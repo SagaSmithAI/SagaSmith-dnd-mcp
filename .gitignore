@@ -1,0 +1,8 @@
+.sagasmith-dnd-mcp/
+.venv/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
