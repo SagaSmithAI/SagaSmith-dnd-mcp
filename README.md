@@ -48,9 +48,16 @@ The server uses stdio. Configure a client such as Nanobot with:
 ## MCP Surface
 
 Tools include storage status/migration, campaign creation/listing, safe module
-write/import/list/search, rule search, and skill listing/reading. Skill packs
-are also resources at `sagasmith://skill/{skill_id}`, while `dnd_dm` and
-`module_generator` are MCP prompts.
+write/import/list/search, rule search, and validated D&D character operations.
+The latter covers complete character sheets, wallet changes, inventory, equipment,
+ammunition, active effects, spell preparation, resources, dice, ability checks,
+and ability-score generation. D&D state is written only through these MCP tools;
+clients do not need the D&D CLI or direct SQLite access.
+
+Skill documents are resources at `sagasmith://skill/{skill_id}`. Their bundled
+references, data, and templates are listed with `skill_asset_list`, read with
+`skill_asset_read`, and exposed using each returned `resource_uri`.
+`dnd_dm` and `module_generator` are MCP prompts.
 
 `module_write` is intentionally separate from `module_import`: generation
 always leaves an editable Markdown artifact under `artifacts/modules` before it

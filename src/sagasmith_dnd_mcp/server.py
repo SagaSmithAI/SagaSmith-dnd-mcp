@@ -15,6 +15,25 @@ from sagasmith_core import (
 )
 from sagasmith_core.modules import MarkdownModuleParser
 from sagasmith_core.systems import SystemRegistry
+from sagasmith_dnd.ability_generation import roll_ability_scores
+from sagasmith_dnd.character_schema import (
+    add_effect,
+    add_inventory_item,
+    adjust_wallet,
+    consume_weapon_ammunition,
+    default_character_notes,
+    default_character_sheet,
+    derive_character_sheet,
+    equip_inventory_item,
+    remove_effect,
+    remove_inventory_item,
+    set_resource_value,
+    set_spell_prepared,
+    update_inventory_item,
+    validate_character_notes,
+    validate_character_sheet,
+)
+from sagasmith_dnd.engine import resolve_check, roll
 from sagasmith_dnd.module_profile import DndModuleProfile
 from sagasmith_dnd.system import DND5E
 
@@ -41,6 +60,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         "SagaSmith D&D",
         instructions="D&D 5e campaign runtime, module storage, and skill packs.",
     )
+
+    def character_view(character: Any) -> dict[str, Any]:
+        """Return a raw validated sheet together with its non-persisted derived view."""
+        value = asdict(character)
+        value["derived"] = derive_character_sheet(value["sheet"])
+        return value
 
     @mcp.tool()
     def storage_status() -> dict[str, Any]:
@@ -101,7 +126,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         notes: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Create a D&D PC, NPC, or monster; optionally bind it to a campaign."""
-        return asdict(
+        normalized_sheet = validate_character_sheet(sheet or default_character_sheet())
+        normalized_notes = validate_character_notes(notes or default_character_notes())
+        return character_view(
             characters.create(
                 system_id="dnd5e",
                 name=name,
@@ -109,8 +136,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 character_type=character_type,
                 player_name=player_name,
                 summary=summary,
-                sheet=sheet,
-                notes=notes,
+                sheet=normalized_sheet,
+                notes=normalized_notes,
             )
         )
 
@@ -118,9 +145,150 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     def character_list(campaign_id: str | None = None) -> list[dict[str, Any]]:
         """List D&D characters, optionally restricted to a campaign."""
         return [
-            asdict(item)
+            character_view(item)
             for item in characters.list(system_id="dnd5e", campaign_id=campaign_id)
         ]
+
+    @mcp.tool()
+    def character_get(character_id: str) -> dict[str, Any]:
+        """Read one validated D&D character card."""
+        return character_view(characters.get(character_id))
+
+    def update_sheet(character_id: str, sheet: dict[str, Any]) -> dict[str, Any]:
+        """Persist a D&D schema mutation with derived values recalculated."""
+        normalized_sheet = validate_character_sheet(sheet)
+        return character_view(characters.update(character_id, sheet=normalized_sheet))
+
+    @mcp.tool()
+    def character_sheet_replace(
+        character_id: str,
+        sheet: dict[str, Any],
+        notes: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Validate and replace a complete D&D v2 sheet, deriving combat and inventory fields."""
+        current = characters.get(character_id)
+        normalized_sheet = validate_character_sheet(sheet)
+        normalized_notes = validate_character_notes(notes if notes is not None else current.notes)
+        return character_view(
+            characters.update(character_id, sheet=normalized_sheet, notes=normalized_notes)
+        )
+
+    @mcp.tool()
+    def character_wallet_adjust(
+        character_id: str, denomination: str, amount: int
+    ) -> dict[str, Any]:
+        """Adjust one D&D character wallet denomination through the v2 schema."""
+        current = characters.get(character_id)
+        return update_sheet(character_id, adjust_wallet(current.sheet, denomination, amount))
+
+    @mcp.tool()
+    def character_inventory_add(
+        character_id: str, item: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Add a normalized inventory item and return its assigned item id."""
+        current = characters.get(character_id)
+        sheet, item_id = add_inventory_item(current.sheet, item)
+        updated = update_sheet(character_id, sheet)
+        return {"character": updated, "item_id": item_id}
+
+    @mcp.tool()
+    def character_inventory_update(
+        character_id: str, item_id: str, patch: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Update one structured inventory item without bypassing D&D validation."""
+        current = characters.get(character_id)
+        return update_sheet(character_id, update_inventory_item(current.sheet, item_id, patch))
+
+    @mcp.tool()
+    def character_inventory_remove(
+        character_id: str, item_id: str, quantity: int | None = None
+    ) -> dict[str, Any]:
+        """Remove an inventory stack or quantity and return the removed item data."""
+        current = characters.get(character_id)
+        sheet, removed = remove_inventory_item(current.sheet, item_id, quantity)
+        updated = update_sheet(character_id, sheet)
+        return {"character": updated, "removed": removed}
+
+    @mcp.tool()
+    def character_inventory_equip(
+        character_id: str, item_id: str, slot: str | None
+    ) -> dict[str, Any]:
+        """Equip an inventory item in a validated D&D equipment slot, or unequip it."""
+        current = characters.get(character_id)
+        return update_sheet(character_id, equip_inventory_item(current.sheet, item_id, slot))
+
+    @mcp.tool()
+    def character_ammunition_consume(
+        character_id: str, weapon_id: str, quantity: int = 1
+    ) -> dict[str, Any]:
+        """Consume ammunition linked to a weapon through structured mechanics."""
+        current = characters.get(character_id)
+        sheet, consumed = consume_weapon_ammunition(current.sheet, weapon_id, quantity)
+        updated = update_sheet(character_id, sheet)
+        return {"character": updated, "consumed": consumed}
+
+    @mcp.tool()
+    def character_effect_add(character_id: str, effect: dict[str, Any]) -> dict[str, Any]:
+        """Add a validated active D&D effect and return its assigned effect id."""
+        current = characters.get(character_id)
+        sheet, effect_id = add_effect(current.sheet, effect)
+        updated = update_sheet(character_id, sheet)
+        return {"character": updated, "effect_id": effect_id}
+
+    @mcp.tool()
+    def character_effect_remove(character_id: str, effect_id: str) -> dict[str, Any]:
+        """Remove an active D&D effect."""
+        current = characters.get(character_id)
+        return update_sheet(character_id, remove_effect(current.sheet, effect_id))
+
+    @mcp.tool()
+    def character_resource_set(
+        character_id: str, resource: str, value: int
+    ) -> dict[str, Any]:
+        """Set a named character resource, enforcing its schema-defined maximum."""
+        current = characters.get(character_id)
+        return update_sheet(character_id, set_resource_value(current.sheet, resource, value))
+
+    @mcp.tool()
+    def character_spell_prepare(
+        character_id: str, spell_id: str, prepared: bool
+    ) -> dict[str, Any]:
+        """Prepare or unprepare a spell under the D&D spellcasting constraints."""
+        current = characters.get(character_id)
+        return update_sheet(
+            character_id, set_spell_prepared(current.sheet, spell_id, prepared)
+        )
+
+    @mcp.tool()
+    def dnd_dice_roll(expression: str) -> dict[str, Any]:
+        """Roll a validated D&D dice expression such as 2d6+3."""
+        return asdict(roll(expression))
+
+    @mcp.tool()
+    def dnd_check(
+        dc: int,
+        ability_score: int,
+        proficient: bool = False,
+        level: int = 1,
+        bonus: int = 0,
+        advantage: bool = False,
+        disadvantage: bool = False,
+    ) -> dict[str, Any]:
+        """Resolve a D&D ability check with proficiency and advantage rules."""
+        return resolve_check(
+            dc=dc,
+            ability_score=ability_score,
+            proficient=proficient,
+            level=level,
+            bonus=bonus,
+            advantage=advantage,
+            disadvantage=disadvantage,
+        )
+
+    @mcp.tool()
+    def dnd_ability_roll(edition: str = "2024") -> dict[str, Any]:
+        """Generate six ability scores using the D&D 4d6 drop-lowest rule."""
+        return roll_ability_scores(edition)
 
     @mcp.tool()
     def character_update(
@@ -132,14 +300,20 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         notes: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Update a D&D character sheet or supporting notes."""
-        return asdict(
+        normalized_sheet = (
+            validate_character_sheet(sheet)
+            if sheet is not None
+            else None
+        )
+        normalized_notes = validate_character_notes(notes) if notes is not None else None
+        return character_view(
             characters.update(
                 character_id,
                 name=name,
                 player_name=player_name,
                 summary=summary,
-                sheet=sheet,
-                notes=notes,
+                sheet=normalized_sheet,
+                notes=normalized_notes,
             )
         )
 
@@ -263,10 +437,35 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         """Read one source-of-truth SKILL.md document."""
         return catalog.read(skill_id)
 
+    @mcp.tool()
+    def skill_asset_list(source: str | None = None) -> list[dict[str, str]]:
+        """List bundled text references, templates, and data files."""
+        return [
+            {
+                "id": asset.id,
+                "source": asset.source,
+                "resource_uri": (
+                    f"sagasmith://asset/{catalog.resource_id(asset.id)}"
+                ),
+            }
+            for asset in catalog.assets()
+            if source is None or asset.source == source
+        ]
+
+    @mcp.tool()
+    def skill_asset_read(asset_id: str) -> str:
+        """Read one text skill asset by the id returned from skill_asset_list."""
+        return catalog.read_asset(asset_id)
+
     @mcp.resource("sagasmith://skill/{skill_id}")
     def skill_resource(skill_id: str) -> str:
         """Skill document resource addressed by its id from skill_list."""
         return catalog.read(skill_id)
+
+    @mcp.resource("sagasmith://asset/{resource_id}")
+    def skill_asset_resource(resource_id: str) -> str:
+        """Skill reference, template, or data resource addressed by its encoded resource id."""
+        return catalog.read_resource_asset(resource_id)
 
     @mcp.prompt()
     def dnd_dm(campaign_id: str, objective: str) -> str:
