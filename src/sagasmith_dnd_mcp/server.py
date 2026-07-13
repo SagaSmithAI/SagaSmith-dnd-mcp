@@ -7,11 +7,16 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 from sagasmith_core import (
+    ActorKnowledgeService,
+    BranchService,
     CampaignService,
     CharacterService,
+    ContinuityService,
+    EventService,
     MemoryService,
     ModuleService,
     RuleService,
+    SnapshotService,
 )
 from sagasmith_core.modules import MarkdownModuleParser
 from sagasmith_core.systems import SystemRegistry
@@ -49,9 +54,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     storage.migrate()
     campaigns = CampaignService(storage.database)
     characters = CharacterService(storage.database)
+    branches = BranchService(storage.database)
+    continuity = ContinuityService(storage.database)
+    events = EventService(storage.database)
+    knowledge = ActorKnowledgeService(storage.database)
     memories = MemoryService(storage.database)
     modules = ModuleService(storage.database)
     rules = RuleService(storage.database)
+    snapshots = SnapshotService(storage.database)
     catalog = SkillCatalog(
         dnd_root=config.dnd_skills_dir,
         modulegen_root=config.modulegen_skills_dir,
@@ -114,6 +124,51 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     def campaign_list(status: str | None = None) -> list[dict[str, Any]]:
         """List D&D 5e campaigns."""
         return [asdict(item) for item in campaigns.list(system_id="dnd5e", status=status)]
+
+    @mcp.tool()
+    def branch_list(campaign_id: str) -> list[dict[str, Any]]:
+        """List playable, non-destructive campaign timelines."""
+        return [asdict(item) for item in branches.list(campaign_id)]
+
+    @mcp.tool()
+    def branch_create(
+        campaign_id: str,
+        name: str,
+        from_snapshot_id: str | None = None,
+        checkout: bool = False,
+    ) -> dict[str, Any]:
+        """Fork a timeline from a snapshot without changing its source branch."""
+        return asdict(
+            branches.create(
+                campaign_id,
+                name=name,
+                from_snapshot_id=from_snapshot_id,
+                checkout=checkout,
+            )
+        )
+
+    @mcp.tool()
+    def branch_checkout(campaign_id: str, branch_id: str) -> dict[str, Any]:
+        """Load a branch head as live campaign state without creating a new save."""
+        snapshot = snapshots.checkout_branch(campaign_id, branch_id)
+        return {
+            "branch": asdict(branches.current(campaign_id)),
+            "snapshot": asdict(snapshot) if snapshot else None,
+        }
+
+    @mcp.tool()
+    def snapshot_create(campaign_id: str, label: str = "") -> dict[str, Any]:
+        """Commit current D&D state, events, facts, and actor knowledge to this branch."""
+        return asdict(snapshots.create(campaign_id, label=label))
+
+    @mcp.tool()
+    def snapshot_list(campaign_id: str) -> list[dict[str, Any]]:
+        return [asdict(item) for item in snapshots.list(campaign_id)]
+
+    @mcp.tool()
+    def snapshot_restore(campaign_id: str, slot: int) -> dict[str, Any]:
+        """Fork from an earlier save; existing future history remains intact."""
+        return asdict(snapshots.restore(campaign_id, slot))
 
     @mcp.tool()
     def character_create(
@@ -182,9 +237,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         return update_sheet(character_id, adjust_wallet(current.sheet, denomination, amount))
 
     @mcp.tool()
-    def character_inventory_add(
-        character_id: str, item: dict[str, Any]
-    ) -> dict[str, Any]:
+    def character_inventory_add(character_id: str, item: dict[str, Any]) -> dict[str, Any]:
         """Add a normalized inventory item and return its assigned item id."""
         current = characters.get(character_id)
         sheet, item_id = add_inventory_item(current.sheet, item)
@@ -242,22 +295,16 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         return update_sheet(character_id, remove_effect(current.sheet, effect_id))
 
     @mcp.tool()
-    def character_resource_set(
-        character_id: str, resource: str, value: int
-    ) -> dict[str, Any]:
+    def character_resource_set(character_id: str, resource: str, value: int) -> dict[str, Any]:
         """Set a named character resource, enforcing its schema-defined maximum."""
         current = characters.get(character_id)
         return update_sheet(character_id, set_resource_value(current.sheet, resource, value))
 
     @mcp.tool()
-    def character_spell_prepare(
-        character_id: str, spell_id: str, prepared: bool
-    ) -> dict[str, Any]:
+    def character_spell_prepare(character_id: str, spell_id: str, prepared: bool) -> dict[str, Any]:
         """Prepare or unprepare a spell under the D&D spellcasting constraints."""
         current = characters.get(character_id)
-        return update_sheet(
-            character_id, set_spell_prepared(current.sheet, spell_id, prepared)
-        )
+        return update_sheet(character_id, set_spell_prepared(current.sheet, spell_id, prepared))
 
     @mcp.tool()
     def dnd_dice_roll(expression: str) -> dict[str, Any]:
@@ -300,11 +347,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         notes: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Update a D&D character sheet or supporting notes."""
-        normalized_sheet = (
-            validate_character_sheet(sheet)
-            if sheet is not None
-            else None
-        )
+        normalized_sheet = validate_character_sheet(sheet) if sheet is not None else None
         normalized_notes = validate_character_notes(notes) if notes is not None else None
         return character_view(
             characters.update(
@@ -338,8 +381,108 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
 
     @mcp.tool()
     def memory_search(campaign_id: str, query: str, limit: int = 8) -> list[dict[str, Any]]:
-        """Retrieve durable campaign memories."""
+        """Retrieve branch-scoped durable world facts for DM administration."""
         return [asdict(item) for item in memories.search(campaign_id, query, limit=limit)]
+
+    @mcp.tool()
+    def event_add(
+        campaign_id: str,
+        summary: str,
+        event_type: str = "narrative",
+        payload: dict[str, Any] | None = None,
+        audience_scope: str = "dm",
+    ) -> dict[str, Any]:
+        """Append a branch-local chronology event; an event is not actor knowledge."""
+        return asdict(
+            events.add(
+                campaign_id,
+                summary=summary,
+                event_type=event_type,
+                payload=payload,
+                audience_scope=audience_scope,
+            )
+        )
+
+    @mcp.tool()
+    def event_list(campaign_id: str, limit: int = 50) -> list[dict[str, Any]]:
+        return [asdict(item) for item in events.list(campaign_id, limit=limit)]
+
+    @mcp.tool()
+    def actor_knowledge_add(
+        campaign_id: str,
+        actor_id: str,
+        knowledge_key: str,
+        proposition: str,
+        subject_ref: str = "",
+        epistemic_status: str = "known",
+        confidence: int = 3,
+        source_event_id: str | None = None,
+        cause: str = "witnessed",
+        disclosure_scope: str = "dm",
+    ) -> dict[str, Any]:
+        """Record what one live PC, NPC, or monster knows or believes."""
+        return asdict(
+            knowledge.add(
+                campaign_id,
+                actor_id=actor_id,
+                knowledge_key=knowledge_key,
+                proposition=proposition,
+                subject_ref=subject_ref,
+                epistemic_status=epistemic_status,
+                confidence=confidence,
+                source_event_id=source_event_id,
+                cause=cause,
+                disclosure_scope=disclosure_scope,
+            )
+        )
+
+    @mcp.tool()
+    def actor_knowledge_revise(
+        knowledge_id: str,
+        proposition: str,
+        epistemic_status: str = "known",
+        confidence: int = 3,
+        source_event_id: str | None = None,
+        cause: str = "told_by",
+        disclosure_scope: str = "dm",
+    ) -> dict[str, Any]:
+        """Append a new subjective revision, e.g. a rumor or Modify Memory effect."""
+        return asdict(
+            knowledge.revise(
+                knowledge_id,
+                proposition=proposition,
+                epistemic_status=epistemic_status,
+                confidence=confidence,
+                source_event_id=source_event_id,
+                cause=cause,
+                disclosure_scope=disclosure_scope,
+            )
+        )
+
+    @mcp.tool()
+    def actor_knowledge_list(campaign_id: str, actor_id: str) -> list[dict[str, Any]]:
+        return [asdict(item) for item in knowledge.list(campaign_id, actor_id=actor_id)]
+
+    @mcp.tool()
+    def continuity_context(
+        campaign_id: str,
+        query: str = "",
+        actor_id: str | None = None,
+        scope_id: str = "party",
+        audience: str = "dm",
+        branch_id: str | None = None,
+        limit: int = 8,
+    ) -> dict[str, Any]:
+        """Retrieve only current-branch facts, events, and optional actor knowledge."""
+        return continuity.context(
+            campaign_id,
+            query=query,
+            actor_id=actor_id,
+            scope_id=scope_id,
+            audience=audience,
+            branch_id=branch_id,
+            limit=limit,
+        )
 
     @mcp.tool()
     def module_write(name: str, content: str) -> dict[str, str]:
@@ -428,8 +571,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     def skill_list() -> list[dict[str, str]]:
         """List installed D&D DM, campaign-manager, and module-generator skill documents."""
         return [
-            {"id": item.id, "title": item.title, "source": item.source}
-            for item in catalog.list()
+            {"id": item.id, "title": item.title, "source": item.source} for item in catalog.list()
         ]
 
     @mcp.tool()
@@ -444,9 +586,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             {
                 "id": asset.id,
                 "source": asset.source,
-                "resource_uri": (
-                    f"sagasmith://asset/{catalog.resource_id(asset.id)}"
-                ),
+                "resource_uri": (f"sagasmith://asset/{catalog.resource_id(asset.id)}"),
             }
             for asset in catalog.assets()
             if source is None or asset.source == source
