@@ -462,6 +462,29 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         """Skill document resource addressed by its id from skill_list."""
         return catalog.read(skill_id)
 
+    @mcp.resource(
+        "sagasmith://skills/overview",
+        name="SagaSmith D&D skill overview",
+        description="Installed D&D and module-generation skill document ids.",
+        mime_type="text/markdown",
+    )
+    def skill_overview_resource() -> str:
+        """Expose a static skill resource for MCP clients without template discovery."""
+        lines = ["# SagaSmith D&D Skills", ""]
+        for document in catalog.list():
+            lines.append(f"- `{document.id}` ({document.source}): {document.title}")
+        lines.extend(
+            [
+                "",
+                "Read a document with `skill_read` or `sagasmith://skill/{skill_id}`.",
+                (
+                    "Use `skill_asset_list` and `skill_asset_read` for references, data, "
+                    "and templates."
+                ),
+            ]
+        )
+        return "\n".join(lines)
+
     @mcp.resource("sagasmith://asset/{resource_id}")
     def skill_asset_resource(resource_id: str) -> str:
         """Skill reference, template, or data resource addressed by its encoded resource id."""

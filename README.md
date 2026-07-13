@@ -36,14 +36,46 @@ pip install -e ".[dense,dev]"
 sagasmith-dnd-mcp
 ```
 
-The server uses stdio. Configure a client such as Nanobot with:
+The server uses standard stdio MCP. Use the installed executable path when the
+client cannot resolve `sagasmith-dnd-mcp` from `PATH`.
+
+### Nanobot
+
+This configuration was verified against the local Nanobot MCP client. It keeps
+the MCP database and Chroma directory in the Nanobot workspace without adding
+the D&D CLI or runtime to Nanobot itself:
 
 ```json
 {
-  "command": "sagasmith-dnd-mcp",
-  "args": []
+  "tools": {
+    "mcpServers": {
+      "sagasmith_dnd": {
+        "command": "C:\\path\\to\\SagaSmith-dnd-mcp\\.venv\\Scripts\\sagasmith-dnd-mcp.exe",
+        "args": [],
+        "cwd": "C:\\path\\to\\SagaSmith-dnd-mcp",
+        "env": {
+          "SAGASMITH_DND_MCP_HOME": "C:\\path\\to\\nanobot-workspace\\.sagasmith-dnd-mcp"
+        },
+        "toolTimeout": 60
+      }
+    }
+  }
 }
 ```
+
+Leave `enabledTools` unset (or use `["*"]`) to retain MCP prompts and static
+resources. Nanobot wraps the tools with names such as
+`mcp_sagasmith_dnd_campaign_create`. Its current client discovers static
+resources but not resource templates, so use `skill_asset_list` and
+`skill_asset_read` to reach dynamic references, data, and templates.
+
+### Other MCP Clients
+
+OpenClaw, Hermes, and other stdio-capable MCP clients use the same process
+contract: `command` is `sagasmith-dnd-mcp` (or the absolute executable path),
+`cwd` is this repository, and `SAGASMITH_DND_MCP_HOME` selects a client-owned
+state directory. No SagaSmith CLI registration, direct SQLite access, or Agent
+package dependency is required.
 
 ## MCP Surface
 
@@ -58,6 +90,9 @@ Skill documents are resources at `sagasmith://skill/{skill_id}`. Their bundled
 references, data, and templates are listed with `skill_asset_list`, read with
 `skill_asset_read`, and exposed using each returned `resource_uri`.
 `dnd_dm` and `module_generator` are MCP prompts.
+
+`sagasmith://skills/overview` is a static resource listing the installed skill
+documents for clients that do not discover resource templates.
 
 `module_write` is intentionally separate from `module_import`: generation
 always leaves an editable Markdown artifact under `artifacts/modules` before it

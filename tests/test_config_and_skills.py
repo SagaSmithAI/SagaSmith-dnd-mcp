@@ -80,3 +80,28 @@ def test_character_writes_store_raw_sheet_and_return_derived_view(tmp_path: Path
         assert "derived" not in updated["sheet"]
 
     asyncio.run(exercise_server())
+
+
+def test_server_exposes_static_skill_overview_resource(tmp_path: Path) -> None:
+    dnd = tmp_path / "dnd"
+    modulegen = tmp_path / "modulegen"
+    dnd.mkdir()
+    modulegen.mkdir()
+    (dnd / "SKILL.md").write_text("# D&D\n", encoding="utf-8")
+    config = McpConfig(
+        home=tmp_path / "home",
+        database_url=None,
+        chroma_url=None,
+        chroma_path_override=None,
+        dnd_skills_dir=dnd,
+        modulegen_skills_dir=modulegen,
+    )
+
+    async def inspect_resources() -> None:
+        server = create_server(config)
+        resources = await server.list_resources()
+        assert [str(resource.uri) for resource in resources] == ["sagasmith://skills/overview"]
+        content = await server.read_resource("sagasmith://skills/overview")
+        assert "dnd.root" in content[0].content
+
+    asyncio.run(inspect_resources())
