@@ -44,12 +44,21 @@ class SagaSmithStorage:
                 "modules": self._collection_status("modules"),
             },
             "artifacts_dir": str(self.config.artifacts_dir),
+            "rules": {
+                "auto_seed": self.config.auto_seed_rules,
+                "seed_root": str(
+                    self.config.dnd_skills_dir / "full" / "skills" / "dnd-dm" / "srd"
+                ),
+            },
         }
 
     def write_module(self, name: str, content: str) -> Path:
         if not name.strip():
             raise ValueError("module name must not be empty")
-        target = (self.config.modules_dir / f"{name}.md").resolve()
+        if len(content.encode("utf-8")) > 20 * 1024 * 1024:
+            raise ValueError("module artifact exceeds the 20 MiB safety limit")
+        filename = name if name.casefold().endswith(".md") else f"{name}.md"
+        target = (self.config.modules_dir / filename).resolve()
         if target.parent != self.config.modules_dir.resolve():
             raise ValueError("module name must not contain a path")
         target.write_text(content, encoding="utf-8")

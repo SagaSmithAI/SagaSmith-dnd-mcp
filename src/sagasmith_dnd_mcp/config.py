@@ -21,6 +21,7 @@ class McpConfig:
     chroma_path_override: Path | None
     dnd_skills_dir: Path
     modulegen_skills_dir: Path
+    auto_seed_rules: bool = True
 
     @classmethod
     def from_environment(cls) -> "McpConfig":
@@ -43,6 +44,7 @@ class McpConfig:
                     root / "SagaSmith-module-gen-skills",
                 )
             ).expanduser().resolve(),
+            auto_seed_rules=os.environ.get("SAGASMITH_DND_MCP_AUTO_SEED", "1") == "1",
         )
 
     @property
