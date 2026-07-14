@@ -4,6 +4,7 @@ from pathlib import Path
 from sagasmith_dnd_mcp.config import McpConfig
 from sagasmith_dnd_mcp.server import create_server
 from sagasmith_dnd_mcp.skills import SkillCatalog
+from sagasmith_dnd_mcp.tool_profiles import profile_catalog
 
 
 def test_config_owns_local_storage(tmp_path: Path) -> None:
@@ -66,16 +67,41 @@ def test_character_writes_store_raw_sheet_and_return_derived_view(tmp_path: Path
 
     async def exercise_server() -> None:
         server = create_server(config)
-        _, campaign = await server.call_tool("campaign_create", {"name": "Test campaign"})
+        _, campaign = await server.call_tool(
+            "campaign_create",
+            {"name": "Test campaign", "idempotency_key": "create-test-campaign"},
+        )
         _, character = await server.call_tool(
-            "character_create", {"name": "Aria", "campaign_id": campaign["id"]}
+            "character_create",
+            {
+                "name": "Aria",
+                "campaign_id": campaign["id"],
+                "idempotency_key": "create-aria",
+            },
         )
         _, updated = await server.call_tool(
             "character_wallet_adjust",
-            {"character_id": character["id"], "denomination": "gp", "amount": 25},
+            {
+                "character_id": character["id"],
+                "denomination": "gp",
+                "amount": 25,
+                "expected_revision": character["revision"],
+                "idempotency_key": "wallet-test-1",
+            },
+        )
+        _, replayed = await server.call_tool(
+            "character_wallet_adjust",
+            {
+                "character_id": character["id"],
+                "denomination": "gp",
+                "amount": 25,
+                "expected_revision": character["revision"],
+                "idempotency_key": "wallet-test-1",
+            },
         )
 
         assert updated["sheet"]["inventory"]["wallet"]["gp"] == 25
+        assert replayed == updated
         assert updated["derived"]["inventory"]["wallet_value_cp"] == 2500
         assert "derived" not in updated["sheet"]
 
@@ -105,3 +131,30 @@ def test_server_exposes_static_skill_overview_resource(tmp_path: Path) -> None:
         assert "dnd.root" in content[0].content
 
     asyncio.run(inspect_resources())
+
+
+def test_server_tool_profiles_are_complete_and_attached_to_tool_metadata(tmp_path: Path) -> None:
+    config = McpConfig(
+        home=tmp_path / "home",
+        database_url=None,
+        chroma_url=None,
+        chroma_path_override=None,
+        dnd_skills_dir=tmp_path / "dnd",
+        modulegen_skills_dir=tmp_path / "modulegen",
+    )
+
+    async def inspect_tools() -> None:
+        server = create_server(config)
+        tools = await server.list_tools()
+        by_name = {tool.name: tool for tool in tools}
+        assert set(by_name) == set().union(*map(set, profile_catalog().values()))
+        assert by_name["module_write"].meta["sagasmith_tool_profiles"] == ["authoring"]
+        assert by_name["combat_resolve_attack"].meta["sagasmith_tool_profiles"] == ["combat"]
+        assert by_name["combat_start"].meta["sagasmith_tool_profiles"] == ["play"]
+        assert by_name["game_phase_get"].meta["sagasmith_tool_profiles"] == [
+            "authoring",
+            "play",
+            "combat",
+        ]
+
+    asyncio.run(inspect_tools())

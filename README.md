@@ -56,15 +56,18 @@ the D&D CLI or runtime to Nanobot itself:
         "env": {
           "SAGASMITH_DND_MCP_HOME": "C:\\path\\to\\nanobot-workspace\\.sagasmith-dnd-mcp"
         },
-        "toolTimeout": 60
+         "toolTimeout": 60,
+         "injectPrincipal": true,
+         "enabledTools": ["campaign_create", "campaign_get", "campaign_list", "character_get", "party_show", "continuity_context", "snapshot_create", "branch_create", "branch_checkout", "combat_start", "combat_attack_resolve", "combat_end_turn"]
       }
     }
   }
 }
 ```
 
-Leave `enabledTools` unset (or use `["*"]`) to retain MCP prompts and static
-resources. Nanobot wraps the tools with names such as
+For a real agent run, use a curated `enabledTools` list first; exposing all 106
+tools at once makes tool selection and context management less stable. Nanobot
+wraps the tools with names such as
 `mcp_sagasmith_dnd_campaign_create`. Its current client discovers static
 resources but not resource templates, so use `skill_asset_list` and
 `skill_asset_read` to reach dynamic references, data, and templates.
@@ -100,12 +103,29 @@ enters a campaign index.
 
 ## Configuration
 
+### Fresh smoke run
+
+Use a new MCP home for each run; this intentionally does not migrate or rewrite
+old campaign data:
+
+```powershell
+$env:PYTHONPATH = "$PWD\src;$PWD\..\sagasmith-core\src;$PWD\..\sagasmith-dnd\src"
+python scripts\smoke_seed.py --home C:\tmp\sagasmith-dnd-smoke-01
+```
+
+The seed creates two PCs, one NPC, separate actor knowledge, a witnessed event,
+an audited party wallet mutation, and a baseline snapshot.
+
 `SAGASMITH_DND_MCP_HOME` moves all managed local state. By default it is
 `<SagaSmith workspace>/.sagasmith-dnd-mcp`.
 
 Set `SAGASMITH_DND_MCP_DENSE_ENABLED=1` after installing `[dense]` to enable
 embedding-backed retrieval. The default remains SQLite FTS-only so the MCP can
 start without loading an embedding model.
+
+When `injectPrincipal` is enabled, the Nanobot transport supplies the caller
+identity and the model must not provide it. Grant tools keep their target
+`principal_id` separate from the authenticated caller.
 
 `SAGASMITH_DATABASE_URL` may point the Core runtime to an external database.
 `CHROMA_DB_URL` may point vector retrieval to a remote Chroma service. When

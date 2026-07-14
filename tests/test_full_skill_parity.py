@@ -39,11 +39,19 @@ def test_mcp_first_full_workflow(tmp_path: Path) -> None:
 
     async def exercise_workflow() -> None:
         server = create_server(config)
-        campaign = await call(server, "campaign_create", {"name": "Parity"})
+        campaign = await call(
+            server,
+            "campaign_create",
+            {"name": "Parity", "idempotency_key": "create-parity"},
+        )
         actor = await call(
             server,
             "character_create",
-            {"name": "Aria", "campaign_id": campaign["id"]},
+                {
+                    "name": "Aria",
+                    "campaign_id": campaign["id"],
+                    "idempotency_key": "create-aria",
+                },
         )
         await call(
             server,
@@ -51,9 +59,10 @@ def test_mcp_first_full_workflow(tmp_path: Path) -> None:
             {
                 "campaign_id": campaign["id"],
                 "actor_id": actor["id"],
-                "knowledge_key": "gate",
-                "proposition": "The gate is sealed.",
-            },
+                    "knowledge_key": "gate",
+                    "proposition": "The gate is sealed.",
+                    "idempotency_key": "knowledge-gate",
+                },
         )
         assert await call(
             server,
@@ -73,20 +82,40 @@ def test_mcp_first_full_workflow(tmp_path: Path) -> None:
         )
         scenes = await call(server, "module_index", {"campaign_id": campaign["id"]})
         await call(
-            server,
-            "module_set_progress",
-            {"campaign_id": campaign["id"], "scene_id": scenes[0]["scene_id"], "progress": 25},
-        )
+                server,
+                "module_set_progress",
+                {
+                    "campaign_id": campaign["id"],
+                    "scene_id": scenes[0]["scene_id"],
+                    "progress": 25,
+                    "expected_state_version": 0,
+                    "idempotency_key": "parity-scene-progress",
+                },
+            )
         assert (await call(server, "module_current", {"campaign_id": campaign["id"]}))["progress"][
             "percent"
         ] == 25
-        await call(
+        wallet = await call(
             server,
             "party_wallet_adjust",
-            {"campaign_id": campaign["id"], "denomination": "gp", "amount": 10},
+            {
+                "campaign_id": campaign["id"],
+                "denomination": "gp",
+                "amount": 10,
+                "expected_revision": campaign["revision"],
+                "idempotency_key": "parity-wallet",
+            },
         )
         snapshot = await call(
-            server, "snapshot_create", {"campaign_id": campaign["id"], "label": "parity"}
+            server,
+            "snapshot_create",
+            {
+                "campaign_id": campaign["id"],
+                "label": "parity",
+                "expected_revision": wallet["campaign"]["revision"],
+                "expected_head_snapshot_id": "",
+                "idempotency_key": "parity-snapshot",
+            },
         )
         verified = await call(
             server,
