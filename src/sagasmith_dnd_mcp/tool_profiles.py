@@ -1,235 +1,281 @@
-"""Authoritative MCP tool visibility profiles for authoring and live play."""
+"""Phase and capability-group catalogue for the SagaSmith D&D MCP contract.
+
+The catalogue is deliberately server-owned: an MCP client can discover groups
+without having to duplicate the D&D tool taxonomy in an agent prompt.
+"""
 
 from __future__ import annotations
 
 from collections.abc import Iterable
+from dataclasses import dataclass
 
-PROFILE_AUTHORING = "authoring"
+PROFILE_LOBBY = "lobby"
 PROFILE_PLAY = "play"
 PROFILE_COMBAT = "combat"
-PROFILES = (PROFILE_AUTHORING, PROFILE_PLAY, PROFILE_COMBAT)
+PROFILES = (PROFILE_LOBBY, PROFILE_PLAY, PROFILE_COMBAT)
 
-ALWAYS_TOOLS = {
-    "storage_status",
-    "server_capabilities",
-    "server_tool_profiles",
-    "system_list",
-    "campaign_list",
-    "campaign_get",
-    "game_phase_get",
-    "game_phase_set",
-    "character_list",
-    "character_get",
-    "party_show",
-    "branch_list",
-    "snapshot_list",
-    "snapshot_verify",
-    "state_history",
-    "continuity_context",
-    "rule_search",
-    "rule_expand",
-    "campaign_rule_profile_get",
-    "campaign_rules_explain",
-    "campaign_rule_receipts",
-    "skill_list",
-    "skill_read",
-    "skill_asset_list",
-    "skill_asset_read",
-}
 
-AUTHORING_TOOLS = ALWAYS_TOOLS | {
-    "storage_migrate",
-    "rule_seed_status",
-    "rule_seed_bundled",
-    "campaign_create",
-    "campaign_member_grant",
-    "actor_grant",
-    "campaign_update",
-    "branch_compare",
-    "branch_create",
-    "branch_checkout",
-    "snapshot_create",
-    "snapshot_restore",
-    "snapshot_lineage",
-    "snapshot_regenerate_recap",
-    "character_create",
-    "character_library_list",
-    "character_instantiate",
-    "character_build",
-    "character_sheet_replace",
-    "character_inventory_add",
-    "character_inventory_update",
-    "character_inventory_remove",
-    "character_inventory_equip",
-    "character_ability_apply",
-    "character_spell_prepare",
-    "character_spell_prepare_list",
-    "character_update",
-    "memory_add",
-    "memory_list",
-    "memory_search",
-    "event_add",
-    "event_list",
-    "actor_knowledge_add",
-    "actor_knowledge_revise",
-    "actor_knowledge_list",
-    "actor_knowledge_search",
-    "state_undo",
-    "state_redo",
-    "module_write",
-    "module_inspect",
-    "module_import",
-    "module_import_job_create",
-    "module_import_job_inspect",
-    "module_import_job_validate",
-    "module_import_job_import",
-    "module_import_job_activate",
-    "module_list",
-    "module_index",
-    "module_expand",
-    "module_read_scene",
-    "module_current",
-    "module_search",
-    "rule_ingest",
-    "rule_document_stage",
-    "rule_document_inspect",
-    "rule_document_import",
-    "import_job_get",
-    "import_job_list",
-    "rule_import_job_create",
-    "rule_import_job_inspect",
-    "rule_import_job_ingest",
-    "rule_content_candidates_extract",
-    "import_job_review_candidates",
-    "rule_import_job_compile",
-    "rule_import_job_install",
-    "rule_import_job_activate",
-    "rule_pack_draft",
-    "rule_pack_draft_from_source",
-    "rule_pack_install",
-    "rule_pack_list",
-    "rule_pack_inspect",
-    "rule_pack_test",
-    "rule_pack_remove",
-    "campaign_rule_profile_set",
-    "campaign_rule_pack_set",
-    "campaign_rule_pack_remove",
-    "character_rule_artifact_add",
-    "content_catalog_list",
-    "character_content_apply",
-}
+@dataclass(frozen=True)
+class ToolGroup:
+    """A coherent, phase-safe set of tools that may be exposed together."""
 
-PLAY_TOOLS = ALWAYS_TOOLS | {
-    "campaign_update",
-    "campaign_advance_effects",
-    "combat_start",
-    "branch_compare",
-    "branch_create",
-    "branch_checkout",
-    "snapshot_create",
-    "snapshot_restore",
-    "snapshot_lineage",
-    "snapshot_regenerate_recap",
-    "character_wallet_adjust",
-    "character_inventory_add",
-    "character_inventory_update",
-    "character_inventory_remove",
-    "character_inventory_equip",
-    "character_ammunition_consume",
-    "character_inventory_transfer",
-    "character_effect_add",
-    "character_effect_remove",
-    "character_rest",
-    "character_cast_spell",
-    "character_use_activity",
-    "character_resource_set",
-    "character_memory_add",
-    "character_memory_resolve",
-    "party_inventory_add",
-    "party_inventory_remove",
-    "party_inventory_transfer",
-    "party_wallet_adjust",
-    "party_wallet_transfer",
-    "dnd_dice_roll",
-    "dnd_check",
-    "dnd_ability_roll",
-    "character_check",
-    "memory_add",
-    "memory_list",
-    "memory_search",
-    "event_add",
-    "event_list",
-    "actor_knowledge_add",
-    "actor_knowledge_revise",
-    "actor_knowledge_list",
-    "actor_knowledge_search",
-    "state_undo",
-    "state_redo",
-    "module_list",
-    "module_expand",
-    "module_read_scene",
-    "module_current",
-    "module_set_progress",
-    "module_search",
-    "content_catalog_list",
-    "character_content_apply",
-}
+    id: str
+    phase: str
+    title: str
+    description: str
+    risk: str
+    tools: frozenset[str]
 
-COMBAT_TOOLS = ALWAYS_TOOLS | {
-    "campaign_advance_effects",
-    "combat_status",
-    "combat_available_actions",
-    "combat_preflight_attack",
-    "combat_resolve_attack",
-    "combat_end_turn",
-    "combat_reaction_attack",
-    "combat_move",
-    "combat_stand",
-    "combat_common_action",
-    "combat_reactions",
-    "combat_cast_spell",
-    "combat_ready_spell",
-    "combat_readied_action_trigger",
-    "combat_readied_action_resolve",
-    "combat_readied_spell_trigger",
-    "combat_readied_spell_resolve",
-    "combat_use_activity",
-    "combat_check",
-    "combat_concentration_check",
-    "combat_apply_damage",
-    "combat_heal",
-    "combat_choice_open",
-    "combat_choice_resolve",
-    "combat_end",
-    "combat_map_patch",
-    "dnd_dice_roll",
-    "dnd_check",
-    "event_add",
-    "event_list",
-    "memory_list",
-    "memory_search",
-    "actor_knowledge_list",
-    "actor_knowledge_search",
-    "snapshot_create",
-    "module_read_scene",
-    "module_current",
-    "module_search",
-}
 
-TOOLS_BY_PROFILE = {
-    PROFILE_AUTHORING: AUTHORING_TOOLS,
-    PROFILE_PLAY: PLAY_TOOLS,
-    PROFILE_COMBAT: COMBAT_TOOLS,
-}
+# The first native tools/list response stays intentionally small.  The six
+# exposure tools are the progressive-discovery protocol; the remainder lets a
+# host diagnose and choose a campaign without loading a domain group.
+CORE_TOOLS = frozenset(
+    {
+        "exposure_open",
+        "exposure_status",
+        "exposure_search",
+        "exposure_inspect",
+        "exposure_load",
+        "exposure_unload",
+        "exposure_call",
+        "server_capabilities",
+        "server_tool_profiles",
+        "storage_status",
+        "campaign_query",
+        "game_phase",
+    }
+)
+
+
+def _group(
+    id: str,
+    phase: str,
+    title: str,
+    description: str,
+    risk: str,
+    *tools: str,
+) -> ToolGroup:
+    return ToolGroup(id, phase, title, description, risk, frozenset(tools))
+
+
+TOOL_GROUPS = (
+    _group(
+        "lobby.campaign",
+        PROFILE_LOBBY,
+        "Campaign setup",
+        "Create campaigns, manage members, branches, snapshots and campaign state.",
+        "write",
+        "system_list",
+        "campaign_create",
+        "campaign_change",
+        "access_grant",
+        "campaign_event",
+        "branch_change",
+        "branch_query",
+        "snapshot_create",
+        "snapshot_query",
+        "snapshot_restore",
+        "state_revision",
+        "campaign_rules",
+    ),
+    _group(
+        "lobby.characters",
+        PROFILE_LOBBY,
+        "Character building",
+        "Create characters and apply structured sheets, content, inventory and prepared spells.",
+        "write",
+        "character_create_from",
+        "character_query",
+        "character_sheet_replace",
+        "character_metadata_update",
+        "character_content_apply",
+        "character_ability_apply",
+        "inventory_change",
+        "inventory_transfer",
+        "wallet_change",
+        "character_state_change",
+        "character_action",
+        "character_spell_prepare",
+    ),
+    _group(
+        "lobby.rules",
+        PROFILE_LOBBY,
+        "Rulebook import and rule packs",
+        "Import rulebooks, compile rule packs, select campaign rules and inspect sources.",
+        "write",
+        "import_query",
+        "rule_import",
+        "rule_pack_compile",
+        "rule_pack_query",
+        "rule_pack_change",
+        "rule_seed_status",
+        "rule_seed_bundled",
+        "rule_search",
+        "rule_expand",
+    ),
+    _group(
+        "lobby.modules",
+        PROFILE_LOBBY,
+        "Module import",
+        "Import adventures, inspect scene indexes, and prepare a campaign module.",
+        "write",
+        "module_import",
+        "module_query",
+        "module_set_progress",
+        "module_search",
+        "module_expand",
+    ),
+    _group(
+        "lobby.memory",
+        PROFILE_LOBBY,
+        "Continuity and actor knowledge",
+        "Maintain campaign memory and separately scoped PC/NPC actor knowledge.",
+        "write",
+        "memory_change",
+        "memory_query",
+        "actor_knowledge_change",
+        "actor_knowledge_query",
+        "continuity_context",
+        "skill_query",
+    ),
+    _group(
+        "lobby.storage_admin",
+        PROFILE_LOBBY,
+        "Storage administration",
+        "Run explicit schema migration actions. Load only for local administration.",
+        "admin",
+        "storage_migrate",
+    ),
+    _group(
+        "play.scene",
+        PROFILE_PLAY,
+        "Scene and campaign play",
+        "Read and advance module scenes, campaign events and deterministic effects.",
+        "write",
+        "campaign_event",
+        "campaign_advance_effects",
+        "module_query",
+        "module_set_progress",
+        "module_search",
+        "module_expand",
+        "continuity_context",
+        "memory_query",
+        "actor_knowledge_query",
+        "snapshot_create",
+        "snapshot_query",
+    ),
+    _group(
+        "play.characters",
+        PROFILE_PLAY,
+        "Character state",
+        "Apply normal out-of-combat character, inventory, resource and prepared-spell changes.",
+        "write",
+        "character_query",
+        "character_metadata_update",
+        "character_content_apply",
+        "inventory_change",
+        "inventory_transfer",
+        "wallet_change",
+        "character_state_change",
+        "character_action",
+        "character_spell_prepare",
+        "memory_change",
+        "actor_knowledge_change",
+    ),
+    _group(
+        "play.resolution",
+        PROFILE_PLAY,
+        "Checks and rolls",
+        "Resolve D&D rolls and character checks before starting combat.",
+        "write",
+        "dnd_dice_roll",
+        "dnd_check",
+        "dnd_ability_roll",
+        "character_check",
+        "combat_start",
+    ),
+    _group(
+        "combat.observe",
+        PROFILE_COMBAT,
+        "Combat state",
+        "Inspect encounter state, available combat options, map and current combatant.",
+        "read",
+        "combat_query",
+        "character_query",
+        "module_query",
+        "module_search",
+        "memory_query",
+        "actor_knowledge_query",
+        "rule_search",
+        "rule_expand",
+    ),
+    _group(
+        "combat.turn",
+        PROFILE_COMBAT,
+        "Turns and choices",
+        "Advance turns, resolve choice windows, ready actions and end combat.",
+        "write",
+        "combat_end_turn",
+        "combat_ready",
+        "combat_choice",
+        "combat_end",
+    ),
+    _group(
+        "combat.actions",
+        PROFILE_COMBAT,
+        "Combat actions",
+        "Resolve attacks, movement, actions, reactions, spells, activities and checks.",
+        "write",
+        "combat_preflight_attack",
+        "combat_resolve_attack",
+        "combat_reaction_attack",
+        "combat_movement",
+        "combat_common_action",
+        "combat_cast_spell",
+        "combat_use_activity",
+        "combat_check",
+        "combat_concentration_check",
+        "combat_hp_change",
+        "dnd_dice_roll",
+        "dnd_check",
+        "campaign_advance_effects",
+    ),
+    _group(
+        "combat.map",
+        PROFILE_COMBAT,
+        "Combat map control",
+        "Patch the temporary combat map created for the current encounter.",
+        "write",
+        "combat_map_patch",
+    ),
+)
+
+GROUP_BY_ID = {group.id: group for group in TOOL_GROUPS}
+
+
+def tools_for_phase(phase: str) -> frozenset[str]:
+    return frozenset().union(
+        *(group.tools for group in TOOL_GROUPS if group.phase == phase), CORE_TOOLS
+    )
+
+
+TOOLS_BY_PROFILE = {profile: tools_for_phase(profile) for profile in PROFILES}
 
 
 def profiles_for_tool(name: str) -> tuple[str, ...]:
-    """Return every profile in which a tool is visible."""
+    """Return every phase in which a public tool is valid."""
+    if name in CORE_TOOLS:
+        return PROFILES
     return tuple(profile for profile in PROFILES if name in TOOLS_BY_PROFILE[profile])
 
 
+def groups_for_tool(name: str) -> tuple[str, ...]:
+    return tuple(group.id for group in TOOL_GROUPS if name in group.tools)
+
+
 def validate_profile_coverage(tool_names: Iterable[str]) -> None:
-    """Fail server construction if a newly added tool has no explicit phase."""
+    """Fail server construction if a public tool has no explicit phase/group."""
     missing = sorted(name for name in tool_names if not profiles_for_tool(name))
     if missing:
         raise RuntimeError(f"MCP tools missing a tool profile: {', '.join(missing)}")
@@ -237,3 +283,17 @@ def validate_profile_coverage(tool_names: Iterable[str]) -> None:
 
 def profile_catalog() -> dict[str, list[str]]:
     return {profile: sorted(TOOLS_BY_PROFILE[profile]) for profile in PROFILES}
+
+
+def group_catalog() -> list[dict[str, object]]:
+    return [
+        {
+            "id": group.id,
+            "phase": group.phase,
+            "title": group.title,
+            "description": group.description,
+            "risk": group.risk,
+            "tools": sorted(group.tools),
+        }
+        for group in TOOL_GROUPS
+    ]

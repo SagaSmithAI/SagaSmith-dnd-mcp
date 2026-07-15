@@ -49,9 +49,7 @@ class SagaSmithStorage:
             "artifacts_dir": str(self.config.artifacts_dir),
             "rules": {
                 "auto_seed": self.config.auto_seed_rules,
-                "seed_root": str(
-                    self.config.dnd_skills_dir / "full" / "skills" / "dnd-dm" / "srd"
-                ),
+                "seed_root": str(self.config.dnd_skills_dir / "full" / "skills" / "dnd-dm" / "srd"),
                 "rulebooks_dir": str(self.config.rulebooks_dir),
                 "import_roots": [str(path) for path in self.config.rule_import_roots],
             },
@@ -92,10 +90,12 @@ class SagaSmithStorage:
 
     def artifact_rulebook_path(self, name: str) -> Path:
         target = (self.config.rulebooks_dir / name).resolve()
-        if (
-            target.parent != self.config.rulebooks_dir.resolve()
-            or target.suffix.casefold() not in {".pdf", ".md", ".markdown", ".txt"}
-        ):
+        if target.parent != self.config.rulebooks_dir.resolve() or target.suffix.casefold() not in {
+            ".pdf",
+            ".md",
+            ".markdown",
+            ".txt",
+        }:
             raise ValueError("invalid managed rulebook artifact")
         if not target.is_file():
             raise LookupError(name)

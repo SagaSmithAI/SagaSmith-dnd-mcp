@@ -408,11 +408,9 @@ def test_rule_pack_authoring_activation_and_explanation(tmp_path: Path) -> None:
         )
         updated = await call(
             server,
-            "character_rule_artifact_add",
+            "character_content_apply",
             {
                 "character_id": character["id"],
-                "pack_id": "dnd5e.xgte",
-                "version": "1.0.0",
                 "artifact_id": "dnd5e.xgte.feature.pilot",
                 "expected_revision": character["revision"],
                 "idempotency_key": "add-pilot-feature",

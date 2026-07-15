@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import asdict
-from typing import Any
+from typing import Any, Literal
 
 from mcp.server.fastmcp import FastMCP
 from sagasmith_core import (
@@ -116,16 +116,136 @@ from sagasmith_dnd.spells import (
 from sagasmith_dnd.system import DND5E
 
 from sagasmith_dnd_mcp.config import McpConfig
+from sagasmith_dnd_mcp.exposure import ExposureError, ExposureRegistry
 from sagasmith_dnd_mcp.skills import SkillCatalog
 from sagasmith_dnd_mcp.storage import SagaSmithStorage
 from sagasmith_dnd_mcp.tool_profiles import (
-    PROFILE_AUTHORING,
+    CORE_TOOLS,
     PROFILE_COMBAT,
+    PROFILE_LOBBY,
     PROFILE_PLAY,
+    group_catalog,
     profile_catalog,
     profiles_for_tool,
     validate_profile_coverage,
 )
+
+
+class SessionExposureFastMCP(FastMCP):
+    """FastMCP with server-owned, session-scoped progressive tool exposure.
+
+    Direct in-process calls retain FastMCP's normal behaviour for library users
+    and deterministic unit tests. Actual MCP requests have a Context/session and
+    are always checked against the exposure registry.
+    """
+
+    def __init__(
+        self, *args: Any, exposure_registry: ExposureRegistry, phase_lookup: Any, **kwargs: Any
+    ) -> None:
+        self.exposure_registry = exposure_registry
+        self._phase_lookup = phase_lookup
+        self._sessions: dict[str, Any] = {}
+        super().__init__(*args, **kwargs)
+
+    def _request_session(self) -> tuple[str, Any] | None:
+        try:
+            context = self.get_context()
+            session = context.session
+        except (LookupError, ValueError):
+            return None
+        key = f"mcp:{id(session)}"
+        self._sessions[key] = session
+        return key, session
+
+    @staticmethod
+    def _require_exposure_principal(
+        exposure: Any, tool_id: str, arguments: dict[str, Any]
+    ) -> None:
+        """Keep an exposure bound to the principal that opened it.
+
+        ``access_grant`` is the lone public facade whose ``principal_id`` names
+        the grant target; its authenticated writer is ``by_principal_id``.
+        """
+        if tool_id == "access_grant":
+            principal_id = arguments.get("by_principal_id") or "system:local"
+        else:
+            principal_id = arguments.get("principal_id") or "system:local"
+        if principal_id != exposure.principal_id:
+            raise ExposureError(
+                "Tool principal_id does not match the principal that opened this session exposure."
+            )
+
+    async def _refresh(self, session_key: str, campaign_id: str | None = None) -> bool:
+        changed = False
+        exposures = (
+            [self.exposure_registry.active(session_key)]
+            if campaign_id is None
+            else [
+                exposure
+                for exposure in self.exposure_registry._by_id.values()
+                if exposure.campaign_id == campaign_id
+            ]
+        )
+        for exposure in exposures:
+            if exposure is None or exposure.campaign_id is None:
+                continue
+            changed = (
+                self.exposure_registry.refresh_phase(
+                    exposure, self._phase_lookup(exposure.campaign_id)
+                )
+                or changed
+            )
+        if changed:
+            for key, exposure_id in tuple(self.exposure_registry._active_by_session.items()):
+                exposure = self.exposure_registry._by_id.get(exposure_id)
+                if exposure is not None and (
+                    campaign_id is None or exposure.campaign_id == campaign_id
+                ):
+                    session = self._sessions.get(key)
+                    if session is not None:
+                        await session.send_tool_list_changed()
+        return changed
+
+    async def list_tools(self):  # type: ignore[override]
+        request = self._request_session()
+        if request is None:
+            return await super().list_tools()
+        session_key, _ = request
+        await self._refresh(session_key)
+        visible = self.exposure_registry.visible_tools(self.exposure_registry.active(session_key))
+        return [tool for tool in await super().list_tools() if tool.name in visible]
+
+    async def call_tool(self, name: str, arguments: dict[str, Any]):  # type: ignore[override]
+        request = self._request_session()
+        if request is None:
+            return await super().call_tool(name, arguments)
+        session_key, _ = request
+        await self._refresh(session_key)
+        exposure = self.exposure_registry.active(session_key)
+        if exposure is not None and not name.startswith("exposure_"):
+            self._require_exposure_principal(exposure, name, arguments)
+        if name not in CORE_TOOLS:
+            if exposure is None:
+                raise ExposureError(
+                    "No active exposure for this MCP session. "
+                    "Call exposure_open, then exposure_load."
+                )
+            self.exposure_registry.require_tool(exposure, name)
+        result = await super().call_tool(name, arguments)
+        if name in {"exposure_open", "exposure_load", "exposure_unload"}:
+            session = self._sessions.get(session_key)
+            if session is not None:
+                await session.send_tool_list_changed()
+        if exposure is not None and name not in CORE_TOOLS:
+            if self.exposure_registry.consume_tool(exposure, name):
+                await self._refresh(session_key)
+                session = self._sessions.get(session_key)
+                if session is not None:
+                    await session.send_tool_list_changed()
+        campaign_id = str(arguments.get("campaign_id") or "") or None
+        if campaign_id and name in {"game_phase", "combat_start", "combat_end"}:
+            await self._refresh(session_key, campaign_id)
+        return result
 
 
 def create_server(config: McpConfig | None = None) -> FastMCP:
@@ -364,9 +484,22 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
 
     if config.auto_seed_rules:
         seed_bundled_rules()
-    mcp = FastMCP(
+
+    def authoritative_phase(campaign_id: str) -> str:
+        campaign = campaigns.get(campaign_id)
+        state = dict(campaign.state or {})
+        combat = state.get("combat")
+        if isinstance(combat, dict) and combat.get("active", False):
+            return PROFILE_COMBAT
+        phase = str(state.get("game_phase") or PROFILE_LOBBY)
+        return phase if phase in {PROFILE_LOBBY, PROFILE_PLAY} else PROFILE_LOBBY
+
+    exposures = ExposureRegistry()
+    mcp = SessionExposureFastMCP(
         "SagaSmith D&D",
         instructions="D&D 5e campaign runtime, module storage, and skill packs.",
+        exposure_registry=exposures,
+        phase_lookup=authoritative_phase,
     )
 
     def character_view(character: Any) -> dict[str, Any]:
@@ -826,7 +959,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     def server_capabilities() -> dict[str, Any]:
         """Describe the MCP contract and the automatic-vs-ruling combat boundary."""
         return {
-            "contract_version": "2026-07-integrity-v6",
+            "contract_version": "2026-07-session-exposure-v1",
             "transport": "stdio",
             "state_owner": "sagasmith-dnd-mcp",
             "features": {
@@ -865,18 +998,23 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "player_safe_scene_scopes": True,
                 "player_safe_combat_maps": True,
                 "rule_aware_noncombat_checks": True,
+                "compact_domain_facades": True,
+                "legacy_tool_aliases": False,
+                "session_scoped_tool_exposure": True,
+                "native_tools_list_filtering": True,
+                "exposure_call_fallback": True,
             },
             "rulebook_import": {
                 "stages": [
-                    "rule_document_stage",
-                    "rule_document_inspect",
-                    "rule_document_import",
+                    "rule_import(stage)",
+                    "rule_import(inspect)",
+                    "rule_import(ingest)",
                     "rule_search",
                     "rule_expand",
-                    "rule_pack_draft_from_source",
-                    "rule_pack_test",
-                    "rule_pack_install",
-                    "campaign_rule_pack_set",
+                    "rule_pack_compile(from_source)",
+                    "rule_pack_query(test)",
+                    "rule_pack_change(install)",
+                    "campaign_rules(set_pack)",
                 ],
                 "source_citation_fields": [
                     "source_id",
@@ -893,6 +1031,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 },
             },
             "write_requirements": ["principal_id", "expected_revision", "idempotency_key"],
+            "tool_exposure": {
+                "owner": "sagasmith-dnd-mcp",
+                "phases": [PROFILE_LOBBY, PROFILE_PLAY, PROFILE_COMBAT],
+                "core_tools": sorted(CORE_TOOLS),
+                "groups": group_catalog(),
+                "native_flow": ["exposure_open", "exposure_load", "tools/list", "tools/call"],
+                "fallback_flow": ["exposure_open", "exposure_load", "exposure_call"],
+            },
         }
 
     @mcp.tool()
@@ -981,9 +1127,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         return asdict(campaigns.get(campaign_id))
 
     @mcp.tool()
-    def server_tool_profiles() -> dict[str, list[str]]:
-        """List the exact game-outside, exploration, and combat MCP tool sets."""
-        return profile_catalog()
+    def server_tool_profiles() -> dict[str, Any]:
+        """List phase profiles and session-loadable capability groups."""
+        return {
+            "profiles": profile_catalog(),
+            "groups": group_catalog(),
+            "core_tools": sorted(CORE_TOOLS),
+        }
 
     @mcp.tool()
     def game_phase_get(
@@ -998,9 +1148,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if isinstance(combat, dict) and combat.get("active", False):
             profile = PROFILE_COMBAT
         else:
-            profile = str(state.get("game_phase") or PROFILE_AUTHORING)
-            if profile not in {PROFILE_AUTHORING, PROFILE_PLAY}:
-                profile = PROFILE_AUTHORING
+            profile = str(state.get("game_phase") or PROFILE_LOBBY)
+            if profile not in {PROFILE_LOBBY, PROFILE_PLAY}:
+                profile = PROFILE_LOBBY
         return {
             "campaign_id": campaign_id,
             "tool_profile": profile,
@@ -1017,14 +1167,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         branch_id: str | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
-        """Switch between game-outside authoring and live non-combat play."""
+        """Switch between game-outside lobby and live non-combat play."""
         access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
         require_write_contract(expected_revision, idempotency_key)
         profile = str(tool_profile).strip().lower()
-        if profile not in {PROFILE_AUTHORING, PROFILE_PLAY}:
-            raise ValueError(
-                "tool_profile must be authoring or play; combat starts via combat_start"
-            )
+        if profile not in {PROFILE_LOBBY, PROFILE_PLAY}:
+            raise ValueError("tool_profile must be lobby or play; combat starts via combat_start")
         resolved_branch_id = require_current_branch(campaign_id, branch_id)
         payload = {"tool_profile": profile, "branch_id": resolved_branch_id}
         scope = f"game-phase:{campaign_id}:{resolved_branch_id}:{principal_id}"
@@ -1068,7 +1216,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         job_id: str,
         principal_id: str = "system:local",
     ) -> dict[str, Any]:
-        """Read the durable evidence, review state, and result for one authoring import."""
+        """Read the durable evidence, review state, and result for one lobby import."""
         access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
         return asdict(require_import_job(campaign_id, job_id))
 
@@ -4934,7 +5082,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             combat = state.get("combat")
             if isinstance(combat, dict) and combat.get("active", False):
                 raise CombatEngineError("prepared spells cannot be changed during combat")
-            if state.get("game_phase", PROFILE_AUTHORING) != PROFILE_AUTHORING:
+            if state.get("game_phase", PROFILE_LOBBY) != PROFILE_LOBBY:
                 raise CombatEngineError(
                     "live prepared-spell changes must be submitted atomically with character_rest"
                 )
@@ -4974,10 +5122,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             combat = state.get("combat")
             if isinstance(combat, dict) and combat.get("active", False):
                 raise CombatEngineError("prepared spells cannot be changed during combat")
-            if state.get("game_phase", PROFILE_AUTHORING) != PROFILE_AUTHORING:
-                raise CombatEngineError(
-                    "switch to authoring for setup or level-up preparation changes"
-                )
+            if state.get("game_phase", PROFILE_LOBBY) != PROFILE_LOBBY:
+                raise CombatEngineError("switch to lobby for setup or level-up preparation changes")
         normalized_event = str(event).strip().lower().replace("-", "_")
         if normalized_event not in {"setup", "level_up"}:
             raise CombatEngineError(
@@ -6335,7 +6481,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
 
     @mcp.tool()
-    def module_import(
+    def module_import_legacy(
         campaign_id: str,
         artifact: str,
         title: str | None = None,
@@ -7574,9 +7720,1496 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         return (
             f"Create a D&D module for campaign {campaign_id}. Brief: {brief}\n\n"
             "Read sagasmith://skill/modulegen.root first. Write the resulting Markdown with "
-            "module_write, "
-            "then call module_import using the returned artifact name."
+            "module_import(action='stage'), then inspect, validate, ingest, and activate the "
+            "returned import job."
         )
+
+    # The public MCP contract intentionally exposes domain facades rather than
+    # one tool per storage operation.  These facades call the mature, narrowly
+    # validated operations above; they must not reimplement writes or weaken
+    # revision, idempotency, access, or combat guards.
+    character_content_apply_legacy = character_content_apply
+    character_spell_prepare_legacy = character_spell_prepare
+    # These facade names intentionally replace same-named legacy tools.
+    for replaced_tool_name in (
+        "character_content_apply",
+        "character_spell_prepare",
+    ):
+        mcp.remove_tool(replaced_tool_name)
+
+    def facade_payload(payload: dict[str, Any] | None) -> dict[str, Any]:
+        if payload is None:
+            return {}
+        if not isinstance(payload, dict):
+            raise ValueError("payload must be an object")
+        return dict(payload)
+
+    def required(payload: dict[str, Any], name: str) -> Any:
+        value = payload.get(name)
+        if value is None or value == "":
+            raise ValueError(f"payload.{name} is required")
+        return value
+
+    def facade_result(action: str, result: Any) -> dict[str, Any]:
+        status = result.get("status", "ok") if isinstance(result, dict) else "ok"
+        return {"status": status, "action": action, "result": result}
+
+    @mcp.tool()
+    def import_query(
+        campaign_id: str,
+        view: Literal["get", "list"] = "list",
+        job_id: str | None = None,
+        kind: Literal["rulebook", "module"] | None = None,
+        principal_id: str = "system:local",
+    ) -> dict[str, Any]:
+        """Read staged rulebook or module import jobs without changing their state."""
+        if view == "get":
+            return facade_result(
+                view,
+                import_job_get(campaign_id, required({"job_id": job_id}, "job_id"), principal_id),
+            )
+        return facade_result(view, import_job_list(campaign_id, kind, principal_id))
+
+    @mcp.tool()
+    def rule_import(
+        campaign_id: str,
+        action: Literal[
+            "stage",
+            "inspect",
+            "ingest",
+            "extract_candidates",
+            "review",
+            "compile",
+            "install",
+            "activate",
+        ],
+        payload: dict[str, Any] | None = None,
+        principal_id: str = "system:local",
+        expected_revision: int | None = None,
+        branch_id: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Run the reviewed rulebook-import state machine; direct rule ingestion is not public."""
+        data = facade_payload(payload)
+        if action == "stage":
+            artifact = rule_document_stage(
+                campaign_id, required(data, "source_path"), principal_id
+            )["artifact"]
+            result = rule_import_job_create(
+                campaign_id,
+                artifact,
+                required(data, "source_key"),
+                required(data, "title"),
+                required(data, "edition"),
+                data.get("locale", "en"),
+                data.get("publication_id", ""),
+                data.get("version", ""),
+                data.get("authority", "supplement"),
+                principal_id,
+                idempotency_key,
+            )
+            return facade_result(action, {"artifact": artifact, **result})
+        job_id = required(data, "job_id")
+        if action == "inspect":
+            return facade_result(
+                action, rule_import_job_inspect(campaign_id, job_id, principal_id, idempotency_key)
+            )
+        if action == "ingest":
+            return facade_result(
+                action, rule_import_job_ingest(campaign_id, job_id, principal_id, idempotency_key)
+            )
+        if action == "extract_candidates":
+            return facade_result(
+                action,
+                rule_content_candidates_extract(campaign_id, job_id, principal_id, idempotency_key),
+            )
+        if action == "review":
+            return facade_result(
+                action,
+                import_job_review_candidates(
+                    campaign_id, job_id, required(data, "decisions"), principal_id, idempotency_key
+                ),
+            )
+        if action == "compile":
+            return facade_result(
+                action,
+                rule_import_job_compile(
+                    campaign_id,
+                    job_id,
+                    required(data, "manifest"),
+                    data.get("mechanics"),
+                    data.get("provenance"),
+                    principal_id,
+                    idempotency_key,
+                ),
+            )
+        if action == "install":
+            return facade_result(
+                action, rule_import_job_install(campaign_id, job_id, principal_id, idempotency_key)
+            )
+        return facade_result(
+            action,
+            rule_import_job_activate(
+                campaign_id, job_id, principal_id, branch_id, expected_revision, idempotency_key
+            ),
+        )
+
+    @mcp.tool()
+    def module_import(
+        campaign_id: str,
+        action: Literal["stage", "inspect", "validate", "ingest", "activate"],
+        payload: dict[str, Any] | None = None,
+        principal_id: str = "system:local",
+        expected_revision: int | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Run the staged module-import state machine and activate only reviewed revisions."""
+        data = facade_payload(payload)
+        if action == "stage":
+            artifact = module_write(
+                required(data, "name"), required(data, "content"), principal_id
+            )["artifact"]
+            result = module_import_job_create(
+                campaign_id,
+                artifact,
+                data.get("title"),
+                data.get("source_key"),
+                principal_id,
+                idempotency_key,
+            )
+            return facade_result(action, {"artifact": artifact, **result})
+        job_id = required(data, "job_id")
+        if action == "inspect":
+            return facade_result(
+                action,
+                module_import_job_inspect(campaign_id, job_id, principal_id, idempotency_key),
+            )
+        if action == "validate":
+            return facade_result(
+                action,
+                module_import_job_validate(campaign_id, job_id, principal_id, idempotency_key),
+            )
+        if action == "ingest":
+            return facade_result(
+                action, module_import_job_import(campaign_id, job_id, principal_id, idempotency_key)
+            )
+        return facade_result(
+            action,
+            module_import_job_activate(
+                campaign_id, job_id, principal_id, expected_revision, idempotency_key
+            ),
+        )
+
+    @mcp.tool()
+    def module_query(
+        campaign_id: str,
+        view: Literal["list", "index", "scene", "current"] = "list",
+        payload: dict[str, Any] | None = None,
+        principal_id: str = "system:local",
+    ) -> dict[str, Any]:
+        """Read module cards, indexes, one scene, or current scoped progress."""
+        data = facade_payload(payload)
+        if view == "list":
+            result = module_list(campaign_id, principal_id)
+        elif view == "index":
+            result = module_index(campaign_id, data.get("module_id"), principal_id)
+        elif view == "scene":
+            result = module_read_scene(campaign_id, required(data, "scene_id"), principal_id)
+        else:
+            result = module_current(campaign_id, data.get("scope_id", "party"), principal_id)
+        return facade_result(view, result)
+
+    @mcp.tool()
+    def rule_pack_compile(
+        action: Literal["draft", "from_source"],
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Compile a rule-pack draft, optionally bound to an indexed source."""
+        data = facade_payload(payload)
+        if action == "draft":
+            result = rule_pack_draft(
+                required(data, "manifest"),
+                data.get("artifacts"),
+                data.get("mechanics"),
+                data.get("provenance"),
+            )
+        else:
+            result = rule_pack_draft_from_source(
+                required(data, "source_id"),
+                required(data, "manifest"),
+                data.get("artifacts"),
+                data.get("mechanics"),
+                data.get("provenance"),
+            )
+        return facade_result(action, result)
+
+    @mcp.tool()
+    def rule_pack_query(
+        view: Literal["list", "inspect", "test", "content_catalog"] = "list",
+        payload: dict[str, Any] | None = None,
+        principal_id: str = "system:local",
+    ) -> dict[str, Any]:
+        """List, inspect, test, or browse selection-ready rule-pack content."""
+        data = facade_payload(payload)
+        if view == "list":
+            result = rule_pack_list(data.get("pack_id"))
+        elif view == "inspect":
+            result = rule_pack_inspect(required(data, "pack_id"), required(data, "version"))
+        elif view == "test":
+            result = rule_pack_test(required(data, "pack_id"), required(data, "version"))
+        else:
+            result = content_catalog_list(
+                required(data, "campaign_id"),
+                data.get("kind"),
+                data.get("query", ""),
+                principal_id,
+                data.get("branch_id"),
+            )
+        return facade_result(view, result)
+
+    @mcp.tool()
+    def rule_pack_change(
+        action: Literal["install", "remove"],
+        pack_id: str,
+        version: str,
+    ) -> dict[str, Any]:
+        """Install or remove a locally compiled rule-pack version."""
+        result = (
+            rule_pack_install(pack_id, version)
+            if action == "install"
+            else rule_pack_remove(pack_id, version)
+        )
+        return facade_result(action, result)
+
+    @mcp.tool()
+    def campaign_rules(
+        campaign_id: str,
+        action: Literal[
+            "get_profile", "set_profile", "set_pack", "remove_pack", "explain", "receipts"
+        ],
+        payload: dict[str, Any] | None = None,
+        principal_id: str = "system:local",
+        expected_revision: int | None = None,
+        branch_id: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Read and change the campaign rule profile and enabled pack set."""
+        data = facade_payload(payload)
+        if action == "get_profile":
+            result = campaign_rule_profile_get(campaign_id, principal_id)
+        elif action == "set_profile":
+            result = campaign_rule_profile_set(
+                campaign_id,
+                required(data, "edition"),
+                data.get("locale", "en"),
+                data.get("publications"),
+                data.get("options"),
+                principal_id,
+                expected_revision,
+                idempotency_key,
+            )
+        elif action == "set_pack":
+            result = campaign_rule_pack_set(
+                campaign_id,
+                required(data, "pack_id"),
+                required(data, "version"),
+                data.get("enabled", True),
+                data.get("options"),
+                principal_id,
+                branch_id,
+                expected_revision,
+                idempotency_key,
+            )
+        elif action == "remove_pack":
+            result = campaign_rule_pack_remove(
+                campaign_id,
+                required(data, "pack_id"),
+                principal_id,
+                branch_id,
+                expected_revision,
+                idempotency_key,
+            )
+        elif action == "explain":
+            result = campaign_rules_explain(campaign_id, data.get("event"), principal_id, branch_id)
+        else:
+            result = campaign_rule_receipts(
+                campaign_id,
+                principal_id,
+                branch_id,
+                data.get("mechanic_id"),
+                data.get("limit", 100),
+            )
+        return facade_result(action, result)
+
+    @mcp.tool()
+    def character_query(
+        view: Literal["get", "list", "library"] = "list",
+        payload: dict[str, Any] | None = None,
+        principal_id: str = "system:local",
+    ) -> dict[str, Any]:
+        """Read a character, campaign roster, or reusable character library."""
+        data = facade_payload(payload)
+        if view == "get":
+            result = character_get(required(data, "character_id"), principal_id)
+        elif view == "library":
+            result = character_library_list(data.get("character_type"))
+        else:
+            result = character_list(data.get("campaign_id"), principal_id)
+        return facade_result(view, result)
+
+    @mcp.tool()
+    def character_create_from(
+        mode: Literal["direct", "build", "template"],
+        payload: dict[str, Any],
+        principal_id: str = "system:local",
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Create a character directly, by D&D build, or from a library template."""
+        data = facade_payload(payload)
+        if mode == "direct":
+            result = character_create(
+                required(data, "name"),
+                data.get("campaign_id"),
+                data.get("character_type", "pc"),
+                data.get("player_name"),
+                data.get("summary", ""),
+                data.get("sheet"),
+                data.get("notes"),
+                principal_id,
+                idempotency_key,
+            )
+        elif mode == "build":
+            result = character_build(
+                required(data, "campaign_id"),
+                required(data, "name"),
+                data.get("player_name"),
+                data.get("summary", ""),
+                data.get("sheet"),
+                data.get("notes"),
+                principal_id,
+            )
+        else:
+            result = character_instantiate(
+                required(data, "template_id"),
+                required(data, "campaign_id"),
+                data.get("name"),
+                data.get("player_name"),
+                principal_id,
+            )
+        return facade_result(mode, result)
+
+    @mcp.tool()
+    def character_metadata_update(
+        character_id: str,
+        payload: dict[str, Any],
+        principal_id: str = "system:local",
+        expected_revision: int | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Update identity and notes metadata; whole-sheet changes remain separate."""
+        data = facade_payload(payload)
+        prohibited = {"sheet", "state", "derived"} & set(data)
+        if prohibited:
+            raise ValueError(
+                f"character metadata update cannot change: {', '.join(sorted(prohibited))}"
+            )
+        if not any(name in data for name in ("name", "player_name", "summary", "notes")):
+            raise ValueError("payload must include at least one metadata field")
+        result = character_update(
+            character_id,
+            data.get("name"),
+            data.get("player_name"),
+            data.get("summary"),
+            None,
+            data.get("notes"),
+            principal_id,
+            expected_revision,
+            idempotency_key,
+        )
+        return facade_result("metadata", result)
+
+    @mcp.tool()
+    def character_content_apply(
+        character_id: str,
+        artifact_id: str,
+        selection: dict[str, Any] | None = None,
+        principal_id: str = "system:local",
+        expected_revision: int | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Apply a selection-ready class, background, feat, spell, or feature artifact."""
+        return facade_result(
+            "apply",
+            character_content_apply_legacy(
+                character_id,
+                artifact_id,
+                selection,
+                principal_id,
+                expected_revision,
+                idempotency_key,
+            ),
+        )
+
+    @mcp.tool()
+    def inventory_change(
+        owner: Literal["character", "party"],
+        action: Literal["add", "update", "remove", "equip", "consume_ammunition"],
+        owner_id: str,
+        payload: dict[str, Any] | None = None,
+        principal_id: str = "system:local",
+        expected_revision: int | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Change one character or party inventory while preserving owner-specific validation."""
+        data = facade_payload(payload)
+        if owner == "party" and action not in {"add", "remove"}:
+            raise ValueError("party inventory supports only add and remove")
+        if owner == "character":
+            if action == "add":
+                result = character_inventory_add(
+                    owner_id,
+                    required(data, "item"),
+                    principal_id,
+                    expected_revision,
+                    idempotency_key,
+                )
+            elif action == "update":
+                result = character_inventory_update(
+                    owner_id,
+                    required(data, "item_id"),
+                    required(data, "patch"),
+                    principal_id,
+                    expected_revision,
+                    idempotency_key,
+                )
+            elif action == "remove":
+                result = character_inventory_remove(
+                    owner_id,
+                    required(data, "item_id"),
+                    data.get("quantity"),
+                    principal_id,
+                    expected_revision,
+                    idempotency_key,
+                )
+            elif action == "equip":
+                result = character_inventory_equip(
+                    owner_id,
+                    required(data, "item_id"),
+                    required(data, "slot"),
+                    principal_id,
+                    expected_revision,
+                    idempotency_key,
+                )
+            else:
+                result = character_ammunition_consume(
+                    owner_id,
+                    required(data, "weapon_id"),
+                    data.get("quantity", 1),
+                    principal_id,
+                    expected_revision,
+                    idempotency_key,
+                )
+        elif action == "add":
+            result = party_inventory_add(
+                owner_id, required(data, "item"), principal_id, expected_revision, idempotency_key
+            )
+        else:
+            result = party_inventory_remove(
+                owner_id,
+                required(data, "item_id"),
+                data.get("quantity"),
+                principal_id,
+                expected_revision,
+                idempotency_key,
+            )
+        return facade_result(action, result)
+
+    @mcp.tool()
+    def inventory_transfer(
+        mode: Literal["character_to_character", "party_to_character", "character_to_party"],
+        payload: dict[str, Any],
+        principal_id: str = "system:local",
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Transfer inventory with the revision contract required by every affected owner."""
+        data = facade_payload(payload)
+        if mode == "character_to_character":
+            result = character_inventory_transfer(
+                required(data, "source_character_id"),
+                required(data, "target_character_id"),
+                required(data, "item_id"),
+                data.get("quantity"),
+                principal_id,
+                required(data, "expected_campaign_revision"),
+                required(data, "expected_source_revision"),
+                required(data, "expected_target_revision"),
+                idempotency_key,
+            )
+        else:
+            direction = "to_character" if mode == "party_to_character" else "from_character"
+            result = party_inventory_transfer(
+                required(data, "campaign_id"),
+                required(data, "character_id"),
+                required(data, "item_id"),
+                direction,
+                data.get("quantity"),
+                principal_id,
+                required(data, "expected_campaign_revision"),
+                required(data, "expected_character_revision"),
+                idempotency_key,
+            )
+        return facade_result(mode, result)
+
+    @mcp.tool()
+    def wallet_change(
+        owner: Literal["character", "party"],
+        action: Literal["adjust", "transfer_to_character", "transfer_from_character"],
+        owner_id: str,
+        denomination: str,
+        amount: int,
+        payload: dict[str, Any] | None = None,
+        principal_id: str = "system:local",
+        expected_revision: int | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Adjust a wallet or transfer money through the party with all affected revisions."""
+        data = facade_payload(payload)
+        if action == "adjust":
+            result = (
+                character_wallet_adjust(
+                    owner_id, denomination, amount, principal_id, expected_revision, idempotency_key
+                )
+                if owner == "character"
+                else party_wallet_adjust(
+                    owner_id, denomination, amount, principal_id, expected_revision, idempotency_key
+                )
+            )
+        else:
+            if owner != "party":
+                raise ValueError("wallet transfers use the party as owner")
+            direction = "withdraw" if action == "transfer_to_character" else "deposit"
+            result = party_wallet_transfer(
+                owner_id,
+                required(data, "character_id"),
+                denomination,
+                amount,
+                direction,
+                principal_id,
+                required(data, "expected_campaign_revision"),
+                required(data, "expected_character_revision"),
+                idempotency_key,
+            )
+        return facade_result(action, result)
+
+    @mcp.tool()
+    def character_state_change(
+        character_id: str,
+        action: Literal[
+            "effect_add", "effect_remove", "resource_set", "rest", "memory_add", "memory_resolve"
+        ],
+        payload: dict[str, Any] | None = None,
+        principal_id: str = "system:local",
+        expected_revision: int | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Apply one noncombat character state transition with its D&D-specific validation."""
+        data = facade_payload(payload)
+        if action == "effect_add":
+            result = character_effect_add(
+                character_id,
+                required(data, "effect"),
+                principal_id,
+                expected_revision,
+                idempotency_key,
+            )
+        elif action == "effect_remove":
+            result = character_effect_remove(
+                character_id,
+                required(data, "effect_id"),
+                principal_id,
+                expected_revision,
+                idempotency_key,
+            )
+        elif action == "resource_set":
+            result = character_resource_set(
+                character_id,
+                required(data, "resource"),
+                required(data, "value"),
+                principal_id,
+                expected_revision,
+                idempotency_key,
+            )
+        elif action == "rest":
+            result = character_rest(
+                character_id,
+                required(data, "rest_type"),
+                data.get("prepared_spell_ids"),
+                data.get("hit_dice_spends"),
+                data.get("hit_dice_recovery"),
+                data.get("food_and_drink", False),
+                principal_id,
+                expected_revision,
+                idempotency_key,
+            )
+        elif action == "memory_add":
+            result = character_memory_add(
+                character_id,
+                required(data, "memory"),
+                principal_id,
+                expected_revision,
+                idempotency_key,
+            )
+        else:
+            result = character_memory_resolve(
+                character_id,
+                required(data, "memory_id"),
+                data.get("status", "resolved"),
+                principal_id,
+                expected_revision,
+                idempotency_key,
+            )
+        return facade_result(action, result)
+
+    @mcp.tool()
+    def character_action(
+        character_id: str,
+        action: Literal["cast_spell", "use_activity"],
+        payload: dict[str, Any],
+        principal_id: str = "system:local",
+        expected_revision: int | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Commit one noncombat spell cast or activity activation through the rules engine."""
+        data = facade_payload(payload)
+        if action == "cast_spell":
+            result = character_cast_spell(
+                character_id,
+                required(data, "spell_id"),
+                data.get("cast_level"),
+                data.get("ritual", False),
+                data.get("component_ruling"),
+                principal_id,
+                expected_revision,
+                idempotency_key,
+            )
+        else:
+            result = character_use_activity(
+                character_id,
+                required(data, "activity_id"),
+                data.get("declaration"),
+                principal_id,
+                expected_revision,
+                idempotency_key,
+            )
+        return facade_result(action, result)
+
+    @mcp.tool()
+    def character_spell_prepare(
+        character_id: str,
+        mode: Literal["set", "replace_all"],
+        payload: dict[str, Any],
+        principal_id: str = "system:local",
+        expected_revision: int | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Set one prepared spell or replace the validated prepared-spell list."""
+        data = facade_payload(payload)
+        if mode == "set":
+            result = character_spell_prepare_legacy(
+                character_id,
+                required(data, "spell_id"),
+                required(data, "prepared"),
+                principal_id,
+                expected_revision,
+                idempotency_key,
+            )
+        else:
+            result = character_spell_prepare_list(
+                character_id,
+                required(data, "spell_ids"),
+                data.get("event", "setup"),
+                principal_id,
+                expected_revision,
+                idempotency_key,
+            )
+        return facade_result(mode, result)
+
+    @mcp.tool()
+    def campaign_query(
+        view: Literal["list", "get", "party"] = "list",
+        payload: dict[str, Any] | None = None,
+        principal_id: str = "system:local",
+    ) -> dict[str, Any]:
+        """Read campaigns, one campaign, or its party state."""
+        data = facade_payload(payload)
+        if view == "get":
+            result = campaign_get(required(data, "campaign_id"), principal_id)
+        elif view == "party":
+            result = party_show(required(data, "campaign_id"), principal_id)
+        else:
+            result = campaign_list(data.get("status"), principal_id)
+        return facade_result(view, result)
+
+    @mcp.tool()
+    def campaign_change(
+        campaign_id: str,
+        payload: dict[str, Any],
+        principal_id: str = "system:local",
+        expected_revision: int | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Change campaign metadata and state under the normal write contract."""
+        data = facade_payload(payload)
+        result = campaign_update(
+            campaign_id,
+            data.get("name"),
+            data.get("status"),
+            data.get("description"),
+            data.get("settings"),
+            data.get("state"),
+            principal_id,
+            expected_revision,
+            idempotency_key,
+        )
+        return facade_result("update", result)
+
+    @mcp.tool()
+    def access_grant(
+        scope: Literal["campaign", "actor"],
+        campaign_id: str,
+        principal_id: str,
+        payload: dict[str, Any] | None = None,
+        by_principal_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Grant campaign membership or actor-level authority without exposing unrelated edits."""
+        data = facade_payload(payload)
+        if scope == "campaign":
+            result = campaign_member_grant(
+                campaign_id, principal_id, data.get("role", "player"), by_principal_id
+            )
+        else:
+            result = actor_grant(
+                campaign_id,
+                principal_id,
+                required(data, "actor_id"),
+                data.get("can_control", False),
+                data.get("can_view_private", False),
+                by_principal_id,
+            )
+        return facade_result(scope, result)
+
+    @mcp.tool()
+    def campaign_event(
+        campaign_id: str,
+        action: Literal["add", "list"],
+        payload: dict[str, Any] | None = None,
+        principal_id: str = "system:local",
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Append an auditable campaign event or retrieve its branch-visible event log."""
+        data = facade_payload(payload)
+        if action == "add":
+            result = event_add(
+                campaign_id,
+                required(data, "summary"),
+                data.get("event_type", "narrative"),
+                data.get("payload"),
+                data.get("audience_scope", "dm"),
+                data.get("branch_id"),
+                data.get("known_by_actor_ids"),
+                data.get("knowledge_key"),
+                data.get("knowledge_proposition"),
+                principal_id,
+                idempotency_key,
+            )
+        else:
+            result = event_list(
+                campaign_id, data.get("limit", 50), data.get("branch_id"), principal_id
+            )
+        return facade_result(action, result)
+
+    @mcp.tool()
+    def memory_query(
+        campaign_id: str,
+        view: Literal["list", "search"] = "list",
+        payload: dict[str, Any] | None = None,
+        principal_id: str = "system:local",
+    ) -> dict[str, Any]:
+        """Read objective campaign memory; actor knowledge remains a separate subjective store."""
+        data = facade_payload(payload)
+        result = (
+            memory_search(
+                campaign_id,
+                required(data, "query"),
+                data.get("limit", 8),
+                data.get("branch_id"),
+                principal_id,
+            )
+            if view == "search"
+            else memory_list(campaign_id, data.get("kind"), data.get("branch_id"), principal_id)
+        )
+        return facade_result(view, result)
+
+    @mcp.tool()
+    def memory_change(
+        campaign_id: str,
+        content: str,
+        kind: str = "fact",
+        subject: str = "",
+        metadata: dict[str, Any] | None = None,
+        branch_id: str | None = None,
+        principal_id: str = "system:local",
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Record an objective durable campaign fact."""
+        return facade_result(
+            "add",
+            memory_add(
+                campaign_id,
+                content,
+                kind,
+                subject,
+                metadata,
+                branch_id,
+                principal_id,
+                idempotency_key,
+            ),
+        )
+
+    @mcp.tool()
+    def actor_knowledge_query(
+        campaign_id: str,
+        actor_id: str,
+        view: Literal["list", "search"] = "list",
+        payload: dict[str, Any] | None = None,
+        principal_id: str = "system:local",
+    ) -> dict[str, Any]:
+        """Read only one actor's branch-scoped, subjective knowledge."""
+        data = facade_payload(payload)
+        result = (
+            actor_knowledge_search(
+                campaign_id,
+                actor_id,
+                required(data, "query"),
+                data.get("branch_id"),
+                data.get("limit", 8),
+                principal_id,
+            )
+            if view == "search"
+            else actor_knowledge_list(campaign_id, actor_id, data.get("branch_id"), principal_id)
+        )
+        return facade_result(view, result)
+
+    @mcp.tool()
+    def actor_knowledge_change(
+        action: Literal["add", "revise"],
+        payload: dict[str, Any],
+        principal_id: str = "system:local",
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Add or revise actor knowledge without crossing actor-knowledge boundaries."""
+        data = facade_payload(payload)
+        if action == "add":
+            result = actor_knowledge_add(
+                required(data, "campaign_id"),
+                required(data, "actor_id"),
+                required(data, "knowledge_key"),
+                required(data, "proposition"),
+                data.get("subject_ref", ""),
+                data.get("epistemic_status", "known"),
+                data.get("confidence", 3),
+                data.get("source_event_id"),
+                data.get("cause", "witnessed"),
+                data.get("disclosure_scope", "dm"),
+                data.get("branch_id"),
+                principal_id,
+                idempotency_key,
+            )
+        else:
+            result = actor_knowledge_revise(
+                required(data, "knowledge_id"),
+                required(data, "proposition"),
+                data.get("epistemic_status", "known"),
+                data.get("confidence", 3),
+                data.get("source_event_id"),
+                data.get("cause", "told_by"),
+                data.get("disclosure_scope", "dm"),
+                data.get("branch_id"),
+                principal_id,
+                required(data, "expected_revision_id"),
+                idempotency_key,
+            )
+        return facade_result(action, result)
+
+    @mcp.tool()
+    def branch_query(
+        campaign_id: str,
+        view: Literal["list", "compare"] = "list",
+        payload: dict[str, Any] | None = None,
+        principal_id: str = "system:local",
+    ) -> dict[str, Any]:
+        """List branches or compare two branch heads without changing checkout state."""
+        data = facade_payload(payload)
+        result = (
+            branch_compare(
+                campaign_id,
+                required(data, "left_branch_id"),
+                required(data, "right_branch_id"),
+                principal_id,
+            )
+            if view == "compare"
+            else branch_list(campaign_id, principal_id)
+        )
+        return facade_result(view, result)
+
+    @mcp.tool()
+    def branch_change(
+        campaign_id: str,
+        action: Literal["create", "checkout"],
+        payload: dict[str, Any],
+        principal_id: str = "system:local",
+        expected_revision: int | None = None,
+        expected_branch_id: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Create or checkout a branch under campaign and branch revision guards."""
+        data = facade_payload(payload)
+        if action == "create":
+            result = branch_create(
+                campaign_id,
+                required(data, "name"),
+                data.get("from_snapshot_id"),
+                data.get("checkout", False),
+                principal_id,
+                expected_revision,
+                expected_branch_id,
+                idempotency_key,
+            )
+        else:
+            result = branch_checkout(
+                campaign_id,
+                required(data, "branch_id"),
+                principal_id,
+                expected_revision,
+                expected_branch_id,
+                idempotency_key,
+            )
+        return facade_result(action, result)
+
+    @mcp.tool()
+    def snapshot_query(
+        campaign_id: str,
+        view: Literal["list", "verify", "lineage", "recap"] = "list",
+        payload: dict[str, Any] | None = None,
+        principal_id: str = "system:local",
+    ) -> dict[str, Any]:
+        """Read snapshot history, integrity, lineage, or a regenerated recap."""
+        data = facade_payload(payload)
+        if view == "list":
+            result = snapshot_list(campaign_id, principal_id)
+        elif view == "verify":
+            result = snapshot_verify(campaign_id, required(data, "slot"), principal_id)
+        elif view == "lineage":
+            result = snapshot_lineage(campaign_id, data.get("slot"), principal_id)
+        else:
+            result = snapshot_regenerate_recap(campaign_id, required(data, "slot"), principal_id)
+        return facade_result(view, result)
+
+    @mcp.tool()
+    def state_revision(
+        campaign_id: str,
+        action: Literal["history", "undo", "redo"],
+        payload: dict[str, Any] | None = None,
+        principal_id: str = "system:local",
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Read revision history or perform guarded undo/redo."""
+        data = facade_payload(payload)
+        if action == "history":
+            result = state_history(campaign_id, data.get("limit", 100), principal_id)
+        elif action == "undo":
+            result = state_undo(
+                campaign_id, principal_id, data.get("expected_history_sequence"), idempotency_key
+            )
+        else:
+            result = state_redo(
+                campaign_id, principal_id, data.get("expected_history_sequence"), idempotency_key
+            )
+        return facade_result(action, result)
+
+    @mcp.tool()
+    def combat_query(
+        campaign_id: str,
+        view: Literal["status", "available_actions", "reactions"] = "status",
+        actor_id: str | None = None,
+        principal_id: str = "system:local",
+    ) -> dict[str, Any]:
+        """Read combat status, legal actions, or legal reactions without committing combat state."""
+        if view == "status":
+            result = combat_status(campaign_id, principal_id)
+        elif view == "available_actions":
+            result = combat_available_actions(
+                campaign_id, required({"actor_id": actor_id}, "actor_id"), principal_id
+            )
+        else:
+            result = combat_reactions(
+                campaign_id, required({"actor_id": actor_id}, "actor_id"), principal_id
+            )
+        return facade_result(view, result)
+
+    @mcp.tool()
+    def combat_movement(
+        campaign_id: str,
+        actor_id: str,
+        action: Literal["move", "stand"],
+        payload: dict[str, Any] | None = None,
+        principal_id: str = "system:local",
+        expected_revision: int | None = None,
+        branch_id: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Move or stand a combatant while preserving movement and reaction checks."""
+        data = facade_payload(payload)
+        result = (
+            combat_move(
+                campaign_id,
+                actor_id,
+                required(data, "distance"),
+                data.get("destination"),
+                data.get("path"),
+                data.get("movement_mode", "voluntary"),
+                data.get("crawl", False),
+                principal_id,
+                expected_revision,
+                branch_id,
+                idempotency_key,
+            )
+            if action == "move"
+            else combat_stand(
+                campaign_id, actor_id, principal_id, expected_revision, branch_id, idempotency_key
+            )
+        )
+        return facade_result(action, result)
+
+    @mcp.tool()
+    def combat_hp_change(
+        campaign_id: str,
+        target_id: str,
+        action: Literal["damage", "heal"],
+        payload: dict[str, Any],
+        principal_id: str = "system:local",
+        expected_revision: int | None = None,
+        branch_id: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Apply structured damage or healing; damage parts and healing amounts stay distinct."""
+        data = facade_payload(payload)
+        result = (
+            combat_apply_damage(
+                campaign_id,
+                target_id,
+                required(data, "parts"),
+                data.get("critical", False),
+                principal_id,
+                expected_revision,
+                branch_id,
+                idempotency_key,
+            )
+            if action == "damage"
+            else combat_heal(
+                campaign_id,
+                target_id,
+                required(data, "amount"),
+                principal_id,
+                expected_revision,
+                branch_id,
+                idempotency_key,
+            )
+        )
+        return facade_result(action, result)
+
+    @mcp.tool()
+    def combat_choice(
+        campaign_id: str,
+        actor_id: str,
+        action: Literal["open", "resolve"],
+        payload: dict[str, Any],
+        principal_id: str = "system:local",
+        expected_revision: int | None = None,
+        branch_id: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Open or resolve a choice window; the engine still decides which choices are legal."""
+        data = facade_payload(payload)
+        result = (
+            combat_choice_open(
+                campaign_id,
+                actor_id,
+                required(data, "event"),
+                data.get("candidates"),
+                data.get("kind", "reaction"),
+                principal_id,
+                expected_revision,
+                branch_id,
+                idempotency_key,
+            )
+            if action == "open"
+            else combat_choice_resolve(
+                campaign_id,
+                actor_id,
+                required(data, "choice_id"),
+                required(data, "selection"),
+                principal_id,
+                expected_revision,
+                branch_id,
+                idempotency_key,
+            )
+        )
+        return facade_result(action, result)
+
+    @mcp.tool()
+    def combat_ready(
+        campaign_id: str,
+        action: Literal[
+            "ready_spell", "trigger_spell", "resolve_spell", "trigger_action", "resolve_action"
+        ],
+        payload: dict[str, Any],
+        principal_id: str = "system:local",
+        expected_revision: int | None = None,
+        branch_id: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Run readied spell/action transitions without bypassing trigger or release validation."""
+        data = facade_payload(payload)
+        if action == "ready_spell":
+            result = combat_ready_spell(
+                campaign_id,
+                required(data, "actor_id"),
+                required(data, "spell_id"),
+                required(data, "trigger"),
+                data.get("cast_level"),
+                data.get("declaration"),
+                principal_id,
+                expected_revision,
+                branch_id,
+                idempotency_key,
+            )
+        elif action == "trigger_spell":
+            result = combat_readied_spell_trigger(
+                campaign_id,
+                required(data, "readied_id"),
+                required(data, "event"),
+                principal_id,
+                expected_revision,
+                branch_id,
+                idempotency_key,
+            )
+        elif action == "resolve_spell":
+            result = combat_readied_spell_resolve(
+                campaign_id,
+                required(data, "actor_id"),
+                required(data, "choice_id"),
+                required(data, "release"),
+                data.get("declaration"),
+                principal_id,
+                expected_revision,
+                branch_id,
+                idempotency_key,
+            )
+        elif action == "trigger_action":
+            result = combat_readied_action_trigger(
+                campaign_id,
+                required(data, "readied_id"),
+                required(data, "event"),
+                principal_id,
+                expected_revision,
+                branch_id,
+                idempotency_key,
+            )
+        else:
+            result = combat_readied_action_resolve(
+                campaign_id,
+                required(data, "actor_id"),
+                required(data, "choice_id"),
+                required(data, "release"),
+                data.get("declaration"),
+                principal_id,
+                expected_revision,
+                branch_id,
+                idempotency_key,
+            )
+        return facade_result(action, result)
+
+    @mcp.tool()
+    def skill_query(
+        kind: Literal["skill", "asset"],
+        action: Literal["list", "read"],
+        identifier: str | None = None,
+        source: str | None = None,
+    ) -> dict[str, Any]:
+        """List or read installed D&D skill documents and text assets."""
+        if kind == "skill":
+            result = (
+                skill_list()
+                if action == "list"
+                else skill_read(required({"identifier": identifier}, "identifier"))
+            )
+        else:
+            result = (
+                skill_asset_list(source)
+                if action == "list"
+                else skill_asset_read(required({"identifier": identifier}, "identifier"))
+            )
+        return facade_result(action, result)
+
+    @mcp.tool()
+    def game_phase(
+        campaign_id: str,
+        action: Literal["get", "set"] = "get",
+        tool_profile: Literal["lobby", "play"] | None = None,
+        principal_id: str = "system:local",
+        expected_revision: int | None = None,
+        branch_id: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Get or set the persisted noncombat tool profile; combat is engine-controlled."""
+        result = (
+            game_phase_get(campaign_id, principal_id)
+            if action == "get"
+            else game_phase_set(
+                campaign_id,
+                required({"tool_profile": tool_profile}, "tool_profile"),
+                principal_id,
+                expected_revision,
+                branch_id,
+                idempotency_key,
+            )
+        )
+        return facade_result(action, result)
+
+    @mcp.tool()
+    def exposure_open(
+        campaign_id: str | None = None,
+        principal_id: str = "system:local",
+    ) -> dict[str, Any]:
+        """Start or replace this MCP session's server-owned tool exposure."""
+        if campaign_id:
+            access.require_campaign(campaign_id, principal_id)
+            phase = authoritative_phase(campaign_id)
+        else:
+            phase = PROFILE_LOBBY
+        request = mcp._request_session()
+        if request is None:
+            # Direct library callers have no protocol session. Give them an
+            # explicit local scope rather than silently sharing state.
+            session_key = f"direct:{principal_id}"
+        else:
+            session_key, _ = request
+        exposure = exposures.open(
+            session_key=session_key,
+            principal_id=principal_id,
+            campaign_id=campaign_id,
+            phase=phase,
+        )
+        return {
+            **exposures.status(exposure),
+            "native_dynamic_tools": request is not None,
+            "next": "Use exposure_search, exposure_inspect, then exposure_load.",
+        }
+
+    @mcp.tool()
+    def exposure_status(exposure_id: str) -> dict[str, Any]:
+        """Return the current phase, loaded groups, and visible tools for one exposure."""
+        request = mcp._request_session()
+        exposure = exposures.get(exposure_id, request[0] if request else None)
+        if exposure.campaign_id:
+            exposures.refresh_phase(exposure, authoritative_phase(exposure.campaign_id))
+        return exposures.status(exposure)
+
+    @mcp.tool()
+    def exposure_search(
+        query: str, phase: Literal["lobby", "play", "combat"] | None = None
+    ) -> dict[str, Any]:
+        """Search server capability groups before loading their full tool schemas."""
+        return {"groups": exposures.search(query, phase), "catalog_version": "2026-07"}
+
+    @mcp.tool()
+    def exposure_inspect(group_id: str) -> dict[str, Any]:
+        """Inspect one capability group, including its tools and phase boundary."""
+        return exposures.inspect(group_id)
+
+    @mcp.tool()
+    def exposure_load(
+        exposure_id: str,
+        group_id: str,
+        ttl_calls: int | None = None,
+    ) -> dict[str, Any]:
+        """Expose one phase-compatible tool group to this MCP session."""
+        request = mcp._request_session()
+        exposure = exposures.get(exposure_id, request[0] if request else None)
+        if exposure.campaign_id:
+            exposures.refresh_phase(exposure, authoritative_phase(exposure.campaign_id))
+        exposures.load(exposure, group_id, ttl_calls)
+        return exposures.status(exposure)
+
+    @mcp.tool()
+    def exposure_unload(exposure_id: str, group_id: str) -> dict[str, Any]:
+        """Remove a previously loaded tool group from this MCP session."""
+        request = mcp._request_session()
+        exposure = exposures.get(exposure_id, request[0] if request else None)
+        exposures.unload(exposure, group_id)
+        return exposures.status(exposure)
+
+    @mcp.tool()
+    async def exposure_call(
+        exposure_id: str,
+        tool_id: str,
+        arguments: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Call an exposed tool when an MCP host cannot refresh native schemas."""
+        if tool_id in CORE_TOOLS or tool_id.startswith("exposure_"):
+            raise ExposureError("exposure_call only dispatches a loaded domain tool.")
+        request = mcp._request_session()
+        exposure = exposures.get(exposure_id, request[0] if request else None)
+        if exposure.campaign_id:
+            exposures.refresh_phase(exposure, authoritative_phase(exposure.campaign_id))
+        exposures.require_tool(exposure, tool_id)
+        mcp._require_exposure_principal(exposure, tool_id, dict(arguments or {}))
+        context = mcp.get_context()
+        result = await mcp._tool_manager.call_tool(
+            tool_id, dict(arguments or {}), context=context, convert_result=True
+        )
+        exposure_changed = exposures.consume_tool(exposure, tool_id)
+        target_campaign_id = str(dict(arguments or {}).get("campaign_id") or "") or None
+        if target_campaign_id and tool_id in {"game_phase", "combat_start", "combat_end"}:
+            if request is not None:
+                await mcp._refresh(request[0], target_campaign_id)
+        elif exposure_changed and request is not None:
+            await request[1].send_tool_list_changed()
+        return {"tool_id": tool_id, "result": result, "exposure": exposures.status(exposure)}
+
+    # No compatibility aliases: old tool names are removed before the server
+    # advertises its capability list.  The underlying functions remain local
+    # implementation seams so their validation is reused by the facades.
+    retired_tool_names = {
+        "campaign_list",
+        "campaign_get",
+        "campaign_member_grant",
+        "campaign_update",
+        "game_phase_get",
+        "game_phase_set",
+        "import_job_get",
+        "import_job_list",
+        "rule_import_job_create",
+        "rule_import_job_inspect",
+        "rule_import_job_ingest",
+        "rule_content_candidates_extract",
+        "import_job_review_candidates",
+        "rule_import_job_compile",
+        "rule_import_job_install",
+        "rule_import_job_activate",
+        "rule_document_stage",
+        "rule_document_inspect",
+        "rule_document_import",
+        "rule_ingest",
+        "module_import_job_create",
+        "module_import_job_inspect",
+        "module_import_job_validate",
+        "module_import_job_import",
+        "module_import_job_activate",
+        "module_write",
+        "module_inspect",
+        "module_import_legacy",
+        "module_list",
+        "module_index",
+        "module_read_scene",
+        "module_current",
+        "rule_pack_draft",
+        "rule_pack_draft_from_source",
+        "rule_pack_install",
+        "rule_pack_list",
+        "rule_pack_inspect",
+        "rule_pack_test",
+        "rule_pack_remove",
+        "campaign_rule_profile_get",
+        "campaign_rule_profile_set",
+        "campaign_rule_pack_set",
+        "campaign_rule_pack_remove",
+        "campaign_rules_explain",
+        "campaign_rule_receipts",
+        "content_catalog_list",
+        "character_create",
+        "character_list",
+        "character_library_list",
+        "character_instantiate",
+        "character_build",
+        "character_get",
+        "character_update",
+        "character_rule_artifact_add",
+        "character_wallet_adjust",
+        "character_inventory_add",
+        "character_inventory_update",
+        "character_inventory_remove",
+        "character_inventory_equip",
+        "character_ammunition_consume",
+        "character_inventory_transfer",
+        "character_effect_add",
+        "character_effect_remove",
+        "character_rest",
+        "character_cast_spell",
+        "character_use_activity",
+        "character_resource_set",
+        "character_spell_prepare_list",
+        "character_memory_add",
+        "character_memory_resolve",
+        "party_show",
+        "party_inventory_add",
+        "party_inventory_remove",
+        "party_inventory_transfer",
+        "party_wallet_adjust",
+        "party_wallet_transfer",
+        "memory_add",
+        "memory_list",
+        "memory_search",
+        "event_add",
+        "event_list",
+        "actor_grant",
+        "actor_knowledge_add",
+        "actor_knowledge_revise",
+        "actor_knowledge_list",
+        "actor_knowledge_search",
+        "branch_list",
+        "branch_compare",
+        "branch_create",
+        "branch_checkout",
+        "snapshot_list",
+        "snapshot_verify",
+        "snapshot_lineage",
+        "snapshot_regenerate_recap",
+        "state_history",
+        "state_undo",
+        "state_redo",
+        "combat_status",
+        "combat_available_actions",
+        "combat_reactions",
+        "combat_move",
+        "combat_stand",
+        "combat_apply_damage",
+        "combat_heal",
+        "combat_choice_open",
+        "combat_choice_resolve",
+        "combat_ready_spell",
+        "combat_readied_spell_trigger",
+        "combat_readied_spell_resolve",
+        "combat_readied_action_trigger",
+        "combat_readied_action_resolve",
+        "skill_list",
+        "skill_read",
+        "skill_asset_list",
+        "skill_asset_read",
+    }
+    for retired_tool_name in retired_tool_names:
+        mcp.remove_tool(retired_tool_name)
 
     registered_tools = mcp._tool_manager.list_tools()
     validate_profile_coverage(tool.name for tool in registered_tools)

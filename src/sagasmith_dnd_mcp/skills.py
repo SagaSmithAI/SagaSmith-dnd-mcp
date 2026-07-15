@@ -72,9 +72,7 @@ class SkillCatalog:
             if not root.is_dir():
                 continue
             paths = (
-                item
-                for item in root.rglob("*")
-                if item.is_file() and ".git" not in item.parts
+                item for item in root.rglob("*") if item.is_file() and ".git" not in item.parts
             )
             for path in sorted(paths):
                 relative = path.relative_to(root).as_posix()

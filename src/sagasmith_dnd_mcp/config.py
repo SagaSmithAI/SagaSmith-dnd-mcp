@@ -48,13 +48,17 @@ class McpConfig:
             ),
             dnd_skills_dir=Path(
                 os.environ.get("SAGASMITH_DND_SKILLS_DIR", root / "SagaSmith-dnd-skills")
-            ).expanduser().resolve(),
+            )
+            .expanduser()
+            .resolve(),
             modulegen_skills_dir=Path(
                 os.environ.get(
                     "SAGASMITH_MODULEGEN_SKILLS_DIR",
                     root / "SagaSmith-module-gen-skills",
                 )
-            ).expanduser().resolve(),
+            )
+            .expanduser()
+            .resolve(),
             auto_seed_rules=os.environ.get("SAGASMITH_DND_MCP_AUTO_SEED", "1") == "1",
             rule_import_roots=tuple(path.resolve() for path in rule_roots),
         )

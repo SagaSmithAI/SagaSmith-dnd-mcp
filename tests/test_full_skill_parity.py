@@ -215,6 +215,7 @@ def test_mcp_first_full_workflow(tmp_path: Path) -> None:
         assert (await call(server, "module_current", {"campaign_id": campaign["id"]}))["progress"][
             "percent"
         ] == 25
+        campaign = await call(server, "campaign_get", {"campaign_id": campaign["id"]})
         wallet = await call(
             server,
             "party_wallet_adjust",

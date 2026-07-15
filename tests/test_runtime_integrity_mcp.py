@@ -798,6 +798,7 @@ def test_module_scene_creates_a_temporary_battle_map(tmp_path: Path) -> None:
                 "idempotency_key": "map-progress",
             },
         )
+        campaign = await call(server, "campaign_get", {"campaign_id": campaign["id"]})
         started = await call(
             server,
             "combat_start",

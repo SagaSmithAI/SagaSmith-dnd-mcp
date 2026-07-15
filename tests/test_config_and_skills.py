@@ -45,9 +45,7 @@ def test_skill_catalog_exposes_references_and_templates_as_assets(tmp_path: Path
     modulegen.mkdir()
     (dnd / "full" / "references" / "workflow.md").write_text("workflow", encoding="utf-8")
     (dnd / "full" / "examples").mkdir()
-    (dnd / "full" / "examples" / "rule-pack.template.json").write_text(
-        "{}", encoding="utf-8"
-    )
+    (dnd / "full" / "examples" / "rule-pack.template.json").write_text("{}", encoding="utf-8")
     (modulegen / "template.md").write_text("template", encoding="utf-8")
     catalog = SkillCatalog(dnd_root=dnd, modulegen_root=modulegen)
 
@@ -154,15 +152,13 @@ def test_server_tool_profiles_are_complete_and_attached_to_tool_metadata(tmp_pat
         tools = await server.list_tools()
         by_name = {tool.name: tool for tool in tools}
         assert set(by_name) == set().union(*map(set, profile_catalog().values()))
-        assert by_name["module_write"].meta["sagasmith_tool_profiles"] == ["authoring"]
-        assert by_name["rule_document_import"].meta["sagasmith_tool_profiles"] == [
-            "authoring"
-        ]
+        assert by_name["module_import"].meta["sagasmith_tool_profiles"] == ["lobby"]
+        assert by_name["rule_import"].meta["sagasmith_tool_profiles"] == ["lobby"]
         assert by_name["character_check"].meta["sagasmith_tool_profiles"] == ["play"]
         assert by_name["combat_resolve_attack"].meta["sagasmith_tool_profiles"] == ["combat"]
         assert by_name["combat_start"].meta["sagasmith_tool_profiles"] == ["play"]
-        assert by_name["game_phase_get"].meta["sagasmith_tool_profiles"] == [
-            "authoring",
+        assert by_name["game_phase"].meta["sagasmith_tool_profiles"] == [
+            "lobby",
             "play",
             "combat",
         ]
@@ -193,6 +189,6 @@ def test_server_capabilities_publish_the_rulebook_import_contract(tmp_path: Path
             "play": "character_check",
             "combat": "combat_check",
         }
-        assert "rule_pack_draft_from_source" in capabilities["rulebook_import"]["stages"]
+        assert "rule_pack_compile(from_source)" in capabilities["rulebook_import"]["stages"]
 
     asyncio.run(inspect_capabilities())

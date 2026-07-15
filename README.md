@@ -94,7 +94,7 @@ Optional books use an explicit rule-pack lifecycle. User PDFs/Markdown/text are
 staged from an allowlisted root with `rule_document_stage`, inspected with the
 shared Core document parser, and indexed with `rule_document_import`.
 `rule_ingest` remains a direct Markdown compatibility path. Neither makes text
-executable. In the `authoring` profile, create a source-bound inactive draft with
+executable. In the `lobby` phase, create a source-bound inactive draft with
 `rule_pack_draft_from_source`, inspect its validation report,
 then use `rule_pack_install`. A DM must explicitly pin an installed version with
 `campaign_rule_pack_set`. `campaign_rules_explain` returns the exact branch lock,

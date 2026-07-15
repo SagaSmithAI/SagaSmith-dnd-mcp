@@ -269,9 +269,10 @@ def test_rule_and_module_import_jobs_are_reviewable_and_activation_safe(tmp_path
                 "idempotency_key": "module-revision-validate",
             },
         )
-        assert revision_validation["validation"]["diff"]["current_module_id"] == imported_module[
-            "module_id"
-        ]
+        assert (
+            revision_validation["validation"]["diff"]["current_module_id"]
+            == imported_module["module_id"]
+        )
         assert revision_validation["validation"]["diff"]["added"]
 
     asyncio.run(exercise())
