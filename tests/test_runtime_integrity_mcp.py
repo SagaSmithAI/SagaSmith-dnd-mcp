@@ -126,6 +126,15 @@ def test_2024_prepared_spell_changes_follow_phase_and_long_rest_rules(tmp_path: 
         assert rested["character"]["sheet"]["spellcasting"]["preparation"][
             "selected_spell_ids"
         ] == ["a", "c"]
+        preparation_receipts = await call(
+            server,
+            "campaign_rule_receipts",
+            {
+                "campaign_id": campaign["id"],
+                "mechanic_id": "dnd5e.core.spell.preparation",
+            },
+        )
+        assert preparation_receipts[0]["event"] == "spell.prepare.long_rest"
         with pytest.raises(Exception):
             await call(
                 server,
@@ -815,6 +824,14 @@ def test_positioned_movement_opens_and_resolves_an_owned_reaction(tmp_path: Path
                 "idempotency_key": "grid-move",
             },
         )
+        movement_receipts = await call(
+            server,
+            "campaign_rule_receipts",
+            {"campaign_id": campaign["id"]},
+        )
+        movement_ids = {item["mechanic_id"] for item in movement_receipts}
+        assert "dnd5e.core.reaction.opportunity_path" in movement_ids
+        assert "dnd5e.core.movement.grapple_source" not in movement_ids
         reactions = await call(
             server,
             "combat_reactions",
@@ -867,6 +884,17 @@ def test_combat_boundaries_and_private_knowledge_filter(tmp_path: Path) -> None:
             {
                 "name": "PC",
                 "campaign_id": campaign["id"],
+                "sheet": {
+                    "resources": {
+                        "guard": {
+                            "label": "Guard",
+                            "value": 1,
+                            "max": 1,
+                            "recovers_on": "none",
+                            "source_key": "test",
+                        }
+                    }
+                },
                 "idempotency_key": "create-boundary-pc",
             },
         )
@@ -894,6 +922,29 @@ def test_combat_boundaries_and_private_knowledge_filter(tmp_path: Path) -> None:
         other = next(
             item["actor_id"] for item in status["combatants"] if item["actor_id"] != current
         )
+        with pytest.raises(Exception):
+            await call(
+                server,
+                "character_resource_set",
+                {
+                    "character_id": first["id"],
+                    "resource": "guard",
+                    "value": 0,
+                    "expected_revision": first["revision"],
+                    "idempotency_key": "combat-resource-bypass",
+                },
+            )
+        with pytest.raises(Exception):
+            await call(
+                server,
+                "campaign_rule_profile_set",
+                {
+                    "campaign_id": campaign["id"],
+                    "edition": "2014",
+                    "expected_revision": started["campaign_revision"],
+                    "idempotency_key": "combat-profile-bypass",
+                },
+            )
         with pytest.raises(Exception):
             await call(
                 server,

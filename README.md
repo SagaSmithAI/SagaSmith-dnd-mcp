@@ -10,6 +10,7 @@ It owns its local state by default:
   data/ttrpgbase.db       SQLite campaigns, modules, rules, and FTS indexes
   data/chroma_db/         Local ChromaDB persistent store
   artifacts/modules/      Generated Markdown modules before import
+  artifacts/rulebooks/    Content-addressed user rulebooks before indexing
 ```
 
 No D&D client should write either database directly. Use MCP tools so SQLite
@@ -65,8 +66,8 @@ the D&D CLI or runtime to Nanobot itself:
 }
 ```
 
-For a real agent run, use a curated `enabledTools` list first; exposing all 106
-tools at once makes tool selection and context management less stable. Nanobot
+For a real agent run, use the server-owned tool profiles; exposing every tool
+at once makes tool selection and context management less stable. Nanobot
 wraps the tools with names such as
 `mcp_sagasmith_dnd_campaign_create`. Its current client discovers static
 resources but not resource templates, so use `skill_asset_list` and
@@ -88,6 +89,35 @@ The latter covers complete character sheets, wallet changes, inventory, equipmen
 ammunition, active effects, spell preparation, resources, dice, ability checks,
 and ability-score generation. D&D state is written only through these MCP tools;
 clients do not need the D&D CLI or direct SQLite access.
+
+Optional books use an explicit rule-pack lifecycle. User PDFs/Markdown/text are
+staged from an allowlisted root with `rule_document_stage`, inspected with the
+shared Core document parser, and indexed with `rule_document_import`.
+`rule_ingest` remains a direct Markdown compatibility path. Neither makes text
+executable. In the `authoring` profile, create a source-bound inactive draft with
+`rule_pack_draft_from_source`, inspect its validation report,
+then use `rule_pack_install`. A DM must explicitly pin an installed version with
+`campaign_rule_pack_set`. `campaign_rules_explain` returns the exact branch lock,
+fingerprint, mechanic ids, and citations used by settlement. Rule locks cannot
+change during active combat, and snapshots restore only when every exact locked
+version and checksum is still installed.
+`campaign_rule_profile_set`, `campaign_rule_pack_set`, and
+`campaign_rule_pack_remove` are campaign mutations: pass the latest
+`expected_revision` and a stable `idempotency_key`, then use the returned
+`campaign_revision` for the next write. Retries with the same key and payload
+replay the original response; stale revisions fail without changing the lock.
+Committed rule-aware mutations persist immutable evidence in the same mutation
+group; `campaign_rule_receipts` can audit it after an optional pack is removed.
+
+The current 2014/2024 engine is itself exposed as an immutable built-in pack,
+`dnd5e.core.2014` or `dnd5e.core.2024`. Its fingerprint covers the preserved
+combat, movement, reaction, damage, rest, spell, character, and MCP action-
+economy boundaries. `campaign_rules_explain` reports this core pack and its
+implementation/test coverage before listing optional extension mechanics.
+Snapshots and branch heads also preserve that exact built-in core lock. A save
+without a core lock, or one whose core fingerprint is unavailable after a runtime
+upgrade, is rejected before any live campaign state is materialized; conversion
+or an explicit reviewed relock must happen separately.
 
 Skill documents are resources at `sagasmith://skill/{skill_id}`. Their bundled
 references, data, and templates are listed with `skill_asset_list`, read with
@@ -135,3 +165,7 @@ needed.
 
 Use `SAGASMITH_DND_SKILLS_DIR` and `SAGASMITH_MODULEGEN_SKILLS_DIR` to point at
 different checkouts of the skill packs.
+
+`SAGASMITH_DND_MCP_RULE_IMPORT_ROOTS` is an `os.pathsep`-separated allowlist for
+user rulebook staging. Its default is `<SagaSmith workspace>/reference/DnD-Books`.
+The server never imports an arbitrary model-selected path directly.

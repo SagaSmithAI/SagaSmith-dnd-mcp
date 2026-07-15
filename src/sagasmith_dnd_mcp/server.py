@@ -20,6 +20,9 @@ from sagasmith_core import (
     MemoryService,
     ModuleService,
     RevisionService,
+    RulePackService,
+    RuleProfileService,
+    RuleReceiptService,
     RuleService,
     SnapshotService,
     StateMutationService,
@@ -27,6 +30,7 @@ from sagasmith_core import (
 )
 from sagasmith_core.idempotency import request_hash
 from sagasmith_core.modules import MarkdownModuleParser
+from sagasmith_core.rule_packs import RulePackError, RulesetUnavailableError, content_checksum
 from sagasmith_core.systems import SystemRegistry
 from sagasmith_dnd.ability_generation import apply_ability_generation, roll_ability_scores
 from sagasmith_dnd.activities import ActivityError, consume_activity
@@ -78,9 +82,21 @@ from sagasmith_dnd.combat_engine import (
     trigger_readied_action,
     trigger_readied_spell,
 )
+from sagasmith_dnd.core_rule_pack import get_core_rule_pack
 from sagasmith_dnd.engine import resolve_check, roll
 from sagasmith_dnd.lifecycle import advance_effect_durations, apply_rest
 from sagasmith_dnd.module_profile import DndModuleProfile
+from sagasmith_dnd.rule_engine import (
+    RuleCompilationError,
+    apply_rule_event,
+    compile_mechanics,
+    context_with_facts,
+    core_receipts,
+    resolution_context,
+    run_mechanic_tests,
+    validate_source_bound_mechanics,
+)
+from sagasmith_dnd.rule_providers import load_native_rule_providers
 from sagasmith_dnd.spells import (
     consume_readied_spell,
     consume_spell_cast,
@@ -118,12 +134,174 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     memories = MemoryService(storage.database)
     modules = ModuleService(storage.database)
     rules = RuleService(storage.database)
+    rule_packs = RulePackService(storage.database)
+    rule_profiles = RuleProfileService(storage.database)
+    rule_receipts = RuleReceiptService(storage.database)
     revisions = RevisionService(storage.database)
     snapshots = SnapshotService(storage.database)
     catalog = SkillCatalog(
         dnd_root=config.dnd_skills_dir,
         modulegen_root=config.modulegen_skills_dir,
     )
+    native_rule_providers = load_native_rule_providers()
+
+    def profile_options_with_core_lock(
+        edition: str, options: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        core_pack = get_core_rule_pack(edition)
+        return {
+            **dict(options or {}),
+            "_core_rule_pack_lock": {
+                "id": core_pack.id,
+                "version": core_pack.version,
+                "fingerprint": core_pack.fingerprint,
+            },
+        }
+
+    def effective_rule_context(
+        campaign_id: str,
+        *,
+        facts: dict[str, Any] | None = None,
+        branch_id: str | None = None,
+    ) -> Any:
+        """Compile the exact current branch lock for one pure runtime call."""
+        effective = rule_packs.effective_ruleset(campaign_id, branch_id=branch_id)
+        value = asdict(effective)
+        enabled_pack_ids = {str(item["pack_id"]) for item in effective.lock}
+        native = [
+            {
+                "id": provider.id,
+                "abi_version": provider.abi_version,
+                "pack_id": provider.pack_id,
+                "mechanics": provider.mechanics(),
+            }
+            for provider in native_rule_providers.values()
+            if provider.pack_id in enabled_pack_ids
+        ]
+        if native:
+            value["mechanics"] = [
+                *list(value["mechanics"]),
+                *(mechanic for provider in native for mechanic in provider["mechanics"]),
+            ]
+            value["fingerprint"] = content_checksum(
+                {"base": effective.fingerprint, "native": native}
+            )
+        try:
+            context = resolution_context(value, facts=facts)
+        except ValueError as error:
+            raise RulesetUnavailableError(
+                "campaign requires an unsupported built-in core edition"
+            ) from error
+        profile = rule_profiles.get(campaign_id)
+        expected_core = dict((profile.options if profile else {}).get("_core_rule_pack_lock") or {})
+        if not expected_core:
+            raise RulesetUnavailableError(
+                "campaign has no locked built-in core rule pack; "
+                "the DM must explicitly set the campaign rule profile"
+            )
+        if expected_core != {
+            "id": context.core_pack.id,
+            "version": context.core_pack.version,
+            "fingerprint": context.core_pack.fingerprint,
+        }:
+            raise RulesetUnavailableError(
+                "locked built-in core rule pack is unavailable; "
+                "runtime upgrade needs explicit relock"
+            )
+        return context
+
+    def effective_ruleset_view(
+        campaign_id: str, *, branch_id: str | None = None
+    ) -> dict[str, Any]:
+        effective = rule_packs.effective_ruleset(campaign_id, branch_id=branch_id)
+        context = effective_rule_context(campaign_id, branch_id=branch_id)
+        value = asdict(effective)
+        value["extension_fingerprint"] = value["fingerprint"]
+        value["fingerprint"] = context.fingerprint
+        value["core_pack"] = {
+            "id": context.core_pack.id,
+            "version": context.core_pack.version,
+            "edition": context.core_pack.edition,
+            "fingerprint": context.core_pack.fingerprint,
+        }
+        return value
+
+    def save_rule_pack_draft(
+        *,
+        manifest: dict[str, Any],
+        artifacts: list[dict[str, Any]] | None,
+        mechanics: list[dict[str, Any]] | None,
+        provenance: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        compiler_errors: list[str] = []
+        try:
+            compile_mechanics(mechanics or [])
+        except RuleCompilationError as error:
+            compiler_errors.append(str(error))
+        declared_tests = list(manifest.get("tests") or [])
+        if mechanics and not declared_tests:
+            compiler_errors.append("executable rule packs require declarative tests")
+        elif mechanics and not compiler_errors:
+            report = run_mechanic_tests(mechanics or [], declared_tests)
+            if not report["passed"]:
+                compiler_errors.extend(
+                    error
+                    for case in report["cases"]
+                    if not case["passed"]
+                    for error in case["errors"]
+                )
+                if report["mechanics_uncovered"]:
+                    compiler_errors.append(
+                        "declarative tests do not exercise mechanics: "
+                        + ", ".join(report["mechanics_uncovered"])
+                    )
+        result = rule_packs.save_draft(
+            manifest=manifest,
+            artifacts=artifacts,
+            mechanics=mechanics,
+            provenance=provenance,
+            additional_errors=compiler_errors,
+        )
+        return asdict(result)
+
+    def checked_rule_facts(value: dict[str, Any] | None) -> dict[str, Any]:
+        facts = dict(value or {})
+        reserved = {"actor_id", "kind", "ability", "dc"} & facts.keys()
+        if reserved:
+            raise ValueError("rule_facts cannot override: " + ", ".join(sorted(reserved)))
+        if len(facts) > 32 or len(repr(facts)) > 8192:
+            raise ValueError("rule_facts exceed the safe settlement limit")
+        if any(not isinstance(key, str) or not key.strip() for key in facts):
+            raise ValueError("rule_facts keys must be non-empty strings")
+        return facts
+
+    def assert_snapshot_core_available(document: dict[str, Any]) -> None:
+        """Fail before materialization when a save's exact built-in core is unavailable."""
+        profile = dict(document.get("payload", {}).get("rule_profile") or {})
+        options = dict(profile.get("options") or {})
+        locked = dict(options.get("_core_rule_pack_lock") or {})
+        if not locked:
+            raise RulesetUnavailableError(
+                "snapshot has no locked built-in core rule pack; "
+                "it cannot be restored without explicit conversion"
+            )
+        edition = str(profile.get("edition") or "")
+        try:
+            core_pack = get_core_rule_pack(edition)
+        except (KeyError, ValueError) as error:
+            raise RulesetUnavailableError(
+                f"snapshot requires unsupported D&D edition {edition!r}"
+            ) from error
+        available = {
+            "id": core_pack.id,
+            "version": core_pack.version,
+            "fingerprint": core_pack.fingerprint,
+        }
+        if locked != available:
+            raise RulesetUnavailableError(
+                "snapshot's locked built-in core rule pack is unavailable; "
+                "runtime upgrade needs an explicit conversion before restore"
+            )
 
     def seed_bundled_rules(*, max_files: int = 64) -> dict[str, Any]:
         """Idempotently index the compact bundled SRD reference corpus."""
@@ -161,7 +339,17 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     def character_view(character: Any) -> dict[str, Any]:
         """Return a raw validated sheet together with its non-persisted derived view."""
         value = asdict(character)
-        value["derived"] = derive_character_sheet(value["sheet"])
+        try:
+            rules_context = (
+                effective_rule_context(character.campaign_id) if character.campaign_id else None
+            )
+            value["derived"] = derive_character_sheet(value["sheet"], rules=rules_context)
+        except RulesetUnavailableError as error:
+            value["derived"] = derive_character_sheet(value["sheet"])
+            value["derived"]["unresolved_rules"] = sorted(
+                {*value["derived"].get("unresolved_rules", []), "ruleset_unavailable"}
+            )
+            value["ruleset_error"] = str(error)
         return value
 
     def public_character_view(character: Any) -> dict[str, Any]:
@@ -344,9 +532,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
 
     def require_write_contract(expected_revision: int | None, idempotency_key: str | None) -> None:
         if expected_revision is None:
-            raise ValueError("expected_revision is required for a combat mutation")
+            raise ValueError("expected_revision is required for this mutation")
         if not idempotency_key:
-            raise ValueError("idempotency_key is required for a combat mutation")
+            raise ValueError("idempotency_key is required for this mutation")
 
     def sanitize_attack_action(
         campaign_id: str, principal_id: str, action: dict[str, Any]
@@ -471,6 +659,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         idempotency_key: str | None = None,
         payload: dict[str, Any] | None = None,
         response_extra: dict[str, Any] | None = None,
+        rule_receipts: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         def response_for(character: dict[str, Any]) -> dict[str, Any]:
             if response_extra is None:
@@ -567,7 +756,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     def server_capabilities() -> dict[str, Any]:
         """Describe the MCP contract and the automatic-vs-ruling combat boundary."""
         return {
-            "contract_version": "2026-07-integrity-v3",
+            "contract_version": "2026-07-integrity-v4",
             "transport": "stdio",
             "state_owner": "sagasmith-dnd-mcp",
             "features": {
@@ -595,6 +784,35 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "structured_activity_accounting": True,
                 "campaign_effect_timeline": True,
                 "idempotency_crash_recovery": True,
+                "structured_rulebook_import": True,
+                "source_bound_rule_packs": True,
+                "rule_aware_noncombat_checks": True,
+            },
+            "rulebook_import": {
+                "stages": [
+                    "rule_document_stage",
+                    "rule_document_inspect",
+                    "rule_document_import",
+                    "rule_search",
+                    "rule_expand",
+                    "rule_pack_draft_from_source",
+                    "rule_pack_test",
+                    "rule_pack_install",
+                    "campaign_rule_pack_set",
+                ],
+                "source_citation_fields": [
+                    "source_id",
+                    "source_key",
+                    "source_checksum",
+                    "chunk_id",
+                    "heading_path",
+                    "page_start",
+                    "page_end",
+                ],
+                "settlement_tools": {
+                    "play": "character_check",
+                    "combat": "combat_check",
+                },
             },
             "write_requirements": ["principal_id", "expected_revision", "idempotency_key"],
         }
@@ -645,6 +863,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         """Create a D&D 5e campaign inside the MCP-owned SQLite database."""
         if not idempotency_key:
             raise ValueError("idempotency_key is required for campaign creation")
+        # Reject before persistence so an unsupported edition cannot leave a
+        # partially initialized campaign without its required Core lock.
+        get_core_rule_pack(edition)
         created = campaigns.create_owned(
             system_id="dnd5e",
             name=name,
@@ -653,7 +874,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             description=description,
             settings={"edition": edition, "locale": locale},
         )
-        return asdict(created)
+        if rule_profiles.get(created.id) is None:
+            rule_profiles.set(
+                created.id,
+                edition=edition,
+                locale=locale,
+                options=profile_options_with_core_lock(edition),
+            )
+        return asdict(campaigns.get(created.id))
 
     @mcp.tool()
     def campaign_list(
@@ -945,6 +1173,20 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             scene_id=scene_id,
             name=name,
         )
+        initiatives = [
+            int(item.get("initiative", 0) or 0)
+            for item in encounter.get("combatants", [])
+        ]
+        start_boundary_ids = (
+            ["dnd5e.core.initiative.tie"]
+            if len(initiatives) != len(set(initiatives))
+            else []
+        )
+        start_receipts = core_receipts(
+            effective_rule_context(campaign_id),
+            start_boundary_ids,
+            "combat.start",
+        )
         updated_state = dict(campaign.state or {})
         updated_state["combat"] = encounter
         updated_state["game_phase"] = PROFILE_COMBAT
@@ -957,6 +1199,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             actor=principal_id,
             branch_id=resolved_branch_id,
             idempotency_key=idempotency_key,
+            rule_receipts=start_receipts,
         )
         response = {
             "combat": encounter,
@@ -1019,6 +1262,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 combat_actor_snapshot(target_id),
                 action={**action, "target_id": target_id},
                 encounter=encounter,
+                rules=effective_rule_context(
+                    campaign_id,
+                    facts={"actor_id": actor_id, "target_id": target_id, "kind": "attack"},
+                ),
             )
         except NeedsRulingError:
             if access.require_campaign(campaign_id, principal_id).role not in {"owner", "dm"}:
@@ -1079,7 +1326,16 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         attacker = combat_actor_snapshot(actor_id)
         target = combat_actor_snapshot(target_id)
         try:
-            plan = preflight_attack(attacker, target, action=action_payload, encounter=encounter)
+            plan = preflight_attack(
+                attacker,
+                target,
+                action=action_payload,
+                encounter=encounter,
+                rules=effective_rule_context(
+                    campaign_id,
+                    facts={"actor_id": actor_id, "target_id": target_id, "kind": "attack"},
+                ),
+            )
         except NeedsRulingError:
             if access.require_campaign(campaign_id, principal_id).role not in {"owner", "dm"}:
                 raise CombatEngineError("attack requires a DM ruling") from None
@@ -1088,6 +1344,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             attacker,
             target,
             plan=plan,
+            rules=effective_rule_context(
+                campaign_id,
+                facts={"actor_id": actor_id, "target_id": target_id, "kind": "attack"},
+            ),
         )
         ammunition = None
         weapon_id = plan.get("weapon_id")
@@ -1175,6 +1435,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             actor=principal_id,
             branch_id=resolved_branch_id,
             idempotency_key=idempotency_key,
+            rule_receipts=list(result.get("rule_receipts") or []),
         )
         response = {
             "status": "committed",
@@ -1236,6 +1497,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             next_state["combat"]["rounds_until_minute"] = 0 if minute_changed else elapsed_rounds
         combat_updates: list[CharacterStateUpdate] = []
         expired_effects = set(duration["expired"])
+        rule_context = effective_rule_context(campaign_id)
+        rule_receipts: list[dict[str, Any]] = core_receipts(
+            rule_context,
+            ["dnd5e.core.mcp.duration_clock"],
+            "turn.end.duration_clock",
+        )
         for combatant in next_state["combat"].get("combatants", []):
             target_id = str(combatant.get("actor_id"))
             target = characters.get(target_id)
@@ -1259,6 +1526,27 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 minutes = advance_effect_durations(sheet, period="minute")
                 sheet = minutes["sheet"]
                 expired.extend(minutes["expired"])
+            extension = apply_rule_event(
+                sheet,
+                "duration.advance",
+                context_with_facts(
+                    rule_context,
+                    actor_id=target_id,
+                    ended_actor_id=actor_id,
+                    round_changed=round_changed,
+                    minute_changed=minute_changed,
+                ),
+            )
+            sheet = extension.sheet
+            rule_receipts.extend(extension.receipts)
+            if target_id == actor_id:
+                ended = apply_rule_event(
+                    sheet,
+                    "turn.end",
+                    context_with_facts(rule_context, actor_id=target_id),
+                )
+                sheet = ended.sheet
+                rule_receipts.extend(ended.receipts)
             expired_effects.update(expired)
             combat_updates.append(
                 CharacterStateUpdate(
@@ -1277,12 +1565,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             actor=principal_id,
             branch_id=resolved_branch_id,
             idempotency_key=idempotency_key,
+            rule_receipts=rule_receipts,
         )
         response = {
             "status": "committed",
             "combat": next_state["combat"],
             "effects_expired": sorted(expired_effects),
             "readied_spells_expired": sorted(str(item.get("id")) for item in expired_readied),
+            "rule_receipts": rule_receipts,
+            "ruleset_fingerprint": rule_context.fingerprint,
             "campaign_revision": mutation_revision(campaign_id),
             "revisions": [asdict(item) for item in revisions_result or []],
         }
@@ -1322,14 +1613,28 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         updates: list[CharacterStateUpdate] = []
         advanced: dict[str, list[str]] = {}
         expired: dict[str, list[str]] = {}
+        rule_receipts: list[dict[str, Any]] = []
+        rule_context = effective_rule_context(campaign_id)
         for character in characters.list(campaign_id=campaign_id):
             result = advance_effect_durations(character.sheet, period=normalized_period)
-            if not result["advanced"] and not result["expired"]:
+            extension = apply_rule_event(
+                result["sheet"],
+                "duration.advance",
+                context_with_facts(
+                    rule_context, actor_id=character.id, period=normalized_period
+                ),
+            )
+            rule_receipts.extend(extension.receipts)
+            if (
+                not result["advanced"]
+                and not result["expired"]
+                and extension.sheet == character.sheet
+            ):
                 continue
             updates.append(
                 CharacterStateUpdate(
                     character_id=character.id,
-                    sheet=validate_character_sheet(result["sheet"]),
+                    sheet=validate_character_sheet(extension.sheet),
                     notes=validate_character_notes(character.notes),
                     expected_revision=character.revision,
                 )
@@ -1346,12 +1651,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 actor=principal_id,
                 branch_id=resolved_branch_id,
                 idempotency_key=idempotency_key,
+                rule_receipts=rule_receipts,
             )
         response = {
             "status": "committed" if updates else "no_change",
             "period": normalized_period,
             "advanced": advanced,
             "expired": expired,
+            "rule_receipts": rule_receipts,
+            "ruleset_fingerprint": rule_context.fingerprint,
             "revisions": [asdict(item) for item in revisions_result or []],
         }
         return remember_idempotent(
@@ -1434,6 +1742,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             action=action_payload,
             encounter=None,
             allow_out_of_turn=True,
+            rules=effective_rule_context(
+                campaign_id,
+                facts={"actor_id": actor_id, "target_id": target_id, "kind": "attack"},
+            ),
         )
         weapon = next(
             (
@@ -1451,6 +1763,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             attacker,
             target,
             plan=plan,
+            rules=effective_rule_context(
+                campaign_id,
+                facts={"actor_id": actor_id, "target_id": target_id, "kind": "attack"},
+            ),
         )
         weapon_id = plan.get("weapon_id")
         if weapon_id and weapon_id != "unarmed-strike":
@@ -1534,6 +1850,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             actor=principal_id,
             branch_id=resolved_branch_id,
             idempotency_key=idempotency_key,
+            rule_receipts=[
+                *list(result.get("rule_receipts") or []),
+                *core_receipts(
+                    effective_rule_context(campaign_id),
+                    ["dnd5e.core.mcp.opportunity_melee_only"],
+                    "reaction.opportunity_attack",
+                ),
+            ],
         )
         response = {
             "status": "committed",
@@ -1587,6 +1911,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             )
         _, encounter = active_encounter(campaign_id)
         require_no_blocking_pending(encounter)
+        moving_combatant = next(
+            item
+            for item in encounter.get("combatants", [])
+            if item.get("actor_id") == actor_id
+        )
+        moving_conditions = {
+            str(item).casefold() for item in moving_combatant.get("conditions", [])
+        }
+        pending_before = {str(item.get("id")) for item in encounter.get("pending", [])}
         next_encounter = spend_movement(
             encounter,
             actor_id,
@@ -1595,6 +1928,23 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             path=path,
             movement_mode=movement_mode,
             crawl=crawl,
+        )
+        movement_boundary_ids: list[str] = []
+        if "prone" in moving_conditions:
+            movement_boundary_ids.append("dnd5e.core.movement.prone_crawl_stand")
+        if "grappled" in moving_conditions:
+            movement_boundary_ids.append("dnd5e.core.movement.grapple_source")
+        if any(
+            str(item.get("id")) not in pending_before
+            and item.get("kind") == "reaction"
+            and item.get("trigger") == "opportunity_attack"
+            for item in next_encounter.get("pending", [])
+        ):
+            movement_boundary_ids.append("dnd5e.core.reaction.opportunity_path")
+        movement_receipts = core_receipts(
+            effective_rule_context(campaign_id),
+            movement_boundary_ids,
+            "movement.spend",
         )
         next_state = {**dict(campaign.state or {}), "combat": next_encounter}
         revisions_result = StateMutationService(storage.database).replace(
@@ -1605,6 +1955,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             actor=principal_id,
             branch_id=resolved_branch_id,
             idempotency_key=idempotency_key,
+            rule_receipts=movement_receipts,
         )
         response = {
             "status": "committed",
@@ -1639,10 +1990,16 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         campaign, encounter = active_encounter(campaign_id)
         if campaign.revision != expected_revision:
             raise ValueError(
-                f"campaign revision conflict: expected {expected_revision}, found {campaign.revision}"
+                "campaign revision conflict: "
+                f"expected {expected_revision}, found {campaign.revision}"
             )
         require_no_blocking_pending(encounter)
         next_encounter = stand_up(encounter, actor_id)
+        stand_receipts = core_receipts(
+            effective_rule_context(campaign_id),
+            ["dnd5e.core.movement.prone_crawl_stand"],
+            "movement.stand",
+        )
         current = characters.get(actor_id)
         combatant = next(
             item for item in next_encounter["combatants"] if item.get("actor_id") == actor_id
@@ -1666,6 +2023,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             actor=principal_id,
             branch_id=resolved_branch_id,
             idempotency_key=idempotency_key,
+            rule_receipts=stand_receipts,
         )
         response = {
             "status": "committed",
@@ -1727,6 +2085,16 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             trigger=trigger,
             payload=payload,
         )
+        normalized_action = str(action).strip().lower().replace("-", "_")
+        action_receipts = (
+            core_receipts(
+                effective_rule_context(campaign_id),
+                ["dnd5e.core.ready.action"],
+                "action.ready",
+            )
+            if normalized_action == "ready"
+            else []
+        )
         next_state = {**dict(campaign.state or {}), "combat": next_encounter}
         revisions_result = StateMutationService(storage.database).replace(
             campaign_id,
@@ -1736,6 +2104,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             actor=principal_id,
             branch_id=resolved_branch_id,
             idempotency_key=idempotency_key,
+            rule_receipts=action_receipts,
         )
         response = {
             "status": "committed",
@@ -1805,7 +2174,17 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             cast_level=cast_level,
             ritual=ritual,
             component_ruling=component_ruling,
+            rules=effective_rule_context(
+                campaign_id,
+                facts={"actor_id": actor_id, "spell_id": spell_id, "cast_level": cast_level},
+            ),
         )
+        if applied.get("status") in {"pending_choice", "pending_ruling"}:
+            return {
+                "status": applied["status"],
+                "result": {key: value for key, value in applied.items() if key != "sheet"},
+                "campaign_revision": campaign.revision,
+            }
         spell_entry = next(
             item
             for item in current.sheet.get("content", {}).get("spells", [])
@@ -1924,6 +2303,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             actor=principal_id,
             branch_id=resolved_branch_id,
             idempotency_key=idempotency_key,
+            rule_receipts=[
+                *list(applied.get("rule_receipts") or []),
+                *core_receipts(
+                    effective_rule_context(campaign_id),
+                    ["dnd5e.core.mcp.combat_spell_boundary"],
+                    "combat.spell.cast",
+                ),
+            ],
         )
         response = {
             "status": "pending_ruling",
@@ -2050,6 +2437,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             actor=principal_id,
             branch_id=resolved_branch_id,
             idempotency_key=idempotency_key,
+            rule_receipts=list(applied.get("rule_receipts") or []),
         )
         readied = next_encounter["readied"][-1]
         response = {
@@ -2319,7 +2707,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         campaign, encounter = active_encounter(campaign_id)
         if campaign.revision != expected_revision:
             raise ValueError(
-                f"campaign revision conflict: expected {expected_revision}, found {campaign.revision}"
+                "campaign revision conflict: "
+                f"expected {expected_revision}, found {campaign.revision}"
             )
         next_encounter = trigger_readied_action(encounter, readied_id=readied_id, event=event)
         next_state = {**dict(campaign.state or {}), "combat": next_encounter}
@@ -2374,7 +2763,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         campaign, encounter = active_encounter(campaign_id)
         if campaign.revision != expected_revision:
             raise ValueError(
-                f"campaign revision conflict: expected {expected_revision}, found {campaign.revision}"
+                "campaign revision conflict: "
+                f"expected {expected_revision}, found {campaign.revision}"
             )
         if release and choice_id not in {
             str(item.get("id")) for item in available_reactions(encounter, actor_id)
@@ -2451,9 +2841,22 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             )
         current = characters.get(actor_id)
         try:
-            applied = consume_activity(current.sheet, activity_id=activity_id)
+            applied = consume_activity(
+                current.sheet,
+                activity_id=activity_id,
+                rules=effective_rule_context(
+                    campaign_id,
+                    facts={"actor_id": actor_id, "activity_id": activity_id},
+                ),
+            )
         except ActivityError as exc:
             raise CombatEngineError(str(exc)) from exc
+        if applied.get("status") in {"pending_choice", "pending_ruling"}:
+            return {
+                "status": applied["status"],
+                "result": {key: value for key, value in applied.items() if key != "sheet"},
+                "campaign_revision": campaign.revision,
+            }
         activation_type = str(applied["activation"].get("type") or "")
         if activation_type == "reaction":
             window = next(
@@ -2520,6 +2923,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             actor=principal_id,
             branch_id=resolved_branch_id,
             idempotency_key=idempotency_key,
+            rule_receipts=list(applied.get("rule_receipts") or []),
         )
         result = {key: value for key, value in applied.items() if key != "sheet"}
         result["declaration"] = declaration or {}
@@ -2537,6 +2941,98 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
 
     @mcp.tool()
+    def character_check(
+        campaign_id: str,
+        actor_id: str,
+        kind: str,
+        ability: str,
+        dc: int = 0,
+        proficient: bool = False,
+        bonus: int = 0,
+        advantage: bool = False,
+        disadvantage: bool = False,
+        rule_facts: dict[str, Any] | None = None,
+        principal_id: str = "system:local",
+        expected_revision: int | None = None,
+        branch_id: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Resolve and audit a non-combat check using the branch's exact rule-pack lock."""
+        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        require_campaign_actor(campaign_id, actor_id)
+        require_write_contract(expected_revision, idempotency_key)
+        settlement_facts = checked_rule_facts(rule_facts)
+        payload = {
+            "actor_id": actor_id,
+            "kind": kind,
+            "ability": ability,
+            "dc": dc,
+            "proficient": proficient,
+            "bonus": bonus,
+            "advantage": advantage,
+            "disadvantage": disadvantage,
+            "rule_facts": settlement_facts,
+            "branch_id": branch_id,
+        }
+        scope = f"character-check:{campaign_id}:{principal_id}"
+        replay = replay_idempotent(scope, idempotency_key, payload)
+        if replay is not None:
+            return replay
+        campaign = campaigns.get(campaign_id)
+        if dict(campaign.state or {}).get("combat", {}).get("active", False):
+            raise CombatEngineError("use combat_check while combat is active")
+        if campaign.revision != expected_revision:
+            raise ValueError(
+                "campaign revision conflict: "
+                f"expected {expected_revision}, found {campaign.revision}"
+            )
+        result = resolve_actor_check(
+            combat_actor_snapshot(actor_id),
+            kind=kind,
+            ability=ability,
+            dc=dc,
+            proficient=proficient,
+            bonus=bonus,
+            advantage=advantage,
+            disadvantage=disadvantage,
+            rules=effective_rule_context(
+                campaign_id,
+                facts={
+                    **settlement_facts,
+                    "actor_id": actor_id,
+                    "kind": kind,
+                    "ability": ability,
+                    "dc": dc,
+                },
+                branch_id=branch_id,
+            ),
+        )
+        next_state = dict(campaign.state or {})
+        next_state["resolution_log"] = [
+            *list(next_state.get("resolution_log") or []),
+            {"type": kind, "actor_id": actor_id, "result": result},
+        ][-100:]
+        revisions_result = StateMutationService(storage.database).replace(
+            campaign_id,
+            campaign_state=validate_party_state(next_state),
+            expected_campaign_revision=campaign.revision,
+            operation=f"character.{kind}",
+            actor=principal_id,
+            branch_id=require_current_branch(campaign_id, branch_id),
+            idempotency_key=idempotency_key,
+            rule_receipts=list(result.get("rule_receipts") or []),
+        )
+        response = {
+            "status": "committed",
+            "result": result,
+            "campaign_revision": mutation_revision(campaign_id),
+            "revisions": [asdict(item) for item in revisions_result or []],
+        }
+        return remember_idempotent(
+            scope, idempotency_key, payload, response, campaign_id=campaign_id
+        )
+
+    @mcp.tool()
     def combat_check(
         campaign_id: str,
         actor_id: str,
@@ -2547,6 +3043,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         bonus: int = 0,
         advantage: bool = False,
         disadvantage: bool = False,
+        rule_facts: dict[str, Any] | None = None,
         principal_id: str = "system:local",
         expected_revision: int | None = None,
         branch_id: str | None = None,
@@ -2555,11 +3052,16 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         """Resolve a check/save/death-save and persist only its mechanical result."""
         access.require_actor(campaign_id, actor_id, principal_id, control=True)
         require_write_contract(expected_revision, idempotency_key)
+        settlement_facts = checked_rule_facts(rule_facts)
         if not is_dm(campaign_id, principal_id):
             if kind != "death_save":
                 raise CombatEngineError("checks and saves require a DM-issued resolution")
             if advantage or disadvantage or proficient or bonus:
                 raise CombatEngineError("death-save modifiers require a DM ruling")
+            if settlement_facts:
+                raise CombatEngineError("rule facts require a DM-issued resolution")
+        if kind == "death_save" and settlement_facts:
+            raise CombatEngineError("rule facts are not accepted for death saves")
         payload = {
             "actor_id": actor_id,
             "kind": kind,
@@ -2569,6 +3071,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "bonus": bonus,
             "advantage": advantage,
             "disadvantage": disadvantage,
+            "rule_facts": settlement_facts,
             "branch_id": branch_id,
         }
         scope = f"combat-check:{campaign_id}:{principal_id}"
@@ -2652,6 +3155,16 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 advantage=advantage,
                 disadvantage=disadvantage,
                 ruleset=encounter.get("ruleset") if encounter else None,
+                rules=effective_rule_context(
+                    campaign_id,
+                    facts={
+                        **settlement_facts,
+                        "actor_id": actor_id,
+                        "kind": kind,
+                        "ability": ability,
+                        "dc": dc,
+                    },
+                ),
             )
         if encounter:
             if updates:
@@ -2679,6 +3192,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             actor=principal_id,
             branch_id=require_current_branch(campaign_id, branch_id),
             idempotency_key=idempotency_key,
+            rule_receipts=list(result.get("rule_receipts") or []),
         )
         response = {
             "status": "committed",
@@ -2748,6 +3262,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             kind="save",
             ability="constitution",
             dc=dc,
+            rules=effective_rule_context(
+                campaign_id,
+                facts={
+                    "actor_id": target_id,
+                    "kind": "save",
+                    "ability": "constitution",
+                    "dc": dc,
+                },
+            ),
         )
         updated_sheet = apply_concentration_result(
             actor["sheet"], effect_ids=effect_ids, success=result["success"]
@@ -2832,6 +3355,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         applied = apply_damage_parts_to_sheet(
             target["sheet"], parts, source=principal_id, critical=critical
         )
+        damage_receipts = core_receipts(
+            effective_rule_context(campaign_id),
+            ["dnd5e.core.damage.zero_hp"] if int(applied["after_hp"]) == 0 else [],
+            "damage.apply",
+        )
         encounter = existing_encounter
         next_state = dict(campaign.state or {})
         if encounter:
@@ -2865,6 +3393,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             actor=principal_id,
             branch_id=require_current_branch(campaign_id, branch_id),
             idempotency_key=idempotency_key,
+            rule_receipts=damage_receipts,
         )
         response = {
             "status": "committed",
@@ -3158,6 +3687,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             )
         if current_branch_id(campaign_id) != expected_branch_id:
             raise ValueError("active branch changed before branch creation")
+        if checkout:
+            source_snapshot_id = from_snapshot_id or branches.current(
+                campaign_id
+            ).head_snapshot_id
+            if source_snapshot_id:
+                assert_snapshot_core_available(
+                    snapshots.get_by_id(campaign_id, source_snapshot_id)
+                )
         created = branches.create(
             campaign_id,
             name=name,
@@ -3208,6 +3745,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             )
         if current_branch_id(campaign_id) != expected_branch_id:
             raise ValueError("active branch changed before branch checkout")
+        target_branch = branches.get(campaign_id, branch_id)
+        if target_branch.head_snapshot_id:
+            assert_snapshot_core_available(
+                snapshots.get_by_id(campaign_id, target_branch.head_snapshot_id)
+            )
         snapshot = snapshots.checkout_branch(campaign_id, branch_id)
         response = {
             "branch": asdict(branches.current(campaign_id)),
@@ -3300,6 +3842,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             )
         if current_branch_id(campaign_id) != expected_branch_id:
             raise ValueError("active branch changed before snapshot restore")
+        assert_snapshot_core_available(snapshots.get(campaign_id, slot))
         response = asdict(snapshots.restore(campaign_id, slot))
         return remember_idempotent(
             scope,
@@ -3357,7 +3900,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             sheet_value["edition"] = str(
                 campaigns.get(campaign_id).settings.get("edition") or "2024"
             )
-        normalized_sheet = validate_character_sheet(sheet_value)
+        normalized_sheet = validate_character_sheet(
+            sheet_value,
+            rules=(effective_rule_context(campaign_id) if campaign_id else None),
+        )
         normalized_notes = validate_character_notes(notes or default_character_notes())
         return character_view(
             characters.create_idempotent(
@@ -3414,7 +3960,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 campaign_id=campaign_id,
                 name=name,
                 player_name=player_name,
-                sheet=validate_character_sheet(sheet),
+                sheet=validate_character_sheet(
+                    sheet, rules=effective_rule_context(campaign_id)
+                ),
             )
         )
 
@@ -3432,7 +3980,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
         sheet_value = deepcopy(sheet or default_character_sheet())
         sheet_value["edition"] = str(campaigns.get(campaign_id).settings.get("edition") or "2024")
-        normalized_sheet = validate_character_sheet(sheet_value)
+        normalized_sheet = validate_character_sheet(
+            sheet_value,
+            rules=effective_rule_context(campaign_id),
+        )
         normalized_notes = validate_character_notes(notes or default_character_notes())
         template, instance = characters.create_with_instance(
             system_id="dnd5e",
@@ -3469,6 +4020,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         idempotency_key: str | None = None,
         payload: dict[str, Any] | None = None,
         response_extra: dict[str, Any] | None = None,
+        rule_receipts: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """Persist a D&D schema mutation with derived values recalculated."""
         current = characters.get(character_id)
@@ -3477,7 +4029,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             sheet_value["edition"] = str(
                 campaigns.get(current.campaign_id).settings.get("edition") or "2024"
             )
-        normalized_sheet = validate_character_sheet(sheet_value)
+        normalized_sheet = validate_character_sheet(
+            sheet_value,
+            rules=(
+                effective_rule_context(current.campaign_id) if current.campaign_id else None
+            ),
+        )
         return update_character(
             current,
             operation=operation,
@@ -3487,6 +4044,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             idempotency_key=idempotency_key,
             payload=payload,
             response_extra=response_extra,
+            rule_receipts=rule_receipts,
         )
 
     @mcp.tool()
@@ -3507,7 +4065,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             sheet_value["edition"] = str(
                 campaigns.get(current.campaign_id).settings.get("edition") or "2024"
             )
-        normalized_sheet = validate_character_sheet(sheet_value)
+        normalized_sheet = validate_character_sheet(
+            sheet_value,
+            rules=(
+                effective_rule_context(current.campaign_id) if current.campaign_id else None
+            ),
+        )
         normalized_notes = validate_character_notes(notes if notes is not None else current.notes)
         return update_character(
             current,
@@ -3723,6 +4286,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             actor=principal_id,
             branch_id=branch_id,
             idempotency_key=idempotency_key,
+            rule_receipts=rule_receipts,
         )
         source_after = characters.get(source.id)
         target_after = characters.get(target.id)
@@ -3824,13 +4388,24 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         replay = replay_idempotent(scope, idempotency_key, payload)
         if replay is not None:
             return replay
+        rest_rules = effective_rule_context(
+            current.campaign_id,
+            facts={"actor_id": character_id, "rest_type": rest_type},
+        )
         applied = apply_rest(
             current.sheet,
             rest_type=rest_type,
             hit_dice_spends=hit_dice_spends,
             hit_dice_recovery=hit_dice_recovery,
             food_and_drink=food_and_drink,
+            rules=rest_rules,
         )
+        if applied.get("status") in {"pending_choice", "pending_ruling"}:
+            return {
+                "status": applied["status"],
+                "result": {key: value for key, value in applied.items() if key != "sheet"},
+                "character": character_view(current),
+            }
         preparation_result = None
         if prepared_spell_ids is not None:
             preparation_result = replace_prepared_spells(
@@ -3851,6 +4426,18 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             actor=principal_id,
             branch_id=branch_id,
             idempotency_key=idempotency_key,
+            rule_receipts=[
+                *list(applied.get("rule_receipts") or []),
+                *(
+                    core_receipts(
+                        rest_rules,
+                        ["dnd5e.core.spell.preparation"],
+                        "spell.prepare.long_rest",
+                    )
+                    if prepared_spell_ids is not None
+                    else []
+                ),
+            ],
         )
         response = {
             "status": "pending_ruling",
@@ -3907,7 +4494,21 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             cast_level=cast_level,
             ritual=ritual,
             component_ruling=component_ruling,
+            rules=effective_rule_context(
+                current.campaign_id,
+                facts={
+                    "actor_id": character_id,
+                    "spell_id": spell_id,
+                    "cast_level": cast_level,
+                },
+            ),
         )
+        if applied.get("status") in {"pending_choice", "pending_ruling"}:
+            return {
+                "status": applied["status"],
+                "result": {key: value for key, value in applied.items() if key != "sheet"},
+                "character": character_view(current),
+            }
         StateMutationService(storage.database).replace(
             current.campaign_id,
             character_updates=[
@@ -3922,6 +4523,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             actor=principal_id,
             branch_id=branch_id,
             idempotency_key=idempotency_key,
+            rule_receipts=list(applied.get("rule_receipts") or []),
         )
         response = {
             "status": "pending_ruling",
@@ -3964,9 +4566,22 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if replay is not None:
             return replay
         try:
-            applied = consume_activity(current.sheet, activity_id=activity_id)
+            applied = consume_activity(
+                current.sheet,
+                activity_id=activity_id,
+                rules=effective_rule_context(
+                    current.campaign_id,
+                    facts={"actor_id": character_id, "activity_id": activity_id},
+                ),
+            )
         except ActivityError as exc:
             raise ValueError(str(exc)) from exc
+        if applied.get("status") in {"pending_choice", "pending_ruling"}:
+            return {
+                "status": applied["status"],
+                "result": {key: value for key, value in applied.items() if key != "sheet"},
+                "character": character_view(current),
+            }
         activation_type = str(applied["activation"].get("type") or "")
         if activation_type in {"reaction", "special"} and not is_dm(
             current.campaign_id, principal_id
@@ -3986,6 +4601,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             actor=principal_id,
             branch_id=branch_id,
             idempotency_key=idempotency_key,
+            rule_receipts=list(applied.get("rule_receipts") or []),
         )
         result = {key: value for key, value in applied.items() if key != "sheet"}
         result["declaration"] = declaration or {}
@@ -4047,6 +4663,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 raise CombatEngineError(
                     "live prepared-spell changes must be submitted atomically with character_rest"
                 )
+        preparation_rules = (
+            effective_rule_context(current.campaign_id) if current.campaign_id else None
+        )
         return update_sheet(
             character_id,
             set_spell_prepared(current.sheet, spell_id, prepared),
@@ -4055,6 +4674,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             expected_revision=expected_revision,
             idempotency_key=idempotency_key,
             payload={"spell_id": spell_id, "prepared": prepared},
+            rule_receipts=core_receipts(
+                preparation_rules,
+                ["dnd5e.core.spell.preparation"],
+                "spell.prepare.setup",
+            ),
         )
 
     @mcp.tool()
@@ -4089,6 +4713,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             spell_ids=list(spell_ids),
             event=normalized_event,
         )
+        preparation_rules = (
+            effective_rule_context(current.campaign_id) if current.campaign_id else None
+        )
         return update_sheet(
             character_id,
             validate_character_sheet(result["sheet"]),
@@ -4100,6 +4727,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             response_extra={
                 "preparation": {key: value for key, value in result.items() if key != "sheet"}
             },
+            rule_receipts=core_receipts(
+                preparation_rules,
+                ["dnd5e.core.spell.preparation"],
+                f"spell.prepare.{normalized_event}",
+            ),
         )
 
     @mcp.tool()
@@ -4122,6 +4754,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             assignments=assignments,
             rolls=rolls,
         )
+        ability_receipts = (
+            core_receipts(
+                effective_rule_context(current.campaign_id),
+                ["dnd5e.core.ability_generation"],
+                "character.ability.apply",
+            )
+            if current.campaign_id
+            else []
+        )
         return update_sheet(
             character_id,
             sheet,
@@ -4130,6 +4771,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             expected_revision=expected_revision,
             idempotency_key=idempotency_key,
             payload={"method": method, "assignments": assignments, "rolls": rolls},
+            rule_receipts=ability_receipts,
         )
 
     @mcp.tool()
@@ -5338,6 +5980,93 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         return rules.expand(chunk_id)
 
     @mcp.tool()
+    def rule_document_stage(
+        campaign_id: str,
+        source_path: str,
+        principal_id: str = "system:local",
+    ) -> dict[str, Any]:
+        """Stage an allowlisted PDF/Markdown/text rulebook in MCP-owned storage."""
+        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        return storage.stage_rulebook(source_path)
+
+    @mcp.tool()
+    def rule_document_inspect(
+        campaign_id: str,
+        artifact: str,
+        principal_id: str = "system:local",
+    ) -> dict[str, Any]:
+        """Run Core document normalization and report structure/warnings without importing."""
+        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        return rules.inspect_path(storage.artifact_rulebook_path(artifact))
+
+    @mcp.tool()
+    def rule_document_import(
+        campaign_id: str,
+        artifact: str,
+        source_key: str,
+        title: str,
+        edition: str,
+        locale: str = "en",
+        publication_id: str = "",
+        version: str = "",
+        authority: str = "supplement",
+        principal_id: str = "system:local",
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Import a staged rulebook through Core's shared structured parser and index."""
+        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        if edition not in {"2014", "2024"}:
+            raise ValueError("imported D&D rulebooks require edition 2014 or 2024")
+        if not idempotency_key:
+            raise ValueError("idempotency_key is required for rulebook import")
+        payload = {
+            "artifact": artifact,
+            "source_key": source_key,
+            "title": title,
+            "edition": edition,
+            "locale": locale,
+            "publication_id": publication_id,
+            "version": version,
+            "authority": authority,
+        }
+        scope = f"rule-document-import:{campaign_id}:{principal_id}"
+        replay = replay_idempotent(scope, idempotency_key, payload)
+        if replay is not None:
+            return replay
+        path = storage.artifact_rulebook_path(artifact)
+        embedder, vectors = storage.dense_components()
+        result = rules.ingest_path(
+            system_id="dnd5e",
+            path=path,
+            source_key=source_key,
+            title=title,
+            locale=locale,
+            edition=edition,
+            publication_id=publication_id,
+            version=version,
+            authority=authority,
+            embedder=embedder,
+            vector_store=vectors,
+        )
+        source = rules.source(result.source_id)
+        source_metadata = dict(source.get("metadata") or {})
+        response = {
+            **asdict(result),
+            "artifact": artifact,
+            "source_checksum": source_metadata.get("source_checksum"),
+            "page_count": source_metadata.get("page_count"),
+            "warnings": list(source_metadata.get("warnings") or []),
+            "metadata": {
+                key: value
+                for key, value in source_metadata.items()
+                if key not in {"source_path", "warnings", "source_checksum", "page_count"}
+            },
+        }
+        return remember_idempotent(
+            scope, idempotency_key, payload, response, campaign_id=campaign_id
+        )
+
+    @mcp.tool()
     def rule_ingest(
         source_key: str,
         title: str,
@@ -5360,6 +6089,382 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             vector_store=vectors,
         )
         return asdict(result)
+
+    @mcp.tool()
+    def rule_pack_draft(
+        manifest: dict[str, Any],
+        artifacts: list[dict[str, Any]] | None = None,
+        mechanics: list[dict[str, Any]] | None = None,
+        provenance: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Create or replace an inactive draft and validate its safe D&D mechanic IR."""
+        return save_rule_pack_draft(
+            manifest=manifest,
+            artifacts=artifacts,
+            mechanics=mechanics,
+            provenance=provenance,
+        )
+
+    @mcp.tool()
+    def rule_pack_draft_from_source(
+        source_id: str,
+        manifest: dict[str, Any],
+        artifacts: list[dict[str, Any]] | None = None,
+        mechanics: list[dict[str, Any]] | None = None,
+        provenance: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Draft a pack whose citations are resolved from imported rule chunks."""
+        source = rules.source(source_id)
+        if source["system_id"] != "dnd5e":
+            raise ValueError("rule source is not a D&D source")
+        bound_mechanics: list[dict[str, Any]] = []
+        for mechanic in mechanics or []:
+            value = deepcopy(mechanic)
+            supplied = list(value.get("citations") or [])
+            if not supplied:
+                raise ValueError("every executable mechanic requires an imported chunk citation")
+            citations: list[dict[str, Any]] = []
+            for citation in supplied:
+                if not isinstance(citation, dict) or not citation.get("chunk_id"):
+                    raise ValueError("source-bound citations require chunk_id")
+                resolved = rules.citation(str(citation["chunk_id"]), source_id=source_id)
+                note = citation.get("note")
+                if note:
+                    resolved["note"] = str(note)
+                citations.append(resolved)
+            value["citations"] = citations
+            bound_mechanics.append(value)
+        bound_artifacts: list[dict[str, Any]] = []
+        for artifact in artifacts or []:
+            value = deepcopy(artifact)
+            chunk_ids = list(value.pop("source_chunk_ids", []) or [])
+            if not chunk_ids:
+                raise ValueError("source-bound artifacts require source_chunk_ids")
+            citations = [
+                rules.citation(str(chunk_id), source_id=source_id) for chunk_id in chunk_ids
+            ]
+            value["rule_refs"] = [
+                f"{citation['source']}#chunk:{citation['chunk_id']}"
+                for citation in citations
+            ]
+            value["source_citations"] = citations
+            bound_artifacts.append(value)
+        source_metadata = dict(source.get("metadata") or {})
+        bound_provenance = {
+            **dict(provenance or {}),
+            "rule_source": {
+                "source_id": source["id"],
+                "source_key": source["source_key"],
+                "title": source["title"],
+                "edition": source["edition"],
+                "publication_id": source["publication_id"],
+                "normalized_checksum": source["checksum"],
+                "source_checksum": source_metadata.get(
+                    "source_checksum", source["checksum"]
+                ),
+                "page_count": source_metadata.get("page_count"),
+                "warnings": list(source_metadata.get("warnings") or []),
+            },
+        }
+        validate_source_bound_mechanics(bound_mechanics, source_id=source_id)
+        return save_rule_pack_draft(
+            manifest=manifest,
+            artifacts=bound_artifacts,
+            mechanics=bound_mechanics,
+            provenance=bound_provenance,
+        )
+
+    @mcp.tool()
+    def rule_pack_install(pack_id: str, version: str) -> dict[str, Any]:
+        """Install one validated immutable version without enabling it for a campaign."""
+        return asdict(rule_packs.install(pack_id, version))
+
+    @mcp.tool()
+    def rule_pack_list(pack_id: str | None = None) -> list[dict[str, Any]]:
+        """List draft, rejected, validated, and installed rule-pack versions."""
+        return [asdict(item) for item in rule_packs.list_versions(pack_id)]
+
+    @mcp.tool()
+    def rule_pack_inspect(pack_id: str, version: str) -> dict[str, Any]:
+        """Inspect an exact draft or installed version, including validation evidence."""
+        return asdict(rule_packs.get_version(pack_id, version))
+
+    @mcp.tool()
+    def rule_pack_test(pack_id: str, version: str) -> dict[str, Any]:
+        """Run declarative positive/negative examples embedded in a pack manifest."""
+        value = rule_packs.get_version(pack_id, version)
+        return run_mechanic_tests(
+            value.mechanics,
+            list(value.manifest.get("tests") or []),
+            fingerprint=value.checksum,
+        )
+
+    @mcp.tool()
+    def rule_pack_remove(pack_id: str, version: str) -> dict[str, Any]:
+        """Remove an unreferenced version; any branch lock makes removal fail closed."""
+        rule_packs.remove_version(pack_id, version)
+        return {"status": "removed", "pack_id": pack_id, "version": version}
+
+    @mcp.tool()
+    def campaign_rule_profile_get(
+        campaign_id: str, principal_id: str = "system:local"
+    ) -> dict[str, Any] | None:
+        """Read the campaign edition/publication profile and exact branch-local pack lock."""
+        access.require_campaign(campaign_id, principal_id)
+        profile = rule_profiles.get(campaign_id)
+        campaign = campaigns.get(campaign_id)
+        try:
+            effective = effective_ruleset_view(campaign_id)
+            effective_error = None
+        except RulePackError as error:
+            effective = None
+            effective_error = str(error)
+        return {
+            "profile": asdict(profile) if profile else None,
+            "activations": [asdict(item) for item in rule_packs.activations(campaign_id)],
+            "effective": effective,
+            "effective_error": effective_error,
+            "campaign_revision": campaign.revision,
+        }
+
+    @mcp.tool()
+    def campaign_rule_profile_set(
+        campaign_id: str,
+        edition: str,
+        locale: str = "en",
+        publications: list[str] | None = None,
+        options: dict[str, Any] | None = None,
+        principal_id: str = "system:local",
+        expected_revision: int | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Set non-executable edition/publication metadata outside active combat."""
+        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        require_write_contract(expected_revision, idempotency_key)
+        payload = {
+            "edition": edition,
+            "locale": locale,
+            "publications": publications or [],
+            "options": options or {},
+        }
+        scope = f"campaign-rule-profile:{campaign_id}:{principal_id}"
+        replay = replay_idempotent(scope, idempotency_key, payload)
+        if replay is not None:
+            return replay
+        if dict(campaigns.get(campaign_id).state or {}).get("combat", {}).get("active", False):
+            raise CombatEngineError("rule profile cannot change during active combat")
+        rule_packs.assert_edition_compatible(campaign_id, edition)
+        profile = rule_profiles.set(
+            campaign_id,
+            edition=edition,
+            locale=locale,
+            publications=publications,
+            options=profile_options_with_core_lock(edition, options),
+            expected_campaign_revision=expected_revision,
+        )
+        response = {
+            "profile": asdict(profile),
+            "campaign_revision": mutation_revision(campaign_id),
+        }
+        return remember_idempotent(
+            scope, idempotency_key, payload, response, campaign_id=campaign_id
+        )
+
+    @mcp.tool()
+    def campaign_rule_pack_set(
+        campaign_id: str,
+        pack_id: str,
+        version: str,
+        enabled: bool = True,
+        options: dict[str, Any] | None = None,
+        principal_id: str = "system:local",
+        branch_id: str | None = None,
+        expected_revision: int | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Explicitly pin and enable/disable an installed pack on one campaign branch."""
+        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        require_write_contract(expected_revision, idempotency_key)
+        resolved_branch_id = require_current_branch(campaign_id, branch_id)
+        payload = {
+            "pack_id": pack_id,
+            "version": version,
+            "enabled": enabled,
+            "options": options or {},
+            "branch_id": resolved_branch_id,
+        }
+        scope = f"campaign-rule-pack-set:{campaign_id}:{resolved_branch_id}:{principal_id}"
+        replay = replay_idempotent(scope, idempotency_key, payload)
+        if replay is not None:
+            return replay
+        activation = rule_packs.set_activation(
+            campaign_id,
+            pack_id=pack_id,
+            version=version,
+            enabled=enabled,
+            options=options,
+            branch_id=resolved_branch_id,
+            expected_campaign_revision=expected_revision,
+        )
+        response = {
+            "activation": asdict(activation),
+            "effective": effective_ruleset_view(
+                campaign_id, branch_id=activation.branch_id
+            ),
+            "campaign_revision": mutation_revision(campaign_id),
+        }
+        return remember_idempotent(
+            scope, idempotency_key, payload, response, campaign_id=campaign_id
+        )
+
+    @mcp.tool()
+    def campaign_rule_pack_remove(
+        campaign_id: str,
+        pack_id: str,
+        principal_id: str = "system:local",
+        branch_id: str | None = None,
+        expected_revision: int | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Remove a future branch-local activation while preserving historical receipts."""
+        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        require_write_contract(expected_revision, idempotency_key)
+        resolved_branch_id = require_current_branch(campaign_id, branch_id)
+        payload = {"pack_id": pack_id, "branch_id": resolved_branch_id}
+        scope = f"campaign-rule-pack-remove:{campaign_id}:{resolved_branch_id}:{principal_id}"
+        replay = replay_idempotent(scope, idempotency_key, payload)
+        if replay is not None:
+            return replay
+        rule_packs.remove_activation(
+            campaign_id,
+            pack_id,
+            branch_id=resolved_branch_id,
+            expected_campaign_revision=expected_revision,
+        )
+        response = {
+            "effective": effective_ruleset_view(
+                campaign_id, branch_id=resolved_branch_id
+            ),
+            "campaign_revision": mutation_revision(campaign_id),
+        }
+        return remember_idempotent(
+            scope, idempotency_key, payload, response, campaign_id=campaign_id
+        )
+
+    @mcp.tool()
+    def campaign_rules_explain(
+        campaign_id: str,
+        event: str | None = None,
+        principal_id: str = "system:local",
+        branch_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Explain the exact lock, fingerprint, and source-cited mechanics used for settlement."""
+        access.require_campaign(campaign_id, principal_id)
+        effective = rule_packs.effective_ruleset(campaign_id, branch_id=branch_id)
+        context = effective_rule_context(campaign_id, branch_id=branch_id)
+        mechanics = [
+            asdict(item)
+            for item in context.mechanics
+            if event is None or item.event == event
+        ]
+        return {
+            "campaign_id": campaign_id,
+            "branch_id": effective.branch_id,
+            "fingerprint": context.fingerprint,
+            "core_pack": {
+                "id": context.core_pack.id,
+                "version": context.core_pack.version,
+                "edition": context.core_pack.edition,
+                "fingerprint": context.core_pack.fingerprint,
+            },
+            "core_boundaries": [asdict(item) for item in context.core_pack.boundaries],
+            "lock": list(effective.lock),
+            "mechanics": mechanics,
+            "coverage": sorted({item.event for item in context.mechanics}),
+        }
+
+    @mcp.tool()
+    def campaign_rule_receipts(
+        campaign_id: str,
+        principal_id: str = "system:local",
+        branch_id: str | None = None,
+        mechanic_id: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """Read immutable historical rule evidence for committed settlements."""
+        access.require_campaign(campaign_id, principal_id)
+        resolved_branch_id = readable_branch(campaign_id, branch_id, principal_id)
+        return [
+            asdict(item)
+            for item in rule_receipts.list(
+                campaign_id,
+                branch_id=resolved_branch_id,
+                mechanic_id=mechanic_id,
+                limit=limit,
+            )
+        ]
+
+    @mcp.tool()
+    def character_rule_artifact_add(
+        character_id: str,
+        pack_id: str,
+        version: str,
+        artifact_id: str,
+        principal_id: str = "system:local",
+        expected_revision: int | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Add one activated pack card to an actor without copying executable rule logic."""
+        current = characters.get(character_id)
+        require_character_control(current, principal_id)
+        require_outside_active_combat(current, "rule artifact changes")
+        if current.campaign_id is None:
+            raise ValueError("rule artifacts require a campaign-bound character")
+        active = next(
+            (
+                item
+                for item in rule_packs.activations(current.campaign_id)
+                if item.pack_id == pack_id and item.enabled
+            ),
+            None,
+        )
+        if active is None or active.version != version:
+            raise ValueError("the exact rule-pack version must be enabled on this branch")
+        pack = rule_packs.get_version(pack_id, version)
+        artifact = next((item for item in pack.artifacts if item.get("id") == artifact_id), None)
+        if artifact is None:
+            raise LookupError(artifact_id)
+        section = {
+            "spell": "spells",
+            "feature": "features",
+            "feat": "feats",
+            "activity": "activities",
+        }.get(str(artifact.get("kind") or ""))
+        if section is None:
+            raise ValueError("only spell, feature, feat, and activity artifacts are actor cards")
+        sheet = deepcopy(current.sheet)
+        if any(item.get("id") == artifact_id for item in sheet["content"][section]):
+            raise ValueError("rule artifact is already present on this character")
+        card = deepcopy(artifact.get("card") or {})
+        card["id"] = artifact_id
+        card["pack_id"] = pack_id
+        card["pack_version"] = version
+        card["rule_refs"] = list(artifact.get("rule_refs") or [])
+        card["mechanic_refs"] = list(artifact.get("mechanic_refs") or [])
+        sheet["content"][section].append(card)
+        return update_sheet(
+            character_id,
+            sheet,
+            operation="character.rule_artifact.add",
+            principal_id=principal_id,
+            expected_revision=expected_revision,
+            idempotency_key=idempotency_key,
+            payload={
+                "pack_id": pack_id,
+                "version": version,
+                "artifact_id": artifact_id,
+            },
+        )
 
     @mcp.tool()
     def skill_list() -> list[dict[str, str]]:

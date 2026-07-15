@@ -22,12 +22,23 @@ class McpConfig:
     dnd_skills_dir: Path
     modulegen_skills_dir: Path
     auto_seed_rules: bool = True
+    rule_import_roots: tuple[Path, ...] = ()
 
     @classmethod
     def from_environment(cls) -> "McpConfig":
         root = _workspace_root()
         home = Path(os.environ.get("SAGASMITH_DND_MCP_HOME", root / ".sagasmith-dnd-mcp"))
         raw_chroma_path = os.environ.get("CHROMA_DB_PATH")
+        raw_rule_roots = os.environ.get("SAGASMITH_DND_MCP_RULE_IMPORT_ROOTS")
+        rule_roots = (
+            tuple(
+                Path(value).expanduser().resolve()
+                for value in raw_rule_roots.split(os.pathsep)
+                if value.strip()
+            )
+            if raw_rule_roots is not None
+            else (root / "reference" / "DnD-Books",)
+        )
         return cls(
             home=home.expanduser().resolve(),
             database_url=os.environ.get("SAGASMITH_DATABASE_URL"),
@@ -45,6 +56,7 @@ class McpConfig:
                 )
             ).expanduser().resolve(),
             auto_seed_rules=os.environ.get("SAGASMITH_DND_MCP_AUTO_SEED", "1") == "1",
+            rule_import_roots=tuple(path.resolve() for path in rule_roots),
         )
 
     @property
@@ -63,8 +75,17 @@ class McpConfig:
     def modules_dir(self) -> Path:
         return self.artifacts_dir / "modules"
 
+    @property
+    def rulebooks_dir(self) -> Path:
+        return self.artifacts_dir / "rulebooks"
+
     def prepare(self) -> None:
-        for directory in (self.database_path.parent, self.chroma_path, self.modules_dir):
+        for directory in (
+            self.database_path.parent,
+            self.chroma_path,
+            self.modules_dir,
+            self.rulebooks_dir,
+        ):
             directory.mkdir(parents=True, exist_ok=True)
         os.environ.setdefault("SAGASMITH_DATA_DIR", str(self.home / "data"))
         if self.chroma_url is None:

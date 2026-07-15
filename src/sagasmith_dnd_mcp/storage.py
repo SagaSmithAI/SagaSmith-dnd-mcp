@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
+import re
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -49,8 +52,54 @@ class SagaSmithStorage:
                 "seed_root": str(
                     self.config.dnd_skills_dir / "full" / "skills" / "dnd-dm" / "srd"
                 ),
+                "rulebooks_dir": str(self.config.rulebooks_dir),
+                "import_roots": [str(path) for path in self.config.rule_import_roots],
             },
         }
+
+    def stage_rulebook(self, source_path: str | Path) -> dict[str, Any]:
+        """Copy an allowlisted user document into content-addressed MCP storage."""
+        source = Path(source_path).expanduser().resolve()
+        if not source.is_file():
+            raise LookupError(str(source))
+        if source.suffix.casefold() not in {".pdf", ".md", ".markdown", ".txt"}:
+            raise ValueError("rulebook must be PDF, Markdown, or text")
+        if not self.config.rule_import_roots:
+            raise PermissionError("no rulebook import roots are configured")
+        if not any(source.is_relative_to(root.resolve()) for root in self.config.rule_import_roots):
+            raise PermissionError("rulebook source is outside configured import roots")
+        size = source.stat().st_size
+        if size > 100 * 1024 * 1024:
+            raise ValueError("rulebook exceeds the 100 MiB safety limit")
+        checksum = hashlib.sha256(source.read_bytes()).hexdigest()
+        safe_name = re.sub(r"[^A-Za-z0-9._-]+", "-", source.name).strip("-.")
+        safe_name = safe_name or f"rulebook{source.suffix.casefold()}"
+        artifact = f"{checksum[:12]}-{safe_name}"
+        target = (self.config.rulebooks_dir / artifact).resolve()
+        if target.parent != self.config.rulebooks_dir.resolve():
+            raise ValueError("invalid rulebook artifact name")
+        if not target.exists():
+            shutil.copy2(source, target)
+        elif hashlib.sha256(target.read_bytes()).hexdigest() != checksum:
+            raise RuntimeError("managed rulebook artifact checksum mismatch")
+        return {
+            "artifact": artifact,
+            "path": str(target),
+            "checksum": checksum,
+            "size": size,
+            "staged": True,
+        }
+
+    def artifact_rulebook_path(self, name: str) -> Path:
+        target = (self.config.rulebooks_dir / name).resolve()
+        if (
+            target.parent != self.config.rulebooks_dir.resolve()
+            or target.suffix.casefold() not in {".pdf", ".md", ".markdown", ".txt"}
+        ):
+            raise ValueError("invalid managed rulebook artifact")
+        if not target.is_file():
+            raise LookupError(name)
+        return target
 
     def write_module(self, name: str, content: str) -> Path:
         if not name.strip():

@@ -22,6 +22,7 @@ def test_config_owns_local_storage(tmp_path: Path) -> None:
     assert config.database_path.parent.is_dir()
     assert config.chroma_path.is_dir()
     assert config.modules_dir.is_dir()
+    assert config.rulebooks_dir.is_dir()
 
 
 def test_skill_catalog_reads_both_repositories(tmp_path: Path) -> None:
@@ -43,10 +44,15 @@ def test_skill_catalog_exposes_references_and_templates_as_assets(tmp_path: Path
     (dnd / "full" / "references").mkdir(parents=True)
     modulegen.mkdir()
     (dnd / "full" / "references" / "workflow.md").write_text("workflow", encoding="utf-8")
+    (dnd / "full" / "examples").mkdir()
+    (dnd / "full" / "examples" / "rule-pack.template.json").write_text(
+        "{}", encoding="utf-8"
+    )
     (modulegen / "template.md").write_text("template", encoding="utf-8")
     catalog = SkillCatalog(dnd_root=dnd, modulegen_root=modulegen)
 
     assert [asset.id for asset in catalog.assets()] == [
+        "dnd:full/examples/rule-pack.template.json",
         "dnd:full/references/workflow.md",
         "modulegen:template.md",
     ]
@@ -149,6 +155,10 @@ def test_server_tool_profiles_are_complete_and_attached_to_tool_metadata(tmp_pat
         by_name = {tool.name: tool for tool in tools}
         assert set(by_name) == set().union(*map(set, profile_catalog().values()))
         assert by_name["module_write"].meta["sagasmith_tool_profiles"] == ["authoring"]
+        assert by_name["rule_document_import"].meta["sagasmith_tool_profiles"] == [
+            "authoring"
+        ]
+        assert by_name["character_check"].meta["sagasmith_tool_profiles"] == ["play"]
         assert by_name["combat_resolve_attack"].meta["sagasmith_tool_profiles"] == ["combat"]
         assert by_name["combat_start"].meta["sagasmith_tool_profiles"] == ["play"]
         assert by_name["game_phase_get"].meta["sagasmith_tool_profiles"] == [
@@ -158,3 +168,27 @@ def test_server_tool_profiles_are_complete_and_attached_to_tool_metadata(tmp_pat
         ]
 
     asyncio.run(inspect_tools())
+
+
+def test_server_capabilities_publish_the_rulebook_import_contract(tmp_path: Path) -> None:
+    config = McpConfig(
+        home=tmp_path / "home",
+        database_url=None,
+        chroma_url=None,
+        chroma_path_override=None,
+        dnd_skills_dir=tmp_path / "dnd",
+        modulegen_skills_dir=tmp_path / "modulegen",
+    )
+
+    async def inspect_capabilities() -> None:
+        server = create_server(config)
+        _, capabilities = await server.call_tool("server_capabilities", {})
+        assert capabilities["features"]["structured_rulebook_import"] is True
+        assert capabilities["features"]["source_bound_rule_packs"] is True
+        assert capabilities["rulebook_import"]["settlement_tools"] == {
+            "play": "character_check",
+            "combat": "combat_check",
+        }
+        assert "rule_pack_draft_from_source" in capabilities["rulebook_import"]["stages"]
+
+    asyncio.run(inspect_capabilities())
