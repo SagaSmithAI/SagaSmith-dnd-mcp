@@ -781,7 +781,11 @@ def test_module_scene_creates_a_temporary_battle_map(tmp_path: Path) -> None:
         await call(
             server,
             "module_import",
-            {"campaign_id": campaign["id"], "artifact": artifact["artifact"]},
+            {
+                "campaign_id": campaign["id"],
+                "artifact": artifact["artifact"],
+                "idempotency_key": "map-module-import",
+            },
         )
         scene = (await call(server, "module_index", {"campaign_id": campaign["id"]}))[0]
         await call(
@@ -812,6 +816,32 @@ def test_module_scene_creates_a_temporary_battle_map(tmp_path: Path) -> None:
         battle_map = started["combat"]["battle_map"]
         assert battle_map["lifecycle"] == "temporary"
         assert battle_map["source"]["scene_id"] == scene["scene_id"]
+        await call(
+            server,
+            "campaign_member_grant",
+            {
+                "campaign_id": campaign["id"],
+                "principal_id": "player:mover",
+                "role": "player",
+            },
+        )
+        await call(
+            server,
+            "actor_grant",
+            {
+                "campaign_id": campaign["id"],
+                "principal_id": "player:mover",
+                "actor_id": mover["id"],
+                "can_view_private": True,
+            },
+        )
+        player_view = await call(
+            server,
+            "combat_status",
+            {"campaign_id": campaign["id"], "principal_id": "player:mover"},
+        )
+        assert "blocked_cells" not in player_view["battle_map"]
+        assert "world_patches" not in player_view["battle_map"]
         with pytest.raises(Exception, match="blocked"):
             await call(
                 server,

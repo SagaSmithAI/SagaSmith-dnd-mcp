@@ -50,12 +50,29 @@ def test_core_srd_content_catalog_is_structured_and_selectable(tmp_path: Path) -
         fireball = next(item for item in spells if item["name"] == "Fireball")
         assert fireball["pack_id"] == "dnd5e.content.srd2014"
         assert fireball["rule_refs"]
+        assert fireball["selection_requirements"]["eligible_classes"] == [
+            "sorcerer",
+            "wizard",
+        ]
+        assert fireball["selection_requirements"]["level"] == 3
+        sheet = default_character_sheet()
+        sheet["progression"].update(
+            {
+                "level": 5,
+                "classes": [{"name": "Wizard", "level": 5, "subclass": "", "hit_die": 6}],
+            }
+        )
+        sheet["spellcasting"]["preparation"].update(
+            {"mode": "spellbook", "max_prepared": 4, "changes_on": "long_rest"}
+        )
+        sheet["spellcasting"]["spellbook"]["enabled"] = True
         character = await call(
             server,
             "character_create",
             {
                 "campaign_id": campaign["id"],
                 "name": "Aria",
+                "sheet": sheet,
                 "idempotency_key": "catalog-character",
             },
         )
@@ -65,6 +82,7 @@ def test_core_srd_content_catalog_is_structured_and_selectable(tmp_path: Path) -
             {
                 "character_id": character["id"],
                 "artifact_id": fireball["id"],
+                "selection": {"source_class": "Wizard", "method": "spellbook"},
                 "expected_revision": character["revision"],
                 "idempotency_key": "catalog-fireball",
             },
@@ -73,6 +91,136 @@ def test_core_srd_content_catalog_is_structured_and_selectable(tmp_path: Path) -
         assert spell["name"] == "Fireball"
         assert spell["definition"]["range"]["kind"] == "distance"
         assert spell["definition"]["range"]["normal_ft"] == 150
+        assert spell["grant"]["source_key"] == "wizard"
+        assert fireball["id"] in applied["sheet"]["spellcasting"]["spellbook"]["spell_ids"]
+
+        subclasses = await call(
+            server,
+            "content_catalog_list",
+            {"campaign_id": campaign["id"], "kind": "subclass", "query": "Berserker"},
+        )
+        berserker = next(item for item in subclasses if item["name"] == "Path of the Berserker")
+        multiclass_sheet = default_character_sheet()
+        multiclass_sheet["progression"].update(
+            {
+                "level": 8,
+                "classes": [
+                    {"name": "Wizard", "level": 5, "subclass": "", "hit_die": 6},
+                    {"name": "Barbarian", "level": 3, "subclass": "", "hit_die": 12},
+                ],
+            }
+        )
+        multiclass = await call(
+            server,
+            "character_create",
+            {
+                "campaign_id": campaign["id"],
+                "name": "Multiclass",
+                "sheet": multiclass_sheet,
+                "idempotency_key": "catalog-multiclass",
+            },
+        )
+        selected = await call(
+            server,
+            "character_content_apply",
+            {
+                "character_id": multiclass["id"],
+                "artifact_id": berserker["id"],
+                "selection": {"target_class_name": "Barbarian"},
+                "expected_revision": multiclass["revision"],
+                "idempotency_key": "catalog-berserker",
+            },
+        )
+        assert selected["sheet"]["progression"]["classes"][0]["subclass"] == ""
+        assert selected["sheet"]["progression"]["classes"][1]["subclass"] == (
+            "Path of the Berserker"
+        )
+        assert selected["sheet"]["content"]["selections"][0]["pack_version"] == "1.1.0"
+
+        backgrounds = await call(
+            server,
+            "content_catalog_list",
+            {"campaign_id": campaign["id"], "kind": "background", "query": "Acolyte"},
+        )
+        acolyte = next(item for item in backgrounds if item["name"] == "Acolyte")
+        novice = await call(
+            server,
+            "character_create",
+            {
+                "campaign_id": campaign["id"],
+                "name": "Novice",
+                "idempotency_key": "catalog-novice",
+            },
+        )
+        pending = await call(
+            server,
+            "character_content_apply",
+            {
+                "character_id": novice["id"],
+                "artifact_id": acolyte["id"],
+                "expected_revision": novice["revision"],
+                "idempotency_key": "catalog-acolyte-pending",
+            },
+        )
+        assert pending["status"] == "pending_ruling"
+        with pytest.raises(Exception, match="language choices must be distinct"):
+            await call(
+                server,
+                "character_content_apply",
+                {
+                    "character_id": novice["id"],
+                    "artifact_id": acolyte["id"],
+                    "selection": {"languages": ["Elvish", "elvish"]},
+                    "expected_revision": novice["revision"],
+                    "idempotency_key": "catalog-acolyte-duplicate-languages",
+                },
+            )
+        background = await call(
+            server,
+            "character_content_apply",
+            {
+                "character_id": novice["id"],
+                "artifact_id": acolyte["id"],
+                "selection": {"languages": ["Celestial", "Elvish"]},
+                "expected_revision": novice["revision"],
+                "idempotency_key": "catalog-acolyte",
+            },
+        )
+        assert background["sheet"]["skills"]["insight"]["proficiency"] == "proficient"
+        assert background["sheet"]["traits"]["languages"] == ["Celestial", "Elvish"]
+
+        feats = await call(
+            server,
+            "content_catalog_list",
+            {"campaign_id": campaign["id"], "kind": "feat", "query": "Grappler"},
+        )
+        grappler = next(item for item in feats if item["name"] == "Grappler")
+        assert grappler["selection_requirements"]["prerequisites"] == [
+            {"kind": "ability_minimum", "ability": "strength", "minimum": 13}
+        ]
+        strong_sheet = default_character_sheet()
+        strong_sheet["abilities"]["strength"]["score"] = 13
+        strong = await call(
+            server,
+            "character_create",
+            {
+                "campaign_id": campaign["id"],
+                "name": "Strong",
+                "sheet": strong_sheet,
+                "idempotency_key": "catalog-strong",
+            },
+        )
+        feat_applied = await call(
+            server,
+            "character_content_apply",
+            {
+                "character_id": strong["id"],
+                "artifact_id": grappler["id"],
+                "expected_revision": strong["revision"],
+                "idempotency_key": "catalog-grappler",
+            },
+        )
+        assert feat_applied["sheet"]["content"]["feats"][0]["name"] == "Grappler"
 
     asyncio.run(exercise())
 
@@ -403,6 +551,21 @@ def test_rulebook_import_source_bound_pack_and_noncombat_settlement(tmp_path: Pa
             {"query": "Tools and Skills Together", "edition": "2014", "top_k": 1},
         )
         chunk_id = hits[0]["id"]
+        with pytest.raises(Exception, match="source edition"):
+            await call(
+                server,
+                "rule_pack_draft_from_source",
+                {
+                    "source_id": imported["source_id"],
+                    "manifest": {
+                        "id": "dnd5e.xgte.wrong-edition",
+                        "version": "1.0.0",
+                        "namespace": "dnd5e.xgte.wrong-edition",
+                        "system_id": "dnd5e",
+                        "editions": ["2024"],
+                    },
+                },
+            )
         draft = await call(
             server,
             "rule_pack_draft_from_source",

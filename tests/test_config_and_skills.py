@@ -185,6 +185,10 @@ def test_server_capabilities_publish_the_rulebook_import_contract(tmp_path: Path
         _, capabilities = await server.call_tool("server_capabilities", {})
         assert capabilities["features"]["structured_rulebook_import"] is True
         assert capabilities["features"]["source_bound_rule_packs"] is True
+        assert capabilities["features"]["structured_content_selection_requirements"] is True
+        assert capabilities["features"]["module_import_idempotency"] is True
+        assert capabilities["features"]["player_safe_scene_scopes"] is True
+        assert capabilities["features"]["player_safe_combat_maps"] is True
         assert capabilities["rulebook_import"]["settlement_tools"] == {
             "play": "character_check",
             "combat": "combat_check",

@@ -105,6 +105,7 @@ from sagasmith_dnd.spells import (
     consume_readied_spell,
     consume_spell_cast,
     replace_prepared_spells,
+    validate_spell_grant,
 )
 from sagasmith_dnd.system import DND5E
 
@@ -487,6 +488,20 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             value.pop("pending", None)
             value.pop("readied", None)
             value.pop("effects", None)
+            battle_map = value.get("battle_map")
+            if isinstance(battle_map, dict):
+                value["battle_map"] = {
+                    key: deepcopy(battle_map[key])
+                    for key in (
+                        "id",
+                        "schema_version",
+                        "lifecycle",
+                        "source",
+                        "grid",
+                        "bounds",
+                    )
+                    if key in battle_map
+                }
         return value
 
     def combat_response(
@@ -554,6 +569,21 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if not is_dm(campaign_id, principal_id) and branch_id not in {None, current}:
             raise PermissionError("players may only inspect the checked-out branch")
         return current if branch_id is None else branch_id
+
+    def readable_scene_scope(campaign_id: str, scope_id: str, principal_id: str) -> str:
+        """Prevent one player from reading another split-party progress ledger."""
+        if is_dm(campaign_id, principal_id) or scope_id == "party":
+            return scope_id
+        if scope_id.startswith("player:"):
+            actor_id_value = scope_id.split(":", 1)[1]
+            try:
+                access.require_actor(campaign_id, actor_id_value, principal_id, private=True)
+            except PermissionError as error:
+                raise PermissionError(
+                    "players may read only party or an owned player scene scope"
+                ) from error
+            return scope_id
+        raise PermissionError("players may read only party or an owned player scene scope")
 
     def require_write_contract(expected_revision: int | None, idempotency_key: str | None) -> None:
         if expected_revision is None:
@@ -781,7 +811,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     def server_capabilities() -> dict[str, Any]:
         """Describe the MCP contract and the automatic-vs-ruling combat boundary."""
         return {
-            "contract_version": "2026-07-integrity-v5",
+            "contract_version": "2026-07-integrity-v6",
             "transport": "stdio",
             "state_owner": "sagasmith-dnd-mcp",
             "features": {
@@ -815,6 +845,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "structured_rulebook_import": True,
                 "source_bound_rule_packs": True,
                 "structured_content_catalog": True,
+                "structured_content_selection_requirements": True,
+                "module_import_idempotency": True,
+                "player_safe_scene_scopes": True,
+                "player_safe_combat_maps": True,
                 "rule_aware_noncombat_checks": True,
             },
             "rulebook_import": {
@@ -5875,7 +5909,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         """Inspect a managed Markdown artifact before importing it into a campaign."""
         if not principal_id:
             raise PermissionError("authenticated caller identity is required for module artifacts")
-        return modules.inspect_path(storage.artifact_module_path(artifact))
+        return modules.inspect_path(
+            storage.artifact_module_path(artifact),
+            parser=MarkdownModuleParser(profile=DndModuleProfile()),
+        )
 
     @mcp.tool()
     def module_import(
@@ -5883,9 +5920,17 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         artifact: str,
         title: str | None = None,
         principal_id: str = "system:local",
+        idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Import a Markdown artifact created by module_write into a campaign."""
         access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        if not idempotency_key:
+            raise ValueError("idempotency_key is required for module import")
+        payload = {"artifact": artifact, "title": title}
+        scope = f"module-import:{campaign_id}:{principal_id}"
+        replay = replay_idempotent(scope, idempotency_key, payload)
+        if replay is not None:
+            return replay
         path = storage.artifact_module_path(artifact)
         embedder, vectors = storage.dense_components()
         result = modules.ingest_path(
@@ -5896,7 +5941,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             embedder=embedder,
             vector_store=vectors,
         )
-        return asdict(result)
+        response = asdict(result)
+        return remember_idempotent(
+            scope,
+            idempotency_key,
+            payload,
+            response,
+            campaign_id=campaign_id,
+        )
 
     @mcp.tool()
     def module_list(campaign_id: str, principal_id: str = "system:local") -> list[dict[str, Any]]:
@@ -5950,10 +6002,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         visibility = result.get("visibility", "keeper")
         if membership.role in {"owner", "dm"} or visibility in {"public", "party"}:
             return result
-        redacted = dict(result)
-        redacted["content"] = "[DM-only scene content hidden]"
-        redacted["redacted"] = True
-        return redacted
+        return {
+            "campaign_id": campaign_id,
+            "scene_id": scene_id,
+            "redacted": True,
+            "content": "[DM-only scene content hidden]",
+        }
 
     @mcp.tool()
     def module_current(
@@ -5963,7 +6017,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     ) -> dict[str, Any] | None:
         """Read the current scene for party, group, or player scope with party fallback."""
         membership = access.require_campaign(campaign_id, principal_id)
-        result = modules.current_scene(campaign_id, scope_id=scope_id)
+        resolved_scope_id = readable_scene_scope(campaign_id, scope_id, principal_id)
+        result = modules.current_scene(campaign_id, scope_id=resolved_scope_id)
         if result is None or membership.role in {"owner", "dm"}:
             return result
         if result.get("visibility", "keeper") in {"public", "party"}:
@@ -6217,6 +6272,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         source = rules.source(source_id)
         if source["system_id"] != "dnd5e":
             raise ValueError("rule source is not a D&D source")
+        if str(manifest.get("system_id") or "") != "dnd5e":
+            raise ValueError("source-bound D&D packs require manifest.system_id=dnd5e")
+        editions = [str(item) for item in manifest.get("editions", [])]
+        if not editions:
+            raise ValueError("source-bound D&D packs must declare at least one edition")
+        if str(source.get("edition") or "") not in editions:
+            raise ValueError("rule source edition must be declared by the pack manifest")
         bound_mechanics: list[dict[str, Any]] = []
         for mechanic in mechanics or []:
             value = deepcopy(mechanic)
@@ -6520,10 +6582,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     ) -> list[dict[str, Any]]:
         """List core and enabled-extension character options from one uniform catalog."""
         access.require_campaign(campaign_id, principal_id)
+        resolved_branch_id = readable_branch(campaign_id, branch_id, principal_id)
         lowered = query.casefold().strip()
         result = []
         for pack_id, version, artifact in available_content_artifacts(
-            campaign_id, kind=kind, branch_id=branch_id
+            campaign_id, kind=kind, branch_id=resolved_branch_id
         ):
             card = dict(artifact.get("card") or {})
             name = str(card.get("name") or artifact["id"])
@@ -6533,15 +6596,45 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 and lowered not in str(artifact["id"]).casefold()
             ):
                 continue
+            artifact_kind = str(artifact.get("kind") or "")
+            selection_requirements: dict[str, Any] = {}
+            if artifact_kind == "spell":
+                selection_requirements = {
+                    "fields": ["source_class", "method"],
+                    "level": int(card.get("level", 0) or 0),
+                    "eligible_classes": list(card.get("classes") or []),
+                    "methods": ["known", "spellbook", "class_prepared"],
+                }
+            elif artifact_kind == "subclass":
+                selection_requirements = {
+                    "fields": ["target_class_name"],
+                    "class_name": str(card.get("class_name") or ""),
+                    "minimum_level": int(card.get("minimum_level", 1) or 1),
+                }
+            elif artifact_kind == "background":
+                grants = dict(card.get("background_grants") or {})
+                choices = dict(grants.get("choices") or {})
+                selection_requirements = {
+                    "fields": ["languages"] if choices.get("language_count") else [],
+                    "language_count": int(choices.get("language_count", 0) or 0),
+                    "skill_proficiencies": list(card.get("skill_proficiencies") or []),
+                }
+            elif artifact_kind == "feat":
+                selection_requirements = {
+                    "fields": [],
+                    "prerequisites": deepcopy(list(card.get("prerequisites") or [])),
+                }
             result.append(
                 {
                     "id": artifact["id"],
-                    "kind": artifact.get("kind"),
+                    "kind": artifact_kind,
                     "name": name,
                     "pack_id": pack_id,
                     "pack_version": version,
                     "rule_refs": list(artifact.get("rule_refs") or []),
                     "mechanic_refs": list(artifact.get("mechanic_refs") or []),
+                    "source_citations": deepcopy(list(artifact.get("source_citations") or [])),
+                    "selection_requirements": selection_requirements,
                 }
             )
         return sorted(
@@ -6553,6 +6646,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     def character_content_apply(
         character_id: str,
         artifact_id: str,
+        selection: dict[str, Any] | None = None,
         principal_id: str = "system:local",
         expected_revision: int | None = None,
         idempotency_key: str | None = None,
@@ -6574,32 +6668,86 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         pack_id, version, artifact = match
         kind = str(artifact.get("kind") or "")
         card = deepcopy(dict(artifact.get("card") or {}))
+        selection = deepcopy(selection or {})
         sheet = deepcopy(current.sheet)
+        provenance = {
+            "id": artifact_id,
+            "pack_id": pack_id,
+            "pack_version": version,
+            "rule_refs": list(artifact.get("rule_refs") or []),
+            "mechanic_refs": list(artifact.get("mechanic_refs") or []),
+        }
         if kind == "spell":
-            card.update(
-                {
-                    "id": artifact_id,
-                    "pack_id": pack_id,
-                    "pack_version": version,
-                    "rule_refs": list(artifact.get("rule_refs") or []),
-                    "mechanic_refs": list(artifact.get("mechanic_refs") or []),
-                }
-            )
             if any(item.get("id") == artifact_id for item in sheet["content"]["spells"]):
                 raise ValueError("content spell is already present")
+            try:
+                source_class = validate_spell_grant(
+                    sheet,
+                    card,
+                    source_class=selection.get("source_class"),
+                )
+            except CombatEngineError as error:
+                return {"status": "pending_ruling", "reason": str(error)}
+            level = int(card.get("level", 0) or 0)
+            preparation_mode = str(
+                sheet.get("spellcasting", {}).get("preparation", {}).get("mode") or "known"
+            )
+            method = str(selection.get("method") or "").strip().casefold()
+            if not method:
+                method = (
+                    "known"
+                    if level == 0 or preparation_mode == "known"
+                    else ("spellbook" if preparation_mode == "spellbook" else "class_prepared")
+                )
+            if method not in {"known", "spellbook", "class_prepared"}:
+                raise ValueError(
+                    "spell selection method must be known, spellbook, or class_prepared"
+                )
+            if method == "spellbook" and preparation_mode != "spellbook":
+                raise ValueError("only a spellbook caster can select a spellbook grant")
+            if method == "class_prepared" and preparation_mode != "prepared":
+                raise ValueError("class_prepared requires prepared-caster configuration")
+            if method == "known" and level > 0 and preparation_mode != "known":
+                raise ValueError(
+                    "this caster records level 1+ spells as prepared or spellbook grants"
+                )
+            card["grant"] = {
+                "source_type": "class",
+                "source_key": source_class,
+                "method": method,
+            }
+            card.setdefault("access", {})["known"] = method == "known"
+            card["access"]["prepared"] = False
+            if method == "spellbook":
+                spellbook = sheet["spellcasting"]["spellbook"]
+                if not spellbook.get("enabled"):
+                    raise ValueError("spellbook grant requires spellcasting.spellbook.enabled")
+                spellbook["spell_ids"] = [
+                    *list(spellbook.get("spell_ids") or []),
+                    artifact_id,
+                ]
+            # Class eligibility belongs to the catalog artifact. The actor card
+            # stores only the selected grant source and exact pack provenance.
+            card.pop("classes", None)
+            card.update(provenance)
             sheet["content"]["spells"].append(card)
         elif kind == "feat":
-            card.update(
-                {
-                    "id": artifact_id,
-                    "pack_id": pack_id,
-                    "pack_version": version,
-                    "rule_refs": list(artifact.get("rule_refs") or []),
-                    "mechanic_refs": list(artifact.get("mechanic_refs") or []),
-                }
-            )
             if any(item.get("id") == artifact_id for item in sheet["content"]["feats"]):
                 raise ValueError("content feat is already present")
+            for prerequisite in card.get("prerequisites", []):
+                if prerequisite.get("kind") != "ability_minimum":
+                    return {
+                        "status": "pending_ruling",
+                        "reason": "feat has a prerequisite that needs DM review",
+                    }
+                ability = str(prerequisite.get("ability") or "")
+                score = int(sheet.get("abilities", {}).get(ability, {}).get("score", 0) or 0)
+                if score < int(prerequisite.get("minimum", 0) or 0):
+                    raise ValueError(f"feat prerequisite is not met: {ability}")
+            # Eligibility is validated against the catalog card, but the actor
+            # feature schema stores the selected feat and exact pack provenance.
+            card.pop("prerequisites", None)
+            card.update(provenance)
             sheet["content"]["feats"].append(card)
         elif kind == "subclass":
             classes = list(sheet["progression"]["classes"])
@@ -6608,20 +6756,95 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "status": "pending_ruling",
                     "reason": "choose a base class before selecting a subclass",
                 }
-            classes[0]["subclass"] = str(card.get("name") or artifact_id)
+            declared_class = str(card.get("class_name") or "").strip()
+            target_class = str(selection.get("target_class_name") or declared_class).strip()
+            if not target_class:
+                return {
+                    "status": "pending_ruling",
+                    "reason": "subclass artifact needs class_name or target_class_name",
+                }
+            if declared_class and target_class.casefold() != declared_class.casefold():
+                raise ValueError("subclass does not belong to target_class_name")
+            target = next(
+                (
+                    item
+                    for item in classes
+                    if str(item.get("name") or "").casefold() == target_class.casefold()
+                ),
+                None,
+            )
+            if target is None:
+                raise ValueError("subclass target class is not on this actor card")
+            minimum_level = int(card.get("minimum_level", 1) or 1)
+            if int(target.get("level", 0) or 0) < minimum_level:
+                raise ValueError(
+                    f"{target_class} must reach level {minimum_level} for this subclass"
+                )
+            existing_subclass = str(target.get("subclass") or "")
+            if existing_subclass and existing_subclass != str(card.get("name") or artifact_id):
+                raise ValueError("target class already has a different subclass")
+            target["subclass"] = str(card.get("name") or artifact_id)
             sheet["progression"]["classes"] = classes
         elif kind == "background":
+            existing_background = str(sheet["progression"].get("background") or "")
+            selected_background = str(card.get("name") or artifact_id)
+            if existing_background and existing_background != selected_background:
+                raise ValueError("character already has a different background")
             sheet["progression"]["background"] = str(card.get("name") or artifact_id)
             grants = dict(card.get("background_grants") or {})
+            requirements = dict(grants.get("choices") or {})
+            language_count = int(requirements.get("language_count", 0) or 0)
+            selected_languages = [str(item).strip() for item in selection.get("languages", [])]
+            if len(selected_languages) != language_count or any(
+                not item for item in selected_languages
+            ):
+                return {
+                    "status": "pending_ruling",
+                    "reason": f"background requires exactly {language_count} language choices",
+                }
+            if len({item.casefold() for item in selected_languages}) != len(selected_languages):
+                raise ValueError("background language choices must be distinct")
+            grants["languages"] = selected_languages
             sheet["progression"]["background_grants"] = {
                 **sheet["progression"]["background_grants"],
                 **grants,
             }
+            sheet["traits"]["languages"] = list(
+                dict.fromkeys([*sheet["traits"]["languages"], *selected_languages])
+            )
+            for skill in card.get("skill_proficiencies", []):
+                skill_key = str(skill).casefold()
+                if skill_key not in sheet["skills"]:
+                    raise ValueError(f"background references an unknown skill: {skill_key}")
+                sheet["skills"][skill_key]["proficiency"] = "proficient"
+        elif kind in {"feature", "activity"}:
+            section = "features" if kind == "feature" else "activities"
+            if any(item.get("id") == artifact_id for item in sheet["content"][section]):
+                raise ValueError(f"content {kind} is already present")
+            card.update(provenance)
+            sheet["content"][section].append(card)
         else:
             return {
                 "status": "pending_ruling",
                 "reason": f"{kind} is catalogued but needs a DM-reviewed application",
             }
+        if kind in {"subclass", "background"}:
+            if any(
+                item.get("artifact_id") == artifact_id for item in sheet["content"]["selections"]
+            ):
+                raise ValueError("content selection is already present")
+            sheet["content"]["selections"].append(
+                {
+                    "artifact_id": artifact_id,
+                    "kind": kind,
+                    "name": str(card.get("name") or artifact_id),
+                    "pack_id": pack_id,
+                    "pack_version": version,
+                    "rule_refs": list(artifact.get("rule_refs") or []),
+                    "mechanic_refs": list(artifact.get("mechanic_refs") or []),
+                    "selection": selection,
+                }
+            )
         return update_sheet(
             character_id,
             sheet,
@@ -6629,7 +6852,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             principal_id=principal_id,
             expected_revision=expected_revision,
             idempotency_key=idempotency_key,
-            payload={"artifact_id": artifact_id, "pack_id": pack_id, "version": version},
+            payload={
+                "artifact_id": artifact_id,
+                "pack_id": pack_id,
+                "version": version,
+                "selection": selection,
+            },
         )
 
     @mcp.tool()
@@ -6663,13 +6891,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if artifact is None:
             raise LookupError(artifact_id)
         section = {
-            "spell": "spells",
             "feature": "features",
-            "feat": "feats",
             "activity": "activities",
         }.get(str(artifact.get("kind") or ""))
         if section is None:
-            raise ValueError("only spell, feature, feat, and activity artifacts are actor cards")
+            raise ValueError(
+                "spell, feat, subclass, and background artifacts must use "
+                "character_content_apply for rule-aware validation"
+            )
         sheet = deepcopy(current.sheet)
         if any(item.get("id") == artifact_id for item in sheet["content"][section]):
             raise ValueError("rule artifact is already present on this character")
