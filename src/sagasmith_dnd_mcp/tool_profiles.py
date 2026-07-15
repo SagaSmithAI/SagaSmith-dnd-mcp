@@ -25,9 +25,12 @@ class ToolGroup:
     description: str
     risk: str
     tools: frozenset[str]
+    requires_campaign: bool = True
+    local_only: bool = False
+    roles: frozenset[str] = frozenset()
 
 
-# The first native tools/list response stays intentionally small.  The six
+# The first native tools/list response stays intentionally small. The exposure
 # exposure tools are the progressive-discovery protocol; the remainder lets a
 # host diagnose and choose a campaign without loading a domain group.
 CORE_TOOLS = frozenset(
@@ -55,19 +58,40 @@ def _group(
     description: str,
     risk: str,
     *tools: str,
+    requires_campaign: bool = True,
+    local_only: bool = False,
+    roles: tuple[str, ...] = (),
 ) -> ToolGroup:
-    return ToolGroup(id, phase, title, description, risk, frozenset(tools))
+    return ToolGroup(
+        id,
+        phase,
+        title,
+        description,
+        risk,
+        frozenset(tools),
+        requires_campaign,
+        local_only,
+        frozenset(roles),
+    )
 
 
 TOOL_GROUPS = (
+    _group(
+        "lobby.bootstrap",
+        PROFILE_LOBBY,
+        "Campaign bootstrap",
+        "List systems and create a campaign before opening a campaign-bound exposure.",
+        "write",
+        "system_list",
+        "campaign_create",
+        requires_campaign=False,
+    ),
     _group(
         "lobby.campaign",
         PROFILE_LOBBY,
         "Campaign setup",
         "Create campaigns, manage members, branches, snapshots and campaign state.",
         "write",
-        "system_list",
-        "campaign_create",
         "campaign_change",
         "access_grant",
         "campaign_event",
@@ -78,6 +102,7 @@ TOOL_GROUPS = (
         "snapshot_restore",
         "state_revision",
         "campaign_rules",
+        roles=("owner", "dm"),
     ),
     _group(
         "lobby.characters",
@@ -97,6 +122,8 @@ TOOL_GROUPS = (
         "character_state_change",
         "character_action",
         "character_spell_prepare",
+        "dnd_dice_roll",
+        "dnd_ability_roll",
     ),
     _group(
         "lobby.rules",
@@ -113,6 +140,7 @@ TOOL_GROUPS = (
         "rule_seed_bundled",
         "rule_search",
         "rule_expand",
+        roles=("owner", "dm"),
     ),
     _group(
         "lobby.modules",
@@ -125,6 +153,7 @@ TOOL_GROUPS = (
         "module_set_progress",
         "module_search",
         "module_expand",
+        roles=("owner", "dm"),
     ),
     _group(
         "lobby.memory",
@@ -146,6 +175,8 @@ TOOL_GROUPS = (
         "Run explicit schema migration actions. Load only for local administration.",
         "admin",
         "storage_migrate",
+        requires_campaign=False,
+        local_only=True,
     ),
     _group(
         "play.scene",
@@ -179,7 +210,6 @@ TOOL_GROUPS = (
         "wallet_change",
         "character_state_change",
         "character_action",
-        "character_spell_prepare",
         "memory_change",
         "actor_knowledge_change",
     ),
@@ -194,6 +224,8 @@ TOOL_GROUPS = (
         "dnd_ability_roll",
         "character_check",
         "combat_start",
+        "rule_search",
+        "rule_expand",
     ),
     _group(
         "combat.observe",
@@ -240,6 +272,15 @@ TOOL_GROUPS = (
         "dnd_dice_roll",
         "dnd_check",
         "campaign_advance_effects",
+    ),
+    _group(
+        "combat.save",
+        PROFILE_COMBAT,
+        "Combat saves",
+        "Create and inspect branch-aware snapshots during an active encounter.",
+        "write",
+        "snapshot_create",
+        "snapshot_query",
     ),
     _group(
         "combat.map",
@@ -293,6 +334,9 @@ def group_catalog() -> list[dict[str, object]]:
             "title": group.title,
             "description": group.description,
             "risk": group.risk,
+            "requires_campaign": group.requires_campaign,
+            "local_only": group.local_only,
+            "roles": sorted(group.roles),
             "tools": sorted(group.tools),
         }
         for group in TOOL_GROUPS

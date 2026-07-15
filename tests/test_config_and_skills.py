@@ -153,6 +153,7 @@ def test_server_tool_profiles_are_complete_and_attached_to_tool_metadata(tmp_pat
         by_name = {tool.name: tool for tool in tools}
         assert set(by_name) == set().union(*map(set, profile_catalog().values()))
         assert by_name["module_import"].meta["sagasmith_tool_profiles"] == ["lobby"]
+        assert by_name["module_import"].meta["sagasmith_tool_groups"] == ["lobby.modules"]
         assert by_name["rule_import"].meta["sagasmith_tool_profiles"] == ["lobby"]
         assert by_name["character_check"].meta["sagasmith_tool_profiles"] == ["play"]
         assert by_name["combat_resolve_attack"].meta["sagasmith_tool_profiles"] == ["combat"]
@@ -162,6 +163,7 @@ def test_server_tool_profiles_are_complete_and_attached_to_tool_metadata(tmp_pat
             "play",
             "combat",
         ]
+        assert by_name["game_phase"].meta["sagasmith_tool_groups"] == []
 
     asyncio.run(inspect_tools())
 

@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 from copy import deepcopy
 from dataclasses import asdict
 from typing import Any, Literal
+from uuid import uuid4
+from weakref import WeakValueDictionary
 
 from mcp.server.fastmcp import FastMCP
 from sagasmith_core import (
@@ -116,15 +119,17 @@ from sagasmith_dnd.spells import (
 from sagasmith_dnd.system import DND5E
 
 from sagasmith_dnd_mcp.config import McpConfig
-from sagasmith_dnd_mcp.exposure import ExposureError, ExposureRegistry
+from sagasmith_dnd_mcp.exposure import Exposure, ExposureError, ExposureRegistry
 from sagasmith_dnd_mcp.skills import SkillCatalog
 from sagasmith_dnd_mcp.storage import SagaSmithStorage
 from sagasmith_dnd_mcp.tool_profiles import (
     CORE_TOOLS,
+    GROUP_BY_ID,
     PROFILE_COMBAT,
     PROFILE_LOBBY,
     PROFILE_PLAY,
     group_catalog,
+    groups_for_tool,
     profile_catalog,
     profiles_for_tool,
     validate_profile_coverage,
@@ -140,11 +145,18 @@ class SessionExposureFastMCP(FastMCP):
     """
 
     def __init__(
-        self, *args: Any, exposure_registry: ExposureRegistry, phase_lookup: Any, **kwargs: Any
+        self,
+        *args: Any,
+        exposure_registry: ExposureRegistry,
+        phase_lookup: Any,
+        scope_validator: Any,
+        **kwargs: Any,
     ) -> None:
         self.exposure_registry = exposure_registry
         self._phase_lookup = phase_lookup
-        self._sessions: dict[str, Any] = {}
+        self._scope_validator = scope_validator
+        self._sessions: WeakValueDictionary[str, Any] = WeakValueDictionary()
+        self._exposure_locks: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
         super().__init__(*args, **kwargs)
 
     def _request_session(self) -> tuple[str, Any] | None:
@@ -153,38 +165,56 @@ class SessionExposureFastMCP(FastMCP):
             session = context.session
         except (LookupError, ValueError):
             return None
-        key = f"mcp:{id(session)}"
+        key = getattr(session, "_sagasmith_exposure_session_key", None)
+        if key is None:
+            key = f"mcp:{uuid4().hex}"
+            setattr(session, "_sagasmith_exposure_session_key", key)
         self._sessions[key] = session
         return key, session
 
-    @staticmethod
-    def _require_exposure_principal(
-        exposure: Any, tool_id: str, arguments: dict[str, Any]
-    ) -> None:
+    def _exposure_lock(self, exposure_id: str) -> asyncio.Lock:
+        return self._exposure_locks.setdefault(exposure_id, asyncio.Lock())
+
+    def _principal_argument(self, tool_id: str) -> str | None:
+        tool = self._tool_manager.get_tool(tool_id)
+        properties = dict((tool.parameters if tool else {}).get("properties") or {})
+        for name in ("auth_principal_id", "by_principal_id", "principal_id"):
+            if name in properties:
+                return name
+        return None
+
+    def _bind_exposure_principal(
+        self,
+        exposure: Exposure,
+        tool_id: str,
+        arguments: dict[str, Any],
+        *,
+        inject_missing: bool,
+    ) -> dict[str, Any]:
         """Keep an exposure bound to the principal that opened it.
 
         ``access_grant`` is the lone public facade whose ``principal_id`` names
         the grant target; its authenticated writer is ``by_principal_id``.
         """
-        if tool_id == "access_grant":
-            principal_id = arguments.get("by_principal_id") or "system:local"
-        else:
-            principal_id = arguments.get("principal_id") or "system:local"
-        if principal_id != exposure.principal_id:
+        result = dict(arguments)
+        principal_argument = self._principal_argument(tool_id)
+        if principal_argument is None:
+            return result
+        supplied = result.get(principal_argument)
+        if supplied is not None and supplied != exposure.principal_id:
             raise ExposureError(
                 "Tool principal_id does not match the principal that opened this session exposure."
             )
+        if inject_missing:
+            result[principal_argument] = exposure.principal_id
+        return result
 
     async def _refresh(self, session_key: str, campaign_id: str | None = None) -> bool:
         changed = False
         exposures = (
             [self.exposure_registry.active(session_key)]
             if campaign_id is None
-            else [
-                exposure
-                for exposure in self.exposure_registry._by_id.values()
-                if exposure.campaign_id == campaign_id
-            ]
+            else list(self.exposure_registry.for_campaign(campaign_id))
         )
         for exposure in exposures:
             if exposure is None or exposure.campaign_id is None:
@@ -196,14 +226,10 @@ class SessionExposureFastMCP(FastMCP):
                 or changed
             )
         if changed:
-            for key, exposure_id in tuple(self.exposure_registry._active_by_session.items()):
-                exposure = self.exposure_registry._by_id.get(exposure_id)
-                if exposure is not None and (
-                    campaign_id is None or exposure.campaign_id == campaign_id
-                ):
-                    session = self._sessions.get(key)
-                    if session is not None:
-                        await session.send_tool_list_changed()
+            for key, _ in self.exposure_registry.active_items(campaign_id):
+                session = self._sessions.get(key)
+                if session is not None:
+                    await session.send_tool_list_changed()
         return changed
 
     async def list_tools(self):  # type: ignore[override]
@@ -222,26 +248,32 @@ class SessionExposureFastMCP(FastMCP):
         session_key, _ = request
         await self._refresh(session_key)
         exposure = self.exposure_registry.active(session_key)
+        if name not in CORE_TOOLS and exposure is None:
+            raise ExposureError(
+                "No active exposure for this MCP session. Call exposure_open, then exposure_load."
+            )
         if exposure is not None and not name.startswith("exposure_"):
-            self._require_exposure_principal(exposure, name, arguments)
+            arguments = self._bind_exposure_principal(
+                exposure, name, arguments, inject_missing=False
+            )
+            self._scope_validator(exposure, name, arguments)
         if name not in CORE_TOOLS:
-            if exposure is None:
-                raise ExposureError(
-                    "No active exposure for this MCP session. "
-                    "Call exposure_open, then exposure_load."
-                )
-            self.exposure_registry.require_tool(exposure, name)
-        result = await super().call_tool(name, arguments)
+            assert exposure is not None
+            async with self._exposure_lock(exposure.id):
+                self.exposure_registry.require_tool(exposure, name)
+                result = await super().call_tool(name, arguments)
+                exposure_changed = self.exposure_registry.consume_tool(exposure, name)
+        else:
+            result = await super().call_tool(name, arguments)
+            exposure_changed = False
         if name in {"exposure_open", "exposure_load", "exposure_unload"}:
             session = self._sessions.get(session_key)
             if session is not None:
                 await session.send_tool_list_changed()
-        if exposure is not None and name not in CORE_TOOLS:
-            if self.exposure_registry.consume_tool(exposure, name):
-                await self._refresh(session_key)
-                session = self._sessions.get(session_key)
-                if session is not None:
-                    await session.send_tool_list_changed()
+        if exposure_changed:
+            session = self._sessions.get(session_key)
+            if session is not None:
+                await session.send_tool_list_changed()
         campaign_id = str(arguments.get("campaign_id") or "") or None
         if campaign_id and name in {"game_phase", "combat_start", "combat_end"}:
             await self._refresh(session_key, campaign_id)
@@ -494,12 +526,77 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         phase = str(state.get("game_phase") or PROFILE_LOBBY)
         return phase if phase in {PROFILE_LOBBY, PROFILE_PLAY} else PROFILE_LOBBY
 
+    def validate_exposure_scope(
+        exposure: Exposure, tool_id: str, arguments: dict[str, Any]
+    ) -> None:
+        """Prevent one campaign's phase exposure from being reused for another campaign."""
+        matching_groups = [
+            GROUP_BY_ID[group_id]
+            for group_id in exposure.loaded_groups
+            if tool_id in GROUP_BY_ID[group_id].tools
+        ]
+        protected_groups = [group for group in matching_groups if group.roles]
+        if matching_groups and len(protected_groups) == len(matching_groups):
+            if exposure.campaign_id is None:
+                raise ExposureError(f"Tool {tool_id!r} requires a campaign-bound exposure.")
+            roles = set().union(*(group.roles for group in protected_groups))
+            access.require_campaign(
+                exposure.campaign_id, exposure.principal_id, roles=roles
+            )
+        if exposure.campaign_id is None:
+            return
+
+        campaign_ids: set[str] = set()
+        character_ids: set[str] = set()
+
+        def collect(value: Any) -> None:
+            if isinstance(value, dict):
+                for key, item in value.items():
+                    if key == "campaign_id" and item:
+                        campaign_ids.add(str(item))
+                    elif (key == "character_id" or key.endswith("_character_id")) and item:
+                        character_ids.add(str(item))
+                    elif key == "actor_id" and item:
+                        character_ids.add(str(item))
+                    collect(item)
+            elif isinstance(value, list):
+                for item in value:
+                    collect(item)
+
+        collect(arguments)
+        owner = str(arguments.get("owner") or "")
+        owner_id = arguments.get("owner_id")
+        if owner == "party" and owner_id:
+            campaign_ids.add(str(owner_id))
+        elif owner == "character" and owner_id:
+            character_ids.add(str(owner_id))
+        if tool_id == "module_expand" and arguments.get("chunk_id"):
+            expanded = modules.expand(str(arguments["chunk_id"]))
+            if expanded.get("campaign_id"):
+                campaign_ids.add(str(expanded["campaign_id"]))
+
+        for character_id in character_ids:
+            try:
+                character = characters.get(character_id)
+            except LookupError:
+                continue
+            if character.campaign_id:
+                campaign_ids.add(str(character.campaign_id))
+
+        mismatched = sorted(item for item in campaign_ids if item != exposure.campaign_id)
+        if mismatched:
+            raise ExposureError(
+                f"Tool {tool_id!r} targets campaign {mismatched[0]!r}, but this exposure is "
+                f"bound to {exposure.campaign_id!r}. Open a separate exposure for that campaign."
+            )
+
     exposures = ExposureRegistry()
     mcp = SessionExposureFastMCP(
         "SagaSmith D&D",
         instructions="D&D 5e campaign runtime, module storage, and skill packs.",
         exposure_registry=exposures,
         phase_lookup=authoritative_phase,
+        scope_validator=validate_exposure_scope,
     )
 
     def character_view(character: Any) -> dict[str, Any]:
@@ -959,7 +1056,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     def server_capabilities() -> dict[str, Any]:
         """Describe the MCP contract and the automatic-vs-ruling combat boundary."""
         return {
-            "contract_version": "2026-07-session-exposure-v1",
+            "contract_version": "2026-07-session-exposure-v2",
             "transport": "stdio",
             "state_owner": "sagasmith-dnd-mcp",
             "features": {
@@ -1003,6 +1100,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "session_scoped_tool_exposure": True,
                 "native_tools_list_filtering": True,
                 "exposure_call_fallback": True,
+                "campaign_bound_exposure": True,
+                "fallback_principal_binding": True,
+                "exposure_expiry": True,
             },
             "rulebook_import": {
                 "stages": [
@@ -1038,6 +1138,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "groups": group_catalog(),
                 "native_flow": ["exposure_open", "exposure_load", "tools/list", "tools/call"],
                 "fallback_flow": ["exposure_open", "exposure_load", "exposure_call"],
+                "expiry": "sliding 12 hours",
             },
         }
 
@@ -9039,7 +9140,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         return exposures.inspect(group_id)
 
     @mcp.tool()
-    def exposure_load(
+    async def exposure_load(
         exposure_id: str,
         group_id: str,
         ttl_calls: int | None = None,
@@ -9047,17 +9148,30 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         """Expose one phase-compatible tool group to this MCP session."""
         request = mcp._request_session()
         exposure = exposures.get(exposure_id, request[0] if request else None)
-        if exposure.campaign_id:
-            exposures.refresh_phase(exposure, authoritative_phase(exposure.campaign_id))
-        exposures.load(exposure, group_id, ttl_calls)
+        group = GROUP_BY_ID.get(group_id)
+        if group is None:
+            raise ExposureError(f"Unknown tool group: {group_id}")
+        if group.roles:
+            if exposure.campaign_id is None:
+                raise ExposureError(f"Tool group {group_id!r} requires a campaign.")
+            access.require_campaign(
+                exposure.campaign_id, exposure.principal_id, roles=set(group.roles)
+            )
+        async with mcp._exposure_lock(exposure.id):
+            if exposure.campaign_id:
+                exposures.refresh_phase(
+                    exposure, authoritative_phase(exposure.campaign_id)
+                )
+            exposures.load(exposure, group_id, ttl_calls)
         return exposures.status(exposure)
 
     @mcp.tool()
-    def exposure_unload(exposure_id: str, group_id: str) -> dict[str, Any]:
+    async def exposure_unload(exposure_id: str, group_id: str) -> dict[str, Any]:
         """Remove a previously loaded tool group from this MCP session."""
         request = mcp._request_session()
         exposure = exposures.get(exposure_id, request[0] if request else None)
-        exposures.unload(exposure, group_id)
+        async with mcp._exposure_lock(exposure.id):
+            exposures.unload(exposure, group_id)
         return exposures.status(exposure)
 
     @mcp.tool()
@@ -9073,14 +9187,18 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         exposure = exposures.get(exposure_id, request[0] if request else None)
         if exposure.campaign_id:
             exposures.refresh_phase(exposure, authoritative_phase(exposure.campaign_id))
-        exposures.require_tool(exposure, tool_id)
-        mcp._require_exposure_principal(exposure, tool_id, dict(arguments or {}))
-        context = mcp.get_context()
-        result = await mcp._tool_manager.call_tool(
-            tool_id, dict(arguments or {}), context=context, convert_result=True
+        bound_arguments = mcp._bind_exposure_principal(
+            exposure, tool_id, dict(arguments or {}), inject_missing=True
         )
-        exposure_changed = exposures.consume_tool(exposure, tool_id)
-        target_campaign_id = str(dict(arguments or {}).get("campaign_id") or "") or None
+        validate_exposure_scope(exposure, tool_id, bound_arguments)
+        context = mcp.get_context()
+        async with mcp._exposure_lock(exposure.id):
+            exposures.require_tool(exposure, tool_id)
+            result = await mcp._tool_manager.call_tool(
+                tool_id, bound_arguments, context=context, convert_result=True
+            )
+            exposure_changed = exposures.consume_tool(exposure, tool_id)
+        target_campaign_id = str(bound_arguments.get("campaign_id") or "") or None
         if target_campaign_id and tool_id in {"game_phase", "combat_start", "combat_end"}:
             if request is not None:
                 await mcp._refresh(request[0], target_campaign_id)
@@ -9217,6 +9335,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         registered_tool.meta = {
             **dict(registered_tool.meta or {}),
             "sagasmith_tool_profiles": list(profiles_for_tool(registered_tool.name)),
+            "sagasmith_tool_groups": list(groups_for_tool(registered_tool.name)),
         }
 
     return mcp
