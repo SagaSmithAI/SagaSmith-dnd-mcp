@@ -5,20 +5,37 @@ on:
 jobs:
   contract-and-runtime:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: SagaSmith-dnd-mcp
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: SagaSmith-dnd-mcp
       - uses: actions/checkout@v4
         with:
           repository: SagaSmithAI/sagasmith-core
-          path: deps/sagasmith-core
+          path: sagasmith-core
       - uses: actions/checkout@v4
         with:
           repository: SagaSmithAI/Sagasmith-dnd
-          path: deps/sagasmith-dnd
+          path: sagasmith-dnd
+      - uses: actions/checkout@v4
+        with:
+          repository: SagaSmithAI/SagaSmith-dnd-skills
+          path: SagaSmith-dnd-skills
+      - uses: actions/checkout@v4
+        with:
+          repository: SagaSmithAI/SagaSmith-module-gen-skills
+          path: SagaSmith-module-gen-skills
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
           cache: pip
-      - run: python -m pip install -e 'deps/sagasmith-core[dev]' -e 'deps/sagasmith-dnd[dev]' -e '.[dev,gateway]'
+          cache-dependency-path: |
+            SagaSmith-dnd-mcp/pyproject.toml
+            sagasmith-dnd/pyproject.toml
+            sagasmith-core/pyproject.toml
+      - run: python -m pip install -e '../sagasmith-core[dev]' -e '../sagasmith-dnd[dev]' -e '.[dev,gateway]'
       - run: ruff check .
       - run: pytest
