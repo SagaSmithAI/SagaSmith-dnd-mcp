@@ -70,9 +70,12 @@ from sagasmith_dnd.combat_engine import (
     resolve_choice_window,
     resolve_common_action,
     resolve_death_save_to_sheet,
+    resolve_readied_action_window,
     resolve_readied_spell_window,
     spend_movement,
+    stand_up,
     start_encounter,
+    trigger_readied_action,
     trigger_readied_spell,
 )
 from sagasmith_dnd.engine import resolve_check, roll
@@ -182,6 +185,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 raise PermissionError("only the local service may modify library characters")
             return
         access.require_actor(character.campaign_id, character.id, principal_id, control=True)
+
+    def require_outside_active_combat(character: Any, operation: str) -> None:
+        """Keep direct card mutations from bypassing encounter action economy."""
+        if character.campaign_id is None:
+            return
+        combat = dict(campaigns.get(character.campaign_id).state or {}).get("combat")
+        if isinstance(combat, dict) and combat.get("active", False):
+            raise CombatEngineError(f"{operation} is not allowed while combat is active")
 
     def visible_character_view(character: Any, principal_id: str) -> dict[str, Any]:
         if character.campaign_id is None:
@@ -1105,6 +1116,21 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         else:
             raise CombatEngineError("actor has no attack payment available")
         current["turn_budget"] = budget
+        if result.get("reveals_attacker"):
+            current["hidden"] = False
+        if plan.get("helped_by"):
+            helper = next(
+                (
+                    item
+                    for item in next_encounter["combatants"]
+                    if item.get("actor_id") == plan["helped_by"]
+                ),
+                None,
+            )
+            if helper is not None:
+                helper_flags = dict(helper.get("turn_flags") or {})
+                helper_flags.pop("helping", None)
+                helper["turn_flags"] = helper_flags
         sync_combatant_conditions(next_encounter, actor_id, updated_attacker["sheet"])
         sync_combatant_conditions(next_encounter, target_id, updated_target["sheet"])
         reconcile_readied_spells(next_encounter, target_id, updated_target["sheet"])
@@ -1203,6 +1229,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         ]
         next_combatant = current_combatant(next_state["combat"])
         round_changed = int(next_state["combat"].get("round", 1)) > int(encounter.get("round", 1))
+        minute_changed = False
+        if round_changed:
+            elapsed_rounds = int(next_state["combat"].get("rounds_until_minute", 0) or 0) + 1
+            minute_changed = elapsed_rounds >= 10
+            next_state["combat"]["rounds_until_minute"] = 0 if minute_changed else elapsed_rounds
         combat_updates: list[CharacterStateUpdate] = []
         expired_effects = set(duration["expired"])
         for combatant in next_state["combat"].get("combatants", []):
@@ -1224,6 +1255,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 rounded = advance_effect_durations(sheet, period="round")
                 sheet = rounded["sheet"]
                 expired.extend(rounded["expired"])
+            if minute_changed:
+                minutes = advance_effect_durations(sheet, period="minute")
+                sheet = minutes["sheet"]
+                expired.extend(minutes["expired"])
             expired_effects.update(expired)
             combat_updates.append(
                 CharacterStateUpdate(
@@ -1400,6 +1435,18 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             encounter=None,
             allow_out_of_turn=True,
         )
+        weapon = next(
+            (
+                item
+                for item in attacker.get("derived", {})
+                .get("inventory", {})
+                .get("weapon_attacks", [])
+                if item.get("item_id") == plan.get("weapon_id")
+            ),
+            None,
+        )
+        if weapon is not None and weapon.get("attack_type") != "melee":
+            raise CombatEngineError("opportunity attacks require a melee attack")
         updated_attacker, updated_target, result = resolve_attack_action(
             attacker,
             target,
@@ -1430,6 +1477,21 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             raise CombatEngineError("actor has no reaction remaining")
         budget["reaction"] = int(budget["reaction"]) - 1
         combatant["turn_budget"] = budget
+        if result.get("reveals_attacker"):
+            combatant["hidden"] = False
+        if plan.get("helped_by"):
+            helper = next(
+                (
+                    item
+                    for item in next_encounter["combatants"]
+                    if item.get("actor_id") == plan["helped_by"]
+                ),
+                None,
+            )
+            if helper is not None:
+                helper_flags = dict(helper.get("turn_flags") or {})
+                helper_flags.pop("helping", None)
+                helper["turn_flags"] = helper_flags
         sync_combatant_conditions(next_encounter, actor_id, updated_attacker["sheet"])
         sync_combatant_conditions(next_encounter, target_id, updated_target["sheet"])
         reconcile_readied_spells(next_encounter, target_id, updated_target["sheet"])
@@ -1494,6 +1556,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         destination: Any = None,
         path: list[Any] | None = None,
         movement_mode: str = "voluntary",
+        crawl: bool = False,
         principal_id: str = "system:local",
         expected_revision: int | None = None,
         branch_id: str | None = None,
@@ -1509,6 +1572,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "destination": destination,
             "path": path,
             "movement_mode": movement_mode,
+            "crawl": crawl,
             "branch_id": resolved_branch_id,
         }
         scope = f"combat-move:{campaign_id}:{resolved_branch_id}:{principal_id}"
@@ -1530,6 +1594,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             destination=destination,
             path=path,
             movement_mode=movement_mode,
+            crawl=crawl,
         )
         next_state = {**dict(campaign.state or {}), "combat": next_encounter}
         revisions_result = StateMutationService(storage.database).replace(
@@ -1537,6 +1602,67 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             campaign_state=validate_party_state(next_state),
             expected_campaign_revision=campaign.revision,
             operation="combat.movement.spend",
+            actor=principal_id,
+            branch_id=resolved_branch_id,
+            idempotency_key=idempotency_key,
+        )
+        response = {
+            "status": "committed",
+            "combat": next_encounter,
+            "campaign_revision": mutation_revision(campaign_id),
+            "revisions": [asdict(item) for item in revisions_result or []],
+        }
+        return combat_response(
+            campaign_id,
+            principal_id,
+            remember_idempotent(scope, idempotency_key, payload, response, campaign_id),
+        )
+
+    @mcp.tool()
+    def combat_stand(
+        campaign_id: str,
+        actor_id: str,
+        principal_id: str = "system:local",
+        expected_revision: int | None = None,
+        branch_id: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Stand from Prone by spending half the actor's speed, without using an action."""
+        access.require_actor(campaign_id, actor_id, principal_id, control=True)
+        require_write_contract(expected_revision, idempotency_key)
+        resolved_branch_id = require_current_branch(campaign_id, branch_id)
+        payload = {"actor_id": actor_id, "branch_id": resolved_branch_id}
+        scope = f"combat-stand:{campaign_id}:{resolved_branch_id}:{principal_id}"
+        replay = replay_idempotent(scope, idempotency_key, payload)
+        if replay is not None:
+            return combat_response(campaign_id, principal_id, replay)
+        campaign, encounter = active_encounter(campaign_id)
+        if campaign.revision != expected_revision:
+            raise ValueError(
+                f"campaign revision conflict: expected {expected_revision}, found {campaign.revision}"
+            )
+        require_no_blocking_pending(encounter)
+        next_encounter = stand_up(encounter, actor_id)
+        current = characters.get(actor_id)
+        combatant = next(
+            item for item in next_encounter["combatants"] if item.get("actor_id") == actor_id
+        )
+        updated_sheet = deepcopy(current.sheet)
+        updated_sheet["conditions"] = list(combatant.get("conditions") or [])
+        next_state = {**dict(campaign.state or {}), "combat": next_encounter}
+        revisions_result = StateMutationService(storage.database).replace(
+            campaign_id,
+            campaign_state=validate_party_state(next_state),
+            character_updates=[
+                CharacterStateUpdate(
+                    character_id=actor_id,
+                    sheet=validate_character_sheet(updated_sheet),
+                    notes=validate_character_notes(current.notes),
+                    expected_revision=current.revision,
+                )
+            ],
+            expected_campaign_revision=campaign.revision,
+            operation="combat.stand",
             actor=principal_id,
             branch_id=resolved_branch_id,
             idempotency_key=idempotency_key,
@@ -1642,6 +1768,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         spell_id: str,
         cast_level: int | None = None,
         ritual: bool = False,
+        component_ruling: dict[str, Any] | None = None,
         choice_id: str | None = None,
         principal_id: str = "system:local",
         expected_revision: int | None = None,
@@ -1657,6 +1784,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "spell_id": spell_id,
             "cast_level": cast_level,
             "ritual": ritual,
+            "component_ruling": component_ruling or {},
             "choice_id": choice_id,
             "branch_id": resolved_branch_id,
         }
@@ -1676,6 +1804,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             spell_id=spell_id,
             cast_level=cast_level,
             ritual=ritual,
+            component_ruling=component_ruling,
         )
         spell_entry = next(
             item
@@ -1684,9 +1813,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         casting_time = str(spell_entry.get("definition", {}).get("casting_time") or "1 action")
         normalized_casting_time = casting_time.casefold().strip()
-        if ritual and not normalized_casting_time.startswith(
-            ("1 action", "bonus action", "reaction")
-        ):
+        if ritual:
             raise CombatEngineError("ritual casting cannot be completed inside an active encounter")
         if normalized_casting_time.startswith("bonus action"):
             payment = "bonus_action"
@@ -1724,7 +1851,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
 
         ruleset = str(encounter.get("ruleset") or current.sheet.get("edition") or "2014")
         spell_level = int(spell_entry.get("level", 0) or 0)
-        spent_slot = applied["payment"].get("economy") == "slots"
+        spent_slot = applied["payment"].get("economy") in {"slots", "pact_magic"}
         turn_casts = list(dict(encounter.get("turn_spell_casts") or {}).get(actor_id, []))
         if ruleset == "2024" and spent_slot and any(item.get("spent_slot") for item in turn_casts):
             raise CombatEngineError("2024 rules allow only one expended spell slot per turn")
@@ -1799,7 +1926,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             idempotency_key=idempotency_key,
         )
         response = {
-            "status": "committed",
+            "status": "pending_ruling",
             "result": {key: value for key, value in applied.items() if key != "sheet"},
             "combat": next_encounter,
             "campaign_revision": mutation_revision(campaign_id),
@@ -2159,6 +2286,125 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "status": "pending_ruling" if release else "armed",
             "released": release,
             "spell_id": resolved.get("spell_id"),
+            "declaration": declaration or {},
+            "combat": next_encounter,
+            "campaign_revision": mutation_revision(campaign_id),
+            "revisions": [asdict(item) for item in revisions_result or []],
+        }
+        return combat_response(
+            campaign_id,
+            principal_id,
+            remember_idempotent(scope, idempotency_key, payload, response, campaign_id),
+        )
+
+    @mcp.tool()
+    def combat_readied_action_trigger(
+        campaign_id: str,
+        readied_id: str,
+        event: str,
+        principal_id: str = "system:local",
+        expected_revision: int | None = None,
+        branch_id: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """DM-confirm a generic Ready trigger and open its owning actor's reaction window."""
+        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        require_write_contract(expected_revision, idempotency_key)
+        resolved_branch_id = require_current_branch(campaign_id, branch_id)
+        payload = {"readied_id": readied_id, "event": event, "branch_id": resolved_branch_id}
+        scope = f"combat-ready-action-trigger:{campaign_id}:{resolved_branch_id}:{principal_id}"
+        replay = replay_idempotent(scope, idempotency_key, payload)
+        if replay is not None:
+            return combat_response(campaign_id, principal_id, replay)
+        campaign, encounter = active_encounter(campaign_id)
+        if campaign.revision != expected_revision:
+            raise ValueError(
+                f"campaign revision conflict: expected {expected_revision}, found {campaign.revision}"
+            )
+        next_encounter = trigger_readied_action(encounter, readied_id=readied_id, event=event)
+        next_state = {**dict(campaign.state or {}), "combat": next_encounter}
+        revisions_result = StateMutationService(storage.database).replace(
+            campaign_id,
+            campaign_state=validate_party_state(next_state),
+            expected_campaign_revision=campaign.revision,
+            operation="combat.ready.action.trigger",
+            actor=principal_id,
+            branch_id=resolved_branch_id,
+            idempotency_key=idempotency_key,
+        )
+        response = {
+            "status": "triggered",
+            "combat": next_encounter,
+            "campaign_revision": mutation_revision(campaign_id),
+            "revisions": [asdict(item) for item in revisions_result or []],
+        }
+        return combat_response(
+            campaign_id,
+            principal_id,
+            remember_idempotent(scope, idempotency_key, payload, response, campaign_id),
+        )
+
+    @mcp.tool()
+    def combat_readied_action_resolve(
+        campaign_id: str,
+        actor_id: str,
+        choice_id: str,
+        release: bool,
+        declaration: dict[str, Any] | None = None,
+        principal_id: str = "system:local",
+        expected_revision: int | None = None,
+        branch_id: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Spend a reaction for a generic Ready action; settle its declared effect by ruling."""
+        access.require_actor(campaign_id, actor_id, principal_id, control=True)
+        require_write_contract(expected_revision, idempotency_key)
+        resolved_branch_id = require_current_branch(campaign_id, branch_id)
+        payload = {
+            "actor_id": actor_id,
+            "choice_id": choice_id,
+            "release": release,
+            "declaration": declaration or {},
+            "branch_id": resolved_branch_id,
+        }
+        scope = f"combat-ready-action-resolve:{campaign_id}:{resolved_branch_id}:{principal_id}"
+        replay = replay_idempotent(scope, idempotency_key, payload)
+        if replay is not None:
+            return combat_response(campaign_id, principal_id, replay)
+        campaign, encounter = active_encounter(campaign_id)
+        if campaign.revision != expected_revision:
+            raise ValueError(
+                f"campaign revision conflict: expected {expected_revision}, found {campaign.revision}"
+            )
+        if release and choice_id not in {
+            str(item.get("id")) for item in available_reactions(encounter, actor_id)
+        }:
+            raise CombatEngineError("actor cannot take this reaction")
+        next_encounter, readied = resolve_readied_action_window(
+            encounter, actor_id_value=actor_id, choice_id=choice_id, release=release
+        )
+        next_encounter["log"] = [
+            *list(next_encounter.get("log") or []),
+            {
+                "type": "readied_action_released" if release else "readied_action_declined",
+                "actor_id": actor_id,
+                "readied_id": readied.get("id"),
+                "declaration": declaration or {},
+            },
+        ][-100:]
+        next_state = {**dict(campaign.state or {}), "combat": next_encounter}
+        revisions_result = StateMutationService(storage.database).replace(
+            campaign_id,
+            campaign_state=validate_party_state(next_state),
+            expected_campaign_revision=campaign.revision,
+            operation="combat.ready.action.release" if release else "combat.ready.action.decline",
+            actor=principal_id,
+            branch_id=resolved_branch_id,
+            idempotency_key=idempotency_key,
+        )
+        response = {
+            "status": "pending_ruling" if release else "armed",
+            "released": release,
             "declaration": declaration or {},
             "combat": next_encounter,
             "campaign_revision": mutation_revision(campaign_id),
@@ -3255,6 +3501,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         """Validate and replace a complete D&D v2 sheet, deriving combat and inventory fields."""
         current = characters.get(character_id)
         require_character_control(current, principal_id)
+        require_outside_active_combat(current, "character sheet replacement")
         sheet_value = deepcopy(sheet)
         if current.campaign_id is not None:
             sheet_value["edition"] = str(
@@ -3285,6 +3532,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         """Adjust one D&D character wallet denomination through the v2 schema."""
         current = characters.get(character_id)
         require_character_control(current, principal_id)
+        require_outside_active_combat(current, "wallet adjustment")
         return update_sheet(
             character_id,
             adjust_wallet(current.sheet, denomination, amount),
@@ -3306,6 +3554,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         """Add a normalized inventory item and return its assigned item id."""
         current = characters.get(character_id)
         require_character_control(current, principal_id)
+        require_outside_active_combat(current, "inventory changes")
         sheet, item_id = add_inventory_item(current.sheet, item)
         return update_sheet(
             character_id,
@@ -3330,6 +3579,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         """Update one structured inventory item without bypassing D&D validation."""
         current = characters.get(character_id)
         require_character_control(current, principal_id)
+        require_outside_active_combat(current, "inventory changes")
         return update_sheet(
             character_id,
             update_inventory_item(current.sheet, item_id, patch),
@@ -3352,6 +3602,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         """Remove an inventory stack or quantity and return the removed item data."""
         current = characters.get(character_id)
         require_character_control(current, principal_id)
+        require_outside_active_combat(current, "inventory changes")
         sheet, removed = remove_inventory_item(current.sheet, item_id, quantity)
         return update_sheet(
             character_id,
@@ -3376,6 +3627,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         """Equip an inventory item in a validated D&D equipment slot, or unequip it."""
         current = characters.get(character_id)
         require_character_control(current, principal_id)
+        require_outside_active_combat(current, "equipment changes")
         return update_sheet(
             character_id,
             equip_inventory_item(current.sheet, item_id, slot),
@@ -3398,6 +3650,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         """Consume ammunition linked to a weapon through structured mechanics."""
         current = characters.get(character_id)
         require_character_control(current, principal_id)
+        require_outside_active_combat(current, "ammunition consumption")
         sheet, consumed = consume_weapon_ammunition(current.sheet, weapon_id, quantity)
         return update_sheet(
             character_id,
@@ -3431,6 +3684,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         }
         source = characters.get(source_character_id)
         target = characters.get(target_character_id)
+        require_outside_active_combat(source, "inventory transfer")
+        require_outside_active_combat(target, "inventory transfer")
         if source.campaign_id is None or source.campaign_id != target.campaign_id:
             raise ValueError("characters must belong to the same campaign")
         if (
@@ -3495,6 +3750,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         """Add a validated active D&D effect and return its assigned effect id."""
         current = characters.get(character_id)
         require_character_control(current, principal_id)
+        require_outside_active_combat(current, "effect changes")
         sheet, effect_id = add_effect(current.sheet, effect)
         return update_sheet(
             character_id,
@@ -3518,6 +3774,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         """Remove an active D&D effect."""
         current = characters.get(character_id)
         require_character_control(current, principal_id)
+        require_outside_active_combat(current, "effect changes")
         return update_sheet(
             character_id,
             remove_effect(current.sheet, effect_id),
@@ -3533,6 +3790,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         character_id: str,
         rest_type: str,
         prepared_spell_ids: list[str] | None = None,
+        hit_dice_spends: list[dict[str, Any]] | None = None,
+        hit_dice_recovery: dict[str, int] | None = None,
+        food_and_drink: bool = False,
         principal_id: str = "system:local",
         expected_revision: int | None = None,
         idempotency_key: str | None = None,
@@ -3540,6 +3800,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         """Apply rest recovery and, on a long rest, atomically replace prepared spells."""
         current = characters.get(character_id)
         require_character_control(current, principal_id)
+        require_outside_active_combat(current, "rest")
         if current.campaign_id is None:
             raise ValueError("rest requires a campaign-bound character")
         campaign = campaigns.get(current.campaign_id)
@@ -3554,13 +3815,22 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "character_id": character_id,
             "rest_type": rest_type,
             "prepared_spell_ids": prepared_spell_ids,
+            "hit_dice_spends": hit_dice_spends or [],
+            "hit_dice_recovery": hit_dice_recovery or {},
+            "food_and_drink": food_and_drink,
         }
         branch_id = require_current_branch(current.campaign_id, None)
         scope = f"character-rest:{current.campaign_id}:{branch_id}:{principal_id}"
         replay = replay_idempotent(scope, idempotency_key, payload)
         if replay is not None:
             return replay
-        applied = apply_rest(current.sheet, rest_type=rest_type)
+        applied = apply_rest(
+            current.sheet,
+            rest_type=rest_type,
+            hit_dice_spends=hit_dice_spends,
+            hit_dice_recovery=hit_dice_recovery,
+            food_and_drink=food_and_drink,
+        )
         preparation_result = None
         if prepared_spell_ids is not None:
             preparation_result = replace_prepared_spells(
@@ -3583,7 +3853,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             idempotency_key=idempotency_key,
         )
         response = {
-            "status": "committed",
+            "status": "pending_ruling",
             "result": {key: value for key, value in applied.items() if key != "sheet"},
             "preparation": (
                 {key: value for key, value in preparation_result.items() if key != "sheet"}
@@ -3606,6 +3876,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         spell_id: str,
         cast_level: int | None = None,
         ritual: bool = False,
+        component_ruling: dict[str, Any] | None = None,
         principal_id: str = "system:local",
         expected_revision: int | None = None,
         idempotency_key: str | None = None,
@@ -3613,6 +3884,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         """Pay canonical spell resources and start concentration from a v2 spell card."""
         current = characters.get(character_id)
         require_character_control(current, principal_id)
+        require_outside_active_combat(current, "spell casting")
         if current.campaign_id is None:
             raise ValueError("spell casting requires a campaign-bound character")
         if expected_revision is None or not idempotency_key:
@@ -3623,6 +3895,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "spell_id": spell_id,
             "cast_level": cast_level,
             "ritual": ritual,
+            "component_ruling": component_ruling or {},
         }
         scope = f"character-cast:{current.campaign_id}:{branch_id}:{principal_id}"
         replay = replay_idempotent(scope, idempotency_key, payload)
@@ -3633,6 +3906,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             spell_id=spell_id,
             cast_level=cast_level,
             ritual=ritual,
+            component_ruling=component_ruling,
         )
         StateMutationService(storage.database).replace(
             current.campaign_id,
@@ -3650,7 +3924,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             idempotency_key=idempotency_key,
         )
         response = {
-            "status": "committed",
+            "status": "pending_ruling",
             "result": {key: value for key, value in applied.items() if key != "sheet"},
             "character": character_view(characters.get(character_id)),
         }
@@ -3674,6 +3948,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         """Consume one non-combat structured card use without fabricating its narrative result."""
         current = characters.get(character_id)
         require_character_control(current, principal_id)
+        require_outside_active_combat(current, "activity use")
         if current.campaign_id is None:
             raise ValueError("activity use requires a campaign-bound character")
         if expected_revision is None or not idempotency_key:
@@ -3739,6 +4014,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         """Set a named character resource, enforcing its schema-defined maximum."""
         current = characters.get(character_id)
         require_character_control(current, principal_id)
+        require_outside_active_combat(current, "resource changes")
         return update_sheet(
             character_id,
             set_resource_value(current.sheet, resource, value),
@@ -3839,6 +4115,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         """Apply a validated ability-generation method to a complete D&D character sheet."""
         current = characters.get(character_id)
         require_character_control(current, principal_id)
+        require_outside_active_combat(current, "ability generation")
         sheet = apply_ability_generation(
             current.sheet,
             method=method,
