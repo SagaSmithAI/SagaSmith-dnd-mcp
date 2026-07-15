@@ -17,6 +17,7 @@ from sagasmith_core import (
     ContinuityService,
     EventService,
     IdempotencyService,
+    ImportJobService,
     MemoryService,
     ModuleService,
     RevisionService,
@@ -82,6 +83,11 @@ from sagasmith_dnd.combat_engine import (
     trigger_readied_action,
     trigger_readied_spell,
 )
+from sagasmith_dnd.content_import import (
+    compiled_artifacts_from_candidates,
+    extract_content_candidates,
+    validate_selection_ready_artifacts,
+)
 from sagasmith_dnd.core_content import PACK_ID as CORE_CONTENT_PACK_ID
 from sagasmith_dnd.core_content import PACK_VERSION as CORE_CONTENT_PACK_VERSION
 from sagasmith_dnd.core_content import build_srd2014_content
@@ -135,6 +141,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     knowledge = ActorKnowledgeService(storage.database)
     access = AccessService(storage.database)
     idempotency = IdempotencyService(storage.database)
+    import_jobs = ImportJobService(storage.database)
     default_local_principal(storage.database)
     memories = MemoryService(storage.database)
     modules = ModuleService(storage.database)
@@ -236,7 +243,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         mechanics: list[dict[str, Any]] | None,
         provenance: dict[str, Any] | None,
     ) -> dict[str, Any]:
-        compiler_errors: list[str] = []
+        compiler_errors = validate_selection_ready_artifacts(artifacts or [])
         try:
             compile_mechanics(mechanics or [])
         except RuleCompilationError as error:
@@ -584,6 +591,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 ) from error
             return scope_id
         raise PermissionError("players may read only party or an owned player scene scope")
+
+    def require_import_job(campaign_id: str, job_id: str, kind: str | None = None) -> Any:
+        job = import_jobs.get(job_id)
+        if job.campaign_id != campaign_id:
+            raise LookupError(job_id)
+        if kind is not None and job.kind != kind:
+            raise ValueError(f"import job is not a {kind} job")
+        return job
 
     def require_write_contract(expected_revision: int | None, idempotency_key: str | None) -> None:
         if expected_revision is None:
@@ -1043,6 +1058,199 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "campaign_revision": mutation_revision(campaign_id),
             "revisions": [asdict(item) for item in revisions_result or []],
         }
+        return remember_idempotent(
+            scope, idempotency_key, payload, response, campaign_id=campaign_id
+        )
+
+    @mcp.tool()
+    def import_job_get(
+        campaign_id: str,
+        job_id: str,
+        principal_id: str = "system:local",
+    ) -> dict[str, Any]:
+        """Read the durable evidence, review state, and result for one authoring import."""
+        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        return asdict(require_import_job(campaign_id, job_id))
+
+    @mcp.tool()
+    def import_job_list(
+        campaign_id: str,
+        kind: str | None = None,
+        principal_id: str = "system:local",
+    ) -> list[dict[str, Any]]:
+        """List rulebook or module imports, newest first, without reading local files."""
+        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        return [asdict(item) for item in import_jobs.list(campaign_id, kind=kind)]
+
+    @mcp.tool()
+    def rule_import_job_create(
+        campaign_id: str,
+        artifact: str,
+        source_key: str,
+        title: str,
+        edition: str,
+        locale: str = "en",
+        publication_id: str = "",
+        version: str = "",
+        authority: str = "supplement",
+        principal_id: str = "system:local",
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Create a reviewable rulebook import job for an already staged artifact."""
+        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        if edition not in {"2014", "2024"}:
+            raise ValueError("imported D&D rulebooks require edition 2014 or 2024")
+        if not idempotency_key:
+            raise ValueError("idempotency_key is required for an import job")
+        path = storage.artifact_rulebook_path(artifact)
+        inspection = rules.inspect_path(path)
+        payload = {
+            "artifact": artifact,
+            "source_key": source_key,
+            "title": title,
+            "edition": edition,
+            "locale": locale,
+            "publication_id": publication_id,
+            "version": version,
+            "authority": authority,
+        }
+        scope = f"import-job-create:{campaign_id}:{principal_id}"
+        replay = replay_idempotent(scope, idempotency_key, payload)
+        if replay is not None:
+            return replay
+        job = import_jobs.create(
+            campaign_id=campaign_id,
+            kind="rulebook",
+            artifact=artifact,
+            artifact_checksum=str(inspection.get("checksum") or ""),
+            payload=payload,
+        )
+        response = {"job": asdict(job)}
+        return remember_idempotent(
+            scope, idempotency_key, payload, response, campaign_id=campaign_id
+        )
+
+    @mcp.tool()
+    def rule_import_job_inspect(
+        campaign_id: str,
+        job_id: str,
+        principal_id: str = "system:local",
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Normalize a staged rulebook and persist the parser report before indexing it."""
+        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        if not idempotency_key:
+            raise ValueError("idempotency_key is required for import inspection")
+        job = require_import_job(campaign_id, job_id, "rulebook")
+        payload = {"job_id": job_id, "operation": "inspect"}
+        scope = f"import-job:{campaign_id}:{job_id}:{principal_id}"
+        replay = replay_idempotent(scope, idempotency_key, payload)
+        if replay is not None:
+            return replay
+        inspection = rules.inspect_path(storage.artifact_rulebook_path(job.artifact))
+        updated = import_jobs.record_inspection(job_id, inspection)
+        response = {"job": asdict(updated), "inspection": inspection}
+        return remember_idempotent(
+            scope, idempotency_key, payload, response, campaign_id=campaign_id
+        )
+
+    @mcp.tool()
+    def rule_import_job_ingest(
+        campaign_id: str,
+        job_id: str,
+        principal_id: str = "system:local",
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Index an inspected rulebook, retaining its source id for candidate citations."""
+        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        if not idempotency_key:
+            raise ValueError("idempotency_key is required for rulebook indexing")
+        job = require_import_job(campaign_id, job_id, "rulebook")
+        if job.state not in {"inspected", "failed"}:
+            raise ValueError("rule import job must be inspected before indexing")
+        payload = {"job_id": job_id, "operation": "ingest"}
+        scope = f"import-job:{campaign_id}:{job_id}:{principal_id}"
+        replay = replay_idempotent(scope, idempotency_key, payload)
+        if replay is not None:
+            return replay
+        values = dict(job.payload)
+        embedder, vectors = storage.dense_components()
+        result = rules.ingest_path(
+            system_id="dnd5e",
+            path=storage.artifact_rulebook_path(job.artifact),
+            source_key=str(values["source_key"]),
+            title=str(values["title"]),
+            locale=str(values.get("locale") or "en"),
+            edition=str(values["edition"]),
+            publication_id=str(values.get("publication_id") or ""),
+            version=str(values.get("version") or ""),
+            authority=str(values.get("authority") or "supplement"),
+            embedder=embedder,
+            vector_store=vectors,
+        )
+        source = rules.source(result.source_id)
+        updated = import_jobs.record_result(
+            job_id,
+            {"ingest": asdict(result), "source": source},
+            state="extracted",
+            source_id=result.source_id,
+        )
+        response = {"job": asdict(updated), "source": source, **asdict(result)}
+        return remember_idempotent(
+            scope, idempotency_key, payload, response, campaign_id=campaign_id
+        )
+
+    @mcp.tool()
+    def rule_content_candidates_extract(
+        campaign_id: str,
+        job_id: str,
+        principal_id: str = "system:local",
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Extract conservative source-linked D&D content candidates for DM review."""
+        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        if not idempotency_key:
+            raise ValueError("idempotency_key is required for candidate extraction")
+        job = require_import_job(campaign_id, job_id, "rulebook")
+        if not job.source_id:
+            raise ValueError("rule import job must be indexed before candidate extraction")
+        payload = {"job_id": job_id, "operation": "extract_candidates"}
+        scope = f"import-job:{campaign_id}:{job_id}:{principal_id}"
+        replay = replay_idempotent(scope, idempotency_key, payload)
+        if replay is not None:
+            return replay
+        candidates = extract_content_candidates(rules.source_chunks(job.source_id))
+        for candidate in candidates:
+            candidate["source_citations"] = [
+                rules.citation(chunk_id, source_id=job.source_id)
+                for chunk_id in candidate["source_chunk_ids"]
+            ]
+        updated = import_jobs.set_candidates(job_id, candidates)
+        response = {"job": asdict(updated), "candidates": updated.candidates}
+        return remember_idempotent(
+            scope, idempotency_key, payload, response, campaign_id=campaign_id
+        )
+
+    @mcp.tool()
+    def import_job_review_candidates(
+        campaign_id: str,
+        job_id: str,
+        decisions: list[dict[str, Any]],
+        principal_id: str = "system:local",
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Accept, reject, or complete extracted content cards before pack compilation."""
+        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        if not idempotency_key:
+            raise ValueError("idempotency_key is required for candidate review")
+        require_import_job(campaign_id, job_id)
+        payload = {"job_id": job_id, "operation": "review", "decisions": decisions}
+        scope = f"import-job:{campaign_id}:{job_id}:{principal_id}"
+        replay = replay_idempotent(scope, idempotency_key, payload)
+        if replay is not None:
+            return replay
+        updated = import_jobs.review_candidates(job_id, decisions)
+        response = {"job": asdict(updated), "candidates": updated.candidates}
         return remember_idempotent(
             scope, idempotency_key, payload, response, campaign_id=campaign_id
         )
@@ -5897,6 +6105,218 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
 
     @mcp.tool()
+    def module_import_job_create(
+        campaign_id: str,
+        artifact: str,
+        title: str | None = None,
+        source_key: str | None = None,
+        principal_id: str = "system:local",
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Create a staged module package job before parsing or activating a revision."""
+        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        if not idempotency_key:
+            raise ValueError("idempotency_key is required for an import job")
+        path = storage.artifact_module_path(artifact)
+        preview = modules.preview_path(
+            path, parser=MarkdownModuleParser(profile=DndModuleProfile())
+        )
+        logical_key = str(source_key or artifact).strip()
+        payload = {
+            "artifact": artifact,
+            "title": title or path.stem,
+            "source_key": logical_key,
+        }
+        scope = f"import-job-create:{campaign_id}:{principal_id}"
+        replay = replay_idempotent(scope, idempotency_key, payload)
+        if replay is not None:
+            return replay
+        job = import_jobs.create(
+            campaign_id=campaign_id,
+            kind="module",
+            artifact=artifact,
+            artifact_checksum=str(preview.get("checksum") or ""),
+            payload=payload,
+        )
+        response = {"job": asdict(job)}
+        return remember_idempotent(
+            scope, idempotency_key, payload, response, campaign_id=campaign_id
+        )
+
+    @mcp.tool()
+    def module_import_job_inspect(
+        campaign_id: str,
+        job_id: str,
+        principal_id: str = "system:local",
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Persist parser preview, stable scene keys, and space evidence for a module job."""
+        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        if not idempotency_key:
+            raise ValueError("idempotency_key is required for module inspection")
+        job = require_import_job(campaign_id, job_id, "module")
+        payload = {"job_id": job_id, "operation": "inspect"}
+        scope = f"import-job:{campaign_id}:{job_id}:{principal_id}"
+        replay = replay_idempotent(scope, idempotency_key, payload)
+        if replay is not None:
+            return replay
+        preview = modules.preview_path(
+            storage.artifact_module_path(job.artifact),
+            parser=MarkdownModuleParser(profile=DndModuleProfile()),
+        )
+        updated = import_jobs.record_inspection(job_id, preview)
+        response = {"job": asdict(updated), "preview": preview}
+        return remember_idempotent(
+            scope, idempotency_key, payload, response, campaign_id=campaign_id
+        )
+
+    @mcp.tool()
+    def module_import_job_validate(
+        campaign_id: str,
+        job_id: str,
+        principal_id: str = "system:local",
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Validate a staged module and preview scene/progress impact before importing it."""
+        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        if not idempotency_key:
+            raise ValueError("idempotency_key is required for module validation")
+        job = require_import_job(campaign_id, job_id, "module")
+        if job.state not in {"inspected", "validated", "failed"}:
+            raise ValueError("module import job must be inspected before validation")
+        payload = {"job_id": job_id, "operation": "validate"}
+        scope = f"import-job:{campaign_id}:{job_id}:{principal_id}"
+        replay = replay_idempotent(scope, idempotency_key, payload)
+        if replay is not None:
+            return replay
+        preview = dict(job.inspection)
+        diff = modules.diff_preview(
+            campaign_id,
+            source_key=str(job.payload.get("source_key") or job.artifact),
+            preview=preview,
+        )
+        validation = {
+            "valid": bool(preview.get("valid")),
+            "errors": list(preview.get("errors") or []),
+            "warnings": list(preview.get("warnings") or []),
+            "preview": preview,
+            "diff": diff,
+        }
+        updated = import_jobs.record_validation(
+            job_id,
+            validation,
+            state="validated" if validation["valid"] else "failed",
+        )
+        response = {"job": asdict(updated), "validation": validation}
+        return remember_idempotent(
+            scope, idempotency_key, payload, response, campaign_id=campaign_id
+        )
+
+    @mcp.tool()
+    def module_import_job_import(
+        campaign_id: str,
+        job_id: str,
+        principal_id: str = "system:local",
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Ingest a validated module inactive, preserving the current active module."""
+        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        if not idempotency_key:
+            raise ValueError("idempotency_key is required for module import")
+        job = require_import_job(campaign_id, job_id, "module")
+        if job.state not in {"validated", "imported"} or not job.validation.get("valid"):
+            raise ValueError("module import job must pass validation before import")
+        payload = {"job_id": job_id, "operation": "import"}
+        scope = f"import-job:{campaign_id}:{job_id}:{principal_id}"
+        replay = replay_idempotent(scope, idempotency_key, payload)
+        if replay is not None:
+            return replay
+        values = dict(job.payload)
+        embedder, vectors = storage.dense_components()
+        result = modules.ingest_path(
+            campaign_id=campaign_id,
+            path=storage.artifact_module_path(job.artifact),
+            source_key=str(values.get("source_key") or job.artifact),
+            title=str(values.get("title") or job.artifact),
+            parser=MarkdownModuleParser(profile=DndModuleProfile()),
+            embedder=embedder,
+            vector_store=vectors,
+            activate=False,
+            logical_source_key=str(values.get("source_key") or job.artifact),
+        )
+        updated = import_jobs.record_result(
+            job_id,
+            {**dict(job.result), "module_import": asdict(result)},
+            state="imported",
+            module_id=result.module_id,
+        )
+        response = {"job": asdict(updated), **asdict(result)}
+        return remember_idempotent(
+            scope, idempotency_key, payload, response, campaign_id=campaign_id
+        )
+
+    @mcp.tool()
+    def module_import_job_activate(
+        campaign_id: str,
+        job_id: str,
+        principal_id: str = "system:local",
+        expected_revision: int | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Atomically promote an imported module revision after its diff was reviewed."""
+        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        require_write_contract(expected_revision, idempotency_key)
+        if dict(campaigns.get(campaign_id).state or {}).get("combat", {}).get("active", False):
+            raise CombatEngineError("module activation cannot change during active combat")
+        job = require_import_job(campaign_id, job_id, "module")
+        if job.state not in {"imported", "activated"} or not job.module_id:
+            raise ValueError("module import job must be imported before activation")
+        payload = {"job_id": job_id, "operation": "activate", "module_id": job.module_id}
+        scope = f"import-job:{campaign_id}:{job_id}:{principal_id}"
+        replay = replay_idempotent(scope, idempotency_key, payload)
+        if replay is not None:
+            return replay
+        before = campaigns.get(campaign_id)
+        if before.revision != expected_revision:
+            raise ValueError(f"campaign revision conflict: {campaign_id}")
+        activation = modules.activate_candidate(campaign_id, job.module_id)
+        state = dict(before.state or {})
+        module_imports = dict(state.get("module_imports") or {})
+        active_modules = dict(module_imports.get("active") or {})
+        source_key = str(job.payload.get("source_key") or job.artifact)
+        active_modules[source_key] = {
+            "module_id": job.module_id,
+            "checksum": job.artifact_checksum,
+            "parser_profile": job.parser_profile,
+            "parser_version": job.parser_version,
+        }
+        state["module_imports"] = {**module_imports, "active": active_modules}
+        after = campaigns.update_audited(
+            campaign_id,
+            state=state,
+            expected_revision=expected_revision,
+            operation="module.import.activate",
+            actor=principal_id,
+            branch_id=current_branch_id(campaign_id),
+            idempotency_key=idempotency_key,
+            request_hash=request_hash(payload),
+        )
+        updated = import_jobs.record_result(
+            job_id,
+            {**dict(job.result), "activation": activation, "campaign_revision": after.revision},
+            state="activated",
+            module_id=job.module_id,
+        )
+        response = {
+            "job": asdict(updated),
+            "activation": activation,
+            "campaign_revision": after.revision,
+        }
+        return remember_idempotent(
+            scope, idempotency_key, payload, response, campaign_id=campaign_id
+        )
+
+    @mcp.tool()
     def module_write(name: str, content: str, principal_id: str = "system:local") -> dict[str, str]:
         """Write generated Markdown to the managed artifact directory before importing it."""
         if not principal_id:
@@ -6334,6 +6754,141 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
 
     @mcp.tool()
+    def rule_import_job_compile(
+        campaign_id: str,
+        job_id: str,
+        manifest: dict[str, Any],
+        mechanics: list[dict[str, Any]] | None = None,
+        provenance: dict[str, Any] | None = None,
+        principal_id: str = "system:local",
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Compile accepted candidates; incomplete cards remain catalog-only."""
+        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        if not idempotency_key:
+            raise ValueError("idempotency_key is required for pack compilation")
+        job = require_import_job(campaign_id, job_id, "rulebook")
+        if not job.source_id:
+            raise ValueError("rule import job must be indexed before pack compilation")
+        if job.state not in {"reviewed", "compiled", "validated", "failed"}:
+            raise ValueError("all content candidates must be reviewed before pack compilation")
+        pack_id = str(manifest.get("id") or "").strip()
+        if not pack_id:
+            raise ValueError("manifest.id is required")
+        payload = {
+            "job_id": job_id,
+            "operation": "compile",
+            "manifest": manifest,
+            "mechanics": mechanics or [],
+            "provenance": provenance or {},
+        }
+        scope = f"import-job:{campaign_id}:{job_id}:{principal_id}"
+        replay = replay_idempotent(scope, idempotency_key, payload)
+        if replay is not None:
+            return replay
+        artifacts = compiled_artifacts_from_candidates(job.candidates, pack_id=pack_id)
+        draft = rule_pack_draft_from_source(
+            source_id=job.source_id,
+            manifest=manifest,
+            artifacts=artifacts,
+            mechanics=mechanics,
+            provenance={**dict(provenance or {}), "import_job_id": job_id},
+        )
+        state = "compiled" if draft["status"] == "validated" else "failed"
+        updated = import_jobs.record_validation(
+            job_id,
+            {"draft": draft, "accepted_artifact_count": len(artifacts)},
+            state=state,
+        )
+        response = {"job": asdict(updated), "draft": draft}
+        return remember_idempotent(
+            scope, idempotency_key, payload, response, campaign_id=campaign_id
+        )
+
+    @mcp.tool()
+    def rule_import_job_install(
+        campaign_id: str,
+        job_id: str,
+        principal_id: str = "system:local",
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Install the exact validated pack compiled by an import job without enabling it."""
+        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        if not idempotency_key:
+            raise ValueError("idempotency_key is required for pack installation")
+        job = require_import_job(campaign_id, job_id, "rulebook")
+        draft = dict(job.validation.get("draft") or {})
+        if job.state not in {"compiled", "installed"} or draft.get("status") != "validated":
+            raise ValueError("import job has no validated pack draft to install")
+        pack_id = str(draft.get("pack_id") or "")
+        version = str(draft.get("version") or "")
+        payload = {"job_id": job_id, "operation": "install", "pack_id": pack_id, "version": version}
+        scope = f"import-job:{campaign_id}:{job_id}:{principal_id}"
+        replay = replay_idempotent(scope, idempotency_key, payload)
+        if replay is not None:
+            return replay
+        installed = asdict(rule_packs.install(pack_id, version))
+        updated = import_jobs.record_result(
+            job_id,
+            {**dict(job.result), "installed_pack": installed},
+            state="installed",
+            source_id=job.source_id,
+        )
+        response = {"job": asdict(updated), "installed": installed}
+        return remember_idempotent(
+            scope, idempotency_key, payload, response, campaign_id=campaign_id
+        )
+
+    @mcp.tool()
+    def rule_import_job_activate(
+        campaign_id: str,
+        job_id: str,
+        principal_id: str = "system:local",
+        branch_id: str | None = None,
+        expected_revision: int | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Enable an installed imported pack only through the checked-out branch lock."""
+        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        require_write_contract(expected_revision, idempotency_key)
+        job = require_import_job(campaign_id, job_id, "rulebook")
+        installed = dict(job.result.get("installed_pack") or {})
+        if job.state not in {"installed", "activated"}:
+            raise ValueError("import job must install its pack before activation")
+        pack_id = str(installed.get("pack_id") or "")
+        version = str(installed.get("version") or "")
+        payload = {
+            "job_id": job_id,
+            "operation": "activate",
+            "pack_id": pack_id,
+            "version": version,
+            "branch_id": branch_id,
+        }
+        scope = f"import-job:{campaign_id}:{job_id}:{principal_id}"
+        replay = replay_idempotent(scope, idempotency_key, payload)
+        if replay is not None:
+            return replay
+        activation = campaign_rule_pack_set(
+            campaign_id=campaign_id,
+            pack_id=pack_id,
+            version=version,
+            principal_id=principal_id,
+            branch_id=branch_id,
+            expected_revision=expected_revision,
+            idempotency_key=idempotency_key,
+        )
+        updated = import_jobs.record_result(
+            job_id,
+            {**dict(job.result), "activation": activation},
+            state="activated",
+            source_id=job.source_id,
+        )
+        response = {"job": asdict(updated), "activation": activation}
+        return remember_idempotent(
+            scope, idempotency_key, payload, response, campaign_id=campaign_id
+        )
+
+    @mcp.tool()
     def rule_pack_install(pack_id: str, version: str) -> dict[str, Any]:
         """Install one validated immutable version without enabling it for a campaign."""
         return asdict(rule_packs.install(pack_id, version))
@@ -6563,8 +7118,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         profile = rule_profiles.get(campaign_id)
         values: list[tuple[str, str, dict[str, Any]]] = []
         if profile and profile.edition == "2014":
-            core = rule_packs.get_version(CORE_CONTENT_PACK_ID, CORE_CONTENT_PACK_VERSION)
-            values.extend((core.pack_id, core.version, dict(item)) for item in core.artifacts)
+            try:
+                core = rule_packs.get_version(CORE_CONTENT_PACK_ID, CORE_CONTENT_PACK_VERSION)
+            except LookupError:
+                # A headless server may intentionally run without the bundled
+                # skill repository. Enabled user packs must remain usable.
+                core = None
+            if core is not None:
+                values.extend((core.pack_id, core.version, dict(item)) for item in core.artifacts)
         for activation in rule_packs.activations(campaign_id, branch_id=branch_id):
             if not activation.enabled:
                 continue
@@ -6635,6 +7196,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "mechanic_refs": list(artifact.get("mechanic_refs") or []),
                     "source_citations": deepcopy(list(artifact.get("source_citations") or [])),
                     "selection_requirements": selection_requirements,
+                    "application_state": str(
+                        artifact.get("application_state") or "selection_ready"
+                    ),
                 }
             )
         return sorted(
@@ -6666,6 +7230,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if match is None:
             raise LookupError("content artifact is not available for this campaign")
         pack_id, version, artifact = match
+        application_state = str(artifact.get("application_state") or "selection_ready")
+        if application_state != "selection_ready":
+            return {
+                "status": "pending_ruling",
+                "reason": (
+                    "catalog artifact is source-linked but not selection-ready; "
+                    "complete reviewer validation before applying it to an actor"
+                ),
+            }
         kind = str(artifact.get("kind") or "")
         card = deepcopy(dict(artifact.get("card") or {}))
         selection = deepcopy(selection or {})
