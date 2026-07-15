@@ -1,0 +1,24 @@
+name: CI
+on:
+  push:
+  pull_request:
+jobs:
+  contract-and-runtime:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: SagaSmithAI/sagasmith-core
+          path: deps/sagasmith-core
+      - uses: actions/checkout@v4
+        with:
+          repository: SagaSmithAI/Sagasmith-dnd
+          path: deps/sagasmith-dnd
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: python -m pip install -e 'deps/sagasmith-core[dev]' -e 'deps/sagasmith-dnd[dev]' -e '.[dev,gateway]'
+      - run: ruff check .
+      - run: pytest
