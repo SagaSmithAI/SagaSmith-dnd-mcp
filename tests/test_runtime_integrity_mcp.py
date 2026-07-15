@@ -867,6 +867,8 @@ def test_module_scene_creates_a_temporary_battle_map(tmp_path: Path) -> None:
             },
         )
         assert patched["battle_map"]["world_patches"] == [{"key": "gate_open", "value": True}]
+        assert patched["battle_map"]["map_revision"] == 2
+        assert patched["battle_map"]["checksum"] != battle_map["checksum"]
 
     asyncio.run(exercise())
 

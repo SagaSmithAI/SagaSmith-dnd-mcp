@@ -51,6 +51,15 @@ pip install -e ".[dev]"
 sagasmith-dnd-mcp
 ```
 
+若要连接 D&D Workbench UI，同时安装并启动 HTTP/SSE adapter：
+
+```powershell
+pip install -e ".[gateway,dev]"
+sagasmith-dnd-gateway
+```
+
+Gateway 默认只监听 `127.0.0.1:8766`。读请求按 `X-SagaSmith-Principal` 投影；战斗移动写请求不会直写数据库，而是调用同一服务实现中的 `combat_movement` MCP 工具，因此仍经过 actor 权限、campaign/branch revision、幂等、五尺格、阻挡与反应窗口校验。SSE 只发布 revision 变化通知，客户端随后重新读取 audience-filtered DTO。
+
 启用向量嵌入：
 
 ```powershell
@@ -151,7 +160,7 @@ allowlisted file
 
 ### 模组与战斗空间
 
-模组生成必须先 `module_write` 形成可编辑 artifact，再 inspect/import。导入生成 scene index 和保守的 location/room 证据；系统不会从散文中凭空画精确战术地图。战斗开始时才为 encounter 创建临时 combat map，随后由 DM/Agent 在证据和裁决基础上补充距离、连接和位置。
+模组生成先形成可编辑 artifact，再经 staged inspect/import。导入生成 scene index 和保守的 location/room 证据；系统不会从散文中凭空画精确战术地图。战斗开始时才为 encounter 创建临时五尺方格 combat map，随后由 DM/Agent 在证据和裁决基础上补充位置与世界变化。地图背景不具机械意义；墙体、视线、掩体、高度、体型占位和困难地形消耗在引擎实现前继续由 DM 裁决。
 
 ### Skills、resources 与 prompts
 
@@ -174,6 +183,9 @@ allowlisted file
 | `SAGASMITH_MODULEGEN_SKILLS_DIR` | 指向 module generator checkout |
 | `SAGASMITH_DND_MCP_RULE_IMPORT_ROOTS` | `os.pathsep` 分隔的规则书导入白名单 |
 | `SAGASMITH_DND_MCP_AUTO_SEED=0` | 禁用 bundled core reference 自动 seed |
+| `SAGASMITH_DND_GATEWAY_HOST` / `PORT` | UI adapter 监听地址，默认 `127.0.0.1:8766` |
+| `SAGASMITH_DND_GATEWAY_TOKEN` | 非 loopback 访问所需 Bearer token |
+| `SAGASMITH_DND_GATEWAY_ORIGINS` | 逗号分隔的精确 CORS origin allowlist |
 
 服务永远不会直接导入模型任意选择的路径。规则书必须位于 allowlisted root；商业内容由用户自行确保使用权。
 

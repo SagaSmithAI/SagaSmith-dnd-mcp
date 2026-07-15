@@ -18,10 +18,12 @@ dependencies = [
 
 [project.optional-dependencies]
 dense = ["sentence-transformers>=5.0.0,<6.0.0"]
+gateway = ["aiohttp>=3.11.0,<4.0.0"]
 dev = ["pytest>=9.0.0,<10.0.0", "ruff>=0.1.0"]
 
 [project.scripts]
 sagasmith-dnd-mcp = "sagasmith_dnd_mcp.server:main"
+sagasmith-dnd-gateway = "sagasmith_dnd_mcp.gateway:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/sagasmith_dnd_mcp"]

@@ -109,7 +109,12 @@ from sagasmith_dnd.rule_engine import (
     validate_source_bound_mechanics,
 )
 from sagasmith_dnd.rule_providers import load_native_rule_providers
-from sagasmith_dnd.spatial import BattleMapError, compile_battle_map, validate_position
+from sagasmith_dnd.spatial import (
+    BattleMapError,
+    compile_battle_map,
+    patch_battle_map,
+    validate_position,
+)
 from sagasmith_dnd.spells import (
     consume_readied_spell,
     consume_spell_cast,
@@ -6205,8 +6210,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if not battle_map:
             raise CombatEngineError("active encounter has no temporary battle map")
         next_encounter = deepcopy(encounter)
-        next_map = dict(next_encounter["battle_map"])
-        next_map["world_patches"] = [*list(next_map.get("world_patches") or []), *normalized]
+        next_map = patch_battle_map(dict(next_encounter["battle_map"]), normalized)
         next_encounter["battle_map"] = next_map
         state = dict(campaign.state or {})
         state["combat"] = next_encounter
@@ -6695,6 +6699,27 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "redacted": True,
             "content": "[DM-only scene content hidden]",
         }
+
+    def module_progress_index(
+        campaign_id: str,
+        scope_id: str = "party",
+        module_id: str | None = None,
+        principal_id: str = "system:local",
+    ) -> list[dict[str, Any]]:
+        """Project ordered scene progress without adding another public MCP tool."""
+        membership = access.require_campaign(campaign_id, principal_id)
+        resolved_scope_id = readable_scene_scope(campaign_id, scope_id, principal_id)
+        result = modules.scene_progress_index(
+            campaign_id,
+            scope_id=resolved_scope_id,
+            module_id=module_id,
+        )
+        if membership.role in {"owner", "dm"}:
+            return result
+        visible_scene_ids = {
+            item["scene_id"] for item in module_index(campaign_id, module_id, principal_id)
+        }
+        return [item for item in result if item["scene_id"] in visible_scene_ids]
 
     @mcp.tool()
     def module_set_progress(
@@ -8004,7 +8029,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     @mcp.tool()
     def module_query(
         campaign_id: str,
-        view: Literal["list", "index", "scene", "current"] = "list",
+        view: Literal["list", "index", "scene", "current", "progress"] = "list",
         payload: dict[str, Any] | None = None,
         principal_id: str = "system:local",
     ) -> dict[str, Any]:
@@ -8016,8 +8041,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             result = module_index(campaign_id, data.get("module_id"), principal_id)
         elif view == "scene":
             result = module_read_scene(campaign_id, required(data, "scene_id"), principal_id)
-        else:
+        elif view == "current":
             result = module_current(campaign_id, data.get("scope_id", "party"), principal_id)
+        else:
+            result = module_progress_index(
+                campaign_id,
+                data.get("scope_id", "party"),
+                data.get("module_id"),
+                principal_id,
+            )
         return facade_result(view, result)
 
     @mcp.tool()
@@ -8046,7 +8078,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
 
     @mcp.tool()
     def rule_pack_query(
-        view: Literal["list", "inspect", "test", "content_catalog"] = "list",
+        view: Literal["list", "inspect", "test", "content_catalog", "sources"] = "list",
         payload: dict[str, Any] | None = None,
         principal_id: str = "system:local",
     ) -> dict[str, Any]:
@@ -8058,13 +8090,18 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             result = rule_pack_inspect(required(data, "pack_id"), required(data, "version"))
         elif view == "test":
             result = rule_pack_test(required(data, "pack_id"), required(data, "version"))
-        else:
+        elif view == "content_catalog":
             result = content_catalog_list(
                 required(data, "campaign_id"),
                 data.get("kind"),
                 data.get("query", ""),
                 principal_id,
                 data.get("branch_id"),
+            )
+        else:
+            result = rules.sources(
+                system_id=data.get("system_id", "dnd5e"),
+                edition=data.get("edition"),
             )
         return facade_result(view, result)
 
