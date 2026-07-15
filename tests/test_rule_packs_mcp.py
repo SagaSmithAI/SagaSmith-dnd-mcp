@@ -10,6 +10,73 @@ from sagasmith_dnd_mcp.config import McpConfig
 from sagasmith_dnd_mcp.server import create_server
 
 
+def test_core_srd_content_catalog_is_structured_and_selectable(tmp_path: Path) -> None:
+    workspace = Path(__file__).resolve().parents[2]
+    config = McpConfig(
+        home=tmp_path / "home",
+        database_url=None,
+        chroma_url=None,
+        chroma_path_override=None,
+        dnd_skills_dir=workspace / "SagaSmith-dnd-skills",
+        modulegen_skills_dir=workspace / "SagaSmith-module-gen-skills",
+    )
+
+    async def call(server, name: str, arguments: dict):
+        _, result = await server.call_tool(name, arguments)
+        return result.get("result", result) if isinstance(result, dict) else result
+
+    async def exercise() -> None:
+        server = create_server(config)
+        campaign = await call(
+            server,
+            "campaign_create",
+            {"name": "SRD Catalog", "idempotency_key": "catalog-campaign"},
+        )
+        await call(
+            server,
+            "campaign_rule_profile_set",
+            {
+                "campaign_id": campaign["id"],
+                "edition": "2014",
+                "expected_revision": campaign["revision"],
+                "idempotency_key": "catalog-profile",
+            },
+        )
+        spells = await call(
+            server,
+            "content_catalog_list",
+            {"campaign_id": campaign["id"], "kind": "spell", "query": "Fireball"},
+        )
+        fireball = next(item for item in spells if item["name"] == "Fireball")
+        assert fireball["pack_id"] == "dnd5e.content.srd2014"
+        assert fireball["rule_refs"]
+        character = await call(
+            server,
+            "character_create",
+            {
+                "campaign_id": campaign["id"],
+                "name": "Aria",
+                "idempotency_key": "catalog-character",
+            },
+        )
+        applied = await call(
+            server,
+            "character_content_apply",
+            {
+                "character_id": character["id"],
+                "artifact_id": fireball["id"],
+                "expected_revision": character["revision"],
+                "idempotency_key": "catalog-fireball",
+            },
+        )
+        spell = applied["sheet"]["content"]["spells"][0]
+        assert spell["name"] == "Fireball"
+        assert spell["definition"]["range"]["kind"] == "distance"
+        assert spell["definition"]["range"]["normal_ft"] == 150
+
+    asyncio.run(exercise())
+
+
 def test_rule_pack_authoring_activation_and_explanation(tmp_path: Path) -> None:
     config = McpConfig(
         home=tmp_path / "home",
@@ -177,10 +244,7 @@ def test_rule_pack_authoring_activation_and_explanation(tmp_path: Path) -> None:
         )
         assert explained["fingerprint"] == activated["effective"]["fingerprint"]
         assert explained["core_pack"]["id"] == "dnd5e.core.2014"
-        assert any(
-            item["id"] == "dnd5e.core.attack.cover"
-            for item in explained["core_boundaries"]
-        )
+        assert any(item["id"] == "dnd5e.core.attack.cover" for item in explained["core_boundaries"])
         assert explained["mechanics"][0]["citations"][0]["source"] == "local:xgte"
         sheet = default_character_sheet()
         sheet["resources"]["pilot"] = {"value": 0, "max": 1, "recovers_on": "none"}
@@ -461,9 +525,7 @@ def test_rulebook_import_source_bound_pack_and_noncombat_settlement(tmp_path: Pa
             {"campaign_id": campaign["id"]},
         )
         extension = next(
-            item
-            for item in receipts
-            if item["mechanic_id"] == "dnd5e.xgte.tool_synergy.advantage"
+            item for item in receipts if item["mechanic_id"] == "dnd5e.xgte.tool_synergy.advantage"
         )
         assert extension["receipt"]["citations"][0]["chunk_id"] == chunk_id
         assert activated["effective"]["lock"][0]["pack_id"] == "dnd5e.xgte.tool_synergy"
@@ -494,9 +556,7 @@ def test_legacy_campaign_without_core_lock_fails_closed(tmp_path: Path) -> None:
         )
         database = Database(sqlite_database_url(config.database_path))
         try:
-            RuleProfileService(database).set(
-                campaign["id"], edition="2014", options={}
-            )
+            RuleProfileService(database).set(campaign["id"], edition="2014", options={})
         finally:
             database.dispose()
         with pytest.raises(Exception, match="no locked built-in core rule pack"):
@@ -541,9 +601,7 @@ def test_snapshot_and_branch_checkout_reject_unavailable_core_lock(
         )
         database = Database(sqlite_database_url(config.database_path))
         try:
-            RuleProfileService(database).set(
-                campaign["id"], edition="2024", options={}
-            )
+            RuleProfileService(database).set(campaign["id"], edition="2024", options={})
         finally:
             database.dispose()
 
@@ -623,12 +681,11 @@ def test_snapshot_and_branch_checkout_reject_unavailable_core_lock(
                 },
             )
         after = await call(server, "campaign_get", {"campaign_id": campaign["id"]})
-        current_branch = (
-            await call(server, "branch_list", {"campaign_id": campaign["id"]})
-        )
+        current_branch = await call(server, "branch_list", {"campaign_id": campaign["id"]})
         assert after["revision"] == repaired["campaign_revision"]
-        assert next(item for item in current_branch if item["id"] == branch["id"])[
-            "is_current"
-        ] is True
+        assert (
+            next(item for item in current_branch if item["id"] == branch["id"])["is_current"]
+            is True
+        )
 
     asyncio.run(exercise())

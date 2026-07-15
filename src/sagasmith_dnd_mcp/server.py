@@ -82,6 +82,9 @@ from sagasmith_dnd.combat_engine import (
     trigger_readied_action,
     trigger_readied_spell,
 )
+from sagasmith_dnd.core_content import PACK_ID as CORE_CONTENT_PACK_ID
+from sagasmith_dnd.core_content import PACK_VERSION as CORE_CONTENT_PACK_VERSION
+from sagasmith_dnd.core_content import build_srd2014_content
 from sagasmith_dnd.core_rule_pack import get_core_rule_pack
 from sagasmith_dnd.engine import resolve_check, roll
 from sagasmith_dnd.lifecycle import advance_effect_durations, apply_rest
@@ -97,6 +100,7 @@ from sagasmith_dnd.rule_engine import (
     validate_source_bound_mechanics,
 )
 from sagasmith_dnd.rule_providers import load_native_rule_providers
+from sagasmith_dnd.spatial import BattleMapError, compile_battle_map, validate_position
 from sagasmith_dnd.spells import (
     consume_readied_spell,
     consume_spell_cast,
@@ -210,9 +214,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             )
         return context
 
-    def effective_ruleset_view(
-        campaign_id: str, *, branch_id: str | None = None
-    ) -> dict[str, Any]:
+    def effective_ruleset_view(campaign_id: str, *, branch_id: str | None = None) -> dict[str, Any]:
         effective = rule_packs.effective_ruleset(campaign_id, branch_id=branch_id)
         context = effective_rule_context(campaign_id, branch_id=branch_id)
         value = asdict(effective)
@@ -263,6 +265,29 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             additional_errors=compiler_errors,
         )
         return asdict(result)
+
+    def ensure_core_content_pack() -> None:
+        """Install the structured SRD catalog once; availability is edition-based."""
+        if not config.dnd_skills_dir.exists():
+            return
+        try:
+            existing = rule_packs.get_version(CORE_CONTENT_PACK_ID, CORE_CONTENT_PACK_VERSION)
+            if existing.status == "installed":
+                return
+        except LookupError:
+            pass
+        manifest, artifacts = build_srd2014_content(config.dnd_skills_dir)
+        if not artifacts:
+            return
+        result = rule_packs.save_draft(
+            manifest=manifest,
+            artifacts=artifacts,
+            provenance={"source": "bundled-srd2014", "structured": True},
+        )
+        if result.status == "validated":
+            rule_packs.install(CORE_CONTENT_PACK_ID, CORE_CONTENT_PACK_VERSION)
+
+    ensure_core_content_pack()
 
     def checked_rule_facts(value: dict[str, Any] | None) -> dict[str, Any]:
         facts = dict(value or {})
@@ -756,7 +781,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     def server_capabilities() -> dict[str, Any]:
         """Describe the MCP contract and the automatic-vs-ruling combat boundary."""
         return {
-            "contract_version": "2026-07-integrity-v4",
+            "contract_version": "2026-07-integrity-v5",
             "transport": "stdio",
             "state_owner": "sagasmith-dnd-mcp",
             "features": {
@@ -769,6 +794,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "branch_compare": True,
                 "bundled_rule_seed": True,
                 "module_visibility_filter": True,
+                "module_revision_safe_snapshots": True,
+                "scene_spatial_evidence": True,
+                "temporary_combat_maps": True,
                 "structured_combat_engine": True,
                 "combat_preflight_commit": True,
                 "combat_choice_windows": True,
@@ -786,6 +814,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "idempotency_crash_recovery": True,
                 "structured_rulebook_import": True,
                 "source_bound_rule_packs": True,
+                "structured_content_catalog": True,
                 "rule_aware_noncombat_checks": True,
             },
             "rulebook_import": {
@@ -1090,6 +1119,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         participant_config: list[dict[str, Any]] | None = None,
         name: str = "Combat",
         scene_id: str | None = None,
+        scope_id: str = "party",
+        battle_map: dict[str, Any] | None = None,
         ruleset: str | None = None,
         principal_id: str = "system:local",
         branch_id: str | None = None,
@@ -1106,6 +1137,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "participant_config": participant_config,
             "name": name,
             "scene_id": scene_id,
+            "scope_id": scope_id,
+            "battle_map": battle_map,
             "ruleset": ruleset,
             "branch_id": branch_id,
         }
@@ -1159,6 +1192,22 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 ):
                     raise ValueError("visible_to_actor_ids must contain only participant actor IDs")
             config_by_actor[actor_id_value] = dict(entry)
+        scene_context = None
+        resolved_scene_id = scene_id
+        if resolved_scene_id is None:
+            scene_context = modules.current_scene(campaign_id, scope_id=scope_id)
+            if scene_context is not None:
+                resolved_scene_id = str(scene_context["scene_id"])
+        if resolved_scene_id is not None:
+            scene_context = modules.read_scene(campaign_id, resolved_scene_id)
+        compiled_map = None
+        if scene_context is not None:
+            try:
+                compiled_map = compile_battle_map(scene_context, battle_map)
+                for entry in config_by_actor.values():
+                    validate_position(compiled_map, entry.get("position"))
+            except BattleMapError as error:
+                raise NeedsRulingError(str(error), missing=("battle_map",)) from error
         participants = [characters.get(item) for item in participant_ids]
         if any(char.campaign_id != campaign_id for char in participants):
             raise ValueError("all participants must belong to the campaign")
@@ -1170,17 +1219,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         encounter = start_encounter(
             actors,
             ruleset=ruleset or str(campaign.settings.get("edition") or "2024"),
-            scene_id=scene_id,
+            scene_id=resolved_scene_id,
             name=name,
+            battle_map=compiled_map,
         )
         initiatives = [
-            int(item.get("initiative", 0) or 0)
-            for item in encounter.get("combatants", [])
+            int(item.get("initiative", 0) or 0) for item in encounter.get("combatants", [])
         ]
         start_boundary_ids = (
-            ["dnd5e.core.initiative.tie"]
-            if len(initiatives) != len(set(initiatives))
-            else []
+            ["dnd5e.core.initiative.tie"] if len(initiatives) != len(set(initiatives)) else []
         )
         start_receipts = core_receipts(
             effective_rule_context(campaign_id),
@@ -1620,9 +1667,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             extension = apply_rule_event(
                 result["sheet"],
                 "duration.advance",
-                context_with_facts(
-                    rule_context, actor_id=character.id, period=normalized_period
-                ),
+                context_with_facts(rule_context, actor_id=character.id, period=normalized_period),
             )
             rule_receipts.extend(extension.receipts)
             if (
@@ -1912,9 +1957,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         _, encounter = active_encounter(campaign_id)
         require_no_blocking_pending(encounter)
         moving_combatant = next(
-            item
-            for item in encounter.get("combatants", [])
-            if item.get("actor_id") == actor_id
+            item for item in encounter.get("combatants", []) if item.get("actor_id") == actor_id
         )
         moving_conditions = {
             str(item).casefold() for item in moving_combatant.get("conditions", [])
@@ -3688,13 +3731,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if current_branch_id(campaign_id) != expected_branch_id:
             raise ValueError("active branch changed before branch creation")
         if checkout:
-            source_snapshot_id = from_snapshot_id or branches.current(
-                campaign_id
-            ).head_snapshot_id
+            source_snapshot_id = from_snapshot_id or branches.current(campaign_id).head_snapshot_id
             if source_snapshot_id:
-                assert_snapshot_core_available(
-                    snapshots.get_by_id(campaign_id, source_snapshot_id)
-                )
+                assert_snapshot_core_available(snapshots.get_by_id(campaign_id, source_snapshot_id))
         created = branches.create(
             campaign_id,
             name=name,
@@ -3960,9 +3999,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 campaign_id=campaign_id,
                 name=name,
                 player_name=player_name,
-                sheet=validate_character_sheet(
-                    sheet, rules=effective_rule_context(campaign_id)
-                ),
+                sheet=validate_character_sheet(sheet, rules=effective_rule_context(campaign_id)),
             )
         )
 
@@ -4031,9 +4068,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             )
         normalized_sheet = validate_character_sheet(
             sheet_value,
-            rules=(
-                effective_rule_context(current.campaign_id) if current.campaign_id else None
-            ),
+            rules=(effective_rule_context(current.campaign_id) if current.campaign_id else None),
         )
         return update_character(
             current,
@@ -4067,9 +4102,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             )
         normalized_sheet = validate_character_sheet(
             sheet_value,
-            rules=(
-                effective_rule_context(current.campaign_id) if current.campaign_id else None
-            ),
+            rules=(effective_rule_context(current.campaign_id) if current.campaign_id else None),
         )
         normalized_notes = validate_character_notes(notes if notes is not None else current.notes)
         return update_character(
@@ -5651,6 +5684,70 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
 
     @mcp.tool()
+    def combat_map_patch(
+        campaign_id: str,
+        patches: list[dict[str, Any]],
+        principal_id: str = "system:local",
+        expected_revision: int | None = None,
+        branch_id: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Record DM-confirmed world changes from an active temporary battle map."""
+        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        require_write_contract(expected_revision, idempotency_key)
+        resolved_branch_id = require_current_branch(campaign_id, branch_id)
+        normalized: list[dict[str, Any]] = []
+        for patch in patches:
+            if not isinstance(patch, dict) or not isinstance(patch.get("key"), str):
+                raise ValueError("each map patch needs a string key")
+            normalized.append({"key": patch["key"], "value": deepcopy(patch.get("value"))})
+        payload = {"patches": normalized, "branch_id": resolved_branch_id}
+        scope = f"combat-map-patch:{campaign_id}:{resolved_branch_id}:{principal_id}"
+        replay = replay_idempotent(scope, idempotency_key, payload)
+        if replay is not None:
+            return replay
+        campaign, encounter = active_encounter(campaign_id)
+        if campaign.revision != expected_revision:
+            raise ValueError(
+                "campaign revision conflict: "
+                f"expected {expected_revision}, found {campaign.revision}"
+            )
+        battle_map = dict(encounter.get("battle_map") or {})
+        if not battle_map:
+            raise CombatEngineError("active encounter has no temporary battle map")
+        next_encounter = deepcopy(encounter)
+        next_map = dict(next_encounter["battle_map"])
+        next_map["world_patches"] = [*list(next_map.get("world_patches") or []), *normalized]
+        next_encounter["battle_map"] = next_map
+        state = dict(campaign.state or {})
+        state["combat"] = next_encounter
+        runtime = dict(state.get("scene_runtime") or {})
+        scene_id = str(dict(next_map.get("source") or {}).get("scene_id") or "")
+        if scene_id:
+            scene_state = dict(runtime.get(scene_id) or {})
+            for patch in normalized:
+                scene_state[patch["key"]] = patch["value"]
+            runtime[scene_id] = scene_state
+        state["scene_runtime"] = runtime
+        StateMutationService(storage.database).replace(
+            campaign_id,
+            campaign_state=validate_party_state(state),
+            expected_campaign_revision=campaign.revision,
+            operation="combat.map.patch",
+            actor=principal_id,
+            branch_id=resolved_branch_id,
+            idempotency_key=idempotency_key,
+        )
+        response = {"battle_map": next_map, "world_patches": normalized}
+        return remember_idempotent(
+            scope,
+            idempotency_key,
+            payload,
+            response,
+            campaign_id=campaign_id,
+        )
+
+    @mcp.tool()
     def combat_end(
         campaign_id: str,
         principal_id: str = "system:local",
@@ -5886,6 +5983,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         progress: int = 0,
         state: dict[str, Any] | None = None,
         current_room: str | None = None,
+        current_location_key: str | None = None,
         principal_id: str = "system:local",
         expected_state_version: int | None = None,
         idempotency_key: str | None = None,
@@ -5904,6 +6002,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "progress": progress,
             "state": state,
             "current_room": current_room,
+            "current_location_key": current_location_key,
             "expected_state_version": expected_state_version,
             "branch_id": branch_id,
         }
@@ -5919,6 +6018,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             progress=progress,
             state=state,
             current_room=current_room,
+            current_location_key=current_location_key,
             expected_state_version=expected_state_version,
         )
         return remember_idempotent(
@@ -6144,8 +6244,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 rules.citation(str(chunk_id), source_id=source_id) for chunk_id in chunk_ids
             ]
             value["rule_refs"] = [
-                f"{citation['source']}#chunk:{citation['chunk_id']}"
-                for citation in citations
+                f"{citation['source']}#chunk:{citation['chunk_id']}" for citation in citations
             ]
             value["source_citations"] = citations
             bound_artifacts.append(value)
@@ -6159,9 +6258,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "edition": source["edition"],
                 "publication_id": source["publication_id"],
                 "normalized_checksum": source["checksum"],
-                "source_checksum": source_metadata.get(
-                    "source_checksum", source["checksum"]
-                ),
+                "source_checksum": source_metadata.get("source_checksum", source["checksum"]),
                 "page_count": source_metadata.get("page_count"),
                 "warnings": list(source_metadata.get("warnings") or []),
             },
@@ -6308,9 +6405,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         response = {
             "activation": asdict(activation),
-            "effective": effective_ruleset_view(
-                campaign_id, branch_id=activation.branch_id
-            ),
+            "effective": effective_ruleset_view(campaign_id, branch_id=activation.branch_id),
             "campaign_revision": mutation_revision(campaign_id),
         }
         return remember_idempotent(
@@ -6342,9 +6437,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             expected_campaign_revision=expected_revision,
         )
         response = {
-            "effective": effective_ruleset_view(
-                campaign_id, branch_id=resolved_branch_id
-            ),
+            "effective": effective_ruleset_view(campaign_id, branch_id=resolved_branch_id),
             "campaign_revision": mutation_revision(campaign_id),
         }
         return remember_idempotent(
@@ -6363,9 +6456,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         effective = rule_packs.effective_ruleset(campaign_id, branch_id=branch_id)
         context = effective_rule_context(campaign_id, branch_id=branch_id)
         mechanics = [
-            asdict(item)
-            for item in context.mechanics
-            if event is None or item.event == event
+            asdict(item) for item in context.mechanics if event is None or item.event == event
         ]
         return {
             "campaign_id": campaign_id,
@@ -6403,6 +6494,143 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 limit=limit,
             )
         ]
+
+    def available_content_artifacts(
+        campaign_id: str, *, kind: str | None = None, branch_id: str | None = None
+    ) -> list[tuple[str, str, dict[str, Any]]]:
+        profile = rule_profiles.get(campaign_id)
+        values: list[tuple[str, str, dict[str, Any]]] = []
+        if profile and profile.edition == "2014":
+            core = rule_packs.get_version(CORE_CONTENT_PACK_ID, CORE_CONTENT_PACK_VERSION)
+            values.extend((core.pack_id, core.version, dict(item)) for item in core.artifacts)
+        for activation in rule_packs.activations(campaign_id, branch_id=branch_id):
+            if not activation.enabled:
+                continue
+            pack = rule_packs.get_version(activation.pack_id, activation.version)
+            values.extend((pack.pack_id, pack.version, dict(item)) for item in pack.artifacts)
+        return [item for item in values if kind is None or item[2].get("kind") == kind]
+
+    @mcp.tool()
+    def content_catalog_list(
+        campaign_id: str,
+        kind: str | None = None,
+        query: str = "",
+        principal_id: str = "system:local",
+        branch_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """List core and enabled-extension character options from one uniform catalog."""
+        access.require_campaign(campaign_id, principal_id)
+        lowered = query.casefold().strip()
+        result = []
+        for pack_id, version, artifact in available_content_artifacts(
+            campaign_id, kind=kind, branch_id=branch_id
+        ):
+            card = dict(artifact.get("card") or {})
+            name = str(card.get("name") or artifact["id"])
+            if (
+                lowered
+                and lowered not in name.casefold()
+                and lowered not in str(artifact["id"]).casefold()
+            ):
+                continue
+            result.append(
+                {
+                    "id": artifact["id"],
+                    "kind": artifact.get("kind"),
+                    "name": name,
+                    "pack_id": pack_id,
+                    "pack_version": version,
+                    "rule_refs": list(artifact.get("rule_refs") or []),
+                    "mechanic_refs": list(artifact.get("mechanic_refs") or []),
+                }
+            )
+        return sorted(
+            result,
+            key=lambda item: (str(item["kind"]), str(item["name"]), str(item["id"])),
+        )
+
+    @mcp.tool()
+    def character_content_apply(
+        character_id: str,
+        artifact_id: str,
+        principal_id: str = "system:local",
+        expected_revision: int | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Apply a catalog option when its structured card has a safe character target."""
+        current = characters.get(character_id)
+        require_character_control(current, principal_id)
+        require_outside_active_combat(current, "content selection")
+        if current.campaign_id is None:
+            raise ValueError("content selection requires a campaign-bound character")
+        if expected_revision is None or not idempotency_key:
+            raise ValueError(
+                "expected_revision and idempotency_key are required for content selection"
+            )
+        candidates = available_content_artifacts(current.campaign_id)
+        match = next((item for item in candidates if item[2].get("id") == artifact_id), None)
+        if match is None:
+            raise LookupError("content artifact is not available for this campaign")
+        pack_id, version, artifact = match
+        kind = str(artifact.get("kind") or "")
+        card = deepcopy(dict(artifact.get("card") or {}))
+        sheet = deepcopy(current.sheet)
+        if kind == "spell":
+            card.update(
+                {
+                    "id": artifact_id,
+                    "pack_id": pack_id,
+                    "pack_version": version,
+                    "rule_refs": list(artifact.get("rule_refs") or []),
+                    "mechanic_refs": list(artifact.get("mechanic_refs") or []),
+                }
+            )
+            if any(item.get("id") == artifact_id for item in sheet["content"]["spells"]):
+                raise ValueError("content spell is already present")
+            sheet["content"]["spells"].append(card)
+        elif kind == "feat":
+            card.update(
+                {
+                    "id": artifact_id,
+                    "pack_id": pack_id,
+                    "pack_version": version,
+                    "rule_refs": list(artifact.get("rule_refs") or []),
+                    "mechanic_refs": list(artifact.get("mechanic_refs") or []),
+                }
+            )
+            if any(item.get("id") == artifact_id for item in sheet["content"]["feats"]):
+                raise ValueError("content feat is already present")
+            sheet["content"]["feats"].append(card)
+        elif kind == "subclass":
+            classes = list(sheet["progression"]["classes"])
+            if not classes:
+                return {
+                    "status": "pending_ruling",
+                    "reason": "choose a base class before selecting a subclass",
+                }
+            classes[0]["subclass"] = str(card.get("name") or artifact_id)
+            sheet["progression"]["classes"] = classes
+        elif kind == "background":
+            sheet["progression"]["background"] = str(card.get("name") or artifact_id)
+            grants = dict(card.get("background_grants") or {})
+            sheet["progression"]["background_grants"] = {
+                **sheet["progression"]["background_grants"],
+                **grants,
+            }
+        else:
+            return {
+                "status": "pending_ruling",
+                "reason": f"{kind} is catalogued but needs a DM-reviewed application",
+            }
+        return update_sheet(
+            character_id,
+            sheet,
+            operation="character.content.apply",
+            principal_id=principal_id,
+            expected_revision=expected_revision,
+            idempotency_key=idempotency_key,
+            payload={"artifact_id": artifact_id, "pack_id": pack_id, "version": version},
+        )
 
     @mcp.tool()
     def character_rule_artifact_add(

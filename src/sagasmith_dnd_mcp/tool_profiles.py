@@ -100,6 +100,8 @@ AUTHORING_TOOLS = ALWAYS_TOOLS | {
     "campaign_rule_pack_set",
     "campaign_rule_pack_remove",
     "character_rule_artifact_add",
+    "content_catalog_list",
+    "character_content_apply",
 }
 
 PLAY_TOOLS = ALWAYS_TOOLS | {
@@ -154,6 +156,8 @@ PLAY_TOOLS = ALWAYS_TOOLS | {
     "module_current",
     "module_set_progress",
     "module_search",
+    "content_catalog_list",
+    "character_content_apply",
 }
 
 COMBAT_TOOLS = ALWAYS_TOOLS | {
@@ -182,6 +186,7 @@ COMBAT_TOOLS = ALWAYS_TOOLS | {
     "combat_choice_open",
     "combat_choice_resolve",
     "combat_end",
+    "combat_map_patch",
     "dnd_dice_roll",
     "dnd_check",
     "event_add",

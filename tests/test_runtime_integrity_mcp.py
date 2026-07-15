@@ -459,9 +459,7 @@ def test_readied_spell_lifecycle_is_atomic_and_rule_complete(tmp_path: Path) -> 
             },
         )
         assert expiring_id in expiry_target["readied_spells_expired"]
-        caster_after_expiry = await call(
-            server, "character_get", {"character_id": caster["id"]}
-        )
+        caster_after_expiry = await call(server, "character_get", {"character_id": caster["id"]})
         assert not any(
             effect["active"] and effect["kind"] == "readied_spell"
             for effect in caster_after_expiry["sheet"]["effects"]
@@ -739,6 +737,105 @@ def test_structured_combat_is_atomic_and_player_filtered(tmp_path: Path) -> None
         allowed = {"actor_id", "token_id", "name", "initiative", "position"}
         assert all(set(item) <= allowed for item in player_view["combatants"])
         assert second["id"] not in {item["actor_id"] for item in player_view["combatants"]}
+
+    asyncio.run(exercise())
+
+
+def test_module_scene_creates_a_temporary_battle_map(tmp_path: Path) -> None:
+    config = McpConfig(
+        home=tmp_path / "home",
+        database_url=None,
+        chroma_url=None,
+        chroma_path_override=None,
+        dnd_skills_dir=tmp_path / "dnd",
+        modulegen_skills_dir=tmp_path / "modulegen",
+        auto_seed_rules=False,
+    )
+
+    async def call(server, name: str, arguments: dict):
+        _, result = await server.call_tool(name, arguments)
+        return result.get("result", result) if isinstance(result, dict) else result
+
+    async def exercise() -> None:
+        server = create_server(config)
+        campaign = await call(
+            server,
+            "campaign_create",
+            {"name": "Map", "idempotency_key": "map-campaign"},
+        )
+        mover = await call(
+            server,
+            "character_create",
+            {"campaign_id": campaign["id"], "name": "Mover", "idempotency_key": "map-mover"},
+        )
+        threat = await call(
+            server,
+            "character_create",
+            {"campaign_id": campaign["id"], "name": "Threat", "idempotency_key": "map-threat"},
+        )
+        artifact = await call(
+            server,
+            "module_write",
+            {"name": "keep.md", "content": "# Keep\n## Gate\nA 30 by 20 foot gatehouse."},
+        )
+        await call(
+            server,
+            "module_import",
+            {"campaign_id": campaign["id"], "artifact": artifact["artifact"]},
+        )
+        scene = (await call(server, "module_index", {"campaign_id": campaign["id"]}))[0]
+        await call(
+            server,
+            "module_set_progress",
+            {
+                "campaign_id": campaign["id"],
+                "scene_id": scene["scene_id"],
+                "expected_state_version": 0,
+                "idempotency_key": "map-progress",
+            },
+        )
+        started = await call(
+            server,
+            "combat_start",
+            {
+                "campaign_id": campaign["id"],
+                "participant_ids": [mover["id"], threat["id"]],
+                "participant_config": [
+                    {"actor_id": mover["id"], "initiative": 20, "position": {"x": 0, "y": 0}},
+                    {"actor_id": threat["id"], "initiative": 10, "position": {"x": 3, "y": 0}},
+                ],
+                "battle_map": {"blocked_cells": [{"x": 1, "y": 0}]},
+                "expected_revision": campaign["revision"],
+                "idempotency_key": "map-combat-start",
+            },
+        )
+        battle_map = started["combat"]["battle_map"]
+        assert battle_map["lifecycle"] == "temporary"
+        assert battle_map["source"]["scene_id"] == scene["scene_id"]
+        with pytest.raises(Exception, match="blocked"):
+            await call(
+                server,
+                "combat_move",
+                {
+                    "campaign_id": campaign["id"],
+                    "actor_id": mover["id"],
+                    "distance": 5,
+                    "destination": {"x": 1, "y": 0},
+                    "expected_revision": started["campaign_revision"],
+                    "idempotency_key": "map-blocked-move",
+                },
+            )
+        patched = await call(
+            server,
+            "combat_map_patch",
+            {
+                "campaign_id": campaign["id"],
+                "patches": [{"key": "gate_open", "value": True}],
+                "expected_revision": started["campaign_revision"],
+                "idempotency_key": "map-gate-open",
+            },
+        )
+        assert patched["battle_map"]["world_patches"] == [{"key": "gate_open", "value": True}]
 
     asyncio.run(exercise())
 
