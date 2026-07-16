@@ -72,6 +72,7 @@ from sagasmith_dnd.combat_engine import (
     current_combatant,
     end_turn,
     pay_activity_activation,
+    pay_attack_action,
     preflight_attack,
     resolve_actor_check,
     resolve_attack_action,
@@ -1953,6 +1954,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             if access.require_campaign(campaign_id, principal_id).role not in {"owner", "dm"}:
                 raise CombatEngineError("attack requires a DM ruling") from None
             raise
+        next_encounter, attack_payment = pay_attack_action(
+            encounter,
+            attacker,
+            weapon_id=str(plan.get("weapon_id") or ""),
+            attack_mode=str(plan.get("attack_mode") or "melee"),
+            multiattack_option_id=action_payload.get("multiattack_option_id"),
+        )
         updated_attacker, updated_target, result = resolve_attack_action(
             attacker,
             target,
@@ -1974,7 +1982,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 )
                 updated_attacker["sheet"] = updated_sheet
                 result["ammunition"] = ammunition
-        next_encounter = dict(encounter)
+        result["attack_payment"] = attack_payment
         current = next(
             item for item in next_encounter["combatants"] if item.get("actor_id") == actor_id
         )
@@ -1983,17 +1991,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             flags = dict(current.get("turn_flags") or {})
             flags["sneak_attack_turn_token"] = sneak_attack["turn_token"]
             current["turn_flags"] = flags
-        budget = dict(current.get("turn_budget") or {})
-        if budget.get("attack_budget", 0) > 0:
-            budget["attack_budget"] -= 1
-        elif budget.get("main_action", 0) > 0:
-            budget["main_action"] -= 1
-            budget["attack_budget"] = max(
-                0, int(attacker.get("derived", {}).get("attacks_per_action", 1) or 1) - 1
-            )
-        else:
-            raise CombatEngineError("actor has no attack payment available")
-        current["turn_budget"] = budget
         if result.get("reveals_attacker"):
             current["hidden"] = False
         if plan.get("helped_by"):
