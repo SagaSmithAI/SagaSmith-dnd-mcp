@@ -141,6 +141,21 @@ from sagasmith_dnd_mcp.tool_profiles import (
 )
 
 
+def _validated_distinct_choices(value: Any, *, count: int, label: str) -> list[str]:
+    if value is None:
+        values: list[Any] = []
+    elif isinstance(value, list):
+        values = value
+    else:
+        raise ValueError(f"{label} must be a list")
+    normalized = [str(item).strip() for item in values]
+    if len(normalized) != count or any(not item for item in normalized):
+        raise ValueError(f"{label} requires exactly {count} choices")
+    if len({item.casefold() for item in normalized}) != len(normalized):
+        raise ValueError(f"{label} choices must be distinct")
+    return normalized
+
+
 class SessionExposureFastMCP(FastMCP):
     """FastMCP with server-owned, session-scoped progressive tool exposure.
 
@@ -7551,6 +7566,37 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "fields": [],
                     "prerequisites": deepcopy(list(card.get("prerequisites") or [])),
                 }
+            elif artifact_kind == "feature":
+                requirements = deepcopy(dict(card.get("selection_requirements") or {}))
+                selection_requirements = {
+                    "fields": [requirements["field"]] if requirements.get("field") else [],
+                    "class_name": str(card.get("class_name") or ""),
+                    "subclass_name": str(card.get("subclass_name") or ""),
+                    "minimum_level": int(card.get("minimum_level", 1) or 1),
+                    **requirements,
+                }
+            elif artifact_kind == "species":
+                grants = dict(card.get("grants") or {})
+                fields = []
+                if int(grants.get("language_choice_count", 0) or 0):
+                    fields.append("languages")
+                if int(grants.get("skill_choice_count", 0) or 0):
+                    fields.append("skills")
+                if list(grants.get("tool_choices") or []):
+                    fields.append("tools")
+                if int(dict(grants.get("ability_choice") or {}).get("count", 0) or 0):
+                    fields.append("abilities")
+                if grants.get("cantrip_choice"):
+                    fields.append("cantrip_artifact_id")
+                selection_requirements = {
+                    "fields": fields,
+                    "base_species": str(card.get("base_species") or card.get("name") or ""),
+                    "language_count": int(grants.get("language_choice_count", 0) or 0),
+                    "skill_count": int(grants.get("skill_choice_count", 0) or 0),
+                    "tool_options": list(grants.get("tool_choices") or []),
+                    "ability_choice": deepcopy(dict(grants.get("ability_choice") or {})),
+                    "cantrip_choice": deepcopy(grants.get("cantrip_choice")),
+                }
             result.append(
                 {
                     "id": artifact["id"],
@@ -7756,10 +7802,245 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 if skill_key not in sheet["skills"]:
                     raise ValueError(f"background references an unknown skill: {skill_key}")
                 sheet["skills"][skill_key]["proficiency"] = "proficient"
+        elif kind == "species":
+            selected_species = str(card.get("name") or artifact_id)
+            existing_species = str(sheet["progression"].get("species") or "")
+            if existing_species and existing_species != selected_species:
+                raise ValueError("character already has a different species")
+            if any(
+                item.get("artifact_id") == artifact_id for item in sheet["content"]["selections"]
+            ):
+                raise ValueError("content species is already present")
+            grants = dict(card.get("grants") or {})
+            if grants.get("unresolved"):
+                return {
+                    "status": "pending_ruling",
+                    "reason": "species has unresolved structured grants",
+                    "missing": list(grants.get("unresolved") or []),
+                }
+            selected_languages = _validated_distinct_choices(
+                selection.get("languages"),
+                count=int(grants.get("language_choice_count", 0) or 0),
+                label="species languages",
+            )
+            selected_skills = [item.casefold() for item in _validated_distinct_choices(
+                selection.get("skills"),
+                count=int(grants.get("skill_choice_count", 0) or 0),
+                label="species skills",
+            )]
+            for skill in selected_skills:
+                if skill not in sheet["skills"]:
+                    raise ValueError(f"species references an unknown skill: {skill}")
+            tool_options = {
+                str(item).casefold(): str(item) for item in grants.get("tool_choices", [])
+            }
+            selected_tools = _validated_distinct_choices(
+                selection.get("tools"),
+                count=1 if tool_options else 0,
+                label="species tools",
+            )
+            if any(item.casefold() not in tool_options for item in selected_tools):
+                raise ValueError("species tool choice is not one of the allowed options")
+            selected_tools = [tool_options[item.casefold()] for item in selected_tools]
+            ability_choice = dict(grants.get("ability_choice") or {})
+            selected_abilities = [item.casefold() for item in _validated_distinct_choices(
+                selection.get("abilities"),
+                count=int(ability_choice.get("count", 0) or 0),
+                label="species abilities",
+            )]
+            excluded_abilities = {
+                str(item).casefold() for item in ability_choice.get("exclude", [])
+            }
+            if any(item not in sheet["abilities"] for item in selected_abilities):
+                raise ValueError("species ability choice is not a valid ability")
+            if excluded_abilities.intersection(selected_abilities):
+                raise ValueError("species ability choice cannot repeat a fixed increase")
+            values_include_grants = bool(selection.get("values_include_species_grants", False))
+            if not values_include_grants:
+                increases = dict(grants.get("ability_score_increases") or {})
+                for ability in selected_abilities:
+                    increases[ability] = int(increases.get(ability, 0)) + int(
+                        ability_choice.get("amount", 0) or 0
+                    )
+                for ability, amount in increases.items():
+                    sheet["abilities"][ability]["score"] = (
+                        int(sheet["abilities"][ability]["score"]) + int(amount)
+                    )
+                hp_bonus = int(grants.get("hp_per_level", 0) or 0) * int(
+                    sheet["progression"].get("level", 1) or 1
+                )
+                if hp_bonus:
+                    sheet["combat"]["hp"]["max"] += hp_bonus
+                    sheet["combat"]["hp"]["value"] += hp_bonus
+            if grants.get("size"):
+                sheet["traits"]["size"] = str(grants["size"])
+            if int(grants.get("walk_speed", 0) or 0):
+                sheet["combat"]["speed"]["walk"] = int(grants["walk_speed"])
+            if int(grants.get("darkvision_ft", 0) or 0):
+                sheet["traits"]["senses"]["darkvision"] = int(grants["darkvision_ft"])
+            sheet["traits"]["languages"] = list(
+                dict.fromkeys(
+                    [
+                        *sheet["traits"]["languages"],
+                        *list(grants.get("languages") or []),
+                        *selected_languages,
+                    ]
+                )
+            )
+            fixed_skills = [str(item).casefold() for item in grants.get("skill_proficiencies", [])]
+            for skill in [*fixed_skills, *selected_skills]:
+                if skill not in sheet["skills"]:
+                    raise ValueError(f"species references an unknown skill: {skill}")
+                sheet["skills"][skill]["proficiency"] = "proficient"
+            proficiencies = sheet["traits"]["proficiencies"]
+            proficiencies["weapons"] = list(
+                dict.fromkeys(
+                    [*proficiencies["weapons"], *list(grants.get("weapon_proficiencies") or [])]
+                )
+            )
+            proficiencies["tools"] = list(
+                dict.fromkeys(
+                    [
+                        *proficiencies["tools"],
+                        *list(grants.get("tool_proficiencies") or []),
+                        *selected_tools,
+                    ]
+                )
+            )
+            sheet["traits"]["resistances"] = list(
+                dict.fromkeys(
+                    [*sheet["traits"]["resistances"], *list(grants.get("resistances") or [])]
+                )
+            )
+            cantrip_id = str(selection.get("cantrip_artifact_id") or "")
+            cantrip_requirement = dict(grants.get("cantrip_choice") or {})
+            if cantrip_requirement:
+                cantrip_match = next(
+                    (item for item in candidates if item[2].get("id") == cantrip_id), None
+                )
+                if cantrip_match is None:
+                    raise ValueError("species cantrip_artifact_id is not available")
+                cantrip_pack_id, cantrip_version, cantrip_artifact = cantrip_match
+                cantrip_card = deepcopy(dict(cantrip_artifact.get("card") or {}))
+                if (
+                    cantrip_artifact.get("kind") != "spell"
+                    or int(cantrip_card.get("level", -1)) != int(cantrip_requirement["level"])
+                    or str(cantrip_requirement["class"]).casefold()
+                    not in {str(item).casefold() for item in cantrip_card.get("classes", [])}
+                ):
+                    raise ValueError(
+                        "species cantrip choice does not meet its class and level rule"
+                    )
+                if any(item.get("id") == cantrip_id for item in sheet["content"]["spells"]):
+                    raise ValueError("species cantrip is already present")
+                cantrip_card.pop("classes", None)
+                cantrip_card["grant"] = {
+                    "source_type": "species",
+                    "source_key": selected_species,
+                    "method": "known",
+                }
+                cantrip_card.setdefault("access", {})["known"] = True
+                cantrip_card["access"]["prepared"] = False
+                cantrip_card.update(
+                    id=cantrip_id,
+                    pack_id=cantrip_pack_id,
+                    pack_version=cantrip_version,
+                    rule_refs=list(cantrip_artifact.get("rule_refs") or []),
+                    mechanic_refs=list(cantrip_artifact.get("mechanic_refs") or []),
+                )
+                sheet["content"]["spells"].append(cantrip_card)
+            elif cantrip_id:
+                raise ValueError("species does not grant a cantrip choice")
+            feature_choices = {
+                "languages": selected_languages,
+                "skills": selected_skills,
+                "tools": selected_tools,
+                "abilities": selected_abilities,
+                "cantrip_artifact_id": cantrip_id,
+            }
+            for feature in grants.get("features", []):
+                feature_card = deepcopy(dict(feature))
+                feature_card.update(
+                    pack_id=pack_id,
+                    pack_version=version,
+                    rule_refs=list(artifact.get("rule_refs") or []),
+                    mechanic_refs=list(artifact.get("mechanic_refs") or []),
+                )
+                if any(feature_choices.values()):
+                    feature_card["choices"] = feature_choices
+                sheet["content"]["features"].append(feature_card)
+            sheet["progression"]["species"] = selected_species
         elif kind in {"feature", "activity"}:
             section = "features" if kind == "feature" else "activities"
             if any(item.get("id") == artifact_id for item in sheet["content"][section]):
                 raise ValueError(f"content {kind} is already present")
+            if kind == "feature":
+                declared_class = str(card.get("class_name") or "").strip()
+                declared_subclass = str(card.get("subclass_name") or "").strip()
+                minimum_level = int(card.get("minimum_level", 1) or 1)
+                target = next(
+                    (
+                        item
+                        for item in sheet["progression"]["classes"]
+                        if str(item.get("name") or "").casefold() == declared_class.casefold()
+                    ),
+                    None,
+                )
+                if declared_class and target is None:
+                    raise ValueError("feature class is not on this actor card")
+                if target is not None and int(target.get("level", 0) or 0) < minimum_level:
+                    raise ValueError(
+                        f"{declared_class} must reach level {minimum_level} for this feature"
+                    )
+                if declared_subclass and (
+                    target is None
+                    or str(target.get("subclass") or "").casefold()
+                    != declared_subclass.casefold()
+                ):
+                    raise ValueError("feature subclass is not selected on this actor card")
+                requirements = dict(card.get("selection_requirements") or {})
+                choice_field = str(requirements.get("field") or "")
+                if choice_field:
+                    selected = selection.get(choice_field)
+                    if int(requirements.get("count", 1) or 1) == 1 and not isinstance(
+                        selected, list
+                    ):
+                        selected_values = [str(selected or "").strip()]
+                    else:
+                        selected_values = _validated_distinct_choices(
+                            selected,
+                            count=int(requirements.get("count", 1) or 1),
+                            label=f"feature {choice_field}",
+                        )
+                    if any(not item for item in selected_values):
+                        raise ValueError(f"feature {choice_field} choice is required")
+                    options = {str(item).casefold() for item in requirements.get("options", [])}
+                    if options and any(item.casefold() not in options for item in selected_values):
+                        raise ValueError("feature choice is not one of the allowed options")
+                    if requirements.get("requires_existing_proficiency"):
+                        for item in selected_values:
+                            skill = sheet["skills"].get(item.casefold())
+                            tool_known = item.casefold() in {
+                                value.casefold()
+                                for value in sheet["traits"]["proficiencies"]["tools"]
+                            }
+                            if not tool_known and (
+                                skill is None or skill.get("proficiency") == "none"
+                            ):
+                                raise ValueError(
+                                    "feature expertise choice requires an existing proficiency"
+                                )
+                            if skill is not None:
+                                skill["proficiency"] = "expertise"
+                for metadata_key in (
+                    "class_name",
+                    "subclass_name",
+                    "minimum_level",
+                    "selection_requirements",
+                ):
+                    card.pop(metadata_key, None)
+                if selection:
+                    card["choices"] = {**dict(card.get("choices") or {}), **selection}
             card.update(provenance)
             sheet["content"][section].append(card)
         else:
@@ -7767,7 +8048,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "status": "pending_ruling",
                 "reason": f"{kind} is catalogued but needs a DM-reviewed application",
             }
-        if kind in {"subclass", "background"}:
+        if kind in {"subclass", "background", "species"}:
             if any(
                 item.get("artifact_id") == artifact_id for item in sheet["content"]["selections"]
             ):

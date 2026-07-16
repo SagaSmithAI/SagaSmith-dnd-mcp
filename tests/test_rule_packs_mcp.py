@@ -135,7 +135,7 @@ def test_core_srd_content_catalog_is_structured_and_selectable(tmp_path: Path) -
         assert selected["sheet"]["progression"]["classes"][1]["subclass"] == (
             "Path of the Berserker"
         )
-        assert selected["sheet"]["content"]["selections"][0]["pack_version"] == "1.1.0"
+        assert selected["sheet"]["content"]["selections"][0]["pack_version"] == "1.2.0"
 
         backgrounds = await call(
             server,
@@ -221,6 +221,128 @@ def test_core_srd_content_catalog_is_structured_and_selectable(tmp_path: Path) -
             },
         )
         assert feat_applied["sheet"]["content"]["feats"][0]["name"] == "Grappler"
+
+        features = await call(
+            server,
+            "content_catalog_list",
+            {"campaign_id": campaign["id"], "kind": "feature", "query": "Sneak Attack"},
+        )
+        sneak_attack = next(item for item in features if item["name"] == "Sneak Attack")
+        assert sneak_attack["selection_requirements"]["class_name"] == "Rogue"
+        rogue_sheet = default_character_sheet()
+        rogue_sheet["progression"]["classes"] = [
+            {"name": "Rogue", "level": 1, "subclass": "", "hit_die": 8}
+        ]
+        rogue = await call(
+            server,
+            "character_create",
+            {
+                "campaign_id": campaign["id"],
+                "name": "Rogue",
+                "sheet": rogue_sheet,
+                "idempotency_key": "catalog-rogue",
+            },
+        )
+        rogue = await call(
+            server,
+            "character_content_apply",
+            {
+                "character_id": rogue["id"],
+                "artifact_id": sneak_attack["id"],
+                "expected_revision": rogue["revision"],
+                "idempotency_key": "catalog-sneak-attack",
+            },
+        )
+        assert rogue["sheet"]["content"]["features"][0]["source_key"] == "Rogue"
+
+        species = await call(
+            server,
+            "content_catalog_list",
+            {"campaign_id": campaign["id"], "kind": "species", "query": "Hill Dwarf"},
+        )
+        hill_dwarf = next(item for item in species if item["name"] == "Hill Dwarf")
+        assert hill_dwarf["selection_requirements"]["tool_options"] == [
+            "smith's tools",
+            "brewer's supplies",
+            "mason's tools",
+        ]
+        dwarf = await call(
+            server,
+            "character_create",
+            {
+                "campaign_id": campaign["id"],
+                "name": "Dwarf",
+                "idempotency_key": "catalog-dwarf",
+            },
+        )
+        dwarf = await call(
+            server,
+            "character_content_apply",
+            {
+                "character_id": dwarf["id"],
+                "artifact_id": hill_dwarf["id"],
+                "selection": {"tools": ["smith's tools"]},
+                "expected_revision": dwarf["revision"],
+                "idempotency_key": "catalog-hill-dwarf",
+            },
+        )
+        assert dwarf["sheet"]["progression"]["species"] == "Hill Dwarf"
+        assert dwarf["sheet"]["abilities"]["constitution"]["score"] == 12
+        assert dwarf["sheet"]["abilities"]["wisdom"]["score"] == 11
+        assert dwarf["sheet"]["traits"]["resistances"] == ["poison"]
+        assert dwarf["sheet"]["combat"]["hp"]["max"] == 2
+        assert any(
+            item["name"] == "Dwarven Toughness"
+            for item in dwarf["sheet"]["content"]["features"]
+        )
+
+        fire_bolt = next(
+            item
+            for item in await call(
+                server,
+                "content_catalog_list",
+                {"campaign_id": campaign["id"], "kind": "spell", "query": "Fire Bolt"},
+            )
+            if item["name"] == "Fire Bolt"
+        )
+        high_elf = next(
+            item
+            for item in await call(
+                server,
+                "content_catalog_list",
+                {"campaign_id": campaign["id"], "kind": "species", "query": "High Elf"},
+            )
+            if item["name"] == "High Elf"
+        )
+        elf = await call(
+            server,
+            "character_create",
+            {
+                "campaign_id": campaign["id"],
+                "name": "Elf",
+                "idempotency_key": "catalog-elf",
+            },
+        )
+        elf = await call(
+            server,
+            "character_content_apply",
+            {
+                "character_id": elf["id"],
+                "artifact_id": high_elf["id"],
+                "selection": {
+                    "languages": ["Draconic"],
+                    "cantrip_artifact_id": fire_bolt["id"],
+                },
+                "expected_revision": elf["revision"],
+                "idempotency_key": "catalog-high-elf",
+            },
+        )
+        assert elf["sheet"]["skills"]["perception"]["proficiency"] == "proficient"
+        assert elf["sheet"]["content"]["spells"][0]["grant"] == {
+            "source_type": "species",
+            "source_key": "High Elf",
+            "method": "known",
+        }
 
     asyncio.run(exercise())
 
