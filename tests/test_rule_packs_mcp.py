@@ -215,6 +215,68 @@ def test_core_srd_content_catalog_is_structured_and_selectable(tmp_path: Path) -
         )
         assert "heavy armor" in cleric["sheet"]["traits"]["proficiencies"]["armor"]
 
+        disciple_of_life = next(
+            item
+            for item in await call(
+                server,
+                "content_catalog_list",
+                {
+                    "campaign_id": campaign["id"],
+                    "kind": "feature",
+                    "query": "Disciple of Life",
+                },
+            )
+            if item["name"] == "Disciple of Life"
+        )
+        cleric = await call(
+            server,
+            "character_content_apply",
+            {
+                "character_id": cleric["id"],
+                "artifact_id": disciple_of_life["id"],
+                "expected_revision": cleric["revision"],
+                "idempotency_key": "catalog-disciple-of-life",
+            },
+        )
+        wounded_sheet = default_character_sheet()
+        wounded_sheet["combat"]["hp"] = {"value": 1, "max": 20, "temp": 0}
+        wounded = await call(
+            server,
+            "character_create",
+            {
+                "campaign_id": campaign["id"],
+                "name": "Wounded",
+                "sheet": wounded_sheet,
+                "idempotency_key": "catalog-wounded",
+            },
+        )
+        current_campaign = await call(
+            server, "campaign_get", {"campaign_id": campaign["id"]}
+        )
+        cure_wounds = domain_spells["Cure Wounds"]
+        healed_facade = await call(
+            server,
+            "combat_hp_change",
+            {
+                "campaign_id": campaign["id"],
+                "target_id": wounded["id"],
+                "action": "heal",
+                "payload": {
+                    "amount": 8,
+                    "source_actor_id": cleric["id"],
+                    "spell_id": cure_wounds["id"],
+                    "spell_level": 1,
+                },
+                "expected_revision": current_campaign["revision"],
+                "idempotency_key": "catalog-life-heal",
+            },
+        )
+        healed = healed_facade["result"]
+        assert healed["requested_amount"] == 8
+        assert healed["bonus_amount"] == 3
+        assert healed["after_hp"] == 12
+        assert healed["source"]["actor_id"] == cleric["id"]
+
         backgrounds = await call(
             server,
             "content_catalog_list",

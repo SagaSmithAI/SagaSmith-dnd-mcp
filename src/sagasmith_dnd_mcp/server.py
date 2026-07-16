@@ -4031,14 +4031,26 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         expected_revision: int | None = None,
         branch_id: str | None = None,
         idempotency_key: str | None = None,
+        source_actor_id: str | None = None,
+        spell_id: str | None = None,
+        spell_level: int | None = None,
     ) -> dict[str, Any]:
-        """Apply DM-approved healing with max-HP clamping."""
+        """Apply source-aware healing with feature modifiers and max-HP clamping."""
         access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
         require_write_contract(expected_revision, idempotency_key)
         require_campaign_actor(campaign_id, target_id)
+        if source_actor_id:
+            require_campaign_actor(campaign_id, source_actor_id)
         if int(amount) <= 0:
             raise CombatEngineError("healing amount must be positive")
-        payload = {"target_id": target_id, "amount": amount, "branch_id": branch_id}
+        payload = {
+            "target_id": target_id,
+            "amount": amount,
+            "branch_id": branch_id,
+            "source_actor_id": source_actor_id,
+            "spell_id": spell_id,
+            "spell_level": spell_level,
+        }
         scope = f"combat-heal:{campaign_id}:{principal_id}"
         replay = replay_idempotent(scope, idempotency_key, payload)
         if replay is not None:
@@ -4053,7 +4065,16 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         active = dict(campaign.state or {}).get("combat")
         if isinstance(active, dict) and active.get("active", False):
             require_no_blocking_pending(active)
-        applied = apply_healing_to_sheet(target["sheet"], amount=amount)
+        source = combat_actor_snapshot(source_actor_id) if source_actor_id else None
+        applied = apply_healing_to_sheet(
+            target["sheet"],
+            amount=amount,
+            source_sheet=source["sheet"] if source else None,
+            spell_id=spell_id,
+            spell_level=spell_level,
+        )
+        if applied.get("source") is not None:
+            applied["source"]["actor_id"] = source_actor_id
         current = characters.get(target_id)
         next_state: dict[str, Any] | None = None
         encounter = dict(campaign.state or {}).get("combat")
@@ -9430,6 +9451,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 expected_revision,
                 branch_id,
                 idempotency_key,
+                source_actor_id=data.get("source_actor_id"),
+                spell_id=data.get("spell_id"),
+                spell_level=data.get("spell_level"),
             )
         )
         return facade_result(action, result)
