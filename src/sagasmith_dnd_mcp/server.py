@@ -63,11 +63,13 @@ from sagasmith_dnd.combat_engine import (
     CombatEngineError,
     NeedsRulingError,
     add_choice_window,
+    apply_attack_ac_bonus,
     apply_concentration_result,
     apply_damage_parts_to_sheet,
     apply_healing_to_sheet,
     arm_readied_spell,
     available_actions,
+    available_attack_defenses,
     available_reactions,
     current_combatant,
     end_turn,
@@ -75,12 +77,13 @@ from sagasmith_dnd.combat_engine import (
     pay_attack_action,
     preflight_attack,
     resolve_actor_check,
-    resolve_attack_action,
+    resolve_attack_damage,
     resolve_choice_window,
     resolve_common_action,
     resolve_death_save_to_sheet,
     resolve_readied_action_window,
     resolve_readied_spell_window,
+    roll_attack_action,
     spend_movement,
     stand_up,
     start_encounter,
@@ -793,6 +796,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "payment",
                 "requires_ruling",
                 "declaration",
+                "defense",
+                "reaction_defense",
+                "pending_reaction",
             }
             value["result"] = {key: item for key, item in result.items() if key in allowed}
         value.pop("revisions", None)
@@ -1939,16 +1945,17 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         require_campaign_actor(campaign_id, target_id)
         attacker = combat_actor_snapshot(actor_id)
         target = combat_actor_snapshot(target_id)
+        rule_context = effective_rule_context(
+            campaign_id,
+            facts={"actor_id": actor_id, "target_id": target_id, "kind": "attack"},
+        )
         try:
             plan = preflight_attack(
                 attacker,
                 target,
                 action=action_payload,
                 encounter=encounter,
-                rules=effective_rule_context(
-                    campaign_id,
-                    facts={"actor_id": actor_id, "target_id": target_id, "kind": "attack"},
-                ),
+                rules=rule_context,
             )
         except NeedsRulingError:
             if access.require_campaign(campaign_id, principal_id).role not in {"owner", "dm"}:
@@ -1961,15 +1968,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             attack_mode=str(plan.get("attack_mode") or "melee"),
             multiattack_option_id=action_payload.get("multiattack_option_id"),
         )
-        updated_attacker, updated_target, result = resolve_attack_action(
-            attacker,
+        attack_roll = roll_attack_action(plan=plan)
+        defenses = available_attack_defenses(
             target,
             plan=plan,
-            rules=effective_rule_context(
-                campaign_id,
-                facts={"actor_id": actor_id, "target_id": target_id, "kind": "attack"},
-            ),
+            attack=attack_roll,
+            encounter=next_encounter,
         )
+        updated_attacker = deepcopy(attacker)
         ammunition = None
         weapon_id = plan.get("weapon_id")
         if weapon_id and weapon_id != "unarmed-strike":
@@ -1981,7 +1987,114 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     updated_attacker["sheet"], weapon_id
                 )
                 updated_attacker["sheet"] = updated_sheet
+        if defenses:
+            result = {
+                **attack_roll,
+                "attack_payment": attack_payment,
+                "pending_reaction": True,
+            }
+            if ammunition is not None:
                 result["ammunition"] = ammunition
+            current = next(
+                item
+                for item in next_encounter["combatants"]
+                if item.get("actor_id") == actor_id
+            )
+            if plan.get("attacker_was_hidden"):
+                current["hidden"] = False
+                result["reveals_attacker"] = True
+            if plan.get("helped_by"):
+                helper = next(
+                    (
+                        item
+                        for item in next_encounter["combatants"]
+                        if item.get("actor_id") == plan["helped_by"]
+                    ),
+                    None,
+                )
+                if helper is not None:
+                    helper_flags = dict(helper.get("turn_flags") or {})
+                    helper_flags.pop("helping", None)
+                    helper["turn_flags"] = helper_flags
+            next_encounter = add_choice_window(
+                next_encounter,
+                kind="reaction",
+                actor_id_value=target_id,
+                event="attack.hit.before_damage",
+                candidates=[*defenses, {"id": "decline", "name": "Decline"}],
+            )
+            window = next_encounter["pending"][-1]
+            window.update(
+                trigger="attack_hit_defense",
+                attacker_id=actor_id,
+                target_id=target_id,
+                plan=deepcopy(plan),
+                attack=deepcopy(attack_roll),
+                attack_payment=deepcopy(attack_payment),
+                ammunition=deepcopy(ammunition),
+            )
+            next_encounter["log"] = [
+                *list(next_encounter.get("log") or []),
+                {
+                    "type": "attack_roll",
+                    "result": result,
+                    "pending_choice_id": window["id"],
+                },
+            ][-100:]
+            next_state = {**dict(campaign.state or {}), "combat": next_encounter}
+            updates = []
+            if ammunition is not None:
+                updates.append(
+                    CharacterStateUpdate(
+                        character_id=actor_id,
+                        sheet=validate_character_sheet(updated_attacker["sheet"]),
+                        notes=validate_character_notes(characters.get(actor_id).notes),
+                        expected_revision=characters.get(actor_id).revision,
+                    )
+                )
+            revisions_result = StateMutationService(storage.database).replace(
+                campaign_id,
+                campaign_state=validate_party_state(next_state),
+                character_updates=updates,
+                expected_campaign_revision=campaign.revision,
+                operation="combat.attack.roll",
+                actor=principal_id,
+                branch_id=resolved_branch_id,
+                idempotency_key=idempotency_key,
+                rule_receipts=core_receipts(
+                    rule_context,
+                    ["dnd5e.core.reaction.post_hit_defense"],
+                    "attack.hit.before_damage",
+                ),
+            )
+            response = {
+                "status": "pending_reaction",
+                "result": result,
+                "choice": window,
+                "combat": next_encounter,
+                "campaign_revision": mutation_revision(campaign_id),
+                "revisions": [asdict(item) for item in revisions_result or []],
+            }
+            return combat_response(
+                campaign_id,
+                principal_id,
+                remember_idempotent(
+                    scope,
+                    idempotency_key,
+                    payload,
+                    response,
+                    campaign_id=campaign_id,
+                ),
+            )
+        updated_attacker, updated_target, result = resolve_attack_damage(
+            updated_attacker,
+            target,
+            plan=plan,
+            attack=attack_roll,
+            rules=rule_context,
+        )
+        if ammunition is not None:
+            result["ammunition"] = ammunition
         result["attack_payment"] = attack_payment
         current = next(
             item for item in next_encounter["combatants"] if item.get("actor_id") == actor_id
@@ -2343,22 +2456,45 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             attacker["position"] = dict(combatant_position)
         if isinstance(window.get("target_position"), dict):
             target["position"] = dict(window["target_position"])
+        for combatant_state, snapshot in (
+            (
+                next(
+                    item
+                    for item in encounter["combatants"]
+                    if item.get("actor_id") == actor_id
+                ),
+                attacker,
+            ),
+            (
+                next(
+                    item
+                    for item in encounter["combatants"]
+                    if item.get("actor_id") == target_id
+                ),
+                target,
+            ),
+        ):
+            snapshot["hidden"] = bool(combatant_state.get("hidden", False))
+            snapshot["visible_to_actor_ids"] = deepcopy(
+                combatant_state.get("visible_to_actor_ids")
+            )
         if window.get("target_visible"):
             action_payload = dict(action_payload)
             action_payload["context"] = {
                 **dict(action_payload.get("context") or {}),
                 "attacker_can_see_target": True,
             }
+        rule_context = effective_rule_context(
+            campaign_id,
+            facts={"actor_id": actor_id, "target_id": target_id, "kind": "attack"},
+        )
         plan = preflight_attack(
             attacker,
             target,
             action=action_payload,
             encounter=None,
             allow_out_of_turn=True,
-            rules=effective_rule_context(
-                campaign_id,
-                facts={"actor_id": actor_id, "target_id": target_id, "kind": "attack"},
-            ),
+            rules=rule_context,
         )
         weapon = next(
             (
@@ -2372,15 +2508,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         if weapon is not None and weapon.get("attack_type") != "melee":
             raise CombatEngineError("opportunity attacks require a melee attack")
-        updated_attacker, updated_target, result = resolve_attack_action(
-            attacker,
+        attack_roll = roll_attack_action(plan=plan)
+        defenses = available_attack_defenses(
             target,
             plan=plan,
-            rules=effective_rule_context(
-                campaign_id,
-                facts={"actor_id": actor_id, "target_id": target_id, "kind": "attack"},
-            ),
+            attack=attack_roll,
+            encounter=encounter,
         )
+        updated_attacker = deepcopy(attacker)
+        ammunition = None
         weapon_id = plan.get("weapon_id")
         if weapon_id and weapon_id != "unarmed-strike":
             weapon = next(
@@ -2391,7 +2527,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     updated_attacker["sheet"], weapon_id
                 )
                 updated_attacker["sheet"] = updated_sheet
-                result["ammunition"] = ammunition
         next_encounter = resolve_choice_window(
             encounter,
             choice_id=choice_id,
@@ -2406,7 +2541,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             raise CombatEngineError("actor has no reaction remaining")
         budget["reaction"] = int(budget["reaction"]) - 1
         combatant["turn_budget"] = budget
-        if result.get("reveals_attacker"):
+        if plan.get("attacker_was_hidden"):
             combatant["hidden"] = False
         if plan.get("helped_by"):
             helper = next(
@@ -2421,6 +2556,105 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 helper_flags = dict(helper.get("turn_flags") or {})
                 helper_flags.pop("helping", None)
                 helper["turn_flags"] = helper_flags
+        if defenses:
+            attack_payment = {
+                "kind": "reaction_attack",
+                "payment": "reaction",
+                "trigger": "opportunity_attack",
+            }
+            result = {
+                **attack_roll,
+                "attack_payment": attack_payment,
+                "pending_reaction": True,
+            }
+            if ammunition is not None:
+                result["ammunition"] = ammunition
+            if plan.get("attacker_was_hidden"):
+                result["reveals_attacker"] = True
+            next_encounter = add_choice_window(
+                next_encounter,
+                kind="reaction",
+                actor_id_value=target_id,
+                event="attack.hit.before_damage",
+                candidates=[*defenses, {"id": "decline", "name": "Decline"}],
+            )
+            defense_window = next_encounter["pending"][-1]
+            defense_window.update(
+                trigger="attack_hit_defense",
+                attacker_id=actor_id,
+                target_id=target_id,
+                plan=deepcopy(plan),
+                attack=deepcopy(attack_roll),
+                attack_payment=attack_payment,
+                ammunition=deepcopy(ammunition),
+                source_choice_id=choice_id,
+            )
+            next_encounter["log"] = [
+                *list(next_encounter.get("log") or []),
+                {
+                    "type": "reaction_attack_roll",
+                    "choice_id": choice_id,
+                    "result": result,
+                    "pending_choice_id": defense_window["id"],
+                },
+            ][-100:]
+            next_state = {**dict(campaign.state or {}), "combat": next_encounter}
+            updates = []
+            if ammunition is not None:
+                updates.append(
+                    CharacterStateUpdate(
+                        character_id=actor_id,
+                        sheet=validate_character_sheet(updated_attacker["sheet"]),
+                        notes=validate_character_notes(characters.get(actor_id).notes),
+                        expected_revision=characters.get(actor_id).revision,
+                    )
+                )
+            revisions_result = StateMutationService(storage.database).replace(
+                campaign_id,
+                campaign_state=validate_party_state(next_state),
+                character_updates=updates,
+                expected_campaign_revision=campaign.revision,
+                operation="combat.reaction.attack.roll",
+                actor=principal_id,
+                branch_id=resolved_branch_id,
+                idempotency_key=idempotency_key,
+                rule_receipts=core_receipts(
+                    rule_context,
+                    [
+                        "dnd5e.core.mcp.opportunity_melee_only",
+                        "dnd5e.core.reaction.post_hit_defense",
+                    ],
+                    "reaction.opportunity_attack.hit",
+                ),
+            )
+            response = {
+                "status": "pending_reaction",
+                "result": result,
+                "choice": defense_window,
+                "combat": next_encounter,
+                "campaign_revision": mutation_revision(campaign_id),
+                "revisions": [asdict(item) for item in revisions_result or []],
+            }
+            return combat_response(
+                campaign_id,
+                principal_id,
+                remember_idempotent(
+                    scope,
+                    idempotency_key,
+                    payload,
+                    response,
+                    campaign_id=campaign_id,
+                ),
+            )
+        updated_attacker, updated_target, result = resolve_attack_damage(
+            updated_attacker,
+            target,
+            plan=plan,
+            attack=attack_roll,
+            rules=rule_context,
+        )
+        if ammunition is not None:
+            result["ammunition"] = ammunition
         sync_combatant_conditions(next_encounter, actor_id, updated_attacker["sheet"])
         sync_combatant_conditions(next_encounter, target_id, updated_target["sheet"])
         reconcile_readied_spells(next_encounter, target_id, updated_target["sheet"])
@@ -2483,6 +2717,189 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             campaign_id,
             principal_id,
             remember_idempotent(scope, idempotency_key, payload, response, campaign_id=campaign_id),
+        )
+
+    def combat_reaction_defense(
+        campaign_id: str,
+        actor_id: str,
+        choice_id: str,
+        selection: dict[str, Any],
+        principal_id: str = "system:local",
+        branch_id: str | None = None,
+        expected_revision: int | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Resolve a post-hit defensive reaction before any damage is rolled."""
+        access.require_actor(campaign_id, actor_id, principal_id, control=True)
+        require_write_contract(expected_revision, idempotency_key)
+        resolved_branch_id = require_current_branch(campaign_id, branch_id)
+        payload = {
+            "actor_id": actor_id,
+            "choice_id": choice_id,
+            "selection": selection,
+            "branch_id": resolved_branch_id,
+        }
+        scope = f"combat-reaction-defense:{campaign_id}:{resolved_branch_id}:{principal_id}"
+        replay = replay_idempotent(scope, idempotency_key, payload)
+        if replay is not None:
+            return combat_response(campaign_id, principal_id, replay)
+        campaign, encounter = active_encounter(campaign_id)
+        if campaign.revision != expected_revision:
+            raise ValueError(
+                "campaign revision conflict: "
+                f"expected {expected_revision}, found {campaign.revision}"
+            )
+        window = next(
+            (item for item in encounter.get("pending", []) if item.get("id") == choice_id),
+            None,
+        )
+        if (
+            not isinstance(window, dict)
+            or window.get("kind") != "reaction"
+            or window.get("trigger") != "attack_hit_defense"
+            or window.get("actor_id") != actor_id
+            or window.get("target_id") != actor_id
+        ):
+            raise CombatEngineError("choice_id is not this actor's attack-defense window")
+        selection_id = str(selection.get("id") or "")
+        candidate = next(
+            (
+                item
+                for item in window.get("candidates", [])
+                if str(item.get("id") or "") == selection_id
+            ),
+            None,
+        )
+        if candidate is None:
+            raise CombatEngineError("selection is not one of the defensive reaction choices")
+        attacker_id = str(window.get("attacker_id") or "")
+        require_campaign_actor(campaign_id, attacker_id)
+        attacker = combat_actor_snapshot(attacker_id)
+        target = combat_actor_snapshot(actor_id)
+        plan = deepcopy(dict(window.get("plan") or {}))
+        attack = deepcopy(dict(window.get("attack") or {}))
+        next_encounter = deepcopy(encounter)
+        used = selection_id not in {"decline", "skip", "pass"}
+        if used:
+            next_encounter = pay_activity_activation(
+                next_encounter,
+                actor_id_value=actor_id,
+                activation_type="reaction",
+            )
+            attack = apply_attack_ac_bonus(
+                attack,
+                bonus=int(candidate.get("bonus", 0) or 0),
+                source_id=selection_id,
+            )
+        next_encounter = resolve_choice_window(
+            next_encounter,
+            choice_id=choice_id,
+            actor_id_value=actor_id,
+            selection={"id": selection_id},
+        )
+        rule_context = effective_rule_context(
+            campaign_id,
+            facts={"actor_id": attacker_id, "target_id": actor_id, "kind": "attack"},
+        )
+        updated_attacker, updated_target, result = resolve_attack_damage(
+            attacker,
+            target,
+            plan=plan,
+            attack=attack,
+            rules=rule_context,
+        )
+        result["attack_payment"] = deepcopy(window.get("attack_payment") or {})
+        if window.get("ammunition") is not None:
+            result["ammunition"] = deepcopy(window["ammunition"])
+        result["reaction_defense"] = {
+            "used": used,
+            "activity_id": selection_id if used else None,
+            "bonus": int(candidate.get("bonus", 0) or 0) if used else 0,
+        }
+        attacker_combatant = next(
+            item
+            for item in next_encounter["combatants"]
+            if item.get("actor_id") == attacker_id
+        )
+        sneak_attack = dict(result.get("sneak_attack") or {})
+        if sneak_attack.get("used"):
+            flags = dict(attacker_combatant.get("turn_flags") or {})
+            flags["sneak_attack_turn_token"] = sneak_attack["turn_token"]
+            attacker_combatant["turn_flags"] = flags
+        if result.get("reveals_attacker"):
+            attacker_combatant["hidden"] = False
+        sync_combatant_conditions(next_encounter, attacker_id, updated_attacker["sheet"])
+        sync_combatant_conditions(next_encounter, actor_id, updated_target["sheet"])
+        reconcile_readied_spells(next_encounter, actor_id, updated_target["sheet"])
+        damage_result = result.get("damage")
+        if isinstance(damage_result, dict):
+            add_concentration_window(
+                next_encounter,
+                actor_id,
+                damage_result.get("concentration"),
+                next_revision=campaign.revision + 1,
+            )
+            result["damage"] = {
+                key: value for key, value in damage_result.items() if key != "sheet"
+            }
+        next_encounter["log"] = [
+            *list(next_encounter.get("log") or []),
+            {
+                "type": "attack_defense_resolved",
+                "choice_id": choice_id,
+                "selection_id": selection_id,
+                "result": result,
+            },
+        ][-100:]
+        next_state = {**dict(campaign.state or {}), "combat": next_encounter}
+        revisions_result = StateMutationService(storage.database).replace(
+            campaign_id,
+            campaign_state=validate_party_state(next_state),
+            character_updates=[
+                CharacterStateUpdate(
+                    character_id=attacker_id,
+                    sheet=validate_character_sheet(updated_attacker["sheet"]),
+                    notes=validate_character_notes(characters.get(attacker_id).notes),
+                    expected_revision=characters.get(attacker_id).revision,
+                ),
+                CharacterStateUpdate(
+                    character_id=actor_id,
+                    sheet=validate_character_sheet(updated_target["sheet"]),
+                    notes=validate_character_notes(characters.get(actor_id).notes),
+                    expected_revision=characters.get(actor_id).revision,
+                ),
+            ],
+            expected_campaign_revision=campaign.revision,
+            operation="combat.reaction.defense",
+            actor=principal_id,
+            branch_id=resolved_branch_id,
+            idempotency_key=idempotency_key,
+            rule_receipts=[
+                *list(result.get("rule_receipts") or []),
+                *core_receipts(
+                    rule_context,
+                    ["dnd5e.core.mcp.reaction_defense_atomicity"],
+                    "attack.hit.defense.resolve",
+                ),
+            ],
+        )
+        response = {
+            "status": "committed",
+            "result": result,
+            "combat": next_encounter,
+            "campaign_revision": mutation_revision(campaign_id),
+            "revisions": [asdict(item) for item in revisions_result or []],
+        }
+        return combat_response(
+            campaign_id,
+            principal_id,
+            remember_idempotent(
+                scope,
+                idempotency_key,
+                payload,
+                response,
+                campaign_id=campaign_id,
+            ),
         )
 
     @mcp.tool()
@@ -2739,7 +3156,25 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         """Read reaction windows an actor may resolve outside its own turn."""
         access.require_actor(campaign_id, actor_id, principal_id, control=True)
         _campaign, encounter = active_encounter(campaign_id)
-        return available_reactions(encounter, actor_id)
+        windows = available_reactions(encounter, actor_id)
+        if is_dm(campaign_id, principal_id):
+            return windows
+        allowed = {
+            "id",
+            "kind",
+            "actor_id",
+            "event",
+            "candidates",
+            "deadline",
+            "status",
+            "trigger",
+            "attacker_id",
+            "target_id",
+        }
+        return [
+            {key: value for key, value in window.items() if key in allowed}
+            for window in windows
+        ]
 
     @mcp.tool()
     def combat_cast_spell(
@@ -4209,6 +4644,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         if pending_choice and pending_choice.get("trigger") == "readied_spell":
             raise CombatEngineError("readied-spell windows must use combat_readied_spell_resolve")
+        if pending_choice and pending_choice.get("trigger") == "attack_hit_defense":
+            raise CombatEngineError(
+                "attack-defense windows must use combat_choice(action=resolve_defense)"
+            )
         next_encounter = resolve_choice_window(
             encounter,
             choice_id=choice_id,
@@ -9459,7 +9898,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     def combat_choice(
         campaign_id: str,
         actor_id: str,
-        action: Literal["open", "resolve"],
+        action: Literal["open", "resolve", "resolve_defense"],
         payload: dict[str, Any],
         principal_id: str = "system:local",
         expected_revision: int | None = None,
@@ -9468,8 +9907,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     ) -> dict[str, Any]:
         """Open or resolve a choice window; the engine still decides which choices are legal."""
         data = facade_payload(payload)
-        result = (
-            combat_choice_open(
+        if action == "open":
+            result = combat_choice_open(
                 campaign_id,
                 actor_id,
                 required(data, "event"),
@@ -9480,8 +9919,19 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 branch_id,
                 idempotency_key,
             )
-            if action == "open"
-            else combat_choice_resolve(
+        elif action == "resolve_defense":
+            result = combat_reaction_defense(
+                campaign_id,
+                actor_id,
+                required(data, "choice_id"),
+                required(data, "selection"),
+                principal_id,
+                branch_id,
+                expected_revision,
+                idempotency_key,
+            )
+        else:
+            result = combat_choice_resolve(
                 campaign_id,
                 actor_id,
                 required(data, "choice_id"),
@@ -9491,7 +9941,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 branch_id,
                 idempotency_key,
             )
-        )
         return facade_result(action, result)
 
     @mcp.tool()

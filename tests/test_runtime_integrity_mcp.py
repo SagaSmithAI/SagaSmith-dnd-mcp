@@ -853,7 +853,8 @@ def test_structured_combat_is_atomic_and_player_filtered(tmp_path: Path) -> None
                 "campaign_id": campaign["id"],
                 "participant_ids": [first["id"], second["id"]],
                 "participant_config": [
-                    {"actor_id": second["id"], "hidden": True},
+                    {"actor_id": first["id"], "initiative": 20},
+                    {"actor_id": second["id"], "initiative": 10, "hidden": True},
                 ],
                 "idempotency_key": "combat-start",
                 "expected_revision": campaign["revision"],
@@ -936,13 +937,19 @@ def test_combat_sneak_attack_persists_the_once_per_turn_token(
         modulegen_skills_dir=tmp_path / "modulegen",
         auto_seed_rules=False,
     )
-    real_resolve_attack = server_module.resolve_attack_action
+    real_roll_attack = server_module.roll_attack_action
+    real_resolve_damage = server_module.resolve_attack_damage
 
-    def deterministic_resolve_attack(*args, **kwargs):
+    def deterministic_roll_attack(*args, **kwargs):
         kwargs["rng"] = random.Random(5)
-        return real_resolve_attack(*args, **kwargs)
+        return real_roll_attack(*args, **kwargs)
 
-    monkeypatch.setattr(server_module, "resolve_attack_action", deterministic_resolve_attack)
+    def deterministic_resolve_damage(*args, **kwargs):
+        kwargs["rng"] = random.Random(5)
+        return real_resolve_damage(*args, **kwargs)
+
+    monkeypatch.setattr(server_module, "roll_attack_action", deterministic_roll_attack)
+    monkeypatch.setattr(server_module, "resolve_attack_damage", deterministic_resolve_damage)
 
     async def call(server, name: str, arguments: dict):
         _, result = await server.call_tool(name, arguments)

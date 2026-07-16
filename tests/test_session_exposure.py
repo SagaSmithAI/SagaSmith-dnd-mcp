@@ -32,8 +32,10 @@ def test_exposures_are_session_scoped_and_phase_safe() -> None:
         phase="lobby",
     )
     registry.load(first, "lobby.modules")
+    registry.load(first, "lobby.rules")
 
     assert "module_import" in registry.visible_tools(first)
+    assert "campaign_rules" in registry.visible_tools(first)
     assert "module_import" not in registry.visible_tools(second)
     with pytest.raises(ExposureError):
         registry.load(first, "combat.actions")

@@ -140,6 +140,7 @@ TOOL_GROUPS = (
         "rule_seed_bundled",
         "rule_search",
         "rule_expand",
+        "campaign_rules",
         roles=("owner", "dm"),
     ),
     _group(
