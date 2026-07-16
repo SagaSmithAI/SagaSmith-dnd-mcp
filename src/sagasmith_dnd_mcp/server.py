@@ -3959,9 +3959,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         normalized_casting_time = casting_time.casefold().strip()
         if ritual:
             raise CombatEngineError("ritual casting cannot be completed inside an active encounter")
-        if normalized_casting_time.startswith("bonus action"):
+        if normalized_casting_time.startswith(("bonus action", "1 bonus action")):
             payment = "bonus_action"
-        elif normalized_casting_time.startswith("reaction"):
+        elif normalized_casting_time.startswith(("reaction", "1 reaction")):
             payment = "reaction"
         elif normalized_casting_time.startswith("1 action"):
             payment = "main_action"

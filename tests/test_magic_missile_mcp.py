@@ -349,3 +349,46 @@ def test_magic_missile_creates_per_dart_concentration_saves_and_prunes_after_fai
         ]
 
     asyncio.run(exercise())
+
+
+def test_combat_cast_accepts_numbered_bonus_action_from_imported_spell_card(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        server = create_server(_config(tmp_path))
+        caster_sheet = default_character_sheet()
+        caster_sheet["spellcasting"]["spell_slots"] = _slots()
+        caster_sheet["content"]["spells"] = [
+            _spell(
+                "dnd5e.content.srd2014.spell.healing-word",
+                "Healing Word",
+                "test.spell.healing_word",
+                "1 bonus action",
+            )
+        ]
+        target_sheet = default_character_sheet()
+        campaign, actors = await _campaign_with_combat(
+            server, [("Caster", caster_sheet), ("Target", target_sheet)]
+        )
+        cast = await _raw(
+            server,
+            "combat_cast_spell",
+            {
+                "campaign_id": campaign["id"],
+                "actor_id": actors[0]["id"],
+                "spell_id": "dnd5e.content.srd2014.spell.healing-word",
+                "cast_level": 1,
+                "expected_revision": campaign["revision"],
+                "idempotency_key": "numbered-bonus-action",
+            },
+        )
+        assert cast["status"] == "pending_ruling"
+        combatant = next(
+            item for item in cast["combat"]["combatants"] if item["actor_id"] == actors[0]["id"]
+        )
+        assert combatant["turn_budget"]["bonus_action"] == 0
+        assert combatant["turn_budget"]["main_action"] == 1
+        caster = await _call(server, "character_get", {"character_id": actors[0]["id"]})
+        assert caster["sheet"]["spellcasting"]["spell_slots"]["1"]["value"] == 0
+
+    asyncio.run(exercise())
