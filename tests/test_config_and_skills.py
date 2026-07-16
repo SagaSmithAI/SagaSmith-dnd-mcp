@@ -40,6 +40,17 @@ def test_environment_config_has_separate_rule_and_module_import_roots(monkeypatc
     assert [path.name for path in config.module_import_roots] == ["modules-a", "modules-b"]
 
 
+def test_default_rule_import_roots_include_the_dnd_skill_corpus(monkeypatch) -> None:
+    monkeypatch.delenv("SAGASMITH_DND_MCP_RULE_IMPORT_ROOTS", raising=False)
+
+    config = McpConfig.from_environment()
+
+    assert config.rule_import_roots[0].name == "DnD-Books"
+    assert config.rule_import_roots[1] == (
+        config.dnd_skills_dir / "full" / "skills" / "dnd-dm" / "srd"
+    ).resolve()
+
+
 def test_skill_catalog_reads_both_repositories(tmp_path: Path) -> None:
     dnd = tmp_path / "dnd"
     modulegen = tmp_path / "modulegen"

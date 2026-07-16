@@ -4521,9 +4521,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         sheet: dict[str, Any] | None = None,
         notes: dict[str, Any] | None = None,
         principal_id: str = "system:local",
+        idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Atomically create a PC library template and independent campaign instance."""
         access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        if not idempotency_key:
+            raise ValueError("idempotency_key is required for character build")
         sheet_value = deepcopy(sheet or default_character_sheet())
         sheet_value["edition"] = str(campaigns.get(campaign_id).settings.get("edition") or "2024")
         normalized_sheet = validate_character_sheet(
@@ -4540,6 +4543,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             summary=summary,
             sheet=normalized_sheet,
             notes=normalized_notes,
+            principal_id=principal_id,
+            idempotency_key=idempotency_key,
         )
         return {"template": character_view(template), "instance": character_view(instance)}
 
@@ -8276,6 +8281,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 data.get("sheet"),
                 data.get("notes"),
                 principal_id,
+                idempotency_key,
             )
         else:
             result = character_instantiate(

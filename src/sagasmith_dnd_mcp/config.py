@@ -29,6 +29,9 @@ class McpConfig:
     def from_environment(cls) -> "McpConfig":
         root = _workspace_root()
         home = Path(os.environ.get("SAGASMITH_DND_MCP_HOME", root / ".sagasmith-dnd-mcp"))
+        dnd_skills_dir = Path(
+            os.environ.get("SAGASMITH_DND_SKILLS_DIR", root / "SagaSmith-dnd-skills")
+        ).expanduser().resolve()
         raw_chroma_path = os.environ.get("CHROMA_DB_PATH")
         raw_rule_roots = os.environ.get("SAGASMITH_DND_MCP_RULE_IMPORT_ROOTS")
         raw_module_roots = os.environ.get("SAGASMITH_DND_MCP_MODULE_IMPORT_ROOTS")
@@ -39,7 +42,10 @@ class McpConfig:
                 if value.strip()
             )
             if raw_rule_roots is not None
-            else (root / "reference" / "DnD-Books",)
+            else (
+                root / "reference" / "DnD-Books",
+                dnd_skills_dir / "full" / "skills" / "dnd-dm" / "srd",
+            )
         )
         module_roots = (
             tuple(
@@ -57,11 +63,7 @@ class McpConfig:
             chroma_path_override=(
                 Path(raw_chroma_path).expanduser().resolve() if raw_chroma_path else None
             ),
-            dnd_skills_dir=Path(
-                os.environ.get("SAGASMITH_DND_SKILLS_DIR", root / "SagaSmith-dnd-skills")
-            )
-            .expanduser()
-            .resolve(),
+            dnd_skills_dir=dnd_skills_dir,
             modulegen_skills_dir=Path(
                 os.environ.get(
                     "SAGASMITH_MODULEGEN_SKILLS_DIR",

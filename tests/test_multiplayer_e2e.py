@@ -24,6 +24,35 @@ def config(tmp_path: Path) -> McpConfig:
     )
 
 
+def test_character_build_replays_one_template_and_instance(tmp_path: Path) -> None:
+    async def exercise() -> None:
+        server = create_server(config(tmp_path))
+        campaign = await call(
+            server,
+            "campaign_create",
+            {"name": "Build table", "edition": "2014", "idempotency_key": "campaign"},
+        )
+        arguments = {
+            "mode": "build",
+            "payload": {"campaign_id": campaign["id"], "name": "Mira"},
+            "idempotency_key": "build-mira",
+        }
+
+        first = await call(server, "character_create_from", arguments)
+        replay = await call(server, "character_create_from", arguments)
+        roster = await call(
+            server,
+            "character_query",
+            {"view": "list", "payload": {"campaign_id": campaign["id"]}},
+        )
+
+        assert replay["template"]["id"] == first["template"]["id"]
+        assert replay["instance"]["id"] == first["instance"]["id"]
+        assert [item["id"] for item in roster] == [first["instance"]["id"]]
+
+    asyncio.run(exercise())
+
+
 def test_dm_two_players_restart_and_combat_projection(tmp_path: Path) -> None:
     async def exercise() -> None:
         runtime = config(tmp_path)
