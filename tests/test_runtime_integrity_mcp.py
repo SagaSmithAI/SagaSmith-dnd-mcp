@@ -1144,6 +1144,7 @@ def test_module_scene_creates_a_temporary_battle_map(tmp_path: Path) -> None:
                 "name": "keep.md",
                 "content": (
                     "# Keep\n## Layout\n#### A1. Gate\nA 30 by 20 foot gatehouse.\n"
+                    "## Setup\nThe heroes wait near the gate.\n"
                     "## Ambush\nRaiders attack at the gate."
                 ),
             },
@@ -1159,14 +1160,16 @@ def test_module_scene_creates_a_temporary_battle_map(tmp_path: Path) -> None:
         )
         scenes = await call(server, "module_index", {"campaign_id": campaign["id"]})
         spatial_scene = next(item for item in scenes if item["title"] == "Layout")
+        setup_scene = next(item for item in scenes if item["title"] == "Setup")
         scene = next(item for item in scenes if item["title"] == "Ambush")
         await call(
             server,
             "module_set_progress",
             {
                 "campaign_id": campaign["id"],
-                "scene_id": scene["scene_id"],
+                "scene_id": setup_scene["scene_id"],
                 "current_location_key": "a1-gate",
+                "state": {"location_scene_id": spatial_scene["scene_id"]},
                 "expected_state_version": 0,
                 "idempotency_key": "map-progress",
             },
