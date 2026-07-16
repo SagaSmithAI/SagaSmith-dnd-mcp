@@ -139,6 +139,8 @@ NanoBot 示例；其他 stdio MCP Host 使用相同的 `command`、`cwd` 与 `en
 
 服务提供 campaign/membership、角色控制、事件、Snapshot DAG、branch checkout、continuity context、修订式记忆以及 PC/NPC 独立的 actor knowledge。玩家只能读取当前分支、允许的场景 scope、自己控制角色的完整 sheet，以及角色真正知道的事实。
 
+Snapshot 是可独立恢复的全量 checkpoint，`recap` 才是父子节点差量。切换 branch 前当前工作区必须已经保存；否则服务拒绝 checkout，避免角色状态与 actor knowledge 落在不同时间点。
+
 ### 规则与扩展书
 
 用户规则书的完整路径是：

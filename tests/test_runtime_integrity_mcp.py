@@ -151,6 +151,187 @@ def test_2024_prepared_spell_changes_follow_phase_and_long_rest_rules(tmp_path: 
     asyncio.run(exercise())
 
 
+def test_dm_can_read_actor_knowledge_from_a_non_current_branch_snapshot(tmp_path: Path) -> None:
+    config = McpConfig(
+        home=tmp_path / "home",
+        database_url=None,
+        chroma_url=None,
+        chroma_path_override=None,
+        dnd_skills_dir=tmp_path / "dnd",
+        modulegen_skills_dir=tmp_path / "modulegen",
+        auto_seed_rules=False,
+    )
+
+    async def call(server, name: str, arguments: dict):
+        _, result = await server.call_tool(name, arguments)
+        return result.get("result", result) if isinstance(result, dict) else result
+
+    async def exercise() -> None:
+        server = create_server(config)
+        campaign = await call(
+            server,
+            "campaign_create",
+            {"name": "Historical actor view", "idempotency_key": "campaign"},
+        )
+        current = await call(server, "campaign_get", {"campaign_id": campaign["id"]})
+        base = await call(
+            server,
+            "snapshot_create",
+            {
+                "campaign_id": campaign["id"],
+                "label": "Before actor",
+                "expected_revision": current["revision"],
+                "expected_head_snapshot_id": "",
+                "idempotency_key": "snapshot-base",
+            },
+        )
+        actor = await call(
+            server,
+            "character_create",
+            {
+                "name": "Branch-only witness",
+                "campaign_id": campaign["id"],
+                "character_type": "npc",
+                "idempotency_key": "actor",
+            },
+        )
+        await call(
+            server,
+            "actor_knowledge_add",
+            {
+                "campaign_id": campaign["id"],
+                "actor_id": actor["id"],
+                "knowledge_key": "branch-secret",
+                "proposition": "Only this branch contains the witness.",
+                "idempotency_key": "knowledge",
+            },
+        )
+        current = await call(server, "campaign_get", {"campaign_id": campaign["id"]})
+        main_branch = next(
+            item
+            for item in await call(server, "branch_list", {"campaign_id": campaign["id"]})
+            if item["is_current"]
+        )
+        await call(
+            server,
+            "snapshot_create",
+            {
+                "campaign_id": campaign["id"],
+                "label": "Actor exists",
+                "expected_revision": current["revision"],
+                "expected_head_snapshot_id": base["id"],
+                "idempotency_key": "snapshot-actor",
+            },
+        )
+        current = await call(server, "campaign_get", {"campaign_id": campaign["id"]})
+        await call(
+            server,
+            "branch_create",
+            {
+                "campaign_id": campaign["id"],
+                "name": "before-actor",
+                "from_snapshot_id": base["id"],
+                "checkout": True,
+                "expected_revision": current["revision"],
+                "expected_branch_id": main_branch["id"],
+                "idempotency_key": "branch-before-actor",
+            },
+        )
+
+        historical = await call(
+            server,
+            "actor_knowledge_query",
+            {
+                "campaign_id": campaign["id"],
+                "actor_id": actor["id"],
+                "view": "list",
+                "payload": {"branch_id": main_branch["id"]},
+            },
+        )
+        assert [item["knowledge_key"] for item in historical] == ["branch-secret"]
+        context = await call(
+            server,
+            "continuity_context",
+            {
+                "campaign_id": campaign["id"],
+                "actor_id": actor["id"],
+                "branch_id": main_branch["id"],
+            },
+        )
+        assert [item["knowledge_key"] for item in context["actor_knowledge"]] == ["branch-secret"]
+
+    asyncio.run(exercise())
+
+
+def test_branch_checkout_rejects_dirty_state_without_leaving_a_branch(tmp_path: Path) -> None:
+    config = McpConfig(
+        home=tmp_path / "home",
+        database_url=None,
+        chroma_url=None,
+        chroma_path_override=None,
+        dnd_skills_dir=tmp_path / "dnd",
+        modulegen_skills_dir=tmp_path / "modulegen",
+        auto_seed_rules=False,
+    )
+
+    async def call(server, name: str, arguments: dict):
+        _, result = await server.call_tool(name, arguments)
+        return result.get("result", result) if isinstance(result, dict) else result
+
+    async def exercise() -> None:
+        server = create_server(config)
+        campaign = await call(
+            server,
+            "campaign_create",
+            {"name": "Dirty checkout", "idempotency_key": "campaign"},
+        )
+        branch = next(
+            item
+            for item in await call(server, "branch_list", {"campaign_id": campaign["id"]})
+            if item["is_current"]
+        )
+        saved = await call(
+            server,
+            "snapshot_create",
+            {
+                "campaign_id": campaign["id"],
+                "label": "Baseline",
+                "expected_revision": campaign["revision"],
+                "expected_head_snapshot_id": "",
+                "idempotency_key": "snapshot",
+            },
+        )
+        changed = await call(
+            server,
+            "campaign_update",
+            {
+                "campaign_id": campaign["id"],
+                "description": "This change has not been saved.",
+                "expected_revision": campaign["revision"],
+                "idempotency_key": "change",
+            },
+        )
+
+        with pytest.raises(Exception, match="unsaved changes"):
+            await call(
+                server,
+                "branch_create",
+                {
+                    "campaign_id": campaign["id"],
+                    "name": "must-not-remain",
+                    "from_snapshot_id": saved["id"],
+                    "checkout": True,
+                    "expected_revision": changed["revision"],
+                    "expected_branch_id": branch["id"],
+                    "idempotency_key": "dirty-branch",
+                },
+            )
+        branches = await call(server, "branch_list", {"campaign_id": campaign["id"]})
+        assert [item["id"] for item in branches] == [branch["id"]]
+
+    asyncio.run(exercise())
+
+
 def test_readied_spell_lifecycle_is_atomic_and_rule_complete(tmp_path: Path) -> None:
     config = McpConfig(
         home=tmp_path / "home",

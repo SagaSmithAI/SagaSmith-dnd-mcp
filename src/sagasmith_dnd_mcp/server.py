@@ -545,9 +545,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             if exposure.campaign_id is None:
                 raise ExposureError(f"Tool {tool_id!r} requires a campaign-bound exposure.")
             roles = set().union(*(group.roles for group in protected_groups))
-            access.require_campaign(
-                exposure.campaign_id, exposure.principal_id, roles=roles
-            )
+            access.require_campaign(exposure.campaign_id, exposure.principal_id, roles=roles)
         if exposure.campaign_id is None:
             return
 
@@ -4230,6 +4228,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             source_snapshot_id = from_snapshot_id or branches.current(campaign_id).head_snapshot_id
             if source_snapshot_id:
                 assert_snapshot_core_available(snapshots.get_by_id(campaign_id, source_snapshot_id))
+            snapshots.assert_clean(campaign_id)
         created = branches.create(
             campaign_id,
             name=name,
@@ -6047,12 +6046,19 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         branch_id: str | None = None,
         principal_id: str = "system:local",
     ) -> list[dict[str, Any]]:
-        access.require_actor(campaign_id, actor_id, principal_id, private=True)
+        resolved_branch_id = readable_branch(campaign_id, branch_id, principal_id)
+        access.require_actor(
+            campaign_id,
+            actor_id,
+            principal_id,
+            private=True,
+            branch_id=resolved_branch_id,
+        )
         membership = access.require_campaign(campaign_id, principal_id)
         values = knowledge.list(
             campaign_id,
             actor_id=actor_id,
-            branch_id=readable_branch(campaign_id, branch_id, principal_id),
+            branch_id=resolved_branch_id,
         )
         if membership.role not in {"owner", "dm"}:
             values = [
@@ -6072,13 +6078,20 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         principal_id: str = "system:local",
     ) -> list[dict[str, Any]]:
         """Search one actor's current subjective knowledge without leaking other actors."""
-        access.require_actor(campaign_id, actor_id, principal_id, private=True)
+        resolved_branch_id = readable_branch(campaign_id, branch_id, principal_id)
+        access.require_actor(
+            campaign_id,
+            actor_id,
+            principal_id,
+            private=True,
+            branch_id=resolved_branch_id,
+        )
         membership = access.require_campaign(campaign_id, principal_id)
         values = knowledge.search(
             campaign_id,
             actor_id=actor_id,
             query=query,
-            branch_id=readable_branch(campaign_id, branch_id, principal_id),
+            branch_id=resolved_branch_id,
             limit=limit,
         )
         if membership.role not in {"owner", "dm"}:
@@ -6340,11 +6353,25 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     ) -> dict[str, Any]:
         """Retrieve only current-branch facts, events, and optional actor knowledge."""
         membership = access.require_campaign(campaign_id, principal_id)
+        branch_id = readable_branch(campaign_id, branch_id, principal_id)
         if membership.role not in {"owner", "dm"}:
             audience = "player"
             if actor_id:
-                access.require_actor(campaign_id, actor_id, principal_id, private=True)
-        branch_id = readable_branch(campaign_id, branch_id, principal_id)
+                access.require_actor(
+                    campaign_id,
+                    actor_id,
+                    principal_id,
+                    private=True,
+                    branch_id=branch_id,
+                )
+        elif actor_id:
+            access.require_actor(
+                campaign_id,
+                actor_id,
+                principal_id,
+                private=True,
+                branch_id=branch_id,
+            )
         return continuity.context(
             campaign_id,
             query=query,
@@ -9196,9 +9223,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             )
         async with mcp._exposure_lock(exposure.id):
             if exposure.campaign_id:
-                exposures.refresh_phase(
-                    exposure, authoritative_phase(exposure.campaign_id)
-                )
+                exposures.refresh_phase(exposure, authoritative_phase(exposure.campaign_id))
             exposures.load(exposure, group_id, ttl_calls)
         return exposures.status(exposure)
 
