@@ -1,6 +1,8 @@
 import asyncio
 from pathlib import Path
 
+import pytest
+
 from sagasmith_dnd_mcp.config import McpConfig
 from sagasmith_dnd_mcp.server import create_server
 
@@ -274,5 +276,114 @@ def test_rule_and_module_import_jobs_are_reviewable_and_activation_safe(tmp_path
             == imported_module["module_id"]
         )
         assert revision_validation["validation"]["diff"]["added"]
+
+    asyncio.run(exercise())
+
+
+def test_module_import_facade_stages_only_allowlisted_documents(tmp_path: Path) -> None:
+    import_root = tmp_path / "modules"
+    import_root.mkdir()
+    source = import_root / "adventure.md"
+    source.write_text(
+        "# Chapter One\n\n## Arrival\n\n#### A1. Courtyard\n30 by 20 feet\n",
+        encoding="utf-8",
+    )
+    outside = tmp_path / "outside.md"
+    outside.write_text("# Outside\n", encoding="utf-8")
+    config = McpConfig(
+        home=tmp_path / "home",
+        database_url=None,
+        chroma_url=None,
+        chroma_path_override=None,
+        dnd_skills_dir=tmp_path / "dnd",
+        modulegen_skills_dir=tmp_path / "modulegen",
+        module_import_roots=(import_root,),
+    )
+
+    async def call(server, name: str, arguments: dict):
+        _, result = await server.call_tool(name, arguments)
+        return result.get("result", result) if isinstance(result, dict) else result
+
+    async def exercise() -> None:
+        server = create_server(config)
+        campaign = await call(
+            server,
+            "campaign_create",
+            {"name": "Managed module", "idempotency_key": "campaign"},
+        )
+        with pytest.raises(Exception, match="outside configured import roots"):
+            await call(
+                server,
+                "module_import",
+                {
+                    "campaign_id": campaign["id"],
+                    "action": "stage",
+                    "payload": {"source_path": str(outside)},
+                    "idempotency_key": "outside",
+                },
+            )
+        staged = await call(
+            server,
+            "module_import",
+            {
+                "campaign_id": campaign["id"],
+                "action": "stage",
+                "payload": {
+                    "source_path": str(source),
+                    "source_key": "managed-adventure",
+                    "title": "Managed Adventure",
+                },
+                "idempotency_key": "stage",
+            },
+        )
+        assert staged["staged"] is True
+        assert staged["artifact"].endswith("-adventure.md")
+        job_id = staged["job"]["id"]
+
+        inspected = await call(
+            server,
+            "module_import",
+            {
+                "campaign_id": campaign["id"],
+                "action": "inspect",
+                "payload": {"job_id": job_id},
+                "idempotency_key": "inspect",
+            },
+        )
+        assert inspected["preview"]["valid"] is True
+        validated = await call(
+            server,
+            "module_import",
+            {
+                "campaign_id": campaign["id"],
+                "action": "validate",
+                "payload": {"job_id": job_id},
+                "idempotency_key": "validate",
+            },
+        )
+        assert validated["validation"]["valid"] is True
+        ingested = await call(
+            server,
+            "module_import",
+            {
+                "campaign_id": campaign["id"],
+                "action": "ingest",
+                "payload": {"job_id": job_id},
+                "idempotency_key": "ingest",
+            },
+        )
+        current = await call(server, "campaign_get", {"campaign_id": campaign["id"]})
+        activated = await call(
+            server,
+            "module_import",
+            {
+                "campaign_id": campaign["id"],
+                "action": "activate",
+                "payload": {"job_id": job_id},
+                "expected_revision": current["revision"],
+                "idempotency_key": "activate",
+            },
+        )
+        assert activated["activation"]["module_id"] == ingested["module_id"]
 
     asyncio.run(exercise())

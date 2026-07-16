@@ -53,6 +53,10 @@ class SagaSmithStorage:
                 "rulebooks_dir": str(self.config.rulebooks_dir),
                 "import_roots": [str(path) for path in self.config.rule_import_roots],
             },
+            "modules": {
+                "artifacts_dir": str(self.config.modules_dir),
+                "import_roots": [str(path) for path in self.config.module_import_roots],
+            },
         }
 
     def stage_rulebook(self, source_path: str | Path) -> dict[str, Any]:
@@ -113,10 +117,55 @@ class SagaSmithStorage:
         target.write_text(content, encoding="utf-8")
         return target
 
+    def stage_module(self, source_path: str | Path) -> dict[str, Any]:
+        """Copy an allowlisted module document into content-addressed MCP storage."""
+        source = Path(source_path).expanduser().resolve()
+        if not source.is_file():
+            raise LookupError(str(source))
+        if source.suffix.casefold() not in {".pdf", ".md", ".markdown", ".txt"}:
+            raise ValueError("module must be PDF, Markdown, or text")
+        if not self.config.module_import_roots:
+            raise PermissionError("no module import roots are configured")
+        if not any(
+            source.is_relative_to(root.resolve()) for root in self.config.module_import_roots
+        ):
+            raise PermissionError("module source is outside configured import roots")
+        size = source.stat().st_size
+        if size > 100 * 1024 * 1024:
+            raise ValueError("module exceeds the 100 MiB safety limit")
+        checksum = hashlib.sha256(source.read_bytes()).hexdigest()
+        safe_name = re.sub(r"[^A-Za-z0-9._-]+", "-", source.name).strip("-.")
+        safe_name = safe_name or f"module{source.suffix.casefold()}"
+        artifact = f"{checksum[:12]}-{safe_name}"
+        target = (self.config.modules_dir / artifact).resolve()
+        if target.parent != self.config.modules_dir.resolve():
+            raise ValueError("invalid module artifact name")
+        if not target.exists():
+            shutil.copy2(source, target)
+        elif hashlib.sha256(target.read_bytes()).hexdigest() != checksum:
+            raise RuntimeError("managed module artifact checksum mismatch")
+        return {
+            "artifact": artifact,
+            "path": str(target),
+            "checksum": checksum,
+            "size": size,
+            "media_type": (
+                "application/pdf" if source.suffix.casefold() == ".pdf" else "text/markdown"
+            ),
+            "staged": True,
+        }
+
     def artifact_module_path(self, name: str) -> Path:
         target = (self.config.modules_dir / name).resolve()
-        if target.parent != self.config.modules_dir.resolve() or target.suffix != ".md":
-            raise ValueError("module artifact must be a .md file directly under artifacts/modules")
+        if target.parent != self.config.modules_dir.resolve() or target.suffix.casefold() not in {
+            ".pdf",
+            ".md",
+            ".markdown",
+            ".txt",
+        }:
+            raise ValueError(
+                "module artifact must be PDF, Markdown, or text directly under artifacts/modules"
+            )
         if not target.is_file():
             raise LookupError(name)
         return target

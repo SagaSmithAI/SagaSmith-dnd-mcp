@@ -23,6 +23,7 @@ class McpConfig:
     modulegen_skills_dir: Path
     auto_seed_rules: bool = True
     rule_import_roots: tuple[Path, ...] = ()
+    module_import_roots: tuple[Path, ...] = ()
 
     @classmethod
     def from_environment(cls) -> "McpConfig":
@@ -30,6 +31,7 @@ class McpConfig:
         home = Path(os.environ.get("SAGASMITH_DND_MCP_HOME", root / ".sagasmith-dnd-mcp"))
         raw_chroma_path = os.environ.get("CHROMA_DB_PATH")
         raw_rule_roots = os.environ.get("SAGASMITH_DND_MCP_RULE_IMPORT_ROOTS")
+        raw_module_roots = os.environ.get("SAGASMITH_DND_MCP_MODULE_IMPORT_ROOTS")
         rule_roots = (
             tuple(
                 Path(value).expanduser().resolve()
@@ -38,6 +40,15 @@ class McpConfig:
             )
             if raw_rule_roots is not None
             else (root / "reference" / "DnD-Books",)
+        )
+        module_roots = (
+            tuple(
+                Path(value).expanduser().resolve()
+                for value in raw_module_roots.split(os.pathsep)
+                if value.strip()
+            )
+            if raw_module_roots is not None
+            else (root / "test_pdfs",)
         )
         return cls(
             home=home.expanduser().resolve(),
@@ -61,6 +72,7 @@ class McpConfig:
             .resolve(),
             auto_seed_rules=os.environ.get("SAGASMITH_DND_MCP_AUTO_SEED", "1") == "1",
             rule_import_roots=tuple(path.resolve() for path in rule_roots),
+            module_import_roots=tuple(path.resolve() for path in module_roots),
         )
 
     @property

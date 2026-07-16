@@ -1095,6 +1095,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "structured_content_catalog": True,
                 "structured_content_selection_requirements": True,
                 "module_import_idempotency": True,
+                "managed_module_document_staging": True,
+                "core_pdf_module_normalization": True,
                 "player_safe_scene_scopes": True,
                 "player_safe_combat_maps": True,
                 "rule_aware_noncombat_checks": True,
@@ -1132,6 +1134,18 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "play": "character_check",
                     "combat": "combat_check",
                 },
+            },
+            "module_import": {
+                "stages": [
+                    "module_import(stage)",
+                    "module_import(inspect)",
+                    "module_import(validate)",
+                    "module_import(ingest)",
+                    "module_import(activate)",
+                ],
+                "stage_inputs": ["source_path", "name+content"],
+                "managed_types": ["pdf", "markdown", "text"],
+                "normalizer": "sagasmith-core",
             },
             "write_requirements": ["principal_id", "expected_revision", "idempotency_key"],
             "tool_exposure": {
@@ -6604,7 +6618,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
 
     @mcp.tool()
     def module_inspect(artifact: str, principal_id: str = "system:local") -> dict[str, Any]:
-        """Inspect a managed Markdown artifact before importing it into a campaign."""
+        """Inspect a managed PDF/Markdown/text artifact before campaign import."""
         if not principal_id:
             raise PermissionError("authenticated caller identity is required for module artifacts")
         return modules.inspect_path(
@@ -6620,7 +6634,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         principal_id: str = "system:local",
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
-        """Import a Markdown artifact created by module_write into a campaign."""
+        """Import a managed module artifact into a campaign."""
         access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
         if not idempotency_key:
             raise ValueError("idempotency_key is required for module import")
@@ -8019,9 +8033,19 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         """Run the staged module-import state machine and activate only reviewed revisions."""
         data = facade_payload(payload)
         if action == "stage":
-            artifact = module_write(
-                required(data, "name"), required(data, "content"), principal_id
-            )["artifact"]
+            access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+            source_path = data.get("source_path")
+            generated_fields = {"name", "content"}.intersection(data)
+            if source_path is not None and generated_fields:
+                raise ValueError("stage accepts either source_path or name+content, not both")
+            if source_path is not None:
+                staged = storage.stage_module(str(source_path))
+                artifact = str(staged["artifact"])
+            else:
+                staged = module_write(
+                    required(data, "name"), required(data, "content"), principal_id
+                )
+                artifact = staged["artifact"]
             result = module_import_job_create(
                 campaign_id,
                 artifact,
@@ -8030,7 +8054,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 principal_id,
                 idempotency_key,
             )
-            return facade_result(action, {"artifact": artifact, **result})
+            return facade_result(action, {**staged, "artifact": artifact, **result})
         job_id = required(data, "job_id")
         if action == "inspect":
             return facade_result(

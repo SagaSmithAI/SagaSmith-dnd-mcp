@@ -1,4 +1,5 @@
 import asyncio
+import os
 from pathlib import Path
 
 from sagasmith_dnd_mcp.config import McpConfig
@@ -23,6 +24,20 @@ def test_config_owns_local_storage(tmp_path: Path) -> None:
     assert config.chroma_path.is_dir()
     assert config.modules_dir.is_dir()
     assert config.rulebooks_dir.is_dir()
+
+
+def test_environment_config_has_separate_rule_and_module_import_roots(monkeypatch) -> None:
+    monkeypatch.setenv(
+        "SAGASMITH_DND_MCP_RULE_IMPORT_ROOTS", os.pathsep.join(("rules-a", "rules-b"))
+    )
+    monkeypatch.setenv(
+        "SAGASMITH_DND_MCP_MODULE_IMPORT_ROOTS", os.pathsep.join(("modules-a", "modules-b"))
+    )
+
+    config = McpConfig.from_environment()
+
+    assert [path.name for path in config.rule_import_roots] == ["rules-a", "rules-b"]
+    assert [path.name for path in config.module_import_roots] == ["modules-a", "modules-b"]
 
 
 def test_skill_catalog_reads_both_repositories(tmp_path: Path) -> None:
@@ -185,6 +200,9 @@ def test_server_capabilities_publish_the_rulebook_import_contract(tmp_path: Path
         assert capabilities["features"]["source_bound_rule_packs"] is True
         assert capabilities["features"]["structured_content_selection_requirements"] is True
         assert capabilities["features"]["module_import_idempotency"] is True
+        assert capabilities["features"]["managed_module_document_staging"] is True
+        assert capabilities["features"]["core_pdf_module_normalization"] is True
+        assert capabilities["module_import"]["stage_inputs"] == ["source_path", "name+content"]
         assert capabilities["features"]["player_safe_scene_scopes"] is True
         assert capabilities["features"]["player_safe_combat_maps"] is True
         assert capabilities["rulebook_import"]["settlement_tools"] == {
