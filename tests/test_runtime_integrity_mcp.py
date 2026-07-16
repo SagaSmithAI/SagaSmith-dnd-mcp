@@ -957,7 +957,13 @@ def test_module_scene_creates_a_temporary_battle_map(tmp_path: Path) -> None:
         artifact = await call(
             server,
             "module_write",
-            {"name": "keep.md", "content": "# Keep\n## Gate\nA 30 by 20 foot gatehouse."},
+            {
+                "name": "keep.md",
+                "content": (
+                    "# Keep\n## Layout\n#### A1. Gate\nA 30 by 20 foot gatehouse.\n"
+                    "## Ambush\nRaiders attack at the gate."
+                ),
+            },
         )
         await call(
             server,
@@ -968,13 +974,16 @@ def test_module_scene_creates_a_temporary_battle_map(tmp_path: Path) -> None:
                 "idempotency_key": "map-module-import",
             },
         )
-        scene = (await call(server, "module_index", {"campaign_id": campaign["id"]}))[0]
+        scenes = await call(server, "module_index", {"campaign_id": campaign["id"]})
+        spatial_scene = next(item for item in scenes if item["title"] == "Layout")
+        scene = next(item for item in scenes if item["title"] == "Ambush")
         await call(
             server,
             "module_set_progress",
             {
                 "campaign_id": campaign["id"],
                 "scene_id": scene["scene_id"],
+                "current_location_key": "a1-gate",
                 "expected_state_version": 0,
                 "idempotency_key": "map-progress",
             },
@@ -997,7 +1006,9 @@ def test_module_scene_creates_a_temporary_battle_map(tmp_path: Path) -> None:
         )
         battle_map = started["combat"]["battle_map"]
         assert battle_map["lifecycle"] == "temporary"
-        assert battle_map["source"]["scene_id"] == scene["scene_id"]
+        assert battle_map["source"]["scene_id"] == spatial_scene["scene_id"]
+        assert battle_map["source"]["encounter_scene_id"] == scene["scene_id"]
+        assert battle_map["source"]["location_key"] == "a1-gate"
         await call(
             server,
             "campaign_member_grant",

@@ -1706,12 +1706,49 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             scene_context = modules.current_scene(campaign_id, scope_id=scope_id)
             if scene_context is not None:
                 resolved_scene_id = str(scene_context["scene_id"])
-        if resolved_scene_id is not None:
+        if resolved_scene_id is not None and scene_context is None:
             scene_context = modules.read_scene(campaign_id, resolved_scene_id)
         compiled_map = None
         if scene_context is not None:
             try:
-                compiled_map = compile_battle_map(scene_context, battle_map)
+                battle_map_request = deepcopy(battle_map or {})
+                progress_location_key = dict(scene_context.get("progress") or {}).get(
+                    "current_location_key"
+                )
+                if progress_location_key and not battle_map_request.get("location_key"):
+                    battle_map_request["location_key"] = progress_location_key
+                map_scene_context = scene_context
+                requested_location_key = battle_map_request.get("location_key")
+                scene_location_keys = {
+                    str(item.get("key"))
+                    for item in dict(scene_context.get("spatial") or {}).get("locations", [])
+                    if isinstance(item, dict) and item.get("key")
+                }
+                if requested_location_key and requested_location_key not in scene_location_keys:
+                    spatial_candidates = [
+                        item
+                        for item in modules.scene_index(
+                            campaign_id, module_id=scene_context.get("module_id")
+                        )
+                        if requested_location_key
+                        in {
+                            str(location.get("key"))
+                            for location in dict(item.get("spatial") or {}).get(
+                                "locations", []
+                            )
+                            if isinstance(location, dict) and location.get("key")
+                        }
+                    ]
+                    if len(spatial_candidates) != 1:
+                        raise BattleMapError(
+                            "battle-map location_key must identify exactly one spatial "
+                            "location in the encounter module"
+                        )
+                    map_scene_context = {
+                        **spatial_candidates[0],
+                        "encounter_scene_id": resolved_scene_id,
+                    }
+                compiled_map = compile_battle_map(map_scene_context, battle_map_request)
                 for entry in config_by_actor.values():
                     validate_position(compiled_map, entry.get("position"))
             except BattleMapError as error:
