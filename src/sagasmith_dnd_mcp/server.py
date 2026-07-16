@@ -1707,7 +1707,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             if scene_context is not None:
                 resolved_scene_id = str(scene_context["scene_id"])
         if resolved_scene_id is not None and scene_context is None:
-            scene_context = modules.read_scene(campaign_id, resolved_scene_id)
+            current_scene_context = modules.current_scene(campaign_id, scope_id=scope_id)
+            scene_context = (
+                current_scene_context
+                if current_scene_context is not None
+                and str(current_scene_context["scene_id"]) == resolved_scene_id
+                else modules.read_scene(campaign_id, resolved_scene_id)
+            )
         compiled_map = None
         if scene_context is not None:
             try:

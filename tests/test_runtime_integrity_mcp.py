@@ -999,6 +999,7 @@ def test_module_scene_creates_a_temporary_battle_map(tmp_path: Path) -> None:
                     {"actor_id": mover["id"], "initiative": 20, "position": {"x": 0, "y": 0}},
                     {"actor_id": threat["id"], "initiative": 10, "position": {"x": 3, "y": 0}},
                 ],
+                "scene_id": scene["scene_id"],
                 "battle_map": {"blocked_cells": [{"x": 1, "y": 0}]},
                 "expected_revision": campaign["revision"],
                 "idempotency_key": "map-combat-start",
