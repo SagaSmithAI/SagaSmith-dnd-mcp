@@ -7770,6 +7770,69 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 raise ValueError("target class already has a different subclass")
             target["subclass"] = str(card.get("name") or artifact_id)
             sheet["progression"]["classes"] = classes
+            domain_spell_ids: list[str] = []
+            for spell_grant in card.get("always_prepared_spells", []):
+                if int(spell_grant.get("minimum_level", 1) or 1) > int(
+                    target.get("level", 0) or 0
+                ):
+                    continue
+                spell_name = str(spell_grant.get("name") or "").strip()
+                spell_match = next(
+                    (
+                        item
+                        for item in candidates
+                        if item[2].get("kind") == "spell"
+                        and str(dict(item[2].get("card") or {}).get("name") or "").casefold()
+                        == spell_name.casefold()
+                        and declared_class.casefold()
+                        in {
+                            str(value).casefold()
+                            for value in dict(item[2].get("card") or {}).get("classes", [])
+                        }
+                    ),
+                    None,
+                )
+                if spell_match is None:
+                    return {
+                        "status": "pending_ruling",
+                        "reason": (
+                            "subclass spell is not available in the active catalog: "
+                            f"{spell_name}"
+                        ),
+                    }
+                spell_pack_id, spell_version, spell_artifact = spell_match
+                spell_id = str(spell_artifact["id"])
+                domain_spell_ids.append(spell_id)
+                spell_card = next(
+                    (item for item in sheet["content"]["spells"] if item.get("id") == spell_id),
+                    None,
+                )
+                if spell_card is None:
+                    spell_card = deepcopy(dict(spell_artifact.get("card") or {}))
+                    spell_card.pop("classes", None)
+                    sheet["content"]["spells"].append(spell_card)
+                spell_card["grant"] = {
+                    "source_type": "subclass",
+                    "source_key": str(card.get("name") or artifact_id),
+                    "method": "class_prepared",
+                }
+                spell_card.setdefault("access", {})["known"] = False
+                spell_card["access"]["prepared"] = True
+                spell_card["access"]["always_prepared"] = True
+                spell_card.update(
+                    id=spell_id,
+                    pack_id=spell_pack_id,
+                    pack_version=spell_version,
+                    rule_refs=list(spell_artifact.get("rule_refs") or []),
+                    mechanic_refs=list(spell_artifact.get("mechanic_refs") or []),
+                )
+            if domain_spell_ids:
+                preparation = sheet["spellcasting"]["preparation"]
+                preparation["selected_spell_ids"] = [
+                    item
+                    for item in preparation.get("selected_spell_ids", [])
+                    if item not in set(domain_spell_ids)
+                ]
         elif kind == "background":
             existing_background = str(sheet["progression"].get("background") or "")
             selected_background = str(card.get("name") or artifact_id)
@@ -7804,8 +7867,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 sheet["skills"][skill_key]["proficiency"] = "proficient"
         elif kind == "species":
             selected_species = str(card.get("name") or artifact_id)
+            base_species = str(card.get("base_species") or selected_species)
             existing_species = str(sheet["progression"].get("species") or "")
-            if existing_species and existing_species != selected_species:
+            if existing_species and existing_species.casefold() not in {
+                selected_species.casefold(),
+                base_species.casefold(),
+            }:
                 raise ValueError("character already has a different species")
             if any(
                 item.get("artifact_id") == artifact_id for item in sheet["content"]["selections"]
@@ -7856,7 +7923,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             if excluded_abilities.intersection(selected_abilities):
                 raise ValueError("species ability choice cannot repeat a fixed increase")
             values_include_grants = bool(selection.get("values_include_species_grants", False))
-            if not values_include_grants:
+            abilities_include_grants = bool(
+                selection.get("ability_scores_include_species_grants", values_include_grants)
+            )
+            hp_includes_grants = bool(
+                selection.get("hit_points_include_species_grants", values_include_grants)
+            )
+            if not abilities_include_grants:
                 increases = dict(grants.get("ability_score_increases") or {})
                 for ability in selected_abilities:
                     increases[ability] = int(increases.get(ability, 0)) + int(
@@ -7866,6 +7939,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     sheet["abilities"][ability]["score"] = (
                         int(sheet["abilities"][ability]["score"]) + int(amount)
                     )
+            if not hp_includes_grants:
                 hp_bonus = int(grants.get("hp_per_level", 0) or 0) * int(
                     sheet["progression"].get("level", 1) or 1
                 )
@@ -8032,11 +8106,19 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                                 )
                             if skill is not None:
                                 skill["proficiency"] = "expertise"
+                mechanical_grants = dict(card.get("mechanical_grants") or {})
+                armor = sheet["traits"]["proficiencies"]["armor"]
+                sheet["traits"]["proficiencies"]["armor"] = list(
+                    dict.fromkeys(
+                        [*armor, *list(mechanical_grants.get("armor_proficiencies") or [])]
+                    )
+                )
                 for metadata_key in (
                     "class_name",
                     "subclass_name",
                     "minimum_level",
                     "selection_requirements",
+                    "mechanical_grants",
                 ):
                     card.pop(metadata_key, None)
                 if selection:

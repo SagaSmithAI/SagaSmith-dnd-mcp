@@ -137,6 +137,84 @@ def test_core_srd_content_catalog_is_structured_and_selectable(tmp_path: Path) -
         )
         assert selected["sheet"]["content"]["selections"][0]["pack_version"] == "1.2.0"
 
+        life_domain = next(
+            item
+            for item in await call(
+                server,
+                "content_catalog_list",
+                {"campaign_id": campaign["id"], "kind": "subclass", "query": "Life Domain"},
+            )
+            if item["name"] == "Life Domain"
+        )
+        cleric_sheet = default_character_sheet()
+        cleric_sheet["progression"]["classes"] = [
+            {"name": "Cleric", "level": 1, "subclass": "", "hit_die": 8}
+        ]
+        cleric_sheet["spellcasting"]["preparation"].update(
+            {"mode": "prepared", "max_prepared": 3, "changes_on": "long_rest"}
+        )
+        cleric = await call(
+            server,
+            "character_create",
+            {
+                "campaign_id": campaign["id"],
+                "name": "Life Cleric",
+                "sheet": cleric_sheet,
+                "idempotency_key": "catalog-life-cleric",
+            },
+        )
+        cleric = await call(
+            server,
+            "character_content_apply",
+            {
+                "character_id": cleric["id"],
+                "artifact_id": life_domain["id"],
+                "selection": {"target_class_name": "Cleric"},
+                "expected_revision": cleric["revision"],
+                "idempotency_key": "catalog-life-domain",
+            },
+        )
+        domain_spells = {
+            spell["name"]: spell
+            for spell in cleric["sheet"]["content"]["spells"]
+        }
+        assert set(domain_spells) == {"Bless", "Cure Wounds"}
+        for spell in domain_spells.values():
+            assert spell["grant"] == {
+                "source_type": "subclass",
+                "source_key": "Life Domain",
+                "method": "class_prepared",
+            }
+            assert spell["access"]["always_prepared"] is True
+            assert spell["access"]["prepared"] is True
+        assert cleric["sheet"]["spellcasting"]["preparation"]["selected_spell_ids"] == []
+
+        bonus_proficiency = next(
+            item
+            for item in await call(
+                server,
+                "content_catalog_list",
+                {
+                    "campaign_id": campaign["id"],
+                    "kind": "feature",
+                    "query": "Bonus Proficiency",
+                },
+            )
+            if item["name"] == "Bonus Proficiency"
+            and item["selection_requirements"]["subclass_name"] == "Life Domain"
+        )
+        cleric = await call(
+            server,
+            "character_content_apply",
+            {
+                "character_id": cleric["id"],
+                "artifact_id": bonus_proficiency["id"],
+                "expected_revision": cleric["revision"],
+                "idempotency_key": "catalog-life-bonus-proficiency",
+            },
+        )
+        assert "heavy armor" in cleric["sheet"]["traits"]["proficiencies"]["armor"]
+
         backgrounds = await call(
             server,
             "content_catalog_list",
@@ -266,12 +344,15 @@ def test_core_srd_content_catalog_is_structured_and_selectable(tmp_path: Path) -
             "brewer's supplies",
             "mason's tools",
         ]
+        dwarf_sheet = default_character_sheet()
+        dwarf_sheet["progression"]["species"] = "Dwarf"
         dwarf = await call(
             server,
             "character_create",
             {
                 "campaign_id": campaign["id"],
                 "name": "Dwarf",
+                "sheet": dwarf_sheet,
                 "idempotency_key": "catalog-dwarf",
             },
         )
