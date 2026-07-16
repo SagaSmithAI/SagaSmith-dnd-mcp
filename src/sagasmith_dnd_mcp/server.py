@@ -1963,6 +1963,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         current = next(
             item for item in next_encounter["combatants"] if item.get("actor_id") == actor_id
         )
+        sneak_attack = dict(result.get("sneak_attack") or {})
+        if sneak_attack.get("used"):
+            flags = dict(current.get("turn_flags") or {})
+            flags["sneak_attack_turn_token"] = sneak_attack["turn_token"]
+            current["turn_flags"] = flags
         budget = dict(current.get("turn_budget") or {})
         if budget.get("attack_budget", 0) > 0:
             budget["attack_budget"] -= 1

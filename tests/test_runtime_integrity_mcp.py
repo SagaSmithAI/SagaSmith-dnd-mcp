@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import random
 from pathlib import Path
 
 import pytest
 
+import sagasmith_dnd_mcp.server as server_module
 from sagasmith_dnd_mcp.config import McpConfig
 from sagasmith_dnd_mcp.server import create_server
 
@@ -918,6 +920,180 @@ def test_structured_combat_is_atomic_and_player_filtered(tmp_path: Path) -> None
         allowed = {"actor_id", "token_id", "name", "initiative", "position"}
         assert all(set(item) <= allowed for item in player_view["combatants"])
         assert second["id"] not in {item["actor_id"] for item in player_view["combatants"]}
+
+    asyncio.run(exercise())
+
+
+def test_combat_sneak_attack_persists_the_once_per_turn_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = McpConfig(
+        home=tmp_path / "home",
+        database_url=None,
+        chroma_url=None,
+        chroma_path_override=None,
+        dnd_skills_dir=tmp_path / "dnd",
+        modulegen_skills_dir=tmp_path / "modulegen",
+        auto_seed_rules=False,
+    )
+    real_resolve_attack = server_module.resolve_attack_action
+
+    def deterministic_resolve_attack(*args, **kwargs):
+        kwargs["rng"] = random.Random(5)
+        return real_resolve_attack(*args, **kwargs)
+
+    monkeypatch.setattr(server_module, "resolve_attack_action", deterministic_resolve_attack)
+
+    async def call(server, name: str, arguments: dict):
+        _, result = await server.call_tool(name, arguments)
+        return result.get("result", result) if isinstance(result, dict) else result
+
+    async def call_raw(server, name: str, arguments: dict):
+        _, result = await server.call_tool(name, arguments)
+        return result
+
+    async def exercise() -> None:
+        server = create_server(config)
+        campaign = await call(
+            server,
+            "campaign_create",
+            {"name": "Sneak Attack", "edition": "2014", "idempotency_key": "sa-campaign"},
+        )
+        actors = []
+        for key in ("rogue", "ally", "target"):
+            actors.append(
+                await call(
+                    server,
+                    "character_create",
+                    {
+                        "name": key.title(),
+                        "campaign_id": campaign["id"],
+                        "idempotency_key": f"sa-{key}",
+                    },
+                )
+            )
+        rogue, ally, target = actors
+        rogue_sheet = rogue["sheet"]
+        rogue_sheet["abilities"]["dexterity"]["score"] = 16
+        rogue_sheet["progression"] = {
+            "level": 6,
+            "classes": [
+                {"name": "Fighter", "level": 5, "hit_die": 10},
+                {"name": "Rogue", "level": 1, "hit_die": 8},
+            ],
+        }
+        rogue_sheet["combat"]["attacks_per_action"] = 2
+        rogue_sheet["content"]["features"] = [
+            {
+                "id": "dnd5e.content.srd2014.feature.rogue-sneak-attack",
+                "name": "Sneak Attack",
+                "source_key": "Rogue",
+            }
+        ]
+        rogue_sheet["inventory"]["items"] = [
+            {
+                "id": "dagger",
+                "name": "Dagger",
+                "kind": "weapon",
+                "equipped": True,
+                "equipped_slot": "main_hand",
+                "mechanics": {
+                    "category": "simple",
+                    "attack_type": "melee",
+                    "attack_ability": "dexterity",
+                    "damage_formula": "1d4",
+                    "damage_type": "piercing",
+                    "properties": ["finesse", "light", "thrown"],
+                },
+            }
+        ]
+        rogue_sheet["inventory"]["equipment_slots"]["main_hand"] = "dagger"
+        rogue = await call(
+            server,
+            "character_sheet_replace",
+            {
+                "character_id": rogue["id"],
+                "sheet": rogue_sheet,
+                "expected_revision": rogue["revision"],
+                "idempotency_key": "sa-rogue-sheet",
+            },
+        )
+        target_sheet = target["sheet"]
+        target_sheet["combat"]["ac"] = {"base": 1, "override": None}
+        target = await call(
+            server,
+            "character_sheet_replace",
+            {
+                "character_id": target["id"],
+                "sheet": target_sheet,
+                "expected_revision": target["revision"],
+                "idempotency_key": "sa-target-sheet",
+            },
+        )
+        campaign = await call(server, "campaign_get", {"campaign_id": campaign["id"]})
+        started = await call(
+            server,
+            "combat_start",
+            {
+                "campaign_id": campaign["id"],
+                "participant_ids": [rogue["id"], ally["id"], target["id"]],
+                "participant_config": [
+                    {
+                        "actor_id": rogue["id"],
+                        "initiative": 20,
+                        "position": {"x": 0, "y": 0},
+                        "disposition": "friendly",
+                    },
+                    {
+                        "actor_id": ally["id"],
+                        "initiative": 15,
+                        "position": {"x": 1, "y": 0},
+                        "disposition": "friendly",
+                    },
+                    {
+                        "actor_id": target["id"],
+                        "initiative": 10,
+                        "position": {"x": 1, "y": 0},
+                        "disposition": "hostile",
+                    },
+                ],
+                "expected_revision": campaign["revision"],
+                "idempotency_key": "sa-start",
+            },
+        )
+        attack = await call_raw(
+            server,
+            "combat_resolve_attack",
+            {
+                "campaign_id": campaign["id"],
+                "actor_id": rogue["id"],
+                "target_id": target["id"],
+                "action": {"weapon_id": "dagger", "use_sneak_attack": True},
+                "expected_revision": started["campaign_revision"],
+                "idempotency_key": "sa-first-attack",
+            },
+        )
+        assert attack["result"]["sneak_attack"]["used"] is True
+        status = await call(server, "combat_status", {"campaign_id": campaign["id"]})
+        rogue_state = next(
+            item for item in status["combatants"] if item["actor_id"] == rogue["id"]
+        )
+        assert rogue_state["turn_flags"]["sneak_attack_turn_token"] == (
+            attack["result"]["sneak_attack"]["turn_token"]
+        )
+        with pytest.raises(Exception, match="already been used"):
+            await call(
+                server,
+                "combat_resolve_attack",
+                {
+                    "campaign_id": campaign["id"],
+                    "actor_id": rogue["id"],
+                    "target_id": target["id"],
+                    "action": {"weapon_id": "dagger", "use_sneak_attack": True},
+                    "expected_revision": attack["campaign_revision"],
+                    "idempotency_key": "sa-second-attack",
+                },
+            )
 
     asyncio.run(exercise())
 
