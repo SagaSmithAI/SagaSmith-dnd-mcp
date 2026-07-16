@@ -120,7 +120,9 @@ from sagasmith_dnd.spatial import (
     validate_position,
 )
 from sagasmith_dnd.spells import (
+    available_shield_attack_defenses,
     consume_readied_spell,
+    consume_shield_reaction,
     consume_spell_cast,
     replace_prepared_spells,
     validate_spell_grant,
@@ -917,6 +919,134 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     def require_no_blocking_pending(encounter: dict[str, Any]) -> None:
         if any(item.get("status", "pending") == "pending" for item in encounter.get("pending", [])):
             raise CombatEngineError("resolve the pending save or choice before another action")
+
+    def require_combat_spell_turn_legal(
+        encounter: dict[str, Any],
+        *,
+        actor_id: str,
+        payment: str,
+        spell_level: int,
+        casting_time: str,
+        spent_slot: bool,
+    ) -> list[dict[str, Any]]:
+        """Enforce the edition's per-turn spell limit before any resource is spent."""
+        turn_casts = list(dict(encounter.get("turn_spell_casts") or {}).get(actor_id, []))
+        ruleset = str(encounter.get("ruleset") or "2014")
+        if ruleset == "2024" and spent_slot and any(item.get("spent_slot") for item in turn_casts):
+            raise CombatEngineError("2024 rules allow only one expended spell slot per turn")
+        if ruleset == "2014":
+            current_is_bonus = payment == "bonus_action"
+            previous_bonus = any(item.get("payment") == "bonus_action" for item in turn_casts)
+            if current_is_bonus or previous_bonus:
+                casts = [
+                    *turn_casts,
+                    {
+                        "payment": payment,
+                        "spell_level": spell_level,
+                        "casting_time": casting_time,
+                    },
+                ]
+                if any(
+                    item.get("payment") != "bonus_action"
+                    and not (
+                        int(item.get("spell_level", 1)) == 0
+                        and str(item.get("casting_time") or "").startswith("1 action")
+                    )
+                    for item in casts
+                ):
+                    raise CombatEngineError(
+                        "2014 bonus-action spell rule permits only a 1-action cantrip "
+                        "as another spell on the same turn"
+                    )
+        return turn_casts
+
+    def record_combat_spell_cast(
+        encounter: dict[str, Any],
+        *,
+        actor_id: str,
+        spell_id: str,
+        spell_level: int,
+        payment: str,
+        casting_time: str,
+        spent_slot: bool,
+        **extra: Any,
+    ) -> None:
+        casts_by_actor = dict(encounter.get("turn_spell_casts") or {})
+        casts_by_actor[actor_id] = [
+            *list(casts_by_actor.get(actor_id, [])),
+            {
+                "spell_id": spell_id,
+                "spell_level": spell_level,
+                "payment": payment,
+                "casting_time": casting_time,
+                "spent_slot": spent_slot,
+                **extra,
+            },
+        ]
+        encounter["turn_spell_casts"] = casts_by_actor
+
+    def post_hit_attack_defenses(
+        campaign_id: str,
+        target: dict[str, Any],
+        *,
+        plan: dict[str, Any],
+        attack: dict[str, Any],
+        encounter: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        """Combine card activities with legal source-bound spell reactions."""
+        spell_options: list[dict[str, Any]] = []
+        for discovered in available_shield_attack_defenses(target["sheet"]):
+            spell_id = str(discovered.get("spell_id") or discovered.get("id") or "")
+            candidate = next(
+                (
+                    item
+                    for item in available_shield_attack_defenses(
+                        target["sheet"],
+                        rules=effective_rule_context(
+                            campaign_id,
+                            facts={
+                                "actor_id": str(plan["target_id"]),
+                                "spell_id": spell_id,
+                                "kind": "spell",
+                            },
+                        ),
+                    )
+                    if str(item.get("id") or "") == str(discovered.get("id") or "")
+                ),
+                None,
+            )
+            if candidate is None:
+                continue
+            legal_casts = []
+            for option in candidate.get("cast_options", []):
+                payment = dict(option.get("payment") or {})
+                try:
+                    require_combat_spell_turn_legal(
+                        encounter,
+                        actor_id=str(plan["target_id"]),
+                        payment="reaction",
+                        spell_level=1,
+                        casting_time="reaction",
+                        spent_slot=payment.get("economy") in {"slots", "pact_magic"},
+                    )
+                except CombatEngineError:
+                    continue
+                legal_casts.append(deepcopy(option))
+            if legal_casts:
+                spell_options.append(
+                    {
+                        **candidate,
+                        "cast_levels": [int(item["cast_level"]) for item in legal_casts],
+                        "cast_options": legal_casts,
+                    }
+                )
+        return available_attack_defenses(
+            target,
+            plan=plan,
+            attack=attack,
+            encounter=encounter,
+            extra_defenses=spell_options,
+        )
 
     def reconcile_readied_spells(
         encounter: dict[str, Any], actor_id: str, sheet: dict[str, Any]
@@ -1998,7 +2128,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             multiattack_option_id=action_payload.get("multiattack_option_id"),
         )
         attack_roll = roll_attack_action(plan=plan)
-        defenses = available_attack_defenses(
+        defenses = post_hit_attack_defenses(
+            campaign_id,
             target,
             plan=plan,
             attack=attack_roll,
@@ -2538,7 +2669,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if weapon is not None and weapon.get("attack_type") != "melee":
             raise CombatEngineError("opportunity attacks require a melee attack")
         attack_roll = roll_attack_action(plan=plan)
-        defenses = available_attack_defenses(
+        defenses = post_hit_attack_defenses(
+            campaign_id,
             target,
             plan=plan,
             attack=attack_roll,
@@ -2809,12 +2941,66 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         attack = deepcopy(dict(window.get("attack") or {}))
         next_encounter = deepcopy(encounter)
         used = selection_id not in {"decline", "skip", "pass"}
+        defense_kind = str(candidate.get("kind") or "")
+        spell_result: dict[str, Any] | None = None
         if used:
             next_encounter = pay_activity_activation(
                 next_encounter,
                 actor_id_value=actor_id,
                 activation_type="reaction",
             )
+            if defense_kind == "spell_armor_class_bonus":
+                cast_level = selection.get("cast_level")
+                if isinstance(cast_level, bool) or not isinstance(cast_level, int):
+                    raise CombatEngineError("Shield selection requires an integer cast_level")
+                cast_option = next(
+                    (
+                        item
+                        for item in candidate.get("cast_options", [])
+                        if int(item.get("cast_level", 0) or 0) == cast_level
+                    ),
+                    None,
+                )
+                if cast_option is None:
+                    raise CombatEngineError("Shield cast_level is not one of the offered choices")
+                cast_payment = dict(cast_option.get("payment") or {})
+                require_combat_spell_turn_legal(
+                    next_encounter,
+                    actor_id=actor_id,
+                    payment="reaction",
+                    spell_level=1,
+                    casting_time="reaction",
+                    spent_slot=cast_payment.get("economy") in {"slots", "pact_magic"},
+                )
+                spell_result = consume_shield_reaction(
+                    target["sheet"],
+                    spell_id=str(candidate.get("spell_id") or selection_id),
+                    cast_level=cast_level,
+                    rules=effective_rule_context(
+                        campaign_id,
+                        facts={
+                            "actor_id": actor_id,
+                            "spell_id": str(candidate.get("spell_id") or selection_id),
+                            "cast_level": cast_level,
+                        },
+                    ),
+                )
+                if spell_result.get("status") != "committed":
+                    raise CombatEngineError("Shield has an unresolved rule choice")
+                target["sheet"] = spell_result["sheet"]
+                target["derived"] = derive_character_sheet(target["sheet"])
+                record_combat_spell_cast(
+                    next_encounter,
+                    actor_id=actor_id,
+                    spell_id=str(candidate.get("spell_id") or selection_id),
+                    spell_level=1,
+                    payment="reaction",
+                    casting_time="reaction",
+                    spent_slot=cast_payment.get("economy") in {"slots", "pact_magic"},
+                    cast_level=cast_level,
+                )
+            elif defense_kind != "armor_class_bonus":
+                raise CombatEngineError("defensive reaction kind is not executable")
             attack = apply_attack_ac_bonus(
                 attack,
                 bonus=int(candidate.get("bonus", 0) or 0),
@@ -2842,9 +3028,29 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             result["ammunition"] = deepcopy(window["ammunition"])
         result["reaction_defense"] = {
             "used": used,
-            "activity_id": selection_id if used else None,
+            "source_type": (
+                "spell" if used and defense_kind == "spell_armor_class_bonus" else "activity"
+            )
+            if used
+            else None,
+            "activity_id": (
+                selection_id if used and defense_kind == "armor_class_bonus" else None
+            ),
+            "spell_id": (
+                str(candidate.get("spell_id") or selection_id)
+                if used and defense_kind == "spell_armor_class_bonus"
+                else None
+            ),
+            "cast_level": spell_result.get("cast_level") if spell_result else None,
+            "payment": deepcopy(spell_result.get("payment") or {}) if spell_result else None,
+            "effect_id": spell_result.get("effect_id") if spell_result else None,
             "bonus": int(candidate.get("bonus", 0) or 0) if used else 0,
         }
+        if spell_result is not None:
+            result["rule_receipts"] = [
+                *list(result.get("rule_receipts") or []),
+                *list(spell_result.get("rule_receipts") or []),
+            ]
         attacker_combatant = next(
             item
             for item in next_encounter["combatants"]
@@ -2907,7 +3113,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 *list(result.get("rule_receipts") or []),
                 *core_receipts(
                     rule_context,
-                    ["dnd5e.core.mcp.reaction_defense_atomicity"],
+                    [
+                        "dnd5e.core.mcp.reaction_defense_atomicity",
+                        *(
+                            ["dnd5e.core.mcp.shield_attack_reaction_atomicity"]
+                            if spell_result is not None
+                            else []
+                        ),
+                    ],
                     "attack.hit.defense.resolve",
                 ),
             ],
@@ -3303,36 +3516,16 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         else:
             require_no_blocking_pending(encounter)
 
-        ruleset = str(encounter.get("ruleset") or current.sheet.get("edition") or "2014")
         spell_level = int(spell_entry.get("level", 0) or 0)
         spent_slot = applied["payment"].get("economy") in {"slots", "pact_magic"}
-        turn_casts = list(dict(encounter.get("turn_spell_casts") or {}).get(actor_id, []))
-        if ruleset == "2024" and spent_slot and any(item.get("spent_slot") for item in turn_casts):
-            raise CombatEngineError("2024 rules allow only one expended spell slot per turn")
-        if ruleset == "2014":
-            current_is_bonus = payment == "bonus_action"
-            previous_bonus = any(item.get("payment") == "bonus_action" for item in turn_casts)
-            if current_is_bonus or previous_bonus:
-                casts = [
-                    *turn_casts,
-                    {
-                        "payment": payment,
-                        "spell_level": spell_level,
-                        "casting_time": normalized_casting_time,
-                    },
-                ]
-                if any(
-                    item.get("payment") != "bonus_action"
-                    and not (
-                        int(item.get("spell_level", 1)) == 0
-                        and str(item.get("casting_time") or "").startswith("1 action")
-                    )
-                    for item in casts
-                ):
-                    raise CombatEngineError(
-                        "2014 bonus-action spell rule permits only a 1-action cantrip "
-                        "as another spell on the same turn"
-                    )
+        require_combat_spell_turn_legal(
+            encounter,
+            actor_id=actor_id,
+            payment=payment,
+            spell_level=spell_level,
+            casting_time=normalized_casting_time,
+            spent_slot=spent_slot,
+        )
         next_encounter = resolve_common_action(
             encounter,
             actor_id_value=actor_id,
@@ -3348,18 +3541,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 actor_id_value=actor_id,
                 selection={"id": spell_id, "kind": "reaction_spell"},
             )
-        casts_by_actor = dict(next_encounter.get("turn_spell_casts") or {})
-        casts_by_actor[actor_id] = [
-            *turn_casts,
-            {
-                "spell_id": spell_id,
-                "spell_level": spell_level,
-                "payment": payment,
-                "casting_time": normalized_casting_time,
-                "spent_slot": spent_slot,
-            },
-        ]
-        next_encounter["turn_spell_casts"] = casts_by_actor
+        record_combat_spell_cast(
+            next_encounter,
+            actor_id=actor_id,
+            spell_id=spell_id,
+            spell_level=spell_level,
+            payment=payment,
+            casting_time=normalized_casting_time,
+            spent_slot=spent_slot,
+        )
         sync_combatant_conditions(next_encounter, actor_id, applied["sheet"])
         next_state = {**dict(campaign.state or {}), "combat": next_encounter}
         revisions_result = StateMutationService(storage.database).replace(
@@ -3448,20 +3638,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             if item.get("id") == spell_id
         )
         spell_level = int(spell_entry.get("level", 0) or 0)
-        spent_slot = applied["payment"].get("economy") == "slots"
-        turn_casts = list(dict(encounter.get("turn_spell_casts") or {}).get(actor_id, []))
-        ruleset = str(encounter.get("ruleset") or current.sheet.get("edition") or "2014")
-        if ruleset == "2024" and spent_slot and any(item.get("spent_slot") for item in turn_casts):
-            raise CombatEngineError("2024 rules allow only one expended spell slot per turn")
-        if (
-            ruleset == "2014"
-            and any(item.get("payment") == "bonus_action" for item in turn_casts)
-            and spell_level != 0
-        ):
-            raise CombatEngineError(
-                "2014 bonus-action spell rule permits only a 1-action cantrip "
-                "as another spell on the same turn"
-            )
+        spent_slot = applied["payment"].get("economy") in {"slots", "pact_magic"}
+        require_combat_spell_turn_legal(
+            encounter,
+            actor_id=actor_id,
+            payment="main_action",
+            spell_level=spell_level,
+            casting_time=applied["casting_time"],
+            spent_slot=spent_slot,
+        )
         next_encounter = resolve_common_action(
             encounter,
             actor_id_value=actor_id,
@@ -3480,19 +3665,16 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             release_effect_kind=applied["release_effect_kind"],
             declaration=declaration,
         )
-        casts_by_actor = dict(next_encounter.get("turn_spell_casts") or {})
-        casts_by_actor[actor_id] = [
-            *turn_casts,
-            {
-                "spell_id": spell_id,
-                "spell_level": spell_level,
-                "payment": "main_action",
-                "casting_time": applied["casting_time"],
-                "spent_slot": spent_slot,
-                "readied": True,
-            },
-        ]
-        next_encounter["turn_spell_casts"] = casts_by_actor
+        record_combat_spell_cast(
+            next_encounter,
+            actor_id=actor_id,
+            spell_id=spell_id,
+            spell_level=spell_level,
+            payment="main_action",
+            casting_time=applied["casting_time"],
+            spent_slot=spent_slot,
+            readied=True,
+        )
         sync_combatant_conditions(next_encounter, actor_id, applied["sheet"])
         reconcile_readied_spells(next_encounter, actor_id, applied["sheet"])
         next_state = {**dict(campaign.state or {}), "combat": next_encounter}
