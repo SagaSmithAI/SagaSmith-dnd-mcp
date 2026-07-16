@@ -66,6 +66,7 @@ from sagasmith_dnd.combat_engine import (
     apply_attack_ac_bonus,
     apply_concentration_result,
     apply_damage_parts_to_sheet,
+    apply_damage_to_sheet,
     apply_healing_to_sheet,
     arm_readied_spell,
     available_actions,
@@ -121,10 +122,13 @@ from sagasmith_dnd.spatial import (
 )
 from sagasmith_dnd.spells import (
     available_shield_attack_defenses,
+    available_shield_magic_missile_defenses,
     consume_readied_spell,
     consume_shield_reaction,
     consume_spell_cast,
+    is_core_magic_missile_spell,
     replace_prepared_spells,
+    validate_magic_missile_allocations,
     validate_spell_grant,
 )
 from sagasmith_dnd.system import DND5E
@@ -1047,6 +1051,235 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             encounter=encounter,
             extra_defenses=spell_options,
         )
+
+    def magic_missile_shield_defenses(
+        campaign_id: str,
+        target_id: str,
+        encounter: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        """Return Shield casts legal for this exact targeting reaction."""
+        combatant = next(
+            (
+                item
+                for item in encounter.get("combatants", [])
+                if str(item.get("actor_id") or "") == target_id
+            ),
+            None,
+        )
+        if combatant is None:
+            raise CombatEngineError(f"combatant not found: {target_id}")
+        budget = dict(combatant.get("turn_budget") or {})
+        blocked = {
+            "dead",
+            "unconscious",
+            "stunned",
+            "incapacitated",
+            "paralyzed",
+            "petrified",
+        }
+        if int(budget.get("reaction", 0) or 0) <= 0 or blocked & {
+            str(item).casefold() for item in combatant.get("conditions", [])
+        }:
+            return []
+        target = combat_actor_snapshot(target_id)
+        result: list[dict[str, Any]] = []
+        for candidate in available_shield_magic_missile_defenses(
+            target["sheet"],
+            rules=effective_rule_context(
+                campaign_id,
+                facts={
+                    "actor_id": target_id,
+                    "spell_id": "",
+                    "kind": "spell_magic_missile_immunity",
+                },
+            ),
+        ):
+            legal_casts: list[dict[str, Any]] = []
+            for option in candidate.get("cast_options", []):
+                payment = dict(option.get("payment") or {})
+                try:
+                    require_combat_spell_turn_legal(
+                        encounter,
+                        actor_id=target_id,
+                        payment="reaction",
+                        spell_level=1,
+                        casting_time="reaction",
+                        spent_slot=payment.get("economy") in {"slots", "pact_magic"},
+                    )
+                except CombatEngineError:
+                    continue
+                legal_casts.append(deepcopy(option))
+            if legal_casts:
+                result.append(
+                    {
+                        **candidate,
+                        "cast_levels": [int(item["cast_level"]) for item in legal_casts],
+                        "cast_options": legal_casts,
+                    }
+                )
+        return result
+
+    def validate_magic_missile_targets(
+        encounter: dict[str, Any],
+        *,
+        caster_id: str,
+        allocations: list[dict[str, Any]],
+        cast_level: int,
+    ) -> list[dict[str, Any]]:
+        """Validate source-rule targeting against current map and visibility facts."""
+        normalized = validate_magic_missile_allocations(allocations, cast_level=cast_level)
+        combatants = {
+            str(item.get("actor_id") or ""): item for item in encounter.get("combatants", [])
+        }
+        caster = combatants.get(caster_id)
+        if caster is None:
+            raise CombatEngineError("Magic Missile caster is not in this encounter")
+        def coordinates(position: Any) -> tuple[float, float] | None:
+            if isinstance(position, dict) and "x" in position and "y" in position:
+                return float(position["x"]), float(position["y"])
+            if isinstance(position, (list, tuple)) and len(position) == 2:
+                return float(position[0]), float(position[1])
+            return None
+
+        caster_position = coordinates(caster.get("position"))
+        if caster_position is None:
+            raise CombatEngineError("Magic Missile range requires the caster's map position")
+        for allocation in normalized:
+            target_id = str(allocation["target_id"])
+            target = combatants.get(target_id)
+            if target is None:
+                raise CombatEngineError(
+                    f"Magic Missile target is not in this encounter: {target_id}"
+                )
+            conditions = {str(item).casefold() for item in target.get("conditions", [])}
+            if "dead" in conditions:
+                raise CombatEngineError("Magic Missile cannot target a dead creature")
+            target_position = coordinates(target.get("position"))
+            if target_position is None:
+                raise CombatEngineError("Magic Missile range requires every target's map position")
+            distance = int(
+                max(
+                    abs(float(caster_position[0]) - float(target_position[0])),
+                    abs(float(caster_position[1]) - float(target_position[1])),
+                )
+                * 5
+            )
+            if distance > 120:
+                raise CombatEngineError("Magic Missile target is outside its 120-foot range")
+            concealed = bool(target.get("hidden", False)) or "invisible" in conditions
+            visible_to = {str(item) for item in target.get("visible_to_actor_ids") or []}
+            if concealed and caster_id not in visible_to:
+                raise CombatEngineError("Magic Missile requires a target the caster can see")
+            allocation["distance_ft"] = distance
+        return normalized
+
+    def settle_magic_missile_damage(
+        campaign_id: str,
+        encounter: dict[str, Any],
+        resolution: dict[str, Any],
+        *,
+        next_revision: int,
+        sheet_overrides: dict[str, dict[str, Any]] | None = None,
+    ) -> tuple[dict[str, Any], dict[str, dict[str, Any]], dict[str, Any]]:
+        """Roll and apply every dart separately after all target reactions settle."""
+        value = deepcopy(encounter)
+        sheets = {str(key): deepcopy(item) for key, item in (sheet_overrides or {}).items()}
+        shielded = {str(item) for item in resolution.get("shielded_target_ids", [])}
+        target_results: list[dict[str, Any]] = []
+        concentration_windows: list[dict[str, Any]] = []
+        resolution_id = str(resolution["id"])
+        spell_id = str(resolution["spell_id"])
+        for allocation in resolution.get("allocations", []):
+            target_id = str(allocation["target_id"])
+            if target_id in shielded:
+                target_results.append(
+                    {
+                        "target_id": target_id,
+                        "darts": int(allocation["darts"]),
+                        "shielded": True,
+                        "dart_results": [],
+                    }
+                )
+                continue
+            sheet = sheets.get(target_id)
+            if sheet is None:
+                sheet = deepcopy(characters.get(target_id).sheet)
+            combatant = next(
+                item
+                for item in value.get("combatants", [])
+                if str(item.get("actor_id") or "") == target_id
+            )
+            dart_results: list[dict[str, Any]] = []
+            for dart_index in range(int(allocation["darts"])):
+                dice = asdict(roll("1d4+1"))
+                applied = apply_damage_to_sheet(
+                    sheet,
+                    amount=int(dice["total"]),
+                    damage_type="force",
+                    source=spell_id,
+                    ruleset=str(value.get("ruleset") or "2014"),
+                    death_saves=bool(combatant.get("death_saves", False)),
+                )
+                sheet = applied["sheet"]
+                concentration = applied.get("concentration")
+                if concentration:
+                    concentration_windows.append(
+                        {
+                            **deepcopy(concentration),
+                            "id": (
+                                f"concentration:{target_id}:{next_revision}:"
+                                f"{resolution_id}:{dart_index}"
+                            ),
+                            "kind": "concentration",
+                            "actor_id": target_id,
+                            "source_resolution_id": resolution_id,
+                            "dart_index": dart_index,
+                        }
+                    )
+                dart_results.append(
+                    {
+                        "dart_index": dart_index,
+                        "roll": dice,
+                        **{key: item for key, item in applied.items() if key != "sheet"},
+                    }
+                )
+            sheets[target_id] = sheet
+            sync_combatant_conditions(value, target_id, sheet)
+            reconcile_readied_spells(value, target_id, sheet)
+            target_results.append(
+                {
+                    "target_id": target_id,
+                    "darts": int(allocation["darts"]),
+                    "shielded": False,
+                    "dart_results": dart_results,
+                }
+            )
+        value["pending"] = [
+            item
+            for item in value.get("pending", [])
+            if str(item.get("spell_resolution_id") or "") != resolution_id
+        ]
+        value["pending"] = [*list(value.get("pending") or []), *concentration_windows]
+        resolutions = dict(value.get("spell_resolutions") or {})
+        resolutions.pop(resolution_id, None)
+        if resolutions:
+            value["spell_resolutions"] = resolutions
+        else:
+            value.pop("spell_resolutions", None)
+        result = {
+            "kind": "magic_missile",
+            "spell_id": spell_id,
+            "caster_id": str(resolution["caster_id"]),
+            "cast_level": int(resolution["cast_level"]),
+            "dart_count": sum(int(item["darts"]) for item in resolution["allocations"]),
+            "targets": target_results,
+            "concentration_windows": len(concentration_windows),
+        }
+        value["log"] = [
+            *list(value.get("log") or []),
+            {"type": "magic_missile", "result": deepcopy(result)},
+        ][-100:]
+        return value, sheets, result
 
     def reconcile_readied_spells(
         encounter: dict[str, Any], actor_id: str, sheet: dict[str, Any]
@@ -3389,6 +3622,241 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             remember_idempotent(scope, idempotency_key, payload_value, response, campaign_id),
         )
 
+    def combat_magic_missile_defense(
+        campaign_id: str,
+        actor_id: str,
+        choice_id: str,
+        selection: dict[str, Any],
+        principal_id: str = "system:local",
+        branch_id: str | None = None,
+        expected_revision: int | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Resolve one Shield targeting reaction, then settle all darts after the last choice."""
+        access.require_actor(campaign_id, actor_id, principal_id, control=True)
+        require_write_contract(expected_revision, idempotency_key)
+        resolved_branch_id = require_current_branch(campaign_id, branch_id)
+        payload = {
+            "actor_id": actor_id,
+            "choice_id": choice_id,
+            "selection": selection,
+            "branch_id": resolved_branch_id,
+        }
+        scope = f"combat-magic-missile-defense:{campaign_id}:{resolved_branch_id}:{principal_id}"
+        replay = replay_idempotent(scope, idempotency_key, payload)
+        if replay is not None:
+            return combat_response(campaign_id, principal_id, replay)
+        campaign, encounter = active_encounter(campaign_id)
+        if campaign.revision != expected_revision:
+            raise ValueError(
+                "campaign revision conflict: "
+                f"expected {expected_revision}, found {campaign.revision}"
+            )
+        window = next(
+            (item for item in encounter.get("pending", []) if item.get("id") == choice_id),
+            None,
+        )
+        if (
+            not isinstance(window, dict)
+            or window.get("kind") != "reaction"
+            or window.get("trigger") != "magic_missile_targeted"
+            or str(window.get("actor_id") or "") != actor_id
+            or str(window.get("target_id") or "") != actor_id
+        ):
+            raise CombatEngineError("choice_id is not this actor's Magic Missile defense window")
+        resolution_id = str(window.get("spell_resolution_id") or "")
+        resolution = deepcopy(
+            dict(dict(encounter.get("spell_resolutions") or {}).get(resolution_id) or {})
+        )
+        if resolution.get("kind") != "magic_missile":
+            raise CombatEngineError("Magic Missile resolution state is missing")
+        selection_id = str(selection.get("id") or "")
+        candidate = next(
+            (
+                item
+                for item in window.get("candidates", [])
+                if str(item.get("id") or "") == selection_id
+            ),
+            None,
+        )
+        if candidate is None:
+            raise CombatEngineError("selection is not one of the Magic Missile defenses")
+        used = selection_id not in {"decline", "skip", "pass"}
+        next_encounter = deepcopy(encounter)
+        sheet_override: dict[str, dict[str, Any]] = {}
+        spell_result: dict[str, Any] | None = None
+        if used:
+            if str(candidate.get("kind") or "") != "spell_magic_missile_immunity":
+                raise CombatEngineError("Magic Missile defense is not executable")
+            cast_level = selection.get("cast_level")
+            if isinstance(cast_level, bool) or not isinstance(cast_level, int):
+                raise CombatEngineError("Shield selection requires an integer cast_level")
+            cast_option = next(
+                (
+                    item
+                    for item in candidate.get("cast_options", [])
+                    if int(item.get("cast_level", 0) or 0) == cast_level
+                ),
+                None,
+            )
+            if cast_option is None:
+                raise CombatEngineError("Shield cast_level is not one of the offered choices")
+            payment = dict(cast_option.get("payment") or {})
+            require_combat_spell_turn_legal(
+                next_encounter,
+                actor_id=actor_id,
+                payment="reaction",
+                spell_level=1,
+                casting_time="reaction",
+                spent_slot=payment.get("economy") in {"slots", "pact_magic"},
+            )
+            next_encounter = pay_activity_activation(
+                next_encounter,
+                actor_id_value=actor_id,
+                activation_type="reaction",
+            )
+            target = characters.get(actor_id)
+            spell_result = consume_shield_reaction(
+                target.sheet,
+                spell_id=str(candidate.get("spell_id") or selection_id),
+                cast_level=cast_level,
+                trigger="magic_missile",
+                rules=effective_rule_context(
+                    campaign_id,
+                    facts={
+                        "actor_id": actor_id,
+                        "spell_id": str(candidate.get("spell_id") or selection_id),
+                        "cast_level": cast_level,
+                        "trigger": "magic_missile_targeted",
+                    },
+                ),
+            )
+            if spell_result.get("status") != "committed":
+                raise CombatEngineError("Shield has an unresolved rule choice")
+            sheet_override[actor_id] = spell_result["sheet"]
+            record_combat_spell_cast(
+                next_encounter,
+                actor_id=actor_id,
+                spell_id=str(candidate.get("spell_id") or selection_id),
+                spell_level=1,
+                payment="reaction",
+                casting_time="reaction",
+                spent_slot=payment.get("economy") in {"slots", "pact_magic"},
+                cast_level=cast_level,
+            )
+            resolution["shielded_target_ids"] = sorted(
+                {*map(str, resolution.get("shielded_target_ids", [])), actor_id}
+            )
+        next_encounter = resolve_choice_window(
+            next_encounter,
+            choice_id=choice_id,
+            actor_id_value=actor_id,
+            selection={"id": selection_id},
+        )
+        resolutions = dict(next_encounter.get("spell_resolutions") or {})
+        resolutions[resolution_id] = resolution
+        next_encounter["spell_resolutions"] = resolutions
+        remaining = [
+            item
+            for item in next_encounter.get("pending", [])
+            if str(item.get("spell_resolution_id") or "") == resolution_id
+            and item.get("status", "pending") == "pending"
+        ]
+        rule_receipts = [
+            *list((spell_result or {}).get("rule_receipts") or []),
+            *core_receipts(
+                effective_rule_context(campaign_id),
+                ["dnd5e.core.mcp.magic_missile_atomicity"],
+                "combat.spell.magic_missile.defense",
+            ),
+        ]
+        if remaining:
+            if sheet_override:
+                sync_combatant_conditions(next_encounter, actor_id, sheet_override[actor_id])
+            next_state = {**dict(campaign.state or {}), "combat": next_encounter}
+            revisions_result = StateMutationService(storage.database).replace(
+                campaign_id,
+                campaign_state=validate_party_state(next_state),
+                character_updates=[
+                    CharacterStateUpdate(
+                        character_id=target_id,
+                        sheet=validate_character_sheet(sheet),
+                        notes=validate_character_notes(characters.get(target_id).notes),
+                        expected_revision=characters.get(target_id).revision,
+                    )
+                    for target_id, sheet in sheet_override.items()
+                ],
+                expected_campaign_revision=campaign.revision,
+                operation="combat.spell.magic_missile.defense",
+                actor=principal_id,
+                branch_id=resolved_branch_id,
+                idempotency_key=idempotency_key,
+                rule_receipts=rule_receipts,
+            )
+            response = {
+                "status": "pending_reaction",
+                "result": {
+                    "kind": "magic_missile",
+                    "spell_id": resolution["spell_id"],
+                    "reaction_defense": {
+                        "used": used,
+                        "spell_id": selection_id if used else None,
+                        "effect_id": (spell_result or {}).get("effect_id"),
+                    },
+                },
+                "choices": remaining,
+                "combat": next_encounter,
+                "campaign_revision": mutation_revision(campaign_id),
+                "revisions": [asdict(item) for item in revisions_result or []],
+            }
+        else:
+            next_encounter, resolved_sheets, result = settle_magic_missile_damage(
+                campaign_id,
+                next_encounter,
+                resolution,
+                next_revision=campaign.revision + 1,
+                sheet_overrides=sheet_override,
+            )
+            next_state = {**dict(campaign.state or {}), "combat": next_encounter}
+            revisions_result = StateMutationService(storage.database).replace(
+                campaign_id,
+                campaign_state=validate_party_state(next_state),
+                character_updates=[
+                    CharacterStateUpdate(
+                        character_id=target_id,
+                        sheet=validate_character_sheet(sheet),
+                        notes=validate_character_notes(characters.get(target_id).notes),
+                        expected_revision=characters.get(target_id).revision,
+                    )
+                    for target_id, sheet in resolved_sheets.items()
+                ],
+                expected_campaign_revision=campaign.revision,
+                operation="combat.spell.magic_missile.resolve",
+                actor=principal_id,
+                branch_id=resolved_branch_id,
+                idempotency_key=idempotency_key,
+                rule_receipts=rule_receipts,
+            )
+            response = {
+                "status": "committed",
+                "result": {
+                    **result,
+                    "reaction_defense": {
+                        "used": used,
+                        "spell_id": selection_id if used else None,
+                        "effect_id": (spell_result or {}).get("effect_id"),
+                    },
+                },
+                "combat": next_encounter,
+                "campaign_revision": mutation_revision(campaign_id),
+                "revisions": [asdict(item) for item in revisions_result or []],
+            }
+        return combat_response(
+            campaign_id,
+            principal_id,
+            remember_idempotent(scope, idempotency_key, payload, response, campaign_id),
+        )
+
     @mcp.tool()
     def combat_reactions(
         campaign_id: str,
@@ -3431,8 +3899,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         expected_revision: int | None = None,
         branch_id: str | None = None,
         idempotency_key: str | None = None,
+        target_allocations: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
-        """Pay a combat action and canonical spell resources in one state mutation."""
+        """Pay a combat action and settle source-bound spell workflows atomically."""
         access.require_actor(campaign_id, actor_id, principal_id, control=True)
         require_write_contract(expected_revision, idempotency_key)
         resolved_branch_id = require_current_branch(campaign_id, branch_id)
@@ -3443,6 +3912,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "ritual": ritual,
             "component_ruling": component_ruling or {},
             "choice_id": choice_id,
+            "target_allocations": target_allocations,
             "branch_id": resolved_branch_id,
         }
         scope = f"combat-cast:{campaign_id}:{resolved_branch_id}:{principal_id}"
@@ -3456,6 +3926,18 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 f"expected {expected_revision}, found {campaign.revision}"
             )
         current = characters.get(actor_id)
+        spell_entry = next(
+            item
+            for item in current.sheet.get("content", {}).get("spells", [])
+            if item.get("id") == spell_id
+        )
+        magic_missile = is_core_magic_missile_spell(spell_entry)
+        if magic_missile and target_allocations is None:
+            raise CombatEngineError("Magic Missile requires target_allocations at cast time")
+        if not magic_missile and target_allocations is not None:
+            raise CombatEngineError(
+                "target_allocations are currently executable only for source-bound Magic Missile"
+            )
         applied = consume_spell_cast(
             current.sheet,
             spell_id=spell_id,
@@ -3473,11 +3955,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "result": {key: value for key, value in applied.items() if key != "sheet"},
                 "campaign_revision": campaign.revision,
             }
-        spell_entry = next(
-            item
-            for item in current.sheet.get("content", {}).get("spells", [])
-            if item.get("id") == spell_id
-        )
         casting_time = str(spell_entry.get("definition", {}).get("casting_time") or "1 action")
         normalized_casting_time = casting_time.casefold().strip()
         if ritual:
@@ -3516,6 +3993,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         else:
             require_no_blocking_pending(encounter)
 
+        normalized_allocations: list[dict[str, Any]] | None = None
+        if magic_missile:
+            normalized_allocations = validate_magic_missile_targets(
+                encounter,
+                caster_id=actor_id,
+                allocations=list(target_allocations or []),
+                cast_level=int(applied.get("cast_level", cast_level or 1) or 1),
+            )
+
         spell_level = int(spell_entry.get("level", 0) or 0)
         spent_slot = applied["payment"].get("economy") in {"slots", "pact_magic"}
         require_combat_spell_turn_legal(
@@ -3550,6 +4036,163 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             casting_time=normalized_casting_time,
             spent_slot=spent_slot,
         )
+        if magic_missile:
+            assert normalized_allocations is not None
+            resolution_id = f"spell-resolution-{uuid4().hex}"
+            resolution = {
+                "id": resolution_id,
+                "kind": "magic_missile",
+                "caster_id": actor_id,
+                "spell_id": spell_id,
+                "cast_level": int(applied.get("cast_level", cast_level or 1) or 1),
+                "allocations": deepcopy(normalized_allocations),
+                "shielded_target_ids": [],
+            }
+            defense_windows: list[dict[str, Any]] = []
+            for allocation in normalized_allocations:
+                target_id = str(allocation["target_id"])
+                target_sheet = characters.get(target_id).sheet
+                if any(
+                    effect.get("active") and effect.get("kind") == "spell_shield"
+                    for effect in target_sheet.get("effects", [])
+                ):
+                    resolution["shielded_target_ids"].append(target_id)
+                    continue
+                candidates = magic_missile_shield_defenses(campaign_id, target_id, next_encounter)
+                if not candidates:
+                    continue
+                next_encounter = add_choice_window(
+                    next_encounter,
+                    kind="reaction",
+                    actor_id_value=target_id,
+                    event="spell.magic_missile.targeted",
+                    candidates=[*candidates, {"id": "decline", "name": "Decline"}],
+                )
+                window = next_encounter["pending"][-1]
+                window.update(
+                    trigger="magic_missile_targeted",
+                    caster_id=actor_id,
+                    target_id=target_id,
+                    spell_id=spell_id,
+                    spell_resolution_id=resolution_id,
+                    darts=int(allocation["darts"]),
+                )
+                defense_windows.append(deepcopy(window))
+            sync_combatant_conditions(next_encounter, actor_id, applied["sheet"])
+            if defense_windows:
+                resolutions = dict(next_encounter.get("spell_resolutions") or {})
+                resolutions[resolution_id] = resolution
+                next_encounter["spell_resolutions"] = resolutions
+                next_encounter["log"] = [
+                    *list(next_encounter.get("log") or []),
+                    {
+                        "type": "magic_missile_targeted",
+                        "resolution_id": resolution_id,
+                        "caster_id": actor_id,
+                        "spell_id": spell_id,
+                        "allocations": deepcopy(normalized_allocations),
+                        "choice_ids": [item["id"] for item in defense_windows],
+                    },
+                ][-100:]
+                next_state = {**dict(campaign.state or {}), "combat": next_encounter}
+                revisions_result = StateMutationService(storage.database).replace(
+                    campaign_id,
+                    campaign_state=validate_party_state(next_state),
+                    character_updates=[
+                        CharacterStateUpdate(
+                            character_id=actor_id,
+                            sheet=validate_character_sheet(applied["sheet"]),
+                            notes=validate_character_notes(current.notes),
+                            expected_revision=current.revision,
+                        )
+                    ],
+                    expected_campaign_revision=campaign.revision,
+                    operation="combat.spell.magic_missile.target",
+                    actor=principal_id,
+                    branch_id=resolved_branch_id,
+                    idempotency_key=idempotency_key,
+                    rule_receipts=[
+                        *list(applied.get("rule_receipts") or []),
+                        *core_receipts(
+                            effective_rule_context(campaign_id),
+                            [
+                                "dnd5e.core.spell.magic_missile_darts",
+                                "dnd5e.core.mcp.magic_missile_atomicity",
+                            ],
+                            "combat.spell.magic_missile.target",
+                        ),
+                    ],
+                )
+                response = {
+                    "status": "pending_reaction",
+                    "result": {
+                        "kind": "magic_missile",
+                        "spell_id": spell_id,
+                        "cast_level": resolution["cast_level"],
+                        "dart_count": sum(item["darts"] for item in normalized_allocations),
+                        "allocations": normalized_allocations,
+                        "payment": deepcopy(applied.get("payment") or {}),
+                    },
+                    "choices": defense_windows,
+                    "combat": next_encounter,
+                    "campaign_revision": mutation_revision(campaign_id),
+                    "revisions": [asdict(item) for item in revisions_result or []],
+                }
+                return combat_response(
+                    campaign_id,
+                    principal_id,
+                    remember_idempotent(scope, idempotency_key, payload, response, campaign_id),
+                )
+            next_encounter, resolved_sheets, result = settle_magic_missile_damage(
+                campaign_id,
+                next_encounter,
+                resolution,
+                next_revision=campaign.revision + 1,
+                sheet_overrides={actor_id: applied["sheet"]},
+            )
+            next_state = {**dict(campaign.state or {}), "combat": next_encounter}
+            updates = [
+                CharacterStateUpdate(
+                    character_id=target_id,
+                    sheet=validate_character_sheet(sheet),
+                    notes=validate_character_notes(characters.get(target_id).notes),
+                    expected_revision=characters.get(target_id).revision,
+                )
+                for target_id, sheet in resolved_sheets.items()
+            ]
+            revisions_result = StateMutationService(storage.database).replace(
+                campaign_id,
+                campaign_state=validate_party_state(next_state),
+                character_updates=updates,
+                expected_campaign_revision=campaign.revision,
+                operation="combat.spell.magic_missile.resolve",
+                actor=principal_id,
+                branch_id=resolved_branch_id,
+                idempotency_key=idempotency_key,
+                rule_receipts=[
+                    *list(applied.get("rule_receipts") or []),
+                    *core_receipts(
+                        effective_rule_context(campaign_id),
+                        [
+                            "dnd5e.core.spell.magic_missile_darts",
+                            "dnd5e.core.mcp.magic_missile_atomicity",
+                        ],
+                        "combat.spell.magic_missile.resolve",
+                    ),
+                ],
+            )
+            response = {
+                "status": "committed",
+                "result": {**result, "payment": deepcopy(applied.get("payment") or {})},
+                "combat": next_encounter,
+                "campaign_revision": mutation_revision(campaign_id),
+                "revisions": [asdict(item) for item in revisions_result or []],
+            }
+            return combat_response(
+                campaign_id,
+                principal_id,
+                remember_idempotent(scope, idempotency_key, payload, response, campaign_id),
+            )
         sync_combatant_conditions(next_encounter, actor_id, applied["sheet"])
         next_state = {**dict(campaign.state or {}), "combat": next_encounter}
         revisions_result = StateMutationService(storage.database).replace(
@@ -4536,8 +5179,22 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         next_state = dict(campaign.state or {})
         if isinstance(encounter, dict):
             reconcile_readied_spells(encounter, target_id, updated_sheet)
+            active_effect_ids = {
+                str(effect.get("id"))
+                for effect in updated_sheet.get("effects", [])
+                if effect.get("active") and effect.get("concentration")
+            }
             encounter["pending"] = [
-                item for item in encounter.get("pending", []) if item.get("id") != pending.get("id")
+                item
+                for item in encounter.get("pending", [])
+                if item.get("id") != pending.get("id")
+                and not (
+                    item.get("kind") == "concentration"
+                    and item.get("actor_id") == target_id
+                    and not active_effect_ids.intersection(
+                        {str(effect_id) for effect_id in item.get("effect_ids", [])}
+                    )
+                )
             ]
             encounter["log"] = [
                 *list(encounter.get("log") or []),
@@ -10131,10 +10788,21 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 idempotency_key,
             )
         elif action == "resolve_defense":
-            result = combat_reaction_defense(
+            choice_id = required(data, "choice_id")
+            _campaign, encounter = active_encounter(campaign_id)
+            window = next(
+                (item for item in encounter.get("pending", []) if item.get("id") == choice_id),
+                None,
+            )
+            resolver = (
+                combat_magic_missile_defense
+                if isinstance(window, dict) and window.get("trigger") == "magic_missile_targeted"
+                else combat_reaction_defense
+            )
+            result = resolver(
                 campaign_id,
                 actor_id,
-                required(data, "choice_id"),
+                choice_id,
                 required(data, "selection"),
                 principal_id,
                 branch_id,
