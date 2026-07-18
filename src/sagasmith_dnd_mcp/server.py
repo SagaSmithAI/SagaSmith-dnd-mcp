@@ -103,7 +103,12 @@ from sagasmith_dnd.core_content import PACK_VERSION as CORE_CONTENT_PACK_VERSION
 from sagasmith_dnd.core_content import build_srd2014_content
 from sagasmith_dnd.core_rule_pack import get_core_rule_pack
 from sagasmith_dnd.engine import resolve_check, roll
-from sagasmith_dnd.lifecycle import advance_effect_durations, apply_rest, recover_stable_creature
+from sagasmith_dnd.lifecycle import (
+    advance_effect_durations,
+    apply_rest,
+    recover_stable_creature,
+    stand_outside_combat,
+)
 from sagasmith_dnd.module_profile import DndModuleProfile
 from sagasmith_dnd.rule_engine import (
     RuleCompilationError,
@@ -6943,6 +6948,43 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         return response
 
+    def character_stand(
+        character_id: str,
+        principal_id: str = "system:local",
+        expected_revision: int | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Stand a conscious Prone character outside active combat."""
+        current = characters.get(character_id)
+        require_character_control(current, principal_id)
+        require_outside_active_combat(current, "standing")
+        if current.campaign_id is None:
+            raise ValueError("standing requires a campaign-bound character")
+        applied = stand_outside_combat(current.sheet)
+        rules = effective_rule_context(
+            current.campaign_id, facts={"actor_id": character_id, "condition": "prone"}
+        )
+        receipts = core_receipts(
+            rules,
+            ["dnd5e.core.movement.prone_crawl_stand"],
+            "character.stand",
+        )
+        return update_sheet(
+            character_id,
+            applied["sheet"],
+            operation="character.stand",
+            principal_id=principal_id,
+            expected_revision=expected_revision,
+            idempotency_key=idempotency_key,
+            payload={"operation": "stand"},
+            response_extra={
+                "status": applied["status"],
+                "removed_condition": applied["removed_condition"],
+                "rule_receipts": receipts,
+            },
+            rule_receipts=receipts,
+        )
+
     @mcp.tool()
     def character_cast_spell(
         character_id: str,
@@ -11106,6 +11148,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "resource_set",
             "rest",
             "stable_recovery",
+            "stand",
             "memory_add",
             "memory_resolve",
         ],
@@ -11155,6 +11198,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             )
         elif action == "stable_recovery":
             result = character_stable_recovery(
+                character_id,
+                principal_id,
+                expected_revision,
+                idempotency_key,
+            )
+        elif action == "stand":
+            result = character_stand(
                 character_id,
                 principal_id,
                 expected_revision,

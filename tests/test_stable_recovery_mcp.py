@@ -133,3 +133,63 @@ def test_stable_recovery_rejects_a_healthy_actor(tmp_path: Path) -> None:
             )
 
     asyncio.run(exercise())
+
+
+def test_recovered_actor_can_stand_through_restricted_state_action(tmp_path: Path) -> None:
+    config = McpConfig(
+        home=tmp_path / "home",
+        database_url=None,
+        chroma_url=None,
+        chroma_path_override=None,
+        dnd_skills_dir=tmp_path / "dnd",
+        modulegen_skills_dir=tmp_path / "modulegen",
+        auto_seed_rules=False,
+    )
+
+    async def exercise() -> None:
+        server = create_server(config)
+        campaign = await _call(
+            server,
+            "campaign_create",
+            {"name": "Stand", "edition": "2014", "idempotency_key": "campaign"},
+        )
+        sheet = default_character_sheet()
+        sheet["combat"]["hp"] = {"value": 1, "max": 12, "temp": 0}
+        sheet["conditions"] = ["prone"]
+        actor = await _call(
+            server,
+            "character_create_from",
+            {
+                "mode": "direct",
+                "payload": {"campaign_id": campaign["id"], "name": "Prone", "sheet": sheet},
+                "idempotency_key": "actor",
+            },
+        )
+
+        stood = await _call(
+            server,
+            "character_state_change",
+            {
+                "character_id": actor["id"],
+                "action": "stand",
+                "payload": {},
+                "expected_revision": actor["revision"],
+                "idempotency_key": "stand",
+            },
+        )
+
+        assert stood["status"] == "stood"
+        assert stood["character"]["sheet"]["conditions"] == []
+        receipts = await _call(
+            server,
+            "campaign_rules",
+            {
+                "campaign_id": campaign["id"],
+                "action": "receipts",
+                "payload": {"mechanic_id": "dnd5e.core.movement.prone_crawl_stand"},
+            },
+        )
+        assert len(receipts) == 1
+        assert receipts[0]["event"] == "character.stand"
+
+    asyncio.run(exercise())
