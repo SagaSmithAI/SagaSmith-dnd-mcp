@@ -46,6 +46,7 @@ FULL_SKILL_CAPABILITIES: dict[str, frozenset[str]] = {
             "module_expand",
             "module_import",
             "module_page_render",
+            "module_content_review",
             "module_query",
             "module_search",
             "module_set_progress",

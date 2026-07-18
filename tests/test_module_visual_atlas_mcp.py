@@ -9,6 +9,32 @@ from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 from sagasmith_dnd_mcp.config import McpConfig
 from sagasmith_dnd_mcp.server import create_server
 
+NECROMITE = """# Necromite of Myrkul
+
+*Medium humanoid (human), neutral evil*
+
+**Armor Class** 11
+**Hit Points** 13 (2d8 + 4)
+**Speed** 30 ft.
+
+| STR | DEX | CON | INT | WIS | CHA |
+|---|---|---|---|---|---|
+| 10 (+0) | 13 (+1) | 15 (+2) | 16 (+3) | 11 (+0) | 10 (+0) |
+
+**Skills** Arcana +5, Religion +5
+**Senses** passive Perception 10
+**Languages** Abyssal, Common, Infernal
+**Challenge** 1/2 (100 XP)
+
+## Actions
+
+***Skull Flail***. *Melee Weapon Attack:* +2 to hit, reach 5 ft., one target.
+*Hit:* 4 (1d8) bludgeoning damage.
+
+***Claws of the Grave***. *Ranged Spell Attack:* +5 to hit, range 90 ft., one target.
+*Hit:* 8 (2d4 + 3) necrotic damage.
+"""
+
 
 def _write_text_pdf(path: Path) -> None:
     writer = PdfWriter()
@@ -81,7 +107,7 @@ def test_pdf_page_review_becomes_snapshot_managed_scene_atlas(tmp_path: Path) ->
         campaign = await _call(
             server,
             "campaign_create",
-            {"name": "Visual atlas", "idempotency_key": "campaign"},
+            {"name": "Visual atlas", "edition": "2014", "idempotency_key": "campaign"},
         )
         staged = await _call(
             server,
@@ -197,5 +223,54 @@ def test_pdf_page_review_becomes_snapshot_managed_scene_atlas(tmp_path: Path) ->
         assert connection["confidence"] == "reviewed_image"
         assert connection["evidence"]["asset_id"] == source_asset["id"]
         assert connection["evidence"]["branch_id"]
+
+        reviewed = await _call(
+            server,
+            "module_content_review",
+            {
+                "campaign_id": campaign["id"],
+                "module_id": module_id,
+                "scene_id": scene["scene_id"],
+                "content_key": "necromite-of-myrkul",
+                "normalized_content": NECROMITE,
+                "source_asset_id": source_asset["id"],
+                "page_number": 1,
+                "observation": "The reviewed page visibly contains the complete creature card.",
+                "idempotency_key": "review-necromite",
+            },
+        )
+        assert reviewed["validation"]["settlement"] == "automatic"
+        review_id = reviewed["review"]["id"]
+        queried = await _call(
+            server,
+            "module_query",
+            {
+                "campaign_id": campaign["id"],
+                "view": "content",
+                "payload": {"review_id": review_id},
+            },
+        )
+        assert queried["evidence"]["asset_checksum"] == source_asset["checksum"]
+        created = await _call(
+            server,
+            "character_create_from",
+            {
+                "mode": "module_statblock",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "review_id": review_id,
+                    "name": "D10 Necromite 1",
+                    "character_type": "monster",
+                },
+                "idempotency_key": "create-necromite",
+            },
+        )
+        attacks = {
+            item["name"]: item
+            for item in created["character"]["derived"]["inventory"]["weapon_attacks"]
+        }
+        assert attacks["Claws of the Grave"]["attack_bonus"] == 5
+        assert attacks["Claws of the Grave"]["damage_expression"] == "2d4 + 3"
+        assert created["statblock"]["settlement"] == "automatic"
 
     asyncio.run(exercise())

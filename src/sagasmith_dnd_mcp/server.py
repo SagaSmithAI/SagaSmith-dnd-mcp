@@ -1524,6 +1524,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "scene_spatial_evidence": True,
                 "module_page_visual_evidence": True,
                 "snapshot_managed_spatial_review": True,
+                "reviewed_image_statblock_import": True,
                 "temporary_combat_maps": True,
                 "structured_combat_engine": True,
                 "combat_preflight_commit": True,
@@ -1594,6 +1595,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "module_import(activate)",
                     "module_query(assets)",
                     "module_page_render",
+                    "module_content_review",
                     "module_set_progress(spatial_review)",
                 ],
                 "stage_inputs": ["source_path", "name+content"],
@@ -8902,6 +8904,76 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         ]
 
     @mcp.tool()
+    def module_content_review(
+        campaign_id: str,
+        module_id: str,
+        scene_id: str,
+        content_key: str,
+        normalized_content: str,
+        source_asset_id: str,
+        page_number: int,
+        observation: str,
+        content_kind: Literal["dnd5e_2014_statblock"] = "dnd5e_2014_statblock",
+        metadata: dict[str, Any] | None = None,
+        principal_id: str = "system:local",
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Validate and retain an executable transcription of image-only module content."""
+        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        if not idempotency_key:
+            raise ValueError("idempotency_key is required for module content review")
+        parsed = parse_2014_statblock(
+            normalized_content,
+            source_key=f"module-review:{module_id}:{content_key}",
+            name=None,
+        )
+        payload = {
+            "module_id": module_id,
+            "scene_id": scene_id,
+            "content_key": content_key,
+            "content_kind": content_kind,
+            "normalized_content": normalized_content,
+            "source_asset_id": source_asset_id,
+            "page_number": page_number,
+            "observation": observation,
+            "metadata": metadata,
+        }
+        scope = f"module-content-review:{campaign_id}:{principal_id}"
+        replay = replay_idempotent(scope, idempotency_key, payload)
+        if replay is not None:
+            return replay
+        review = modules.review_content(
+            campaign_id=campaign_id,
+            module_id=module_id,
+            scene_id=scene_id,
+            content_key=content_key,
+            content_kind=content_kind,
+            normalized_content=normalized_content,
+            source_asset_id=source_asset_id,
+            page_number=page_number,
+            reviewer=principal_id,
+            observation=observation,
+            metadata=metadata,
+        )
+        response = {
+            "review": review,
+            "validation": {
+                "name": parsed.name,
+                "challenge_rating": parsed.challenge_rating,
+                "experience_points": parsed.experience_points,
+                "warnings": list(parsed.warnings),
+                "settlement": "automatic" if not parsed.warnings else "mixed",
+            },
+        }
+        return remember_idempotent(
+            scope,
+            idempotency_key,
+            payload,
+            response,
+            campaign_id=campaign_id,
+        )
+
+    @mcp.tool()
     def module_read_scene(
         campaign_id: str,
         scene_id: str,
@@ -10993,6 +11065,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "progress",
             "readiness",
             "assets",
+            "content",
         ] = "list",
         payload: dict[str, Any] | None = None,
         principal_id: str = "system:local",
@@ -11021,6 +11094,17 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             )
         elif view == "assets":
             result = module_assets(campaign_id, required(data, "module_id"), principal_id)
+        elif view == "content":
+            access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+            if data.get("review_id"):
+                result = modules.get_content_review(campaign_id, str(data["review_id"]))
+            else:
+                result = modules.list_content_reviews(
+                    campaign_id,
+                    required(data, "module_id"),
+                    content_kind=data.get("content_kind"),
+                    content_key=data.get("content_key"),
+                )
         else:
             result = module_progress_index(
                 campaign_id,
@@ -11175,7 +11259,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
 
     @mcp.tool()
     def character_create_from(
-        mode: Literal["direct", "build", "template", "statblock"],
+        mode: Literal["direct", "build", "template", "statblock", "module_statblock"],
         payload: dict[str, Any],
         principal_id: str = "system:local",
         idempotency_key: str | None = None,
@@ -11213,6 +11297,63 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 data.get("player_name"),
                 principal_id,
             )
+        elif mode == "module_statblock":
+            campaign_id = str(required(data, "campaign_id"))
+            review_id = str(required(data, "review_id"))
+            access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+            campaign = campaigns.get(campaign_id)
+            campaign_edition = str(campaign.settings.get("edition") or "2024")
+            if campaign_edition != "2014":
+                raise ValueError("reviewed module statblocks currently support D&D 2014 campaigns")
+            review = modules.get_content_review(campaign_id, review_id)
+            if review["content_kind"] != "dnd5e_2014_statblock":
+                raise ValueError("module content review is not a D&D 2014 statblock")
+            parsed = parse_2014_statblock(
+                review["normalized_content"],
+                source_key=f"module-review:{review_id}",
+                rule_refs=[f"module-scene:{review['scene_id']}", f"module-review:{review_id}"],
+                name=str(data.get("name") or "").strip() or None,
+            )
+            character_type = str(data.get("character_type") or "monster")
+            if character_type not in {"npc", "monster"}:
+                raise ValueError("module statblock import creates only npc or monster actors")
+            notes = deepcopy(data.get("notes") or default_character_notes())
+            profile = notes.setdefault("profile", {})
+            if not str(profile.get("summary") or "").strip():
+                profile["summary"] = parsed.summary
+            evidence = dict(review.get("evidence") or {})
+            provenance = (
+                f"Reviewed module statblock: module-review:{review_id} "
+                f"(module_id={review['module_id']}; scene_id={review['scene_id']}; "
+                f"page={evidence.get('page')}; asset_checksum={evidence.get('asset_checksum')})."
+            )
+            if parsed.warnings:
+                provenance += " Manual rulings: " + "; ".join(parsed.warnings) + "."
+            existing_dm_notes = str(profile.get("dm_notes") or "").strip()
+            profile["dm_notes"] = "\n".join(
+                item for item in (existing_dm_notes, provenance) if item
+            )
+            character = character_create(
+                parsed.name,
+                campaign_id,
+                character_type,
+                data.get("player_name"),
+                str(data.get("summary") or parsed.summary),
+                parsed.sheet,
+                notes,
+                principal_id,
+                idempotency_key,
+            )
+            result = {
+                "character": character,
+                "source": review,
+                "statblock": {
+                    "challenge_rating": parsed.challenge_rating,
+                    "experience_points": parsed.experience_points,
+                    "warnings": list(parsed.warnings),
+                    "settlement": "automatic" if not parsed.warnings else "mixed",
+                },
+            }
         else:
             campaign_id = str(required(data, "campaign_id"))
             source_id = str(required(data, "source_id"))

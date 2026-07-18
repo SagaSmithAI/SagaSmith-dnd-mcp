@@ -152,6 +152,7 @@ TOOL_GROUPS = (
         "module_import",
         "module_query",
         "module_page_render",
+        "module_content_review",
         "module_set_progress",
         "module_search",
         "module_expand",
