@@ -103,7 +103,7 @@ from sagasmith_dnd.core_content import PACK_VERSION as CORE_CONTENT_PACK_VERSION
 from sagasmith_dnd.core_content import build_srd2014_content
 from sagasmith_dnd.core_rule_pack import get_core_rule_pack
 from sagasmith_dnd.engine import resolve_check, roll
-from sagasmith_dnd.lifecycle import advance_effect_durations, apply_rest
+from sagasmith_dnd.lifecycle import advance_effect_durations, apply_rest, recover_stable_creature
 from sagasmith_dnd.module_profile import DndModuleProfile
 from sagasmith_dnd.rule_engine import (
     RuleCompilationError,
@@ -1441,6 +1441,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             actor=principal_id,
             branch_id=branch_id,
             idempotency_key=idempotency_key,
+            rule_receipts=rule_receipts,
         )
         response = response_for(character_view(characters.get(before.id)))
         return remember_idempotent(
@@ -6762,6 +6763,66 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             campaign_id=current.campaign_id,
         )
 
+    def character_stable_recovery(
+        character_id: str,
+        principal_id: str = "system:local",
+        expected_revision: int | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Roll and settle an unhealed Stable creature's automatic 1 HP recovery."""
+        current = characters.get(character_id)
+        require_character_control(current, principal_id)
+        require_outside_active_combat(current, "stable recovery")
+        if current.campaign_id is None:
+            raise ValueError("stable recovery requires a campaign-bound character")
+        if expected_revision is None or not idempotency_key:
+            raise ValueError(
+                "expected_revision and idempotency_key are required for stable recovery"
+            )
+        branch_id = require_current_branch(current.campaign_id, None)
+        payload = {"character_id": character_id, "operation": "stable_recovery"}
+        scope = f"character-write:{current.campaign_id}:{branch_id}:{principal_id}:{character_id}"
+        request_payload = {
+            "operation": "character.stable_recovery",
+            "character_id": character_id,
+            **payload,
+        }
+        replay = replay_idempotent(scope, idempotency_key, request_payload)
+        if replay is not None:
+            return replay
+        recovery_roll = asdict(roll("1d4"))
+        applied = recover_stable_creature(
+            current.sheet, recovery_hours=int(recovery_roll["total"])
+        )
+        rules = effective_rule_context(
+            current.campaign_id,
+            facts={"actor_id": character_id, "recovery_hours": recovery_roll["total"]},
+        )
+        receipts = core_receipts(
+            rules,
+            ["dnd5e.core.damage.stable_recovery"],
+            "character.stable_recovery",
+        )
+        response = update_sheet(
+            character_id,
+            applied["sheet"],
+            operation="character.stable_recovery",
+            principal_id=principal_id,
+            expected_revision=expected_revision,
+            idempotency_key=idempotency_key,
+            payload=payload,
+            response_extra={
+                "status": "recovered",
+                "recovery_roll": recovery_roll,
+                "recovery_hours": applied["recovery_hours"],
+                "before_hp": applied["before_hp"],
+                "after_hp": applied["after_hp"],
+                "rule_receipts": receipts,
+            },
+            rule_receipts=receipts,
+        )
+        return response
+
     @mcp.tool()
     def character_cast_spell(
         character_id: str,
@@ -10916,7 +10977,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     def character_state_change(
         character_id: str,
         action: Literal[
-            "effect_add", "effect_remove", "resource_set", "rest", "memory_add", "memory_resolve"
+            "effect_add",
+            "effect_remove",
+            "resource_set",
+            "rest",
+            "stable_recovery",
+            "memory_add",
+            "memory_resolve",
         ],
         payload: dict[str, Any] | None = None,
         principal_id: str = "system:local",
@@ -10958,6 +11025,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 data.get("hit_dice_spends"),
                 data.get("hit_dice_recovery"),
                 data.get("food_and_drink", False),
+                principal_id,
+                expected_revision,
+                idempotency_key,
+            )
+        elif action == "stable_recovery":
+            result = character_stable_recovery(
+                character_id,
                 principal_id,
                 expected_revision,
                 idempotency_key,
