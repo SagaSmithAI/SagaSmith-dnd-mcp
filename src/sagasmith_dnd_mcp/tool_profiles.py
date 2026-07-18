@@ -186,7 +186,7 @@ TOOL_GROUPS = (
         "Read and advance module scenes, campaign events and deterministic effects.",
         "write",
         "campaign_event",
-        "campaign_advance_effects",
+        "campaign_change",
         "module_query",
         "module_set_progress",
         "module_search",
@@ -273,7 +273,6 @@ TOOL_GROUPS = (
         "combat_hp_change",
         "dnd_dice_roll",
         "dnd_check",
-        "campaign_advance_effects",
     ),
     _group(
         "combat.save",

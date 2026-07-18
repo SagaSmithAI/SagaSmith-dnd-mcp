@@ -2906,22 +2906,99 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
 
     @mcp.tool()
-    def campaign_advance_effects(
+    def campaign_clock_set(
         campaign_id: str,
-        period: str,
+        day: int,
+        hour: int = 0,
+        minute: int = 0,
+        label: str = "",
         principal_id: str = "system:local",
         expected_revision: int | None = None,
         branch_id: str | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
-        """Advance a campaign's minute/hour/day timed effects in one atomic mutation."""
+        """Set the branch-local campaign clock without fabricating elapsed time."""
+        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        require_write_contract(expected_revision, idempotency_key)
+        resolved_branch_id = require_current_branch(campaign_id, branch_id)
+        if isinstance(day, bool) or not isinstance(day, int) or day < 1:
+            raise ValueError("day must be a positive integer")
+        if isinstance(hour, bool) or not isinstance(hour, int) or not 0 <= hour <= 23:
+            raise ValueError("hour must be an integer from 0 to 23")
+        if isinstance(minute, bool) or not isinstance(minute, int) or not 0 <= minute <= 59:
+            raise ValueError("minute must be an integer from 0 to 59")
+        payload = {
+            "day": day,
+            "hour": hour,
+            "minute": minute,
+            "label": str(label).strip(),
+            "branch_id": resolved_branch_id,
+        }
+        scope = f"campaign-clock-set:{campaign_id}:{resolved_branch_id}:{principal_id}"
+        replay = replay_idempotent(scope, idempotency_key, payload)
+        if replay is not None:
+            return replay
+        campaign = campaigns.get(campaign_id)
+        if campaign.revision != expected_revision:
+            raise ValueError(
+                "campaign revision conflict: "
+                f"expected {expected_revision}, found {campaign.revision}"
+            )
+        state = validate_party_state(deepcopy(campaign.state or {}))
+        if bool(dict(state.get("combat") or {}).get("active")):
+            raise CombatEngineError("campaign clock cannot be set during active combat")
+        world_time = {
+            "schema_version": 1,
+            "day": day,
+            "hour": hour,
+            "minute": minute,
+            "elapsed_minutes": (day - 1) * 1440 + hour * 60 + minute,
+            "label": str(label).strip(),
+        }
+        state["world_time"] = world_time
+        revisions_result = StateMutationService(storage.database).replace(
+            campaign_id,
+            campaign_state=state,
+            expected_campaign_revision=campaign.revision,
+            operation="campaign.clock.set",
+            actor=principal_id,
+            branch_id=resolved_branch_id,
+            idempotency_key=idempotency_key,
+        )
+        response = {
+            "status": "committed",
+            "world_time": world_time,
+            "campaign_revision": mutation_revision(campaign_id),
+            "revisions": [asdict(item) for item in revisions_result or []],
+        }
+        return remember_idempotent(
+            scope, idempotency_key, payload, response, campaign_id=campaign_id
+        )
+
+    @mcp.tool()
+    def campaign_advance_effects(
+        campaign_id: str,
+        period: str,
+        count: int = 1,
+        principal_id: str = "system:local",
+        expected_revision: int | None = None,
+        branch_id: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Advance the campaign clock and matching timed effects atomically."""
         access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
         require_write_contract(expected_revision, idempotency_key)
         resolved_branch_id = require_current_branch(campaign_id, branch_id)
         normalized_period = str(period).strip().lower().replace("-", "_")
         if normalized_period not in {"minute", "hour", "day", "round", "encounter"}:
             raise ValueError("period must be minute, hour, day, round, or encounter")
-        payload = {"period": normalized_period, "branch_id": resolved_branch_id}
+        if isinstance(count, bool) or not isinstance(count, int) or count < 1:
+            raise ValueError("count must be a positive integer")
+        payload = {
+            "period": normalized_period,
+            "count": count,
+            "branch_id": resolved_branch_id,
+        }
         scope = f"campaign-advance-effects:{campaign_id}:{resolved_branch_id}:{principal_id}"
         replay = replay_idempotent(scope, idempotency_key, payload)
         if replay is not None:
@@ -2932,39 +3009,79 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "campaign revision conflict: "
                 f"expected {expected_revision}, found {campaign.revision}"
             )
+        next_state = validate_party_state(deepcopy(campaign.state or {}))
+        if bool(dict(next_state.get("combat") or {}).get("active")):
+            raise CombatEngineError("campaign time cannot advance during active combat")
+        time_minutes = {"minute": 1, "hour": 60, "day": 1440}
+        world_time: dict[str, Any] | None = None
+        if normalized_period in time_minutes:
+            current_clock = dict(next_state.get("world_time") or {})
+            if not current_clock:
+                raise ValueError("set the campaign clock before advancing narrative time")
+            elapsed = int(current_clock.get("elapsed_minutes", 0) or 0)
+            elapsed += time_minutes[normalized_period] * count
+            world_time = {
+                "schema_version": 1,
+                "day": elapsed // 1440 + 1,
+                "hour": (elapsed % 1440) // 60,
+                "minute": elapsed % 60,
+                "elapsed_minutes": elapsed,
+                "label": str(current_clock.get("label") or ""),
+            }
+            next_state["world_time"] = world_time
+        effect_steps = {
+            "minute": {"minute": count},
+            "hour": {"minute": count * 60, "hour": count},
+            "day": {"minute": count * 1440, "hour": count * 24, "day": count},
+            "round": {"round": count},
+            "encounter": {"encounter": count},
+        }[normalized_period]
         updates: list[CharacterStateUpdate] = []
         advanced: dict[str, list[str]] = {}
         expired: dict[str, list[str]] = {}
         rule_receipts: list[dict[str, Any]] = []
         rule_context = effective_rule_context(campaign_id)
         for character in characters.list(campaign_id=campaign_id):
-            result = advance_effect_durations(character.sheet, period=normalized_period)
-            extension = apply_rule_event(
-                result["sheet"],
-                "duration.advance",
-                context_with_facts(rule_context, actor_id=character.id, period=normalized_period),
-            )
-            rule_receipts.extend(extension.receipts)
+            sheet = character.sheet
+            character_advanced: list[str] = []
+            character_expired: list[str] = []
+            for effect_period, amount in effect_steps.items():
+                result = advance_effect_durations(sheet, period=effect_period, amount=amount)
+                extension = apply_rule_event(
+                    result["sheet"],
+                    "duration.advance",
+                    context_with_facts(
+                        rule_context,
+                        actor_id=character.id,
+                        period=effect_period,
+                        amount=amount,
+                    ),
+                )
+                rule_receipts.extend(extension.receipts)
+                sheet = extension.sheet
+                character_advanced.extend(result["advanced"])
+                character_expired.extend(result["expired"])
             if (
-                not result["advanced"]
-                and not result["expired"]
-                and extension.sheet == character.sheet
+                not character_advanced
+                and not character_expired
+                and sheet == character.sheet
             ):
                 continue
             updates.append(
                 CharacterStateUpdate(
                     character_id=character.id,
-                    sheet=validate_character_sheet(extension.sheet),
+                    sheet=validate_character_sheet(sheet),
                     notes=validate_character_notes(character.notes),
                     expected_revision=character.revision,
                 )
             )
-            advanced[character.id] = result["advanced"]
-            expired[character.id] = result["expired"]
+            advanced[character.id] = list(dict.fromkeys(character_advanced))
+            expired[character.id] = list(dict.fromkeys(character_expired))
         revisions_result = None
-        if updates:
+        if updates or world_time is not None:
             revisions_result = StateMutationService(storage.database).replace(
                 campaign_id,
+                campaign_state=next_state if world_time is not None else None,
                 character_updates=updates,
                 expected_campaign_revision=campaign.revision,
                 operation="campaign.effects.advance",
@@ -2974,12 +3091,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 rule_receipts=rule_receipts,
             )
         response = {
-            "status": "committed" if updates else "no_change",
+            "status": "committed" if updates or world_time is not None else "no_change",
             "period": normalized_period,
+            "count": count,
+            "world_time": world_time,
             "advanced": advanced,
             "expired": expired,
             "rule_receipts": rule_receipts,
             "ruleset_fingerprint": rule_context.fingerprint,
+            "campaign_revision": mutation_revision(campaign_id),
             "revisions": [asdict(item) for item in revisions_result or []],
         }
         return remember_idempotent(
@@ -10265,10 +10385,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     # revision, idempotency, access, or combat guards.
     character_content_apply_legacy = character_content_apply
     character_spell_prepare_legacy = character_spell_prepare
+    campaign_clock_set_legacy = campaign_clock_set
+    campaign_advance_effects_legacy = campaign_advance_effects
     # These facade names intentionally replace same-named legacy tools.
     for replaced_tool_name in (
         "character_content_apply",
         "character_spell_prepare",
+        "campaign_clock_set",
+        "campaign_advance_effects",
     ):
         mcp.remove_tool(replaced_tool_name)
 
@@ -11139,24 +11263,49 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     def campaign_change(
         campaign_id: str,
         payload: dict[str, Any],
+        action: Literal["update", "clock_set", "clock_advance"] = "update",
         principal_id: str = "system:local",
         expected_revision: int | None = None,
+        branch_id: str | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
-        """Change campaign metadata and state under the normal write contract."""
+        """Update campaign metadata or manage its branch-local narrative clock."""
         data = facade_payload(payload)
-        result = campaign_update(
-            campaign_id,
-            data.get("name"),
-            data.get("status"),
-            data.get("description"),
-            data.get("settings"),
-            data.get("state"),
-            principal_id,
-            expected_revision,
-            idempotency_key,
-        )
-        return facade_result("update", result)
+        if action == "clock_set":
+            result = campaign_clock_set_legacy(
+                campaign_id,
+                required(data, "day"),
+                data.get("hour", 0),
+                data.get("minute", 0),
+                data.get("label", ""),
+                principal_id,
+                expected_revision,
+                branch_id,
+                idempotency_key,
+            )
+        elif action == "clock_advance":
+            result = campaign_advance_effects_legacy(
+                campaign_id,
+                required(data, "period"),
+                data.get("count", 1),
+                principal_id,
+                expected_revision,
+                branch_id,
+                idempotency_key,
+            )
+        else:
+            result = campaign_update(
+                campaign_id,
+                data.get("name"),
+                data.get("status"),
+                data.get("description"),
+                data.get("settings"),
+                data.get("state"),
+                principal_id,
+                expected_revision,
+                idempotency_key,
+            )
+        return facade_result(action, result)
 
     @mcp.tool()
     def access_grant(
