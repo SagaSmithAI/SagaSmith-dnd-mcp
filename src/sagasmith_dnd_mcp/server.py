@@ -133,6 +133,7 @@ from sagasmith_dnd.spells import (
     validate_magic_missile_allocations,
     validate_spell_grant,
 )
+from sagasmith_dnd.statblocks import parse_2014_statblock
 from sagasmith_dnd.system import DND5E
 
 from sagasmith_dnd_mcp.config import McpConfig
@@ -697,6 +698,27 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if character.campaign_id != campaign_id:
             raise ValueError("actor does not belong to the campaign")
         return character
+
+    def combat_card_readiness(character: Any) -> dict[str, Any]:
+        """Summarize whether a card can enter structured combat without hidden gaps."""
+        view = character_view(character)
+        derived = dict(view.get("derived") or {})
+        attacks = list(dict(derived.get("inventory") or {}).get("weapon_attacks") or [])
+        multiattacks = list(derived.get("multiattack_options") or [])
+        spellcasting = dict(derived.get("spellcasting") or {})
+        prepared_spells = list(spellcasting.get("prepared_spell_ids") or [])
+        unresolved = list(derived.get("unresolved_rules") or [])
+        return {
+            "ready": not unresolved,
+            "settlement": "automatic" if not unresolved else "dm_ruling_required",
+            "unresolved_rules": unresolved,
+            "hit_points": int(dict(derived.get("hit_points") or {}).get("max", 0) or 0),
+            "armor_class": int(derived.get("armor_class", 10) or 10),
+            "weapon_attack_ids": [str(item.get("item_id") or "") for item in attacks],
+            "multiattack_option_ids": [str(item.get("id") or "") for item in multiattacks],
+            "prepared_spell_ids": prepared_spells,
+            "unarmed_fallback": not attacks,
+        }
 
     def combat_view(campaign_id: str, principal_id: str) -> dict[str, Any] | None:
         campaign = campaigns.get(campaign_id)
@@ -8566,6 +8588,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         "id": actor.id,
                         "name": actor.name,
                         "character_type": actor.character_type,
+                        "combat_card": combat_card_readiness(actor),
                     }
                 )
             missing_count = required_count - len(actor_ids)
@@ -10497,12 +10520,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
 
     @mcp.tool()
     def character_create_from(
-        mode: Literal["direct", "build", "template"],
+        mode: Literal["direct", "build", "template", "statblock"],
         payload: dict[str, Any],
         principal_id: str = "system:local",
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
-        """Create a character directly, by D&D build, or from a library template."""
+        """Create directly, by D&D build/template, or from an imported rule statblock."""
         data = facade_payload(payload)
         if mode == "direct":
             result = character_create(
@@ -10527,7 +10550,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 principal_id,
                 idempotency_key,
             )
-        else:
+        elif mode == "template":
             result = character_instantiate(
                 required(data, "template_id"),
                 required(data, "campaign_id"),
@@ -10535,6 +10558,97 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 data.get("player_name"),
                 principal_id,
             )
+        else:
+            campaign_id = str(required(data, "campaign_id"))
+            source_id = str(required(data, "source_id"))
+            access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+            campaign = campaigns.get(campaign_id)
+            source = rules.source(source_id)
+            if str(source.get("system_id") or "") != "dnd5e":
+                raise ValueError("statblock source must belong to the dnd5e rule corpus")
+            campaign_edition = str(campaign.settings.get("edition") or "2024")
+            source_edition = str(source.get("edition") or "")
+            if source_edition != campaign_edition:
+                raise ValueError(
+                    f"statblock source edition {source_edition!r} does not match "
+                    f"campaign edition {campaign_edition!r}"
+                )
+            if source_edition != "2014":
+                raise ValueError("structured statblock import currently supports D&D 2014 sources")
+
+            available_chunks = rules.source_chunks(source_id)
+            by_chunk_id = {str(item["id"]): item for item in available_chunks}
+            selected_value = data.get("chunk_ids")
+            if selected_value is None:
+                selected_chunks = available_chunks
+            else:
+                if not isinstance(selected_value, list):
+                    raise ValueError("payload.chunk_ids must be a list")
+                chunk_ids = [str(item).strip() for item in selected_value]
+                if any(not item for item in chunk_ids) or len(chunk_ids) != len(set(chunk_ids)):
+                    raise ValueError("payload.chunk_ids must contain unique non-empty ids")
+                missing = [item for item in chunk_ids if item not in by_chunk_id]
+                if missing:
+                    raise ValueError("statblock chunks do not belong to the requested source")
+                selected_chunks = [by_chunk_id[item] for item in chunk_ids]
+            if not selected_chunks:
+                raise ValueError("statblock source has no indexed chunks")
+            selected_chunks = sorted(
+                selected_chunks, key=lambda item: (int(item.get("ordinal", 0)), str(item["id"]))
+            )
+            selected_chunk_ids = [str(item["id"]) for item in selected_chunks]
+            source_text = "\n\n".join(str(item.get("content") or "") for item in selected_chunks)
+            parsed = parse_2014_statblock(
+                source_text,
+                source_key=f"rule-source:{source['source_key']}",
+                rule_refs=selected_chunk_ids,
+                name=str(data.get("name") or source.get("title") or "").strip() or None,
+            )
+            character_type = str(data.get("character_type") or "npc")
+            if character_type not in {"npc", "monster"}:
+                raise ValueError("statblock import creates only npc or monster actors")
+            notes = deepcopy(data.get("notes") or default_character_notes())
+            profile = notes.setdefault("profile", {})
+            if not str(profile.get("summary") or "").strip():
+                profile["summary"] = parsed.summary
+            provenance = (
+                f"Statblock import: rule-source:{source['source_key']} "
+                f"(source_id={source_id}; chunks={','.join(selected_chunk_ids)})."
+            )
+            if parsed.warnings:
+                provenance += " Manual rulings: " + "; ".join(parsed.warnings) + "."
+            existing_dm_notes = str(profile.get("dm_notes") or "").strip()
+            profile["dm_notes"] = "\n".join(
+                item for item in (existing_dm_notes, provenance) if item
+            )
+            character = character_create(
+                parsed.name,
+                campaign_id,
+                character_type,
+                data.get("player_name"),
+                str(data.get("summary") or parsed.summary),
+                parsed.sheet,
+                notes,
+                principal_id,
+                idempotency_key,
+            )
+            result = {
+                "character": character,
+                "source": {
+                    "id": source_id,
+                    "source_key": source["source_key"],
+                    "title": source["title"],
+                    "edition": source_edition,
+                    "checksum": source["checksum"],
+                    "chunk_ids": selected_chunk_ids,
+                },
+                "statblock": {
+                    "challenge_rating": parsed.challenge_rating,
+                    "experience_points": parsed.experience_points,
+                    "warnings": list(parsed.warnings),
+                    "settlement": "automatic" if not parsed.warnings else "mixed",
+                },
+            }
         return facade_result(mode, result)
 
     @mcp.tool()
