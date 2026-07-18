@@ -756,6 +756,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             value.pop("readied", None)
             value.pop("effects", None)
             value.pop("reinforcements", None)
+            value.pop("participant_manifest", None)
             battle_map = value.get("battle_map")
             if isinstance(battle_map, dict):
                 value["battle_map"] = {
@@ -2013,6 +2014,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         campaign_id: str,
         participant_ids: list[str],
         participant_config: list[dict[str, Any]] | None = None,
+        participant_manifest: dict[str, Any] | None = None,
         name: str = "Combat",
         scene_id: str | None = None,
         scope_id: str = "party",
@@ -2031,6 +2033,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         payload = {
             "participant_ids": list(participant_ids),
             "participant_config": participant_config,
+            "participant_manifest": participant_manifest,
             "name": name,
             "scene_id": scene_id,
             "scope_id": scope_id,
@@ -2102,6 +2105,37 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 and str(current_scene_context["scene_id"]) == resolved_scene_id
                 else modules.read_scene(campaign_id, resolved_scene_id)
             )
+        readiness = None
+        if participant_manifest is not None:
+            if resolved_scene_id is None:
+                raise ValueError("participant_manifest requires an encounter scene_id")
+            readiness = module_scene_readiness(
+                campaign_id,
+                resolved_scene_id,
+                participant_manifest,
+                principal_id,
+            )
+            if not readiness["ready"]:
+                missing_groups = [
+                    item["key"]
+                    for item in readiness["groups"]
+                    if item["blocking"] and item["missing_count"]
+                ]
+                raise CombatEngineError(
+                    "scene participant manifest is incomplete for groups: "
+                    + ", ".join(missing_groups)
+                )
+            omitted = sorted(set(readiness["initial_actor_ids"]) - set(participant_ids))
+            if omitted:
+                raise CombatEngineError(
+                    "combat participant_ids omit manifest combatants: " + ", ".join(omitted)
+                )
+            premature = sorted(set(readiness["reinforcement_actor_ids"]) & set(participant_ids))
+            if premature:
+                raise CombatEngineError(
+                    "manifest reinforcements must enter through combat_join: "
+                    + ", ".join(premature)
+                )
         compiled_map = None
         if scene_context is not None:
             try:
@@ -2191,6 +2225,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             name=name,
             battle_map=compiled_map,
         )
+        if readiness is not None:
+            encounter["participant_manifest"] = readiness
         initiatives = [
             int(item.get("initiative", 0) or 0) for item in encounter.get("combatants", [])
         ]
@@ -8424,6 +8460,161 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "content": "[DM-only scene content hidden]",
         }
 
+    def module_scene_readiness(
+        campaign_id: str,
+        scene_id: str,
+        participant_manifest: dict[str, Any],
+        principal_id: str = "system:local",
+    ) -> dict[str, Any]:
+        """Validate source-grounded combatants and reserves before an encounter starts."""
+        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        if not isinstance(participant_manifest, dict):
+            raise ValueError("participant_manifest must be an object")
+        unknown_manifest = set(participant_manifest) - {"schema_version", "groups", "notes"}
+        if unknown_manifest:
+            raise ValueError(
+                f"unsupported participant manifest fields: {sorted(unknown_manifest)}"
+            )
+        schema_version = participant_manifest.get("schema_version", 1)
+        if schema_version != 1:
+            raise ValueError("participant_manifest schema_version must be 1")
+        groups = participant_manifest.get("groups")
+        if not isinstance(groups, list):
+            raise ValueError("participant_manifest.groups must be a list")
+        encounter_scene = modules.read_scene(campaign_id, scene_id)
+        module_id = str(encounter_scene["module_id"])
+        normalized_groups: list[dict[str, Any]] = []
+        group_keys: set[str] = set()
+        used_actor_ids: set[str] = set()
+        initial_actor_ids: list[str] = []
+        reinforcement_actor_ids: list[str] = []
+        optional_actor_ids: list[str] = []
+
+        for index, raw_group in enumerate(groups):
+            if not isinstance(raw_group, dict):
+                raise ValueError("each participant manifest group must be an object")
+            allowed = {
+                "key",
+                "label",
+                "role",
+                "required_count",
+                "actor_ids",
+                "source_scene_id",
+                "source_excerpt",
+            }
+            unknown = set(raw_group) - allowed
+            if unknown:
+                raise ValueError(
+                    f"unsupported participant group fields: {sorted(unknown)}"
+                )
+            key = str(raw_group.get("key") or "").strip()
+            if not key or key in group_keys:
+                raise ValueError("participant manifest group keys must be non-empty and unique")
+            group_keys.add(key)
+            role = str(raw_group.get("role") or "").strip()
+            if role not in {"combatant", "reinforcement", "optional"}:
+                raise ValueError(
+                    "participant manifest role must be combatant, reinforcement, or optional"
+                )
+            required_count = raw_group.get("required_count")
+            if (
+                isinstance(required_count, bool)
+                or not isinstance(required_count, int)
+                or required_count < 1
+            ):
+                raise ValueError("participant group required_count must be a positive integer")
+            actor_ids_value = raw_group.get("actor_ids", [])
+            if not isinstance(actor_ids_value, list):
+                raise ValueError("participant group actor_ids must be a list")
+            actor_ids = [str(item).strip() for item in actor_ids_value]
+            if any(not item for item in actor_ids) or len(actor_ids) != len(set(actor_ids)):
+                raise ValueError("participant group actor_ids must be non-empty and unique")
+            overlap = used_actor_ids & set(actor_ids)
+            if overlap:
+                raise ValueError(
+                    "actors cannot appear in multiple participant groups: "
+                    + ", ".join(sorted(overlap))
+                )
+            if len(actor_ids) > required_count:
+                raise ValueError(f"participant group {key!r} exceeds required_count")
+            used_actor_ids.update(actor_ids)
+
+            source_scene_id = str(raw_group.get("source_scene_id") or scene_id)
+            source_scene = (
+                encounter_scene
+                if source_scene_id == scene_id
+                else modules.read_scene(campaign_id, source_scene_id)
+            )
+            if str(source_scene.get("module_id")) != module_id:
+                raise ValueError("participant evidence must belong to the encounter module")
+            source_excerpt = " ".join(
+                str(raw_group.get("source_excerpt") or "").split()
+            ).strip()
+            if len(source_excerpt) < 8 or len(source_excerpt) > 500:
+                raise ValueError("participant source_excerpt must contain 8 to 500 characters")
+            normalized_content = " ".join(str(source_scene.get("content") or "").split())
+            if source_excerpt.casefold() not in normalized_content.casefold():
+                raise ValueError(
+                    f"participant group {key!r} source_excerpt is not present in its scene"
+                )
+
+            actor_views = []
+            for actor_id in actor_ids:
+                actor = require_campaign_actor(campaign_id, actor_id)
+                actor_views.append(
+                    {
+                        "id": actor.id,
+                        "name": actor.name,
+                        "character_type": actor.character_type,
+                    }
+                )
+            missing_count = required_count - len(actor_ids)
+            blocking = role != "optional"
+            normalized_groups.append(
+                {
+                    "key": key,
+                    "label": str(raw_group.get("label") or key).strip(),
+                    "role": role,
+                    "required_count": required_count,
+                    "actor_ids": actor_ids,
+                    "actors": actor_views,
+                    "missing_count": missing_count,
+                    "blocking": blocking,
+                    "source_scene_id": source_scene_id,
+                    "source_excerpt": source_excerpt,
+                    "ordinal": index,
+                }
+            )
+            target = (
+                initial_actor_ids
+                if role == "combatant"
+                else reinforcement_actor_ids
+                if role == "reinforcement"
+                else optional_actor_ids
+            )
+            target.extend(actor_ids)
+
+        ready = all(
+            not item["blocking"] or item["missing_count"] == 0 for item in normalized_groups
+        )
+        complete = all(item["missing_count"] == 0 for item in normalized_groups)
+        normalized_manifest = {
+            "schema_version": 1,
+            "scene_id": scene_id,
+            "module_id": module_id,
+            "groups": normalized_groups,
+            "notes": str(participant_manifest.get("notes") or "").strip(),
+        }
+        return {
+            **normalized_manifest,
+            "checksum": request_hash(normalized_manifest),
+            "ready": ready,
+            "complete": complete,
+            "initial_actor_ids": initial_actor_ids,
+            "reinforcement_actor_ids": reinforcement_actor_ids,
+            "optional_actor_ids": optional_actor_ids,
+        }
+
     @mcp.tool()
     def module_current(
         campaign_id: str,
@@ -10131,7 +10322,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     @mcp.tool()
     def module_query(
         campaign_id: str,
-        view: Literal["list", "index", "scene", "current", "progress"] = "list",
+        view: Literal["list", "index", "scene", "current", "progress", "readiness"] = "list",
         payload: dict[str, Any] | None = None,
         principal_id: str = "system:local",
     ) -> dict[str, Any]:
@@ -10145,6 +10336,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             result = module_read_scene(campaign_id, required(data, "scene_id"), principal_id)
         elif view == "current":
             result = module_current(campaign_id, data.get("scope_id", "party"), principal_id)
+        elif view == "readiness":
+            result = module_scene_readiness(
+                campaign_id,
+                required(data, "scene_id"),
+                required(data, "participant_manifest"),
+                principal_id,
+            )
         else:
             result = module_progress_index(
                 campaign_id,
