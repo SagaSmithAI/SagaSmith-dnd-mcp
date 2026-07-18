@@ -7523,6 +7523,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         known_by_actor_ids: list[str] | None = None,
         knowledge_key: str | None = None,
         knowledge_proposition: str | None = None,
+        knowledge_disclosure_scope: str = "owner",
         principal_id: str = "system:local",
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
@@ -7531,6 +7532,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if not idempotency_key:
             raise ValueError("idempotency_key is required for event writes")
         branch_id = require_current_branch(campaign_id, branch_id)
+        if audience_scope == "actor" and not known_by_actor_ids:
+            raise ValueError("actor-scoped events require known_by_actor_ids")
         if known_by_actor_ids:
             if not knowledge_key or not knowledge_proposition:
                 raise ValueError(
@@ -7547,6 +7550,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "known_by_actor_ids": known_by_actor_ids or [],
             "knowledge_key": knowledge_key,
             "knowledge_proposition": knowledge_proposition,
+            "knowledge_disclosure_scope": knowledge_disclosure_scope,
         }
         scope = f"event-add:{campaign_id}:{branch_id}:{principal_id}"
         replay = replay_idempotent(scope, idempotency_key, request_payload)
@@ -7571,6 +7575,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         proposition=knowledge_proposition,
                         source_event_id=created.id,
                         cause="witnessed",
+                        disclosure_scope=knowledge_disclosure_scope,
                         branch_id=branch_id,
                     ).id
                 )
@@ -10755,6 +10760,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 data.get("known_by_actor_ids"),
                 data.get("knowledge_key"),
                 data.get("knowledge_proposition"),
+                data.get("knowledge_disclosure_scope", "owner"),
                 principal_id,
                 idempotency_key,
             )
