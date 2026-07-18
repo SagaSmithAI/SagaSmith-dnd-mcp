@@ -7945,6 +7945,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     @mcp.tool()
     def combat_end(
         campaign_id: str,
+        outcome: dict[str, Any] | None = None,
         principal_id: str = "system:local",
         expected_revision: int | None = None,
         branch_id: str | None = None,
@@ -7955,7 +7956,26 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         require_write_contract(expected_revision, idempotency_key)
         campaign = campaigns.get(campaign_id)
         resolved_branch_id = require_current_branch(campaign_id, branch_id)
-        payload = {"branch_id": resolved_branch_id}
+        outcome_value = dict(outcome or {})
+        if outcome_value:
+            allowed = {"status", "summary"}
+            unknown = set(outcome_value) - allowed
+            if unknown:
+                raise ValueError(f"unsupported combat outcome fields: {sorted(unknown)}")
+            status = str(outcome_value.get("status") or "").strip().lower()
+            if status not in {
+                "defeat",
+                "interrupted",
+                "truce",
+                "victory",
+                "withdrawal",
+            }:
+                raise ValueError("combat outcome status is invalid")
+            summary = str(outcome_value.get("summary") or "").strip()
+            if not summary or len(summary) > 2000:
+                raise ValueError("combat outcome summary must contain 1 to 2000 characters")
+            outcome_value = {"status": status, "summary": summary}
+        payload = {"branch_id": resolved_branch_id, "outcome": outcome_value}
         scope = f"combat-end:{campaign_id}:{resolved_branch_id}:{principal_id}"
         replay = replay_idempotent(scope, idempotency_key, payload)
         if replay is not None:
@@ -7978,6 +7998,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     f"cannot end combat while {actor.id} is still making death saves"
                 )
         combat["active"] = False
+        if outcome_value:
+            combat["outcome"] = outcome_value
         ending_readied = list(combat.get("readied", []))
         combat["readied"] = []
         updated_state = dict(campaign.state or {})
@@ -8019,6 +8041,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         response = {
             "ended": True,
             "combat": combat,
+            "outcome": outcome_value or None,
             "tool_profile": PROFILE_PLAY,
             "effects_expired": sorted(expired_effects),
             "readied_spells_expired": sorted(

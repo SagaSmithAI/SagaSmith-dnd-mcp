@@ -149,5 +149,20 @@ def test_combat_join_queues_actor_until_next_round(tmp_path: Path) -> None:
             actors[1]["id"],
         ]
         assert second_end["combat"]["reinforcements"] == []
+        ended = await _call(
+            server,
+            "combat_end",
+            {
+                "campaign_id": campaign["id"],
+                "outcome": {
+                    "status": "victory",
+                    "summary": "The queued ally entered and the opposition withdrew.",
+                },
+                "expected_revision": second_end["campaign_revision"],
+                "idempotency_key": "join-combat-end",
+            },
+        )
+        assert ended["outcome"]["status"] == "victory"
+        assert ended["combat"]["outcome"] == ended["outcome"]
 
     asyncio.run(exercise())
