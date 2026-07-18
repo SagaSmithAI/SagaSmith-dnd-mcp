@@ -122,6 +122,11 @@ def test_medicine_stabilization_pays_action_and_commits_target_atomically(
         assert result["success"] is expected_success
         assert result["stabilized"] is expected_success
         assert result["skill"] == "medicine"
+        assert any(
+            receipt["mechanic_id"] == "dnd5e.core.damage.zero_hp"
+            and receipt["event"] == "combat.stabilize"
+            for receipt in result["rule_receipts"]
+        )
         status = await _call(
             server,
             "combat_query",

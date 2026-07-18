@@ -5088,6 +5088,17 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             assert target_id is not None and stabilize_target is not None
             medicine_total = int(actor["derived"]["skills"]["medicine"])
             wisdom_modifier = int(actor["derived"]["ability_modifiers"]["wisdom"])
+            stabilize_context = effective_rule_context(
+                campaign_id,
+                facts={
+                    **settlement_facts,
+                    "actor_id": actor_id,
+                    "target_id": target_id,
+                    "kind": "stabilize",
+                    "ability": "wisdom",
+                    "dc": 10,
+                },
+            )
             check = resolve_actor_check(
                 actor,
                 kind="ability",
@@ -5098,17 +5109,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 advantage=advantage,
                 disadvantage=disadvantage,
                 ruleset=encounter.get("ruleset") if encounter else None,
-                rules=effective_rule_context(
-                    campaign_id,
-                    facts={
-                        **settlement_facts,
-                        "actor_id": actor_id,
-                        "target_id": target_id,
-                        "kind": "stabilize",
-                        "ability": "wisdom",
-                        "dc": 10,
-                    },
-                ),
+                rules=stabilize_context,
             )
             encounter = resolve_common_action(
                 encounter,
@@ -5123,6 +5124,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "skill": "medicine",
                 "target_id": target_id,
                 "stabilized": bool(check["success"]),
+                "rule_receipts": [
+                    *list(check.get("rule_receipts") or []),
+                    *core_receipts(
+                        stabilize_context,
+                        ["dnd5e.core.damage.zero_hp"],
+                        "combat.stabilize",
+                    ),
+                ],
             }
             if check["success"]:
                 applied = stabilize_sheet(stabilize_target["sheet"])
