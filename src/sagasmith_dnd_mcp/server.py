@@ -9748,15 +9748,38 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     ) -> dict[str, Any]:
         """Resolve source-bound per-level modifiers and post-level catalog work."""
         candidates = available_content_artifacts(campaign_id, branch_id=branch_id)
-        by_id = {str(item[2].get("id") or ""): item for item in candidates}
+
+        def exact_recorded_artifact(record: dict[str, Any]) -> tuple[str, str, dict[str, Any]]:
+            artifact_id = str(record.get("artifact_id") or record.get("id") or "")
+            pack_id = str(record.get("pack_id") or "")
+            version = str(record.get("pack_version") or "")
+            if not artifact_id or not pack_id or not version:
+                raise ValueError(
+                    "level-affecting content must record artifact id, pack id, and pack version"
+                )
+            try:
+                pack = rule_packs.get_version(pack_id, version)
+            except LookupError as error:
+                raise RulesetUnavailableError(
+                    f"recorded content pack is unavailable: {pack_id}@{version}"
+                ) from error
+            artifact = next(
+                (item for item in pack.artifacts if str(item.get("id") or "") == artifact_id),
+                None,
+            )
+            if artifact is None:
+                raise RulesetUnavailableError(
+                    f"recorded artifact is unavailable: {artifact_id} in {pack_id}@{version}"
+                )
+            return pack_id, version, dict(artifact)
+
         hp_per_level_bonus = 0
         hp_bonus_sources: list[dict[str, Any]] = []
         for selection in sheet.get("content", {}).get("selections", []):
             artifact_id = str(selection.get("artifact_id") or "")
-            candidate = by_id.get(artifact_id)
-            if candidate is None:
+            if not artifact_id:
                 continue
-            pack_id, version, artifact = candidate
+            pack_id, version, artifact = exact_recorded_artifact(selection)
             card = dict(artifact.get("card") or {})
             grants = dict(card.get("grants") or {})
             amount = int(grants.get("hp_per_level", 0) or 0)
@@ -9771,15 +9794,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         "scope": "character_level",
                     }
                 )
-        present_features = {
-            str(item.get("id") or "")
-            for item in sheet.get("content", {}).get("features", [])
-        }
-        for artifact_id in present_features:
-            candidate = by_id.get(artifact_id)
-            if candidate is None:
+        feature_records = list(sheet.get("content", {}).get("features", []))
+        present_features = {str(item.get("id") or "") for item in feature_records}
+        for feature in feature_records:
+            artifact_id = str(feature.get("id") or "")
+            if not artifact_id or not feature.get("pack_id") or not feature.get("pack_version"):
                 continue
-            pack_id, version, artifact = candidate
+            pack_id, version, artifact = exact_recorded_artifact(feature)
             card = dict(artifact.get("card") or {})
             grants = dict(card.get("mechanical_grants") or {})
             amount = int(grants.get("hp_per_level", 0) or 0)

@@ -193,6 +193,39 @@ def test_lobby_level_advance_is_source_bound_and_reports_catalog_follow_up(
         assert len(receipts) == 1
         assert receipts[0]["event"] == "character.level.advance"
 
+        unresolvable_sheet = _cleric_sheet()
+        unresolvable_sheet["content"]["selections"][0]["pack_version"] = "9.9.9"
+        unresolvable = await _call(
+            server,
+            "character_create_from",
+            {
+                "mode": "direct",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "name": "Unresolvable provenance",
+                    "sheet": unresolvable_sheet,
+                },
+                "idempotency_key": "unresolvable-actor",
+            },
+        )
+        with pytest.raises(Exception, match="recorded content pack is unavailable"):
+            await _call(
+                server,
+                "character_state_change",
+                {
+                    "character_id": unresolvable["id"],
+                    "action": "level_advance",
+                    "payload": {
+                        "class_name": "Cleric",
+                        "hp_method": "fixed",
+                        "reason": "milestone",
+                        "source_ref": "module:test",
+                    },
+                    "expected_revision": unresolvable["revision"],
+                    "idempotency_key": "unresolvable-level",
+                },
+            )
+
     asyncio.run(exercise())
 
 
