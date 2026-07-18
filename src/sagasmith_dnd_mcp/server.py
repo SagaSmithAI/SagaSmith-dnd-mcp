@@ -86,6 +86,7 @@ from sagasmith_dnd.combat_engine import (
     resolve_readied_spell_window,
     roll_attack_action,
     spend_movement,
+    stabilize_sheet,
     stand_up,
     start_encounter,
     trigger_readied_action,
@@ -4938,6 +4939,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         actor_id: str,
         kind: str,
         ability: str,
+        target_id: str | None = None,
         dc: int = 0,
         proficient: bool = False,
         bonus: int = 0,
@@ -4949,7 +4951,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         branch_id: str | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
-        """Resolve a check/save/death-save and persist only its mechanical result."""
+        """Resolve a check/save/death-save or an atomic Medicine stabilization."""
         access.require_actor(campaign_id, actor_id, principal_id, control=True)
         require_write_contract(expected_revision, idempotency_key)
         settlement_facts = checked_rule_facts(rule_facts)
@@ -4962,8 +4964,25 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 raise CombatEngineError("rule facts require a DM-issued resolution")
         if kind == "death_save" and settlement_facts:
             raise CombatEngineError("rule facts are not accepted for death saves")
+        if kind == "death_save" and target_id is not None:
+            raise CombatEngineError("death saves do not accept a target_id")
+        if kind == "stabilize":
+            if not target_id:
+                raise CombatEngineError("stabilize requires target_id")
+            if target_id == actor_id:
+                raise CombatEngineError("an unconscious actor cannot stabilize itself")
+            if str(ability).casefold() not in {"wisdom", "wis", "medicine"}:
+                raise CombatEngineError("stabilize uses a Wisdom (Medicine) check")
+            if dc not in {0, 10} or proficient or bonus:
+                raise CombatEngineError(
+                    "stabilize derives its DC and Medicine modifier from the Core rules "
+                    "and actor card"
+                )
+        elif target_id is not None:
+            raise CombatEngineError("target_id is accepted only for kind=stabilize")
         payload = {
             "actor_id": actor_id,
+            "target_id": target_id,
             "kind": kind,
             "ability": ability,
             "dc": dc,
@@ -4985,6 +5004,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 f"expected {expected_revision}, found {campaign.revision}"
             )
         death_save_combatant: dict[str, Any] | None = None
+        stabilize_target: dict[str, Any] | None = None
         if kind == "death_save":
             _campaign, active = active_encounter(campaign_id)
             require_no_blocking_pending(active)
@@ -4997,6 +5017,47 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 raise CombatEngineError("this combatant is not configured to make death saves")
             if dict(death_save_combatant.get("turn_flags") or {}).get("death_save_used"):
                 raise CombatEngineError("this actor already made a death save this turn")
+        elif kind == "stabilize":
+            assert target_id is not None
+            _campaign, active = active_encounter(campaign_id)
+            require_no_blocking_pending(active)
+            acting = current_combatant(active)
+            if acting is None or acting.get("actor_id") != actor_id:
+                raise CombatEngineError("stabilization can be attempted only on this actor's turn")
+            require_campaign_actor(campaign_id, target_id)
+            combatants = {
+                str(item.get("actor_id") or ""): item for item in active.get("combatants", [])
+            }
+            source_combatant = combatants.get(actor_id)
+            target_combatant = combatants.get(target_id)
+            if source_combatant is None or target_combatant is None:
+                raise CombatEngineError("both actors must be present in the encounter")
+            source_position = source_combatant.get("position")
+            target_position = target_combatant.get("position")
+            if not (
+                isinstance(source_position, dict)
+                and isinstance(target_position, dict)
+                and "x" in source_position
+                and "y" in source_position
+                and "x" in target_position
+                and "y" in target_position
+            ):
+                raise CombatEngineError("stabilization requires recorded map positions")
+            cell_ft = int(
+                dict(dict(active.get("battle_map") or {}).get("grid") or {}).get("cell_ft", 5)
+                or 5
+            )
+            distance = int(
+                max(
+                    abs(float(source_position["x"]) - float(target_position["x"])),
+                    abs(float(source_position["y"]) - float(target_position["y"])),
+                )
+                * cell_ft
+            )
+            if distance > 5:
+                raise CombatEngineError("stabilization requires the target to be within 5 feet")
+            stabilize_target = combat_actor_snapshot(target_id)
+            stabilize_sheet(stabilize_target["sheet"])
         actor = combat_actor_snapshot(actor_id)
         next_state = dict(campaign.state or {})
         encounter = dict(next_state.get("combat") or {})
@@ -5023,6 +5084,60 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     expected_revision=current.revision,
                 )
             )
+        elif kind == "stabilize":
+            assert target_id is not None and stabilize_target is not None
+            medicine_total = int(actor["derived"]["skills"]["medicine"])
+            wisdom_modifier = int(actor["derived"]["ability_modifiers"]["wisdom"])
+            check = resolve_actor_check(
+                actor,
+                kind="ability",
+                ability="wisdom",
+                dc=10,
+                proficient=False,
+                bonus=medicine_total - wisdom_modifier,
+                advantage=advantage,
+                disadvantage=disadvantage,
+                ruleset=encounter.get("ruleset") if encounter else None,
+                rules=effective_rule_context(
+                    campaign_id,
+                    facts={
+                        **settlement_facts,
+                        "actor_id": actor_id,
+                        "target_id": target_id,
+                        "kind": "stabilize",
+                        "ability": "wisdom",
+                        "dc": 10,
+                    },
+                ),
+            )
+            encounter = resolve_common_action(
+                encounter,
+                actor_id_value=actor_id,
+                action="stabilize",
+                target_id=target_id,
+                payload={"method": "medicine", "dc": 10},
+            )
+            result = {
+                **check,
+                "kind": "stabilize",
+                "skill": "medicine",
+                "target_id": target_id,
+                "stabilized": bool(check["success"]),
+            }
+            if check["success"]:
+                applied = stabilize_sheet(stabilize_target["sheet"])
+                result["stabilization"] = {
+                    key: value for key, value in applied.items() if key != "sheet"
+                }
+                current_target = characters.get(target_id)
+                updates.append(
+                    CharacterStateUpdate(
+                        character_id=target_id,
+                        sheet=validate_character_sheet(applied["sheet"]),
+                        notes=validate_character_notes(current_target.notes),
+                        expected_revision=current_target.revision,
+                    )
+                )
         else:
             combatant = next(
                 (
@@ -5067,8 +5182,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 ),
             )
         if encounter:
-            if updates:
-                sync_combatant_conditions(encounter, actor_id, updates[0].sheet)
+            for update in updates:
+                sync_combatant_conditions(encounter, update.character_id, update.sheet)
             if kind == "death_save":
                 combatant = next(
                     item
