@@ -250,6 +250,7 @@ TOOL_GROUPS = (
         "Advance turns, resolve choice windows, ready actions and end combat.",
         "write",
         "combat_end_turn",
+        "combat_join",
         "combat_ready",
         "combat_choice",
         "combat_end",

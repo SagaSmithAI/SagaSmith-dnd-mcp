@@ -77,6 +77,7 @@ from sagasmith_dnd.combat_engine import (
     pay_activity_activation,
     pay_attack_action,
     preflight_attack,
+    queue_combatant,
     resolve_actor_check,
     resolve_attack_damage,
     resolve_choice_window,
@@ -754,6 +755,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             value.pop("pending", None)
             value.pop("readied", None)
             value.pop("effects", None)
+            value.pop("reinforcements", None)
             battle_map = value.get("battle_map")
             if isinstance(battle_map, dict):
                 value["battle_map"] = {
@@ -2224,6 +2226,115 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             campaign_id,
             principal_id,
             remember_idempotent(scope, idempotency_key, payload, response, campaign_id=campaign_id),
+        )
+
+    @mcp.tool()
+    def combat_join(
+        campaign_id: str,
+        actor_id: str,
+        participant_config: dict[str, Any] | None = None,
+        principal_id: str = "system:local",
+        branch_id: str | None = None,
+        expected_revision: int | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Queue one canonical campaign actor to enter combat at the next round."""
+        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        require_write_contract(expected_revision, idempotency_key)
+        resolved_branch_id = require_current_branch(campaign_id, branch_id)
+        config_value = dict(participant_config or {})
+        allowed = {
+            "token_id",
+            "position",
+            "hidden",
+            "visible_to_actor_ids",
+            "disposition",
+            "reach_ft",
+            "surprised",
+            "death_saves",
+            "initiative",
+            "tie_breaker",
+        }
+        unknown = set(config_value) - allowed
+        if unknown:
+            raise ValueError(f"unsupported participant config fields: {sorted(unknown)}")
+        payload = {
+            "actor_id": actor_id,
+            "participant_config": config_value,
+            "branch_id": resolved_branch_id,
+        }
+        scope = f"combat-join:{campaign_id}:{resolved_branch_id}:{principal_id}"
+        replay = replay_idempotent(scope, idempotency_key, payload)
+        if replay is not None:
+            return combat_response(campaign_id, principal_id, replay)
+        campaign, encounter = active_encounter(campaign_id)
+        require_no_blocking_pending(encounter)
+        if campaign.revision != expected_revision:
+            raise ValueError(
+                "campaign revision conflict: "
+                f"expected {expected_revision}, found {campaign.revision}"
+            )
+        require_campaign_actor(campaign_id, actor_id)
+        visible_to = config_value.get("visible_to_actor_ids")
+        encounter_actor_ids = {
+            str(item.get("actor_id") or "") for item in encounter.get("combatants", [])
+        } | {actor_id}
+        if visible_to is not None and (
+            not isinstance(visible_to, list)
+            or any(str(item) not in encounter_actor_ids for item in visible_to)
+        ):
+            raise ValueError(
+                "visible_to_actor_ids must contain only current or joining participant IDs"
+            )
+        battle_map = encounter.get("battle_map")
+        if isinstance(battle_map, dict):
+            try:
+                validate_position(battle_map, config_value.get("position"))
+            except BattleMapError as error:
+                raise NeedsRulingError(str(error), missing=("position",)) from error
+        actor = combat_actor_snapshot(actor_id)
+        actor.update(config_value)
+        next_encounter = queue_combatant(encounter, actor)
+        queued = next(
+            item
+            for item in next_encounter.get("reinforcements", [])
+            if item.get("actor_id") == actor_id
+        )
+        tied = any(
+            item.get("actor_id") != actor_id
+            and int(item.get("initiative", 0) or 0) == int(queued.get("initiative", 0) or 0)
+            for item in [
+                *list(next_encounter.get("combatants") or []),
+                *list(next_encounter.get("reinforcements") or []),
+            ]
+        )
+        receipts = core_receipts(
+            effective_rule_context(campaign_id),
+            ["dnd5e.core.initiative.tie"] if tied else [],
+            "combat.join",
+        )
+        next_state = {**dict(campaign.state or {}), "combat": next_encounter}
+        revisions_result = StateMutationService(storage.database).replace(
+            campaign_id,
+            campaign_state=validate_party_state(next_state),
+            expected_campaign_revision=campaign.revision,
+            operation="combat.participant.join",
+            actor=principal_id,
+            branch_id=resolved_branch_id,
+            idempotency_key=idempotency_key,
+            rule_receipts=receipts,
+        )
+        response = {
+            "status": "committed",
+            "queued": deepcopy(queued),
+            "combat": next_encounter,
+            "campaign_revision": mutation_revision(campaign_id),
+            "revisions": [asdict(item) for item in revisions_result or []],
+        }
+        return combat_response(
+            campaign_id,
+            principal_id,
+            remember_idempotent(scope, idempotency_key, payload, response, campaign_id),
         )
 
     @mcp.tool()
@@ -4940,6 +5051,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         kind: str,
         ability: str,
         target_id: str | None = None,
+        action: str | None = None,
         dc: int = 0,
         proficient: bool = False,
         bonus: int = 0,
@@ -4966,6 +5078,22 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             raise CombatEngineError("rule facts are not accepted for death saves")
         if kind == "death_save" and target_id is not None:
             raise CombatEngineError("death saves do not accept a target_id")
+        if kind in {"death_save", "stabilize"} and action is not None:
+            raise CombatEngineError(f"{kind} manages its own action boundary")
+        normalized_check_action = (
+            str(action).strip().lower().replace("-", "_") if action is not None else None
+        )
+        if normalized_check_action not in {
+            None,
+            "hide",
+            "improvise",
+            "influence",
+            "search",
+            "study",
+            "utilize",
+            "use_object",
+        }:
+            raise CombatEngineError("unsupported action-bound check")
         if kind == "stabilize":
             if not target_id:
                 raise CombatEngineError("stabilize requires target_id")
@@ -4983,6 +5111,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         payload = {
             "actor_id": actor_id,
             "target_id": target_id,
+            "action": normalized_check_action,
             "kind": kind,
             "ability": ability,
             "dc": dc,
@@ -5059,6 +5188,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             stabilize_target = combat_actor_snapshot(target_id)
             stabilize_sheet(stabilize_target["sheet"])
         actor = combat_actor_snapshot(actor_id)
+        normalized_ability = str(ability).strip().casefold().replace(" ", "_")
+        derived_skill = normalized_ability in dict(actor["derived"].get("skills") or {})
+        if kind in {"ability", "check"} and derived_skill and (proficient or bonus):
+            raise CombatEngineError(
+                "skill checks derive proficiency and bonuses from the actor card"
+            )
         next_state = dict(campaign.state or {})
         encounter = dict(next_state.get("combat") or {})
         updates: list[CharacterStateUpdate] = []
@@ -5172,7 +5307,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             result = resolve_actor_check(
                 actor,
                 kind=kind,
-                ability=ability,
+                ability=normalized_ability,
                 dc=dc,
                 proficient=proficient,
                 bonus=bonus,
@@ -5190,6 +5325,28 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     },
                 ),
             )
+            if derived_skill:
+                result = {**result, "skill": normalized_ability}
+            if normalized_check_action is not None:
+                if not encounter:
+                    raise CombatEngineError("an action-bound check requires active combat")
+                require_no_blocking_pending(encounter)
+                acting = current_combatant(encounter)
+                if acting is None or acting.get("actor_id") != actor_id:
+                    raise CombatEngineError(
+                        "an action-bound check can be made only on this actor's turn"
+                    )
+                encounter = resolve_common_action(
+                    encounter,
+                    actor_id_value=actor_id,
+                    action=normalized_check_action,
+                    payload={
+                        "kind": kind,
+                        "ability": normalized_ability,
+                        "dc": dc,
+                    },
+                )
+                result = {**result, "action": normalized_check_action}
         if encounter:
             for update in updates:
                 sync_combatant_conditions(encounter, update.character_id, update.sheet)
