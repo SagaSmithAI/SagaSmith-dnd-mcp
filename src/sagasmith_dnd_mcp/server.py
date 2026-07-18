@@ -10597,7 +10597,23 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 selected_chunks, key=lambda item: (int(item.get("ordinal", 0)), str(item["id"]))
             )
             selected_chunk_ids = [str(item["id"]) for item in selected_chunks]
-            source_text = "\n\n".join(str(item.get("content") or "") for item in selected_chunks)
+            rendered_chunks = []
+            for item in selected_chunks:
+                heading_path = [
+                    str(value).strip()
+                    for value in item.get("heading_path", [])
+                    if str(value).strip()
+                ]
+                headings = "\n".join(
+                    f"{'#' * min(6, 3 + index)} {heading}"
+                    for index, heading in enumerate(heading_path)
+                )
+                rendered_chunks.append(
+                    "\n\n".join(
+                        value for value in (headings, str(item.get("content") or "")) if value
+                    )
+                )
+            source_text = "\n\n".join(rendered_chunks)
             parsed = parse_2014_statblock(
                 source_text,
                 source_key=f"rule-source:{source['source_key']}",
