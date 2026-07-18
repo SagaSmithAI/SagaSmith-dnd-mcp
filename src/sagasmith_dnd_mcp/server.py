@@ -703,16 +703,45 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         """Summarize whether a card can enter structured combat without hidden gaps."""
         view = character_view(character)
         derived = dict(view.get("derived") or {})
+        sheet = dict(view.get("sheet") or {})
         attacks = list(dict(derived.get("inventory") or {}).get("weapon_attacks") or [])
         multiattacks = list(derived.get("multiattack_options") or [])
         spellcasting = dict(derived.get("spellcasting") or {})
         prepared_spells = list(spellcasting.get("prepared_spell_ids") or [])
         unresolved = list(derived.get("unresolved_rules") or [])
+        hit_points = int(dict(derived.get("hit_points") or {}).get("value", 0) or 0)
+        conditions = {str(item).strip().casefold() for item in sheet.get("conditions", [])}
+        blockers = list(unresolved)
+        if hit_points <= 0:
+            blockers.append("zero_hit_points")
+        if "dead" in conditions:
+            blockers.append("dead")
+        dm_notes = str(
+            dict(dict(view.get("notes") or {}).get("profile") or {}).get("dm_notes") or ""
+        )
+        manual_rulings: list[str] = []
+        for line in dm_notes.splitlines():
+            if "Manual rulings:" not in line:
+                continue
+            value = line.split("Manual rulings:", 1)[1].strip().rstrip(".")
+            manual_rulings.extend(item.strip() for item in value.split(";") if item.strip())
+        settlement = (
+            "dm_ruling_required"
+            if unresolved
+            else "mixed"
+            if manual_rulings
+            else "automatic"
+        )
         return {
-            "ready": not unresolved,
-            "settlement": "automatic" if not unresolved else "dm_ruling_required",
+            "ready": not blockers,
+            "settlement": settlement,
+            "blocking_reasons": sorted(set(blockers)),
             "unresolved_rules": unresolved,
-            "hit_points": int(dict(derived.get("hit_points") or {}).get("max", 0) or 0),
+            "manual_rulings": manual_rulings,
+            "hit_points": hit_points,
+            "maximum_hit_points": int(
+                dict(derived.get("hit_points") or {}).get("max", 0) or 0
+            ),
             "armor_class": int(derived.get("armor_class", 10) or 10),
             "weapon_attack_ids": [str(item.get("item_id") or "") for item in attacks],
             "multiattack_option_ids": [str(item.get("id") or "") for item in multiattacks],
@@ -2138,14 +2167,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 principal_id,
             )
             if not readiness["ready"]:
-                missing_groups = [
+                unavailable_groups = [
                     item["key"]
                     for item in readiness["groups"]
-                    if item["blocking"] and item["missing_count"]
+                    if item["blocking"]
+                    and (item["missing_count"] or item["unready_count"])
                 ]
                 raise CombatEngineError(
-                    "scene participant manifest is incomplete for groups: "
-                    + ", ".join(missing_groups)
+                    "scene participant manifest has missing or unusable groups: "
+                    + ", ".join(unavailable_groups)
                 )
             omitted = sorted(set(readiness["initial_actor_ids"]) - set(participant_ids))
             if omitted:
@@ -8591,6 +8621,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         "combat_card": combat_card_readiness(actor),
                     }
                 )
+            unready_actor_ids = [
+                str(item["id"])
+                for item in actor_views
+                if not dict(item.get("combat_card") or {}).get("ready", False)
+            ]
             missing_count = required_count - len(actor_ids)
             blocking = role != "optional"
             normalized_groups.append(
@@ -8602,6 +8637,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "actor_ids": actor_ids,
                     "actors": actor_views,
                     "missing_count": missing_count,
+                    "unready_count": len(unready_actor_ids),
+                    "unready_actor_ids": unready_actor_ids,
                     "blocking": blocking,
                     "source_scene_id": source_scene_id,
                     "source_excerpt": source_excerpt,
@@ -8618,9 +8655,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             target.extend(actor_ids)
 
         ready = all(
-            not item["blocking"] or item["missing_count"] == 0 for item in normalized_groups
+            not item["blocking"]
+            or (item["missing_count"] == 0 and item["unready_count"] == 0)
+            for item in normalized_groups
         )
-        complete = all(item["missing_count"] == 0 for item in normalized_groups)
+        complete = all(
+            item["missing_count"] == 0 and item["unready_count"] == 0
+            for item in normalized_groups
+        )
         normalized_manifest = {
             "schema_version": 1,
             "scene_id": scene_id,

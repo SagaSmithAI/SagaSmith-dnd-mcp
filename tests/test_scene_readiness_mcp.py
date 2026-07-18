@@ -1,4 +1,5 @@
 import asyncio
+from copy import deepcopy
 from pathlib import Path
 
 import pytest
@@ -72,6 +73,18 @@ def test_scene_readiness_blocks_missing_combatants_and_reserves(tmp_path: Path) 
                     "campaign_id": campaign["id"],
                     "name": key,
                     "character_type": character_type,
+                    "notes": (
+                        {
+                            "profile": {
+                                "dm_notes": (
+                                    "Statblock import: test. Manual rulings: "
+                                    "Parry requires a reaction decision."
+                                )
+                            }
+                        }
+                        if key == "captain"
+                        else None
+                    ),
                     "idempotency_key": f"actor-{key}",
                 },
             )
@@ -126,6 +139,55 @@ def test_scene_readiness_blocks_missing_combatants_and_reserves(tmp_path: Path) 
             "missing_count"
         ] == 1
 
+        original_bandit_sheet = deepcopy(actors["bandit2"]["sheet"])
+        dead_bandit_sheet = deepcopy(original_bandit_sheet)
+        dead_bandit_sheet["combat"]["hp"]["value"] = 0
+        dead_bandit_sheet["conditions"] = ["dead"]
+        dead_bandit = await _call(
+            server,
+            "character_sheet_replace",
+            {
+                "character_id": actors["bandit2"]["id"],
+                "sheet": dead_bandit_sheet,
+                "expected_revision": actors["bandit2"]["revision"],
+                "idempotency_key": "dead-bandit-card",
+            },
+        )
+        unusable = await _call(
+            server,
+            "module_query",
+            {
+                "campaign_id": campaign["id"],
+                "view": "readiness",
+                "payload": {
+                    "scene_id": scene["scene_id"],
+                    "participant_manifest": manifest(
+                        [actors["bandit1"]["id"], actors["bandit2"]["id"]]
+                    ),
+                },
+            },
+        )
+        unusable_bandits = next(
+            item for item in unusable["groups"] if item["key"] == "rusk-bandits"
+        )
+        assert unusable["ready"] is False
+        assert unusable_bandits["missing_count"] == 0
+        assert unusable_bandits["unready_actor_ids"] == [actors["bandit2"]["id"]]
+        assert unusable_bandits["actors"][1]["combat_card"]["blocking_reasons"] == [
+            "dead",
+            "zero_hit_points",
+        ]
+        actors["bandit2"] = await _call(
+            server,
+            "character_sheet_replace",
+            {
+                "character_id": actors["bandit2"]["id"],
+                "sheet": original_bandit_sheet,
+                "expected_revision": dead_bandit["revision"],
+                "idempotency_key": "restore-bandit-card",
+            },
+        )
+
         complete_manifest = manifest([actors["bandit1"]["id"], actors["bandit2"]["id"]])
         ready = await _call(
             server,
@@ -140,6 +202,11 @@ def test_scene_readiness_blocks_missing_combatants_and_reserves(tmp_path: Path) 
             },
         )
         assert ready["ready"] is True
+        captain_group = next(item for item in ready["groups"] if item["key"] == "captain-rusk")
+        assert captain_group["actors"][0]["combat_card"]["settlement"] == "mixed"
+        assert captain_group["actors"][0]["combat_card"]["manual_rulings"] == [
+            "Parry requires a reaction decision"
+        ]
         assert ready["initial_actor_ids"] == [
             actors["captain"]["id"],
             actors["bandit1"]["id"],
