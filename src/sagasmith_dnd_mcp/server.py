@@ -9768,6 +9768,20 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 None,
             )
             if artifact is None:
+                embedded = next(
+                    (
+                        feature
+                        for item in pack.artifacts
+                        for feature in dict(dict(item.get("card") or {}).get("grants") or {}).get(
+                            "features", []
+                        )
+                        if str(feature.get("id") or "") == artifact_id
+                    ),
+                    None,
+                )
+                if embedded is not None:
+                    artifact = {"id": artifact_id, "kind": "feature", "card": embedded}
+            if artifact is None:
                 raise RulesetUnavailableError(
                     f"recorded artifact is unavailable: {artifact_id} in {pack_id}@{version}"
                 )

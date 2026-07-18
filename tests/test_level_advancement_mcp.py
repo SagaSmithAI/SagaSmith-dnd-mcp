@@ -63,6 +63,18 @@ def _cleric_sheet() -> dict:
             "selection": {},
         }
     ]
+    sheet["content"]["features"] = [
+        {
+            "id": "dnd5e.content.srd2014.species-feature.hill-dwarf-dwarven-toughness",
+            "name": "Dwarven Toughness",
+            "source_key": "Hill Dwarf",
+            "description": "Maximum hit points increase again whenever the actor gains a level.",
+            "pack_id": "dnd5e.content.srd2014",
+            "pack_version": "1.5.0",
+            "rule_refs": ["bundled:srd2014/01_Races/Races_Each/Dwarf.md"],
+            "mechanic_refs": [],
+        }
+    ]
     return sheet
 
 
