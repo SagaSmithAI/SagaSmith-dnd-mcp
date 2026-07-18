@@ -97,11 +97,16 @@ class McpConfig:
     def rulebooks_dir(self) -> Path:
         return self.artifacts_dir / "rulebooks"
 
+    @property
+    def module_assets_dir(self) -> Path:
+        return self.artifacts_dir / "module-assets"
+
     def prepare(self) -> None:
         for directory in (
             self.database_path.parent,
             self.chroma_path,
             self.modules_dir,
+            self.module_assets_dir,
             self.rulebooks_dir,
         ):
             directory.mkdir(parents=True, exist_ok=True)

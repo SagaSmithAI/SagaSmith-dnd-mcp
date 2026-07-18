@@ -170,6 +170,38 @@ class SagaSmithStorage:
             raise LookupError(name)
         return target
 
+    def store_rendered_module_page(
+        self,
+        *,
+        module_id: str,
+        source_checksum: str,
+        page_number: int,
+        scale: float,
+        checksum: str,
+        content: bytes,
+    ) -> Path:
+        """Persist a content-addressed rendered page beneath MCP-owned storage."""
+        if not re.fullmatch(r"[0-9a-fA-F-]{36}", module_id):
+            raise ValueError("invalid module id for rendered asset")
+        directory = (self.config.module_assets_dir / module_id).resolve()
+        if directory.parent != self.config.module_assets_dir.resolve():
+            raise ValueError("invalid rendered module asset directory")
+        directory.mkdir(parents=True, exist_ok=True)
+        scale_key = f"{scale:.2f}".replace(".", "-")
+        filename = (
+            f"{source_checksum[:12]}-page-{page_number:04d}-"
+            f"x{scale_key}-{checksum[:12]}.png"
+        )
+        target = (directory / filename).resolve()
+        if target.parent != directory:
+            raise ValueError("invalid rendered module asset path")
+        if target.exists():
+            if hashlib.sha256(target.read_bytes()).hexdigest() != checksum:
+                raise RuntimeError("managed rendered page checksum mismatch")
+        else:
+            target.write_bytes(content)
+        return target
+
     @staticmethod
     def _dense_enabled() -> bool:
         import os

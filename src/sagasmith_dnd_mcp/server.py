@@ -9,7 +9,7 @@ from typing import Any, Literal
 from uuid import uuid4
 from weakref import WeakValueDictionary
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import FastMCP, Image
 from sagasmith_core import (
     AccessService,
     ActorKnowledgeService,
@@ -31,6 +31,7 @@ from sagasmith_core import (
     SnapshotService,
     StateMutationService,
     default_local_principal,
+    render_pdf_page,
 )
 from sagasmith_core.idempotency import request_hash
 from sagasmith_core.modules import MarkdownModuleParser
@@ -1521,6 +1522,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "module_visibility_filter": True,
                 "module_revision_safe_snapshots": True,
                 "scene_spatial_evidence": True,
+                "module_page_visual_evidence": True,
+                "snapshot_managed_spatial_review": True,
                 "temporary_combat_maps": True,
                 "structured_combat_engine": True,
                 "combat_preflight_commit": True,
@@ -1589,6 +1592,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "module_import(validate)",
                     "module_import(ingest)",
                     "module_import(activate)",
+                    "module_query(assets)",
+                    "module_page_render",
+                    "module_set_progress(spatial_review)",
                 ],
                 "stage_inputs": ["source_path", "name+content"],
                 "managed_types": ["pdf", "markdown", "text"],
@@ -8826,15 +8832,85 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "content": "[DM-only module content hidden]",
         }
 
+    def module_assets(
+        campaign_id: str,
+        module_id: str,
+        principal_id: str = "system:local",
+    ) -> list[dict[str, Any]]:
+        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        return modules.list_assets(campaign_id, module_id)
+
+    @mcp.tool()
+    def module_page_render(
+        campaign_id: str,
+        module_id: str,
+        page_number: int,
+        source_asset_id: str | None = None,
+        scale: float = 1.5,
+        principal_id: str = "system:local",
+    ) -> Any:
+        """Render one imported PDF page as visual evidence for maps or handouts."""
+        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        assets = modules.list_assets(campaign_id, module_id)
+        if source_asset_id:
+            source_asset = modules.get_asset(campaign_id, source_asset_id)
+            if source_asset["module_id"] != module_id:
+                raise ValueError("source asset does not belong to module")
+        else:
+            candidates = [item for item in assets if item["media_type"] == "application/pdf"]
+            if len(candidates) != 1:
+                raise ValueError("source_asset_id is required unless the module has one PDF asset")
+            source_asset = candidates[0]
+        if source_asset["media_type"] != "application/pdf":
+            raise ValueError("module page rendering requires a PDF source asset")
+        rendered = render_pdf_page(source_asset["source_path"], page_number, scale=scale)
+        if rendered.source_checksum != source_asset["checksum"]:
+            raise RuntimeError("module PDF no longer matches its imported checksum")
+        target = storage.store_rendered_module_page(
+            module_id=module_id,
+            source_checksum=rendered.source_checksum,
+            page_number=rendered.page_number,
+            scale=rendered.scale,
+            checksum=rendered.checksum,
+            content=rendered.content,
+        )
+        asset = modules.register_asset(
+            campaign_id=campaign_id,
+            module_id=module_id,
+            source_path=str(target),
+            media_type=rendered.media_type,
+            checksum=rendered.checksum,
+            metadata={
+                "kind": "rendered_page",
+                "derived_from_asset_id": source_asset["id"],
+                "source_checksum": rendered.source_checksum,
+                "source_page": rendered.page_number,
+                "page_count": rendered.page_count,
+                "width": rendered.width,
+                "height": rendered.height,
+                "scale": rendered.scale,
+            },
+        )
+        return [
+            {
+                "campaign_id": campaign_id,
+                "module_id": module_id,
+                "asset": asset,
+                "source_asset_id": source_asset["id"],
+            },
+            Image(path=target),
+        ]
+
     @mcp.tool()
     def module_read_scene(
         campaign_id: str,
         scene_id: str,
+        scope_id: str = "party",
         principal_id: str = "system:local",
     ) -> dict[str, Any]:
         """Read one full scene, including its structured rooms and visibility metadata."""
         membership = access.require_campaign(campaign_id, principal_id)
-        result = modules.read_scene(campaign_id, scene_id)
+        result = modules.read_scene(campaign_id, scene_id, scope_id=scope_id)
         visibility = result.get("visibility", "keeper")
         if membership.role in {"owner", "dm"} or visibility in {"public", "party"}:
             return result
@@ -9067,8 +9143,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         principal_id: str = "system:local",
         expected_state_version: int | None = None,
         idempotency_key: str | None = None,
+        spatial_review: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Persist scoped scene progress without changing another scope's current scene."""
+        """Persist scoped progress or a source-backed visual atlas review."""
         access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
         if expected_state_version is None or not idempotency_key:
             raise ValueError(
@@ -9085,6 +9162,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "current_location_key": current_location_key,
             "expected_state_version": expected_state_version,
             "branch_id": branch_id,
+            "spatial_review": spatial_review,
         }
         scope = f"module-progress:{campaign_id}:{branch_id}:{principal_id}:{scope_id}"
         replay = replay_idempotent(scope, idempotency_key, request_payload)
@@ -9100,6 +9178,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             current_room=current_room,
             current_location_key=current_location_key,
             expected_state_version=expected_state_version,
+            spatial_review=(
+                {
+                    **dict(spatial_review),
+                    "reviewer": principal_id,
+                    "branch_id": branch_id,
+                }
+                if spatial_review is not None
+                else None
+            ),
         )
         return remember_idempotent(
             scope,
@@ -10898,7 +10985,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     @mcp.tool()
     def module_query(
         campaign_id: str,
-        view: Literal["list", "index", "scene", "current", "progress", "readiness"] = "list",
+        view: Literal[
+            "list",
+            "index",
+            "scene",
+            "current",
+            "progress",
+            "readiness",
+            "assets",
+        ] = "list",
         payload: dict[str, Any] | None = None,
         principal_id: str = "system:local",
     ) -> dict[str, Any]:
@@ -10909,7 +11004,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         elif view == "index":
             result = module_index(campaign_id, data.get("module_id"), principal_id)
         elif view == "scene":
-            result = module_read_scene(campaign_id, required(data, "scene_id"), principal_id)
+            result = module_read_scene(
+                campaign_id,
+                required(data, "scene_id"),
+                data.get("scope_id", "party"),
+                principal_id,
+            )
         elif view == "current":
             result = module_current(campaign_id, data.get("scope_id", "party"), principal_id)
         elif view == "readiness":
@@ -10919,6 +11019,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 required(data, "participant_manifest"),
                 principal_id,
             )
+        elif view == "assets":
+            result = module_assets(campaign_id, required(data, "module_id"), principal_id)
         else:
             result = module_progress_index(
                 campaign_id,
