@@ -110,6 +110,7 @@ from sagasmith_dnd.lifecycle import (
     stand_outside_combat,
 )
 from sagasmith_dnd.module_profile import DndModuleProfile
+from sagasmith_dnd.progression import advance_single_class_level
 from sagasmith_dnd.rule_engine import (
     RuleCompilationError,
     apply_rule_event,
@@ -6985,6 +6986,115 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             rule_receipts=receipts,
         )
 
+    def character_level_advance(
+        character_id: str,
+        class_name: str,
+        hp_method: str,
+        reason: str,
+        source_ref: str,
+        hp_roll: int | None = None,
+        principal_id: str = "system:local",
+        expected_revision: int | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Advance one existing 2014 class level during the lobby phase."""
+        current = characters.get(character_id)
+        require_character_control(current, principal_id)
+        require_outside_active_combat(current, "level advancement")
+        if current.campaign_id is None:
+            raise ValueError("level advancement requires a campaign-bound character")
+        if not is_dm(current.campaign_id, principal_id):
+            raise PermissionError("level advancement requires the campaign DM")
+        campaign = campaigns.get(current.campaign_id)
+        state = dict(campaign.state or {})
+        if state.get("game_phase", PROFILE_LOBBY) != PROFILE_LOBBY:
+            raise CombatEngineError("switch to lobby before advancing a character level")
+        if expected_revision is None or not idempotency_key:
+            raise ValueError(
+                "expected_revision and idempotency_key are required for level advancement"
+            )
+        normalized_reason = str(reason).strip()
+        normalized_source_ref = str(source_ref).strip()
+        if not normalized_reason or not normalized_source_ref:
+            raise ValueError("reason and source_ref are required for audited level advancement")
+        audit_source = f"{normalized_source_ref}: {normalized_reason}"
+        if len(audit_source) > 300:
+            raise ValueError("combined source_ref and reason must not exceed 300 characters")
+        branch_id = require_current_branch(current.campaign_id, None)
+        old_level = int(current.sheet.get("progression", {}).get("level", 0) or 0)
+        context = level_advancement_content_context(
+            current.campaign_id,
+            current.sheet,
+            class_name=class_name,
+            new_level=old_level + 1,
+            branch_id=branch_id,
+        )
+        applied = advance_single_class_level(
+            current.sheet,
+            class_name=class_name,
+            hp_method=hp_method,
+            hp_roll=hp_roll,
+            hp_per_level_bonus=int(context["hp_per_level_bonus"]),
+            source=audit_source,
+        )
+        rules = effective_rule_context(
+            current.campaign_id,
+            facts={
+                "actor_id": character_id,
+                "class_name": class_name,
+                "old_level": applied["old_level"],
+                "new_level": applied["new_level"],
+                "source_ref": normalized_source_ref,
+            },
+        )
+        receipts = core_receipts(
+            rules,
+            [
+                "dnd5e.core.progression.hp_hit_dice",
+                "dnd5e.core.progression.spellcasting",
+            ],
+            "character.level.advance",
+        )
+        follow_up = {
+            "feature_artifacts": context["feature_options"],
+            "subclass_options": context["subclass_options"],
+            "spell_choices": applied["spell_choices"],
+            "prepared_spell_event": (
+                "level_up"
+                if applied["spellcasting"].get("mode") in {"prepared", "spellbook"}
+                else None
+            ),
+            "complete": not (
+                context["feature_options"]
+                or context["subclass_options"]
+                or any(int(value) for value in applied["spell_choices"].values())
+            ),
+        }
+        result = {key: value for key, value in applied.items() if key != "sheet"}
+        result["hp_bonus_sources"] = context["hp_bonus_sources"]
+        result["follow_up"] = follow_up
+        return update_sheet(
+            character_id,
+            applied["sheet"],
+            operation="character.level.advance",
+            principal_id=principal_id,
+            expected_revision=expected_revision,
+            idempotency_key=idempotency_key,
+            payload={
+                "class_name": class_name,
+                "hp_method": hp_method,
+                "hp_roll": hp_roll,
+                "reason": normalized_reason,
+                "source_ref": normalized_source_ref,
+            },
+            response_extra={
+                "status": "committed",
+                "advancement": result,
+                "rule_receipts": receipts,
+            },
+            rule_receipts=receipts,
+        )
+
     @mcp.tool()
     def character_cast_spell(
         character_id: str,
@@ -9628,6 +9738,127 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             values.extend((pack.pack_id, pack.version, dict(item)) for item in pack.artifacts)
         return [item for item in values if kind is None or item[2].get("kind") == kind]
 
+    def level_advancement_content_context(
+        campaign_id: str,
+        sheet: dict[str, Any],
+        *,
+        class_name: str,
+        new_level: int,
+        branch_id: str,
+    ) -> dict[str, Any]:
+        """Resolve source-bound per-level modifiers and post-level catalog work."""
+        candidates = available_content_artifacts(campaign_id, branch_id=branch_id)
+        by_id = {str(item[2].get("id") or ""): item for item in candidates}
+        hp_per_level_bonus = 0
+        hp_bonus_sources: list[dict[str, Any]] = []
+        for selection in sheet.get("content", {}).get("selections", []):
+            artifact_id = str(selection.get("artifact_id") or "")
+            candidate = by_id.get(artifact_id)
+            if candidate is None:
+                continue
+            pack_id, version, artifact = candidate
+            card = dict(artifact.get("card") or {})
+            grants = dict(card.get("grants") or {})
+            amount = int(grants.get("hp_per_level", 0) or 0)
+            if amount:
+                hp_per_level_bonus += amount
+                hp_bonus_sources.append(
+                    {
+                        "artifact_id": artifact_id,
+                        "pack_id": pack_id,
+                        "pack_version": version,
+                        "amount": amount,
+                        "scope": "character_level",
+                    }
+                )
+        present_features = {
+            str(item.get("id") or "")
+            for item in sheet.get("content", {}).get("features", [])
+        }
+        for artifact_id in present_features:
+            candidate = by_id.get(artifact_id)
+            if candidate is None:
+                continue
+            pack_id, version, artifact = candidate
+            card = dict(artifact.get("card") or {})
+            grants = dict(card.get("mechanical_grants") or {})
+            amount = int(grants.get("hp_per_level", 0) or 0)
+            if (
+                str(card.get("class_name") or "").casefold() == class_name.casefold()
+            ):
+                amount += int(grants.get("hp_per_class_level", 0) or 0)
+            if amount:
+                hp_per_level_bonus += amount
+                hp_bonus_sources.append(
+                    {
+                        "artifact_id": artifact_id,
+                        "pack_id": pack_id,
+                        "pack_version": version,
+                        "amount": amount,
+                        "scope": "class_level",
+                    }
+                )
+
+        target_class = next(
+            item
+            for item in sheet["progression"]["classes"]
+            if str(item.get("name") or "").casefold() == class_name.casefold()
+        )
+        subclass_name = str(target_class.get("subclass") or "")
+        feature_options: list[dict[str, Any]] = []
+        subclass_options: list[dict[str, Any]] = []
+        for pack_id, version, artifact in candidates:
+            if str(artifact.get("application_state") or "selection_ready") != "selection_ready":
+                continue
+            artifact_id = str(artifact.get("id") or "")
+            card = dict(artifact.get("card") or {})
+            kind = str(artifact.get("kind") or "")
+            declared_class = str(card.get("class_name") or "")
+            minimum_level = int(card.get("minimum_level", 1) or 1)
+            if declared_class.casefold() != class_name.casefold() or minimum_level > new_level:
+                continue
+            if kind == "feature" and artifact_id not in present_features:
+                declared_subclass = str(card.get("subclass_name") or "")
+                if declared_subclass and declared_subclass.casefold() != subclass_name.casefold():
+                    continue
+                feature_options.append(
+                    {
+                        "artifact_id": artifact_id,
+                        "name": str(card.get("name") or artifact_id),
+                        "minimum_level": minimum_level,
+                        "class_name": declared_class,
+                        "subclass_name": declared_subclass,
+                        "selection_requirements": deepcopy(
+                            dict(card.get("selection_requirements") or {})
+                        ),
+                        "pack_id": pack_id,
+                        "pack_version": version,
+                        "rule_refs": list(artifact.get("rule_refs") or []),
+                    }
+                )
+            if kind == "subclass" and not subclass_name:
+                subclass_options.append(
+                    {
+                        "artifact_id": artifact_id,
+                        "name": str(card.get("name") or artifact_id),
+                        "minimum_level": minimum_level,
+                        "pack_id": pack_id,
+                        "pack_version": version,
+                        "rule_refs": list(artifact.get("rule_refs") or []),
+                    }
+                )
+        return {
+            "hp_per_level_bonus": hp_per_level_bonus,
+            "hp_bonus_sources": hp_bonus_sources,
+            "feature_options": sorted(
+                feature_options,
+                key=lambda item: (item["minimum_level"], item["name"], item["artifact_id"]),
+            ),
+            "subclass_options": sorted(
+                subclass_options, key=lambda item: (item["name"], item["artifact_id"])
+            ),
+        }
+
     @mcp.tool()
     def content_catalog_list(
         campaign_id: str,
@@ -10227,6 +10458,24 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         [*armor, *list(mechanical_grants.get("armor_proficiencies") or [])]
                     )
                 )
+                for resource_key, resource in dict(
+                    mechanical_grants.get("resources") or {}
+                ).items():
+                    normalized_key = str(resource_key).strip()
+                    if not normalized_key:
+                        raise ValueError("feature resource grant has an empty key")
+                    existing = sheet["resources"].get(normalized_key)
+                    if existing is not None and existing != resource:
+                        raise ValueError(
+                            f"feature resource grant conflicts with existing resource: "
+                            f"{normalized_key}"
+                        )
+                    sheet["resources"][normalized_key] = deepcopy(dict(resource))
+                resource_key = str(card.get("resource_key") or "")
+                if resource_key and resource_key not in sheet["resources"]:
+                    raise ValueError(
+                        f"feature requires an unapplied shared resource: {resource_key}"
+                    )
                 for metadata_key in (
                     "class_name",
                     "subclass_name",
@@ -11147,6 +11396,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "effect_remove",
             "resource_set",
             "rest",
+            "level_advance",
             "stable_recovery",
             "stand",
             "memory_add",
@@ -11192,6 +11442,18 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 data.get("hit_dice_spends"),
                 data.get("hit_dice_recovery"),
                 data.get("food_and_drink", False),
+                principal_id,
+                expected_revision,
+                idempotency_key,
+            )
+        elif action == "level_advance":
+            result = character_level_advance(
+                character_id,
+                required(data, "class_name"),
+                required(data, "hp_method"),
+                required(data, "reason"),
+                required(data, "source_ref"),
+                data.get("hp_roll"),
                 principal_id,
                 expected_revision,
                 idempotency_key,
