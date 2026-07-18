@@ -5269,6 +5269,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         applied = apply_damage_parts_to_sheet(
             target["sheet"], parts, source=principal_id, critical=critical
         )
+        applied_result = {key: value for key, value in applied.items() if key != "sheet"}
         damage_receipts = core_receipts(
             effective_rule_context(campaign_id),
             ["dnd5e.core.damage.zero_hp"] if int(applied["after_hp"]) == 0 else [],
@@ -5287,7 +5288,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             )
             encounter["log"] = [
                 *list(encounter.get("log") or []),
-                {"type": "damage", "target_id": target_id, "result": applied},
+                {"type": "damage", "target_id": target_id, "result": applied_result},
             ][-100:]
             next_state["combat"] = encounter
         current = characters.get(target_id)
@@ -5311,7 +5312,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         response = {
             "status": "committed",
-            "result": {key: value for key, value in applied.items() if key != "sheet"},
+            "result": applied_result,
             "combat": next_state.get("combat"),
             "campaign_revision": mutation_revision(campaign_id),
             "revisions": [asdict(item) for item in revisions_result or []],

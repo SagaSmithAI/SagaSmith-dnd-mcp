@@ -569,6 +569,10 @@ def test_readied_spell_lifecycle_is_atomic_and_rule_complete(tmp_path: Path) -> 
                 "idempotency_key": "ready-concentration-damage",
             },
         )
+        damage_log = damaged["combat"]["log"][-1]
+        assert damage_log["type"] == "damage"
+        assert damage_log["result"] == damaged["result"]
+        assert "sheet" not in damage_log["result"]
         concentration = next(
             item for item in damaged["combat"]["pending"] if item["kind"] == "concentration"
         )
