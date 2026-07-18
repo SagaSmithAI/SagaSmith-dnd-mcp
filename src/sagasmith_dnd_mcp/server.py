@@ -11669,9 +11669,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         context = mcp.get_context()
         async with mcp._exposure_lock(exposure.id):
             exposures.require_tool(exposure, tool_id)
-            result = await mcp._tool_manager.call_tool(
+            called = await mcp._tool_manager.call_tool(
                 tool_id, bound_arguments, context=context, convert_result=True
             )
+            if isinstance(called, tuple) and len(called) == 2:
+                content, structured = called
+                result = structured if structured is not None else content
+            else:
+                result = called
             exposure_changed = exposures.consume_tool(exposure, tool_id)
         target_campaign_id = str(bound_arguments.get("campaign_id") or "") or None
         if target_campaign_id and tool_id in {"game_phase", "combat_start", "combat_end"}:

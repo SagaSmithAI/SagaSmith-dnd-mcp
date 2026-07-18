@@ -169,6 +169,9 @@ def test_stdio_session_uses_native_refresh_and_exposure_call_fallback(tmp_path) 
                     },
                 )
                 assert not created.isError
+                created_payload = json.loads(created.content[0].text)
+                assert isinstance(created_payload["result"], dict)
+                assert created_payload["result"]["name"] == "Exposure test"
                 campaigns = await session.call_tool(
                     "campaign_query", {"principal_id": principal_id}
                 )
@@ -193,6 +196,9 @@ def test_stdio_session_uses_native_refresh_and_exposure_call_fallback(tmp_path) 
                     },
                 )
                 assert not fallback.isError
+                fallback_payload = json.loads(fallback.content[0].text)
+                assert isinstance(fallback_payload["result"], dict)
+                assert fallback_payload["result"]["auto_seed"] is False
 
                 cross_campaign = await session.call_tool(
                     "campaign_query",
