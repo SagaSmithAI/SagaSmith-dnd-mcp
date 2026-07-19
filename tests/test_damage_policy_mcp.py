@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
+import pytest
+
 from sagasmith_dnd_mcp.config import McpConfig
 from sagasmith_dnd_mcp.server import create_server
 
@@ -55,6 +57,16 @@ def test_generic_damage_uses_encounter_death_save_policy_and_skips_dead_turn(
                 "idempotency_key": "target",
             },
         )
+        outsider = await call(
+            server,
+            "character_create",
+            {
+                "name": "Outside encounter",
+                "campaign_id": campaign["id"],
+                "character_type": "pc",
+                "idempotency_key": "outsider",
+            },
+        )
         target_sheet = target["sheet"]
         target_sheet["combat"]["hp"] = {"value": 5, "max": 5, "temp": 0}
         target = await call(
@@ -82,6 +94,45 @@ def test_generic_damage_uses_encounter_death_save_policy_and_skips_dead_turn(
                 "idempotency_key": "start",
             },
         )
+        with pytest.raises(Exception, match="healing target is not a combatant"):
+            await call_raw(
+                server,
+                "combat_heal",
+                {
+                    "campaign_id": campaign["id"],
+                    "target_id": outsider["id"],
+                    "amount": 1,
+                    "expected_revision": started["campaign_revision"],
+                    "idempotency_key": "heal-outsider",
+                },
+            )
+        with pytest.raises(Exception, match="healing source is not a combatant"):
+            await call_raw(
+                server,
+                "combat_heal",
+                {
+                    "campaign_id": campaign["id"],
+                    "target_id": acting["id"],
+                    "source_actor_id": outsider["id"],
+                    "amount": 1,
+                    "expected_revision": started["campaign_revision"],
+                    "idempotency_key": "heal-from-outsider",
+                },
+            )
+        with pytest.raises(Exception, match="check actor is not a combatant"):
+            await call_raw(
+                server,
+                "combat_check",
+                {
+                    "campaign_id": campaign["id"],
+                    "actor_id": outsider["id"],
+                    "kind": "save",
+                    "ability": "dexterity",
+                    "dc": 10,
+                    "expected_revision": started["campaign_revision"],
+                    "idempotency_key": "save-outsider",
+                },
+            )
         damaged = await call_raw(
             server,
             "combat_apply_damage",

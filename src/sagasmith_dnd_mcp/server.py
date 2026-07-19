@@ -883,6 +883,22 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             raise CombatEngineError("combat is not active")
         return campaign, encounter
 
+    def require_encounter_combatant(
+        encounter: dict[str, Any], actor_id: str, *, role: str = "actor"
+    ) -> dict[str, Any]:
+        """Return one encounter participant or reject cross-boundary settlement."""
+        combatant = next(
+            (
+                item
+                for item in encounter.get("combatants", [])
+                if str(item.get("actor_id") or "") == actor_id
+            ),
+            None,
+        )
+        if combatant is None:
+            raise CombatEngineError(f"{role} is not a combatant in the active encounter")
+        return combatant
+
     def mutation_revision(campaign_id: str) -> int:
         """Read the committed campaign revision after mixed entity writes."""
         return int(campaigns.get(campaign_id).revision)
@@ -5357,6 +5373,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             )
         death_save_combatant: dict[str, Any] | None = None
         stabilize_target: dict[str, Any] | None = None
+        active_state = dict(campaign.state or {}).get("combat")
+        if isinstance(active_state, dict) and active_state.get("active", False):
+            require_encounter_combatant(active_state, actor_id, role="check actor")
         if kind == "death_save":
             _campaign, active = active_encounter(campaign_id)
             require_no_blocking_pending(active)
@@ -5773,16 +5792,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if isinstance(existing_encounter, dict) and existing_encounter.get("active", False):
             require_no_blocking_pending(existing_encounter)
             ruleset = str(existing_encounter.get("ruleset") or ruleset)
-            target_combatant = next(
-                (
-                    item
-                    for item in existing_encounter.get("combatants", [])
-                    if str(item.get("actor_id") or "") == target_id
-                ),
-                None,
+            target_combatant = require_encounter_combatant(
+                existing_encounter, target_id, role="damage target"
             )
-            if target_combatant is None:
-                raise CombatEngineError("damage target is not a combatant")
             target_uses_death_saves = bool(target_combatant.get("death_saves", False))
         applied = apply_damage_parts_to_sheet(
             target["sheet"],
@@ -5889,6 +5901,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         active = dict(campaign.state or {}).get("combat")
         if isinstance(active, dict) and active.get("active", False):
             require_no_blocking_pending(active)
+            require_encounter_combatant(active, target_id, role="healing target")
+            if source_actor_id is not None:
+                require_encounter_combatant(active, source_actor_id, role="healing source")
         source = combat_actor_snapshot(source_actor_id) if source_actor_id else None
         applied = apply_healing_to_sheet(
             target["sheet"],
