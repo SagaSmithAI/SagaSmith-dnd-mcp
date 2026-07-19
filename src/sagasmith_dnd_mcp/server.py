@@ -743,7 +743,22 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             if "Manual rulings:" not in line:
                 continue
             value = line.split("Manual rulings:", 1)[1].strip().rstrip(".")
+            value = value.partition(" Variant source:")[0].rstrip(". ")
             manual_rulings.extend(item.strip() for item in value.split(";") if item.strip())
+        manual_rulings = list(dict.fromkeys(manual_rulings))
+        specific_multiattacks = {
+            item.split(":", 1)[0]
+            for item in manual_rulings
+            if item.endswith("Multiattack composition requires a DM ruling")
+        }
+        manual_rulings = [
+            item
+            for item in manual_rulings
+            if not (
+                item.endswith("descriptive action is not automatically settled")
+                and item.split(":", 1)[0] in specific_multiattacks
+            )
+        ]
         settlement = (
             "dm_ruling_required" if unresolved else "mixed" if manual_rulings else "automatic"
         )
@@ -12088,14 +12103,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 f"(module_id={review['module_id']}; scene_id={review['scene_id']}; "
                 f"page={evidence.get('page')}; asset_checksum={evidence.get('asset_checksum')})."
             )
-            if parsed.warnings:
-                provenance += " Manual rulings: " + "; ".join(parsed.warnings) + "."
             if variant is not None:
                 changed_fields = ", ".join(sorted(set(variant) - {"source_ref"})) or "none"
                 provenance += (
-                    f" Variant source: {variant['source_ref']}; applied fields: "
+                    f"\nVariant source: {variant['source_ref']}; applied fields: "
                     f"{changed_fields}."
                 )
+            if parsed.warnings:
+                provenance += "\nManual rulings: " + "; ".join(parsed.warnings) + "."
             existing_dm_notes = str(profile.get("dm_notes") or "").strip()
             profile["dm_notes"] = "\n".join(
                 item for item in (existing_dm_notes, provenance) if item
@@ -12203,14 +12218,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 f"Statblock import: rule-source:{source['source_key']} "
                 f"(source_id={source_id}; chunks={','.join(selected_chunk_ids)})."
             )
-            if parsed.warnings:
-                provenance += " Manual rulings: " + "; ".join(parsed.warnings) + "."
             if variant is not None:
                 changed_fields = ", ".join(sorted(set(variant) - {"source_ref"})) or "none"
                 provenance += (
-                    f" Variant source: {variant['source_ref']}; applied fields: "
+                    f"\nVariant source: {variant['source_ref']}; applied fields: "
                     f"{changed_fields}."
                 )
+            if parsed.warnings:
+                provenance += "\nManual rulings: " + "; ".join(parsed.warnings) + "."
             existing_dm_notes = str(profile.get("dm_notes") or "").strip()
             profile["dm_notes"] = "\n".join(
                 item for item in (existing_dm_notes, provenance) if item

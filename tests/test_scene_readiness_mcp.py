@@ -78,7 +78,11 @@ def test_scene_readiness_blocks_missing_combatants_and_reserves(tmp_path: Path) 
                             "profile": {
                                 "dm_notes": (
                                     "Statblock import: test. Manual rulings: "
-                                    "Parry requires a reaction decision."
+                                    "Parry requires a reaction decision; "
+                                    "Multiattack: Multiattack composition requires a DM ruling; "
+                                    "Multiattack: descriptive action is not automatically settled. "
+                                    "Variant source: module-chunk:test; "
+                                    "applied fields: current_hit_points."
                                 )
                             }
                         }
@@ -205,7 +209,8 @@ def test_scene_readiness_blocks_missing_combatants_and_reserves(tmp_path: Path) 
         captain_group = next(item for item in ready["groups"] if item["key"] == "captain-rusk")
         assert captain_group["actors"][0]["combat_card"]["settlement"] == "mixed"
         assert captain_group["actors"][0]["combat_card"]["manual_rulings"] == [
-            "Parry requires a reaction decision"
+            "Parry requires a reaction decision",
+            "Multiattack: Multiattack composition requires a DM ruling",
         ]
         assert ready["initial_actor_ids"] == [
             actors["captain"]["id"],
