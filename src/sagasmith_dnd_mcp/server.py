@@ -2606,6 +2606,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     facts={"actor_id": actor_id, "target_id": target_id, "kind": "attack"},
                 ),
             )
+            pay_attack_action(
+                encounter,
+                combat_actor_snapshot(actor_id),
+                weapon_id=str(plan.get("weapon_id") or ""),
+                attack_mode=str(plan.get("attack_mode") or "melee"),
+                multiattack_option_id=action.get("multiattack_option_id"),
+            )
         except NeedsRulingError:
             if access.require_campaign(campaign_id, principal_id).role not in {"owner", "dm"}:
                 raise CombatEngineError("attack requires a DM ruling") from None
@@ -2686,6 +2693,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             weapon_id=str(plan.get("weapon_id") or ""),
             attack_mode=str(plan.get("attack_mode") or "melee"),
             multiattack_option_id=action_payload.get("multiattack_option_id"),
+        )
+        attack_payment_receipts = core_receipts(
+            rule_context,
+            ["dnd5e.core.action.multiattack_choice"],
+            "combat.attack.payment",
         )
         attack_roll = roll_attack_action(plan=plan)
         defenses = post_hit_attack_defenses(
@@ -2783,7 +2795,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     rule_context,
                     ["dnd5e.core.reaction.post_hit_defense"],
                     "attack.hit.before_damage",
-                ),
+                )
+                + attack_payment_receipts,
             )
             response = {
                 "status": "pending_reaction",
@@ -2814,6 +2827,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if ammunition is not None:
             result["ammunition"] = ammunition
         result["attack_payment"] = attack_payment
+        result["rule_receipts"] = [
+            *list(result.get("rule_receipts") or []),
+            *attack_payment_receipts,
+        ]
         current = next(
             item for item in next_encounter["combatants"] if item.get("actor_id") == actor_id
         )
