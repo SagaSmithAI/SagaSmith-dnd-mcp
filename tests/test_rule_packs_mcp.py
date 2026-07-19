@@ -135,7 +135,9 @@ def test_core_srd_content_catalog_is_structured_and_selectable(tmp_path: Path) -
         assert selected["sheet"]["progression"]["classes"][1]["subclass"] == (
             "Path of the Berserker"
         )
-        assert selected["sheet"]["content"]["selections"][0]["pack_version"] == "1.4.0"
+        assert selected["sheet"]["content"]["selections"][0]["pack_version"] == berserker[
+            "pack_version"
+        ]
 
         life_domain = next(
             item
