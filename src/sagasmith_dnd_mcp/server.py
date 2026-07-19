@@ -733,11 +733,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             value = line.split("Manual rulings:", 1)[1].strip().rstrip(".")
             manual_rulings.extend(item.strip() for item in value.split(";") if item.strip())
         settlement = (
-            "dm_ruling_required"
-            if unresolved
-            else "mixed"
-            if manual_rulings
-            else "automatic"
+            "dm_ruling_required" if unresolved else "mixed" if manual_rulings else "automatic"
         )
         return {
             "ready": not blockers,
@@ -746,9 +742,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "unresolved_rules": unresolved,
             "manual_rulings": manual_rulings,
             "hit_points": hit_points,
-            "maximum_hit_points": int(
-                dict(derived.get("hit_points") or {}).get("max", 0) or 0
-            ),
+            "maximum_hit_points": int(dict(derived.get("hit_points") or {}).get("max", 0) or 0),
             "armor_class": int(derived.get("armor_class", 10) or 10),
             "weapon_attack_ids": [str(item.get("item_id") or "") for item in attacks],
             "multiattack_option_ids": [str(item.get("id") or "") for item in multiattacks],
@@ -1212,6 +1206,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         caster = combatants.get(caster_id)
         if caster is None:
             raise CombatEngineError("Magic Missile caster is not in this encounter")
+
         def coordinates(position: Any) -> tuple[float, float] | None:
             if isinstance(position, dict) and "x" in position and "y" in position:
                 return float(position["x"]), float(position["y"])
@@ -2201,8 +2196,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 unavailable_groups = [
                     item["key"]
                     for item in readiness["groups"]
-                    if item["blocking"]
-                    and (item["missing_count"] or item["unready_count"])
+                    if item["blocking"] and (item["missing_count"] or item["unready_count"])
                 ]
                 raise CombatEngineError(
                     "scene participant manifest has missing or unusable groups: "
@@ -2224,15 +2218,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             try:
                 battle_map_request = deepcopy(battle_map or {})
                 progress_context = scene_context
-                if (
-                    current_scene_context is not None
-                    and current_scene_context.get("module_id") == scene_context.get("module_id")
-                ):
+                if current_scene_context is not None and current_scene_context.get(
+                    "module_id"
+                ) == scene_context.get("module_id"):
                     progress_context = current_scene_context
                 progress = dict(progress_context.get("progress") or {})
-                progress_location_key = progress.get(
-                    "current_location_key"
-                )
+                progress_location_key = progress.get("current_location_key")
                 if progress_location_key and not battle_map_request.get("location_key"):
                     battle_map_request["location_key"] = progress_location_key
                 map_scene_context = scene_context
@@ -2262,9 +2253,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                             if requested_location_key
                             in {
                                 str(location.get("key"))
-                                for location in dict(item.get("spatial") or {}).get(
-                                    "locations", []
-                                )
+                                for location in dict(item.get("spatial") or {}).get("locations", [])
                                 if isinstance(location, dict) and location.get("key")
                             }
                         ]
@@ -2620,9 +2609,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             if ammunition is not None:
                 result["ammunition"] = ammunition
             current = next(
-                item
-                for item in next_encounter["combatants"]
-                if item.get("actor_id") == actor_id
+                item for item in next_encounter["combatants"] if item.get("actor_id") == actor_id
             )
             if plan.get("attacker_was_hidden"):
                 current["hidden"] = False
@@ -3091,11 +3078,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 sheet = extension.sheet
                 character_advanced.extend(result["advanced"])
                 character_expired.extend(result["expired"])
-            if (
-                not character_advanced
-                and not character_expired
-                and sheet == character.sheet
-            ):
+            if not character_advanced and not character_expired and sheet == character.sheet:
                 continue
             updates.append(
                 CharacterStateUpdate(
@@ -3202,26 +3185,16 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             target["position"] = dict(window["target_position"])
         for combatant_state, snapshot in (
             (
-                next(
-                    item
-                    for item in encounter["combatants"]
-                    if item.get("actor_id") == actor_id
-                ),
+                next(item for item in encounter["combatants"] if item.get("actor_id") == actor_id),
                 attacker,
             ),
             (
-                next(
-                    item
-                    for item in encounter["combatants"]
-                    if item.get("actor_id") == target_id
-                ),
+                next(item for item in encounter["combatants"] if item.get("actor_id") == target_id),
                 target,
             ),
         ):
             snapshot["hidden"] = bool(combatant_state.get("hidden", False))
-            snapshot["visible_to_actor_ids"] = deepcopy(
-                combatant_state.get("visible_to_actor_ids")
-            )
+            snapshot["visible_to_actor_ids"] = deepcopy(combatant_state.get("visible_to_actor_ids"))
         if window.get("target_visible"):
             action_payload = dict(action_payload)
             action_payload["context"] = {
@@ -3617,9 +3590,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             )
             if used
             else None,
-            "activity_id": (
-                selection_id if used and defense_kind == "armor_class_bonus" else None
-            ),
+            "activity_id": (selection_id if used and defense_kind == "armor_class_bonus" else None),
             "spell_id": (
                 str(candidate.get("spell_id") or selection_id)
                 if used and defense_kind == "spell_armor_class_bonus"
@@ -3636,9 +3607,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 *list(spell_result.get("rule_receipts") or []),
             ]
         attacker_combatant = next(
-            item
-            for item in next_encounter["combatants"]
-            if item.get("actor_id") == attacker_id
+            item for item in next_encounter["combatants"] if item.get("actor_id") == attacker_id
         )
         sneak_attack = dict(result.get("sneak_attack") or {})
         if sneak_attack.get("used"):
@@ -4233,8 +4202,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "target_id",
         }
         return [
-            {key: value for key, value in window.items() if key in allowed}
-            for window in windows
+            {key: value for key, value in window.items() if key in allowed} for window in windows
         ]
 
     @mcp.tool()
@@ -5415,8 +5383,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             ):
                 raise CombatEngineError("stabilization requires recorded map positions")
             cell_ft = int(
-                dict(dict(active.get("battle_map") or {}).get("grid") or {}).get("cell_ft", 5)
-                or 5
+                dict(dict(active.get("battle_map") or {}).get("grid") or {}).get("cell_ft", 5) or 5
             )
             distance = int(
                 max(
@@ -5764,6 +5731,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         expected_revision: int | None = None,
         branch_id: str | None = None,
         idempotency_key: str | None = None,
+        knock_out: bool = False,
+        melee: bool = False,
     ) -> dict[str, Any]:
         """Apply DM-approved damage parts; automatic trait and HP settlement is deterministic."""
         access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
@@ -5773,6 +5742,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "target_id": target_id,
             "parts": parts,
             "critical": critical,
+            "knock_out": knock_out,
+            "melee": melee,
             "branch_id": branch_id,
         }
         scope = f"combat-damage:{campaign_id}:{principal_id}"
@@ -5803,6 +5774,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             critical=critical,
             ruleset=ruleset,
             death_saves=target_uses_death_saves,
+            knock_out=knock_out,
+            melee=melee,
         )
         applied_result = {key: value for key, value in applied.items() if key != "sheet"}
         damage_receipts = core_receipts(
@@ -6943,6 +6916,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         require_outside_active_combat(current, "stable recovery")
         if current.campaign_id is None:
             raise ValueError("stable recovery requires a campaign-bound character")
+        access.require_campaign(current.campaign_id, principal_id, roles={"owner", "dm"})
         if expected_revision is None or not idempotency_key:
             raise ValueError(
                 "expected_revision and idempotency_key are required for stable recovery"
@@ -6959,37 +6933,115 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if replay is not None:
             return replay
         recovery_roll = asdict(roll("1d4"))
-        applied = recover_stable_creature(
-            current.sheet, recovery_hours=int(recovery_roll["total"])
-        )
+        recovery_hours = int(recovery_roll["total"])
+        recover_stable_creature(current.sheet, recovery_hours=recovery_hours)
+        campaign = campaigns.get(current.campaign_id)
+        next_state = validate_party_state(deepcopy(campaign.state or {}))
+        world_time = dict(next_state.get("world_time") or {})
+        if not world_time:
+            raise ValueError("set the campaign clock before resolving stable recovery")
+        elapsed = int(world_time.get("elapsed_minutes", 0) or 0) + recovery_hours * 60
+        next_world_time = {
+            "schema_version": 1,
+            "day": elapsed // 1440 + 1,
+            "hour": (elapsed % 1440) // 60,
+            "minute": elapsed % 60,
+            "elapsed_minutes": elapsed,
+            "label": str(world_time.get("label") or ""),
+        }
+        next_state["world_time"] = next_world_time
         rules = effective_rule_context(
             current.campaign_id,
-            facts={"actor_id": character_id, "recovery_hours": recovery_roll["total"]},
+            facts={"actor_id": character_id, "recovery_hours": recovery_hours},
         )
-        receipts = core_receipts(
-            rules,
-            ["dnd5e.core.damage.stable_recovery"],
-            "character.stable_recovery",
+        receipts: list[dict[str, Any]] = []
+        updates: list[CharacterStateUpdate] = []
+        advanced: dict[str, list[str]] = {}
+        expired: dict[str, list[str]] = {}
+        applied: dict[str, Any] | None = None
+        for character in characters.list(campaign_id=current.campaign_id):
+            sheet = character.sheet
+            character_advanced: list[str] = []
+            character_expired: list[str] = []
+            for effect_period, amount in (
+                ("minute", recovery_hours * 60),
+                ("hour", recovery_hours),
+            ):
+                duration_result = advance_effect_durations(
+                    sheet, period=effect_period, amount=amount
+                )
+                extension = apply_rule_event(
+                    duration_result["sheet"],
+                    "duration.advance",
+                    context_with_facts(
+                        rules,
+                        actor_id=character.id,
+                        period=effect_period,
+                        amount=amount,
+                    ),
+                )
+                receipts.extend(extension.receipts)
+                sheet = extension.sheet
+                character_advanced.extend(duration_result["advanced"])
+                character_expired.extend(duration_result["expired"])
+            if character.id == character_id:
+                applied = recover_stable_creature(sheet, recovery_hours=recovery_hours)
+                sheet = applied["sheet"]
+            if sheet != character.sheet:
+                updates.append(
+                    CharacterStateUpdate(
+                        character_id=character.id,
+                        sheet=validate_character_sheet(sheet),
+                        notes=validate_character_notes(character.notes),
+                        expected_revision=(
+                            expected_revision
+                            if character.id == character_id
+                            else character.revision
+                        ),
+                    )
+                )
+            if character_advanced:
+                advanced[character.id] = list(dict.fromkeys(character_advanced))
+            if character_expired:
+                expired[character.id] = list(dict.fromkeys(character_expired))
+        assert applied is not None
+        receipts.extend(
+            core_receipts(
+                rules,
+                ["dnd5e.core.damage.stable_recovery"],
+                "character.stable_recovery",
+            )
         )
-        response = update_sheet(
-            character_id,
-            applied["sheet"],
+        StateMutationService(storage.database).replace(
+            current.campaign_id,
+            campaign_state=next_state,
+            character_updates=updates,
+            expected_campaign_revision=campaign.revision,
             operation="character.stable_recovery",
-            principal_id=principal_id,
-            expected_revision=expected_revision,
+            actor=principal_id,
+            branch_id=branch_id,
             idempotency_key=idempotency_key,
-            payload=payload,
-            response_extra={
-                "status": "recovered",
-                "recovery_roll": recovery_roll,
-                "recovery_hours": applied["recovery_hours"],
-                "before_hp": applied["before_hp"],
-                "after_hp": applied["after_hp"],
-                "rule_receipts": receipts,
-            },
             rule_receipts=receipts,
         )
-        return response
+        response = {
+            "character": character_view(characters.get(character_id)),
+            "status": "recovered",
+            "recovery_roll": recovery_roll,
+            "recovery_hours": applied["recovery_hours"],
+            "before_hp": applied["before_hp"],
+            "after_hp": applied["after_hp"],
+            "world_time": next_world_time,
+            "advanced": advanced,
+            "expired": expired,
+            "rule_receipts": receipts,
+        }
+        return remember_idempotent(
+            scope,
+            idempotency_key,
+            request_payload,
+            response,
+            campaign_id=current.campaign_id,
+        )
 
     def character_stand(
         character_id: str,
@@ -7319,6 +7371,106 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             expected_revision=expected_revision,
             idempotency_key=idempotency_key,
             payload={"resource": resource, "value": value},
+        )
+
+    def character_apply_damage(
+        character_id: str,
+        parts: list[dict[str, Any]],
+        *,
+        critical: bool = False,
+        knock_out: bool = False,
+        melee: bool = False,
+        principal_id: str = "system:local",
+        expected_revision: int | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Apply DM-issued damage during play without mutating encounter state."""
+        current = characters.get(character_id)
+        require_character_control(current, principal_id)
+        require_outside_active_combat(current, "noncombat damage")
+        if current.campaign_id is None:
+            raise CombatEngineError("noncombat damage requires a campaign-bound actor")
+        access.require_campaign(current.campaign_id, principal_id, roles={"owner", "dm"})
+        campaign = campaigns.get(current.campaign_id)
+        applied = apply_damage_parts_to_sheet(
+            current.sheet,
+            parts,
+            source=principal_id,
+            critical=critical,
+            ruleset=str(campaign.settings.get("edition") or current.sheet.get("edition") or "2014"),
+            death_saves=current.character_type == "pc",
+            knock_out=knock_out,
+            melee=melee,
+        )
+        result = {key: value for key, value in applied.items() if key != "sheet"}
+        return update_sheet(
+            character_id,
+            applied["sheet"],
+            operation="character.damage.apply",
+            principal_id=principal_id,
+            expected_revision=expected_revision,
+            idempotency_key=idempotency_key,
+            payload={
+                "parts": parts,
+                "critical": critical,
+                "knock_out": knock_out,
+                "melee": melee,
+            },
+            response_extra={"result": result},
+            rule_receipts=core_receipts(
+                effective_rule_context(current.campaign_id),
+                ["dnd5e.core.damage.zero_hp"] if int(applied["after_hp"]) == 0 else [],
+                "damage.apply",
+            ),
+        )
+
+    def character_apply_healing(
+        character_id: str,
+        amount: int,
+        *,
+        source_actor_id: str | None = None,
+        spell_id: str | None = None,
+        spell_level: int | None = None,
+        principal_id: str = "system:local",
+        expected_revision: int | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Apply DM-issued source-aware healing during play."""
+        current = characters.get(character_id)
+        require_character_control(current, principal_id)
+        require_outside_active_combat(current, "noncombat healing")
+        if current.campaign_id is None:
+            raise CombatEngineError("noncombat healing requires a campaign-bound actor")
+        access.require_campaign(current.campaign_id, principal_id, roles={"owner", "dm"})
+        if int(amount) <= 0:
+            raise CombatEngineError("healing amount must be positive")
+        source = None
+        if source_actor_id is not None:
+            source = require_campaign_actor(current.campaign_id, source_actor_id)
+        applied = apply_healing_to_sheet(
+            current.sheet,
+            amount=amount,
+            source_sheet=source.sheet if source is not None else None,
+            spell_id=spell_id,
+            spell_level=spell_level,
+        )
+        if applied.get("source") is not None:
+            applied["source"]["actor_id"] = source_actor_id
+        result = {key: value for key, value in applied.items() if key != "sheet"}
+        return update_sheet(
+            character_id,
+            applied["sheet"],
+            operation="character.heal.apply",
+            principal_id=principal_id,
+            expected_revision=expected_revision,
+            idempotency_key=idempotency_key,
+            payload={
+                "amount": amount,
+                "source_actor_id": source_actor_id,
+                "spell_id": spell_id,
+                "spell_level": spell_level,
+            },
+            response_extra={"result": result},
         )
 
     @mcp.tool()
@@ -9039,9 +9191,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             raise ValueError("participant_manifest must be an object")
         unknown_manifest = set(participant_manifest) - {"schema_version", "groups", "notes"}
         if unknown_manifest:
-            raise ValueError(
-                f"unsupported participant manifest fields: {sorted(unknown_manifest)}"
-            )
+            raise ValueError(f"unsupported participant manifest fields: {sorted(unknown_manifest)}")
         schema_version = participant_manifest.get("schema_version", 1)
         if schema_version != 1:
             raise ValueError("participant_manifest schema_version must be 1")
@@ -9071,9 +9221,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             }
             unknown = set(raw_group) - allowed
             if unknown:
-                raise ValueError(
-                    f"unsupported participant group fields: {sorted(unknown)}"
-                )
+                raise ValueError(f"unsupported participant group fields: {sorted(unknown)}")
             key = str(raw_group.get("key") or "").strip()
             if not key or key in group_keys:
                 raise ValueError("participant manifest group keys must be non-empty and unique")
@@ -9114,9 +9262,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             )
             if str(source_scene.get("module_id")) != module_id:
                 raise ValueError("participant evidence must belong to the encounter module")
-            source_excerpt = " ".join(
-                str(raw_group.get("source_excerpt") or "").split()
-            ).strip()
+            source_excerpt = " ".join(str(raw_group.get("source_excerpt") or "").split()).strip()
             if len(source_excerpt) < 8 or len(source_excerpt) > 500:
                 raise ValueError("participant source_excerpt must contain 8 to 500 characters")
             normalized_content = " ".join(str(source_scene.get("content") or "").split())
@@ -9170,13 +9316,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             target.extend(actor_ids)
 
         ready = all(
-            not item["blocking"]
-            or (item["missing_count"] == 0 and item["unready_count"] == 0)
+            not item["blocking"] or (item["missing_count"] == 0 and item["unready_count"] == 0)
             for item in normalized_groups
         )
         complete = all(
-            item["missing_count"] == 0 and item["unready_count"] == 0
-            for item in normalized_groups
+            item["missing_count"] == 0 and item["unready_count"] == 0 for item in normalized_groups
         )
         normalized_manifest = {
             "schema_version": 1,
@@ -10011,9 +10155,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             card = dict(artifact.get("card") or {})
             grants = dict(card.get("mechanical_grants") or {})
             amount = int(grants.get("hp_per_level", 0) or 0)
-            if (
-                str(card.get("class_name") or "").casefold() == class_name.casefold()
-            ):
+            if str(card.get("class_name") or "").casefold() == class_name.casefold():
                 amount += int(grants.get("hp_per_class_level", 0) or 0)
             if amount:
                 hp_per_level_bonus += amount
@@ -10345,9 +10487,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             sheet["progression"]["classes"] = classes
             domain_spell_ids: list[str] = []
             for spell_grant in card.get("always_prepared_spells", []):
-                if int(spell_grant.get("minimum_level", 1) or 1) > int(
-                    target.get("level", 0) or 0
-                ):
+                if int(spell_grant.get("minimum_level", 1) or 1) > int(target.get("level", 0) or 0):
                     continue
                 spell_name = str(spell_grant.get("name") or "").strip()
                 spell_match = next(
@@ -10369,8 +10509,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     return {
                         "status": "pending_ruling",
                         "reason": (
-                            "subclass spell is not available in the active catalog: "
-                            f"{spell_name}"
+                            f"subclass spell is not available in the active catalog: {spell_name}"
                         ),
                     }
                 spell_pack_id, spell_version, spell_artifact = spell_match
@@ -10463,11 +10602,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 count=int(grants.get("language_choice_count", 0) or 0),
                 label="species languages",
             )
-            selected_skills = [item.casefold() for item in _validated_distinct_choices(
-                selection.get("skills"),
-                count=int(grants.get("skill_choice_count", 0) or 0),
-                label="species skills",
-            )]
+            selected_skills = [
+                item.casefold()
+                for item in _validated_distinct_choices(
+                    selection.get("skills"),
+                    count=int(grants.get("skill_choice_count", 0) or 0),
+                    label="species skills",
+                )
+            ]
             for skill in selected_skills:
                 if skill not in sheet["skills"]:
                     raise ValueError(f"species references an unknown skill: {skill}")
@@ -10483,11 +10625,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 raise ValueError("species tool choice is not one of the allowed options")
             selected_tools = [tool_options[item.casefold()] for item in selected_tools]
             ability_choice = dict(grants.get("ability_choice") or {})
-            selected_abilities = [item.casefold() for item in _validated_distinct_choices(
-                selection.get("abilities"),
-                count=int(ability_choice.get("count", 0) or 0),
-                label="species abilities",
-            )]
+            selected_abilities = [
+                item.casefold()
+                for item in _validated_distinct_choices(
+                    selection.get("abilities"),
+                    count=int(ability_choice.get("count", 0) or 0),
+                    label="species abilities",
+                )
+            ]
             excluded_abilities = {
                 str(item).casefold() for item in ability_choice.get("exclude", [])
             }
@@ -10509,9 +10654,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         ability_choice.get("amount", 0) or 0
                     )
                 for ability, amount in increases.items():
-                    sheet["abilities"][ability]["score"] = (
-                        int(sheet["abilities"][ability]["score"]) + int(amount)
-                    )
+                    sheet["abilities"][ability]["score"] = int(
+                        sheet["abilities"][ability]["score"]
+                    ) + int(amount)
             if not hp_includes_grants:
                 hp_bonus = int(grants.get("hp_per_level", 0) or 0) * int(
                     sheet["progression"].get("level", 1) or 1
@@ -10641,8 +10786,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     )
                 if declared_subclass and (
                     target is None
-                    or str(target.get("subclass") or "").casefold()
-                    != declared_subclass.casefold()
+                    or str(target.get("subclass") or "").casefold() != declared_subclass.casefold()
                 ):
                     raise ValueError("feature subclass is not selected on this actor card")
                 requirements = dict(card.get("selection_requirements") or {})
@@ -11707,6 +11851,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "effect_add",
             "effect_remove",
             "resource_set",
+            "damage",
+            "heal",
             "rest",
             "level_advance",
             "stable_recovery",
@@ -11745,6 +11891,28 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 principal_id,
                 expected_revision,
                 idempotency_key,
+            )
+        elif action == "damage":
+            result = character_apply_damage(
+                character_id,
+                required(data, "parts"),
+                critical=data.get("critical", False),
+                knock_out=data.get("knock_out", False),
+                melee=data.get("melee", False),
+                principal_id=principal_id,
+                expected_revision=expected_revision,
+                idempotency_key=idempotency_key,
+            )
+        elif action == "heal":
+            result = character_apply_healing(
+                character_id,
+                required(data, "amount"),
+                source_actor_id=data.get("source_actor_id"),
+                spell_id=data.get("spell_id"),
+                spell_level=data.get("spell_level"),
+                principal_id=principal_id,
+                expected_revision=expected_revision,
+                idempotency_key=idempotency_key,
             )
         elif action == "rest":
             result = character_rest(
@@ -12273,6 +12441,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 expected_revision,
                 branch_id,
                 idempotency_key,
+                knock_out=data.get("knock_out", False),
+                melee=data.get("melee", False),
             )
             if action == "damage"
             else combat_heal(

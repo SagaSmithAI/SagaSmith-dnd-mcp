@@ -44,6 +44,17 @@ def test_stable_recovery_is_rolled_atomic_idempotent_and_audited(
             "campaign_create",
             {"name": "Stable Recovery", "edition": "2014", "idempotency_key": "campaign"},
         )
+        await _call(
+            server,
+            "campaign_change",
+            {
+                "campaign_id": campaign["id"],
+                "action": "clock_set",
+                "payload": {"day": 1},
+                "expected_revision": campaign["revision"],
+                "idempotency_key": "clock",
+            },
+        )
         sheet = default_character_sheet()
         sheet["combat"]["hp"] = {"value": 0, "max": 12, "temp": 0}
         sheet["conditions"] = ["prone", "stable", "unconscious"]
@@ -74,6 +85,8 @@ def test_stable_recovery_is_rolled_atomic_idempotent_and_audited(
         assert recovered["status"] == "recovered"
         assert recovered["recovery_roll"]["expression"] == "1d4"
         assert recovered["recovery_hours"] == 4
+        assert recovered["world_time"]["day"] == 1
+        assert recovered["world_time"]["hour"] == 4
         assert recovered["character"]["sheet"]["combat"]["hp"]["value"] == 1
         assert recovered["character"]["sheet"]["conditions"] == ["prone"]
         assert replay == recovered
