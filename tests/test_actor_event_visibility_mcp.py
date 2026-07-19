@@ -231,3 +231,130 @@ def test_campaign_reads_do_not_bypass_player_visibility_boundaries(tmp_path: Pat
         }
 
     asyncio.run(exercise())
+
+
+def test_player_cannot_read_dm_snapshot_revision_or_rule_receipt_history(tmp_path: Path) -> None:
+    config = McpConfig(
+        home=tmp_path / "home",
+        database_url=None,
+        chroma_url=None,
+        chroma_path_override=None,
+        dnd_skills_dir=tmp_path / "dnd",
+        modulegen_skills_dir=tmp_path / "modulegen",
+        auto_seed_rules=False,
+    )
+
+    async def exercise() -> None:
+        server = create_server(config)
+        campaign = await _call(
+            server,
+            "campaign_create",
+            {"name": "Private administration", "idempotency_key": "campaign"},
+        )
+        await _call(
+            server,
+            "snapshot_create",
+            {
+                "campaign_id": campaign["id"],
+                "label": "DM: eastern statue trap is still armed",
+                "expected_revision": campaign["revision"],
+                "expected_head_snapshot_id": "",
+                "idempotency_key": "snapshot",
+            },
+        )
+        await _call(
+            server,
+            "access_grant",
+            {
+                "scope": "campaign",
+                "campaign_id": campaign["id"],
+                "principal_id": "player:alice",
+                "payload": {"role": "player"},
+            },
+        )
+
+        calls = [
+            (
+                "snapshot_query",
+                {
+                    "campaign_id": campaign["id"],
+                    "view": "list",
+                    "principal_id": "player:alice",
+                },
+            ),
+            (
+                "state_revision",
+                {
+                    "campaign_id": campaign["id"],
+                    "action": "history",
+                    "principal_id": "player:alice",
+                },
+            ),
+            (
+                "campaign_rules",
+                {
+                    "campaign_id": campaign["id"],
+                    "action": "receipts",
+                    "principal_id": "player:alice",
+                },
+            ),
+        ]
+        for tool_name, arguments in calls:
+            with pytest.raises(Exception, match="cannot access"):
+                await _call(server, tool_name, arguments)
+
+        snapshots = await _call(
+            server,
+            "snapshot_query",
+            {"campaign_id": campaign["id"], "view": "list"},
+        )
+        assert snapshots[0]["label"].startswith("DM:")
+
+    asyncio.run(exercise())
+
+
+def test_nonlocal_character_library_read_redacts_private_template_notes(tmp_path: Path) -> None:
+    config = McpConfig(
+        home=tmp_path / "home",
+        database_url=None,
+        chroma_url=None,
+        chroma_path_override=None,
+        dnd_skills_dir=tmp_path / "dnd",
+        modulegen_skills_dir=tmp_path / "modulegen",
+        auto_seed_rules=False,
+    )
+
+    async def exercise() -> None:
+        server = create_server(config)
+        created = await _call(
+            server,
+            "character_create",
+            {
+                "name": "Reusable Rival",
+                "character_type": "npc",
+                "notes": {
+                    "profile": {
+                        "summary": "A reusable rival.",
+                        "dm_notes": "Secretly serves Zariel.",
+                    }
+                },
+                "idempotency_key": "library-character",
+            },
+        )
+
+        local = await _call(server, "character_query", {"view": "library"})
+        remote = await _call(
+            server,
+            "character_query",
+            {"view": "library", "principal_id": "player:alice"},
+        )
+
+        assert local[0]["id"] == created["id"]
+        assert local[0]["notes"]["profile"]["dm_notes"] == "Secretly serves Zariel."
+        assert remote[0]["id"] == created["id"]
+        assert "notes" not in remote[0]
+        assert "player_name" not in remote[0]
+        assert remote[0]["notes_redacted"] is True
+        assert remote[0]["sheet"] == local[0]["sheet"]
+
+    asyncio.run(exercise())

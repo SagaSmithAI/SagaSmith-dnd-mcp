@@ -667,6 +667,16 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "revision": character.revision,
         }
 
+    def library_character_view(character: Any, principal_id: str) -> dict[str, Any]:
+        """Keep reusable sheets usable without exposing campaign-less private notes."""
+        if principal_id == "system:local":
+            return character_view(character)
+        value = character_view(character)
+        value.pop("notes", None)
+        value.pop("player_name", None)
+        value["notes_redacted"] = True
+        return value
+
     def is_dm(campaign_id: str, principal_id: str) -> bool:
         return access.require_campaign(campaign_id, principal_id).role in {"owner", "dm"}
 
@@ -6392,7 +6402,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
 
     @mcp.tool()
     def snapshot_list(campaign_id: str, principal_id: str = "system:local") -> list[dict[str, Any]]:
-        access.require_campaign(campaign_id, principal_id)
+        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
         return [asdict(item) for item in snapshots.list(campaign_id)]
 
     @mcp.tool()
@@ -6442,7 +6452,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         campaign_id: str, slot: int, principal_id: str = "system:local"
     ) -> dict[str, bool]:
         """Verify that a saved snapshot has an internally consistent payload."""
-        access.require_campaign(campaign_id, principal_id)
+        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
         return {"valid": snapshots.verify(campaign_id, slot)}
 
     @mcp.tool()
@@ -6452,7 +6462,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         principal_id: str = "system:local",
     ) -> list[dict[str, Any]]:
         """List the lineage of a save without mutating campaign history."""
-        access.require_campaign(campaign_id, principal_id)
+        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
         return [asdict(item) for item in snapshots.lineage(campaign_id, slot)]
 
     @mcp.tool()
@@ -6519,10 +6529,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         ]
 
     @mcp.tool()
-    def character_library_list(character_type: str | None = None) -> list[dict[str, Any]]:
+    def character_library_list(
+        character_type: str | None = None,
+        principal_id: str = "system:local",
+    ) -> list[dict[str, Any]]:
         """List reusable D&D templates that are not bound to a campaign."""
         return [
-            character_view(item)
+            library_character_view(item, principal_id)
             for item in characters.list_library(system_id="dnd5e", character_type=character_type)
         ]
 
@@ -8569,7 +8582,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         principal_id: str = "system:local",
     ) -> list[dict[str, Any]]:
         """List audited reversible campaign and character mutations."""
-        access.require_campaign(campaign_id, principal_id)
+        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
         return [asdict(item) for item in revisions.history(campaign_id, limit=limit)]
 
     @mcp.tool()
@@ -10193,7 +10206,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         limit: int = 100,
     ) -> list[dict[str, Any]]:
         """Read immutable historical rule evidence for committed settlements."""
-        access.require_campaign(campaign_id, principal_id)
+        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
         resolved_branch_id = readable_branch(campaign_id, branch_id, principal_id)
         return [
             asdict(item)
@@ -11929,7 +11942,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if view == "get":
             result = character_get(required(data, "character_id"), principal_id)
         elif view == "library":
-            result = character_library_list(data.get("character_type"))
+            result = character_library_list(data.get("character_type"), principal_id)
         else:
             result = character_list(data.get("campaign_id"), principal_id)
         return facade_result(view, result)
