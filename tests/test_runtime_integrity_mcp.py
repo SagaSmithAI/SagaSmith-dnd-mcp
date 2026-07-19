@@ -123,6 +123,7 @@ def test_2024_prepared_spell_changes_follow_phase_and_long_rest_rules(tmp_path: 
                 "idempotency_key": "prep-rest",
             },
         )
+        assert rested["status"] == "committed"
         assert rested["preparation"]["added"] == ["c"]
         assert rested["preparation"]["removed"] == ["b"]
         assert rested["character"]["sheet"]["spellcasting"]["preparation"][

@@ -6865,6 +6865,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if replay is not None:
             return replay
         access.require_actor(source.campaign_id, source.id, principal_id, control=True)
+        access.require_actor(source.campaign_id, target.id, principal_id, control=True)
         source_sheet, moved = remove_inventory_item(source.sheet, item_id, quantity)
         target_sheet = receive_inventory_item(target.sheet, moved)
         mutations = StateMutationService(storage.database)
@@ -6883,13 +6884,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             actor=principal_id,
             branch_id=branch_id,
             idempotency_key=idempotency_key,
-            rule_receipts=rule_receipts,
         )
         source_after = characters.get(source.id)
         target_after = characters.get(target.id)
         response = {
-            "source": character_view(source_after),
-            "target": character_view(target_after),
+            "source": visible_character_view(source_after, principal_id),
+            "target": visible_character_view(target_after, principal_id),
             "item": moved,
         }
         return remember_idempotent(
@@ -7037,7 +7037,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             ],
         )
         response = {
-            "status": "pending_ruling",
+            "status": applied["status"],
             "result": {key: value for key, value in applied.items() if key != "sheet"},
             "preparation": (
                 {key: value for key, value in preparation_result.items() if key != "sheet"}
@@ -12301,7 +12301,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 idempotency_key,
             )
         else:
-            direction = "to_character" if mode == "party_to_character" else "from_character"
+            direction = "withdraw" if mode == "party_to_character" else "deposit"
             result = party_inventory_transfer(
                 required(data, "campaign_id"),
                 required(data, "character_id"),
