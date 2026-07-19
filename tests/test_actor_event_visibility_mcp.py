@@ -106,3 +106,128 @@ def test_actor_scoped_event_is_visible_only_to_witnesses(tmp_path: Path) -> None
             )
 
     asyncio.run(exercise())
+
+
+def test_campaign_reads_do_not_bypass_player_visibility_boundaries(tmp_path: Path) -> None:
+    config = McpConfig(
+        home=tmp_path / "home",
+        database_url=None,
+        chroma_url=None,
+        chroma_path_override=None,
+        dnd_skills_dir=tmp_path / "dnd",
+        modulegen_skills_dir=tmp_path / "modulegen",
+        auto_seed_rules=False,
+    )
+
+    async def exercise() -> None:
+        server = create_server(config)
+        campaign = await _call(
+            server,
+            "campaign_create",
+            {"name": "Redacted campaign", "idempotency_key": "campaign"},
+        )
+        updated = await _call(
+            server,
+            "campaign_change",
+            {
+                "campaign_id": campaign["id"],
+                "action": "update",
+                "payload": {"state": {"dm_secret": "the eastern statue is trapped"}},
+                "expected_revision": campaign["revision"],
+                "idempotency_key": "secret",
+            },
+        )
+        clock = await _call(
+            server,
+            "campaign_change",
+            {
+                "campaign_id": campaign["id"],
+                "action": "clock_set",
+                "payload": {"day": 1, "hour": 9},
+                "expected_revision": updated["revision"],
+                "idempotency_key": "clock",
+            },
+        )
+        party_effect = await _call(
+            server,
+            "campaign_change",
+            {
+                "campaign_id": campaign["id"],
+                "action": "effect_add",
+                "payload": {
+                    "effect": {
+                        "id": "visible-light",
+                        "name": "Visible light",
+                        "visibility": "party",
+                        "target": {"kind": "object", "id": "mace"},
+                        "duration": {"period": "hour", "remaining": 1},
+                    }
+                },
+                "expected_revision": clock["campaign_revision"],
+                "idempotency_key": "party-effect",
+            },
+        )
+        hidden_effect = await _call(
+            server,
+            "campaign_change",
+            {
+                "campaign_id": campaign["id"],
+                "action": "effect_add",
+                "payload": {
+                    "effect": {
+                        "id": "hidden-trap",
+                        "name": "Hidden trap aura",
+                        "visibility": "dm",
+                        "target": {"kind": "location", "id": "east-statue"},
+                        "duration": {"period": "manual", "remaining": 0},
+                    }
+                },
+                "expected_revision": party_effect["campaign_revision"],
+                "idempotency_key": "dm-effect",
+            },
+        )
+        assert hidden_effect["effect"]["visibility"] == "dm"
+        await _call(
+            server,
+            "access_grant",
+            {
+                "scope": "campaign",
+                "campaign_id": campaign["id"],
+                "principal_id": "player:alice",
+                "payload": {"role": "player"},
+            },
+        )
+
+        player = await _call(
+            server,
+            "campaign_query",
+            {
+                "view": "get",
+                "payload": {"campaign_id": campaign["id"]},
+                "principal_id": "player:alice",
+            },
+        )
+        listed = await _call(
+            server,
+            "campaign_query",
+            {"view": "list", "principal_id": "player:alice"},
+        )
+        owner = await _call(
+            server,
+            "campaign_query",
+            {"view": "get", "payload": {"campaign_id": campaign["id"]}},
+        )
+
+        assert player["state_redacted"] is True
+        assert "dm_secret" not in player["state"]
+        assert {effect["id"] for effect in player["state"]["world_effects"]} == {
+            "visible-light"
+        }
+        assert listed[0]["state"] == player["state"]
+        assert owner["state"]["dm_secret"] == "the eastern statue is trapped"
+        assert {effect["id"] for effect in owner["state"]["world_effects"]} == {
+            "visible-light",
+            "hidden-trap",
+        }
+
+    asyncio.run(exercise())

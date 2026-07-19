@@ -1701,16 +1701,40 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         """List D&D 5e campaigns."""
         allowed = access.accessible_campaign_ids(principal_id)
         return [
-            asdict(item)
+            campaign_audience_view(item.id, principal_id)
             for item in campaigns.list(system_id="dnd5e", status=status)
             if item.id in allowed
         ]
 
+    def campaign_audience_view(campaign_id: str, principal_id: str) -> dict[str, Any]:
+        """Project campaign state through the same audience boundary as domain reads."""
+        membership = access.require_campaign(campaign_id, principal_id)
+        campaign = campaigns.get(campaign_id)
+        value = asdict(campaign)
+        if membership.role in {"owner", "dm"}:
+            return value
+        state = dict(value.get("state") or {})
+        safe_state: dict[str, Any] = {
+            "game_phase": str(state.get("game_phase") or PROFILE_LOBBY),
+            "party": deepcopy(dict(state.get("party") or {})),
+            "world_time": deepcopy(dict(state.get("world_time") or {})),
+            "world_effects": [
+                deepcopy(effect)
+                for effect in state.get("world_effects", [])
+                if str(effect.get("visibility") or "party") in {"public", "party"}
+            ],
+        }
+        combat = combat_view(campaign_id, principal_id)
+        if combat is not None:
+            safe_state["combat"] = combat
+        value["state"] = safe_state
+        value["state_redacted"] = True
+        return value
+
     @mcp.tool()
     def campaign_get(campaign_id: str, principal_id: str = "system:local") -> dict[str, Any]:
         """Read one campaign, including its persisted party and combat state."""
-        access.require_campaign(campaign_id, principal_id)
-        return asdict(campaigns.get(campaign_id))
+        return campaign_audience_view(campaign_id, principal_id)
 
     @mcp.tool()
     def server_tool_profiles() -> dict[str, Any]:
