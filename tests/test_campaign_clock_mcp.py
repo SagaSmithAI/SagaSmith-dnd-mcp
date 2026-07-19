@@ -86,11 +86,32 @@ def test_campaign_clock_and_elapsed_effects_advance_atomically(tmp_path: Path) -
                 "idempotency_key": "clock-set",
             },
         )
+        light = await _call(
+            server,
+            "campaign_change",
+            {
+                "campaign_id": campaign["id"],
+                "action": "effect_add",
+                "payload": {
+                    "effect": {
+                        "id": "mace-light",
+                        "name": "Light on a mace",
+                        "kind": "light",
+                        "source_spell_id": "dnd5e.content.srd2014.spell.light",
+                        "source_actor_id": actor["id"],
+                        "target": {"kind": "object", "id": "mace", "label": "Mace"},
+                        "duration": {"period": "hour", "remaining": 1},
+                    }
+                },
+                "expected_revision": clock["campaign_revision"],
+                "idempotency_key": "light-add",
+            },
+        )
         arguments = {
             "campaign_id": campaign["id"],
             "action": "clock_advance",
             "payload": {"period": "hour", "count": 2},
-            "expected_revision": clock["campaign_revision"],
+            "expected_revision": light["campaign_revision"],
             "idempotency_key": "clock-advance",
         }
 
@@ -106,6 +127,7 @@ def test_campaign_clock_and_elapsed_effects_advance_atomically(tmp_path: Path) -
             "elapsed_minutes": 2130,
             "label": "Baldur's Gate",
         }
+        assert advanced["world_expired"] == ["mace-light"]
         updated = await _call(
             server,
             "character_query",
@@ -121,6 +143,7 @@ def test_campaign_clock_and_elapsed_effects_advance_atomically(tmp_path: Path) -
             {"view": "get", "payload": {"campaign_id": campaign["id"]}},
         )
         assert persisted["state"]["world_time"] == advanced["world_time"]
+        assert persisted["state"]["world_effects"][0]["active"] is False
 
     asyncio.run(exercise())
 
@@ -143,6 +166,41 @@ def test_campaign_clock_must_be_set_before_time_advance(tmp_path: Path) -> None:
                     "payload": {"period": "hour"},
                     "expected_revision": campaign["revision"],
                     "idempotency_key": "advance",
+                },
+            )
+
+    asyncio.run(exercise())
+
+
+def test_campaign_clock_cannot_jump_past_timed_effects(tmp_path: Path) -> None:
+    async def exercise() -> None:
+        server = create_server(_config(tmp_path))
+        campaign = await _call(
+            server,
+            "campaign_create",
+            {"name": "Clock reset", "edition": "2014", "idempotency_key": "campaign"},
+        )
+        clock = await _call(
+            server,
+            "campaign_change",
+            {
+                "campaign_id": campaign["id"],
+                "action": "clock_set",
+                "payload": {"day": 1, "hour": 10},
+                "expected_revision": campaign["revision"],
+                "idempotency_key": "clock",
+            },
+        )
+        with pytest.raises(Exception, match="use clock_advance"):
+            await _call(
+                server,
+                "campaign_change",
+                {
+                    "campaign_id": campaign["id"],
+                    "action": "clock_set",
+                    "payload": {"day": 1, "hour": 12},
+                    "expected_revision": clock["campaign_revision"],
+                    "idempotency_key": "jump",
                 },
             )
 

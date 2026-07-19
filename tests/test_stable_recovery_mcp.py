@@ -44,7 +44,7 @@ def test_stable_recovery_is_rolled_atomic_idempotent_and_audited(
             "campaign_create",
             {"name": "Stable Recovery", "edition": "2014", "idempotency_key": "campaign"},
         )
-        await _call(
+        clock = await _call(
             server,
             "campaign_change",
             {
@@ -53,6 +53,24 @@ def test_stable_recovery_is_rolled_atomic_idempotent_and_audited(
                 "payload": {"day": 1},
                 "expected_revision": campaign["revision"],
                 "idempotency_key": "clock",
+            },
+        )
+        await _call(
+            server,
+            "campaign_change",
+            {
+                "campaign_id": campaign["id"],
+                "action": "effect_add",
+                "payload": {
+                    "effect": {
+                        "id": "recovery-light",
+                        "name": "Recovery room light",
+                        "target": {"kind": "object", "id": "mace"},
+                        "duration": {"period": "hour", "remaining": 1},
+                    }
+                },
+                "expected_revision": clock["campaign_revision"],
+                "idempotency_key": "world-effect",
             },
         )
         sheet = default_character_sheet()
@@ -89,6 +107,7 @@ def test_stable_recovery_is_rolled_atomic_idempotent_and_audited(
         assert recovered["world_time"]["hour"] == 4
         assert recovered["character"]["sheet"]["combat"]["hp"]["value"] == 1
         assert recovered["character"]["sheet"]["conditions"] == ["prone"]
+        assert recovered["world_expired"] == ["recovery-light"]
         assert replay == recovered
         receipts = await _call(
             server,

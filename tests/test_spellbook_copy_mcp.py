@@ -145,7 +145,7 @@ def test_discovered_spellbook_copy_is_source_bound_paid_timed_and_atomic(
         )
         assert book["item_id"] == "d11-red-spellbook"
         current_campaign = await campaign(server, created["id"])
-        await call(
+        clock = await call(
             server,
             "campaign_change",
             {
@@ -154,6 +154,24 @@ def test_discovered_spellbook_copy_is_source_bound_paid_timed_and_atomic(
                 "payload": {"day": 1, "hour": 10, "label": "Copy test"},
                 "expected_revision": current_campaign["revision"],
                 "idempotency_key": "clock",
+            },
+        )
+        await call(
+            server,
+            "campaign_change",
+            {
+                "campaign_id": created["id"],
+                "action": "effect_add",
+                "payload": {
+                    "effect": {
+                        "id": "copy-room-light",
+                        "name": "Light in the copying room",
+                        "target": {"kind": "object", "id": "desk-lamp"},
+                        "duration": {"period": "hour", "remaining": 1},
+                    }
+                },
+                "expected_revision": clock["campaign_revision"],
+                "idempotency_key": "world-effect",
             },
         )
         current_campaign = await campaign(server, created["id"])
@@ -207,6 +225,7 @@ def test_discovered_spellbook_copy_is_source_bound_paid_timed_and_atomic(
         assert copied["spellbook_copy"]["cost_cp"] == 5000
         assert copied["spellbook_copy"]["hours"] == 2
         assert copied["spellbook_copy"]["world_time"]["hour"] == 12
+        assert copied["spellbook_copy"]["world_expired"] == ["copy-room-light"]
         after = await campaign(server, created["id"])
         assert after["state"]["party"]["inventory"]["items"][0]["id"] == (
             "d11-red-spellbook"

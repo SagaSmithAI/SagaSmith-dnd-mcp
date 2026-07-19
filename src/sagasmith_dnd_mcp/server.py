@@ -59,6 +59,7 @@ from sagasmith_dnd.character_schema import (
     validate_character_notes,
     validate_character_sheet,
     validate_party_state,
+    validate_world_effect,
 )
 from sagasmith_dnd.combat_engine import (
     CombatEngineError,
@@ -106,6 +107,7 @@ from sagasmith_dnd.core_rule_pack import get_core_rule_pack
 from sagasmith_dnd.engine import resolve_check, roll
 from sagasmith_dnd.lifecycle import (
     advance_effect_durations,
+    advance_world_effect_durations,
     apply_rest,
     recover_stable_creature,
     stand_outside_combat,
@@ -2922,6 +2924,89 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             remember_idempotent(scope, idempotency_key, payload, response, campaign_id=campaign_id),
         )
 
+    def campaign_world_effect_change(
+        campaign_id: str,
+        action: str,
+        payload: dict[str, Any],
+        principal_id: str,
+        expected_revision: int | None,
+        branch_id: str | None,
+        idempotency_key: str | None,
+    ) -> dict[str, Any]:
+        """Add or dismiss one structured campaign-space effect outside combat."""
+        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        require_write_contract(expected_revision, idempotency_key)
+        resolved_branch_id = require_current_branch(campaign_id, branch_id)
+        if action not in {"effect_add", "effect_remove"}:
+            raise ValueError("world effect action must be effect_add or effect_remove")
+        request_payload = {
+            "action": action,
+            "payload": payload,
+            "branch_id": resolved_branch_id,
+        }
+        scope = f"campaign-world-effect:{campaign_id}:{resolved_branch_id}:{principal_id}"
+        replay = replay_idempotent(scope, idempotency_key, request_payload)
+        if replay is not None:
+            return replay
+        campaign = campaigns.get(campaign_id)
+        if campaign.revision != expected_revision:
+            raise ValueError(
+                "campaign revision conflict: "
+                f"expected {expected_revision}, found {campaign.revision}"
+            )
+        state = validate_party_state(deepcopy(campaign.state or {}))
+        if bool(dict(state.get("combat") or {}).get("active")):
+            raise CombatEngineError("world effects cannot be edited during active combat")
+        effects = list(state.get("world_effects") or [])
+        if action == "effect_add":
+            raw_effect = deepcopy(required(payload, "effect"))
+            clock = dict(state.get("world_time") or {})
+            raw_effect.setdefault(
+                "created_at_elapsed_minutes", int(clock.get("elapsed_minutes", 0) or 0)
+            )
+            effect = validate_world_effect(raw_effect)
+            if any(item["id"] == effect["id"] for item in effects):
+                raise ValueError("world effect id is already present")
+            if effect["duration"]["period"] in {"minute", "hour", "day"} and not clock:
+                raise ValueError("set the campaign clock before adding a timed world effect")
+            effects.append(effect)
+        else:
+            effect_id = str(required(payload, "effect_id"))
+            effect = next((item for item in effects if item["id"] == effect_id), None)
+            if effect is None:
+                raise ValueError("world effect is not present")
+            if not effect.get("active"):
+                raise ValueError("world effect is already inactive")
+            effect["active"] = False
+            effect["metadata"] = {
+                **dict(effect.get("metadata") or {}),
+                "ended_by": principal_id,
+                "ended_reason": str(payload.get("reason") or "dismissed"),
+            }
+        state["world_effects"] = effects
+        revisions_result = StateMutationService(storage.database).replace(
+            campaign_id,
+            campaign_state=state,
+            expected_campaign_revision=campaign.revision,
+            operation=f"campaign.world_effect.{action.removeprefix('effect_')}",
+            actor=principal_id,
+            branch_id=resolved_branch_id,
+            idempotency_key=idempotency_key,
+        )
+        response = {
+            "status": "committed",
+            "effect": effect,
+            "campaign_revision": mutation_revision(campaign_id),
+            "revisions": [asdict(item) for item in revisions_result or []],
+        }
+        return remember_idempotent(
+            scope,
+            idempotency_key,
+            request_payload,
+            response,
+            campaign_id=campaign_id,
+        )
+
     @mcp.tool()
     def campaign_clock_set(
         campaign_id: str,
@@ -2964,12 +3049,22 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         state = validate_party_state(deepcopy(campaign.state or {}))
         if bool(dict(state.get("combat") or {}).get("active")):
             raise CombatEngineError("campaign clock cannot be set during active combat")
+        requested_elapsed = (day - 1) * 1440 + hour * 60 + minute
+        existing_clock = dict(state.get("world_time") or {})
+        if (
+            existing_clock
+            and int(existing_clock.get("elapsed_minutes", 0) or 0) != requested_elapsed
+        ):
+            raise ValueError(
+                "campaign clock is already set; use clock_advance so timed effects "
+                "stay synchronized"
+            )
         world_time = {
             "schema_version": 1,
             "day": day,
             "hour": hour,
             "minute": minute,
-            "elapsed_minutes": (day - 1) * 1440 + hour * 60 + minute,
+            "elapsed_minutes": requested_elapsed,
             "label": str(label).strip(),
         }
         state["world_time"] = world_time
@@ -3053,6 +3148,16 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "round": {"round": count},
             "encounter": {"encounter": count},
         }[normalized_period]
+        world_advanced: list[str] = []
+        world_expired: list[str] = []
+        for effect_period, amount in effect_steps.items():
+            world_result = advance_world_effect_durations(
+                next_state, period=effect_period, amount=amount
+            )
+            next_state = world_result["state"]
+            world_advanced.extend(world_result["advanced"])
+            world_expired.extend(world_result["expired"])
+        world_state_changed = bool(world_advanced or world_expired)
         updates: list[CharacterStateUpdate] = []
         advanced: dict[str, list[str]] = {}
         expired: dict[str, list[str]] = {}
@@ -3091,10 +3196,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             advanced[character.id] = list(dict.fromkeys(character_advanced))
             expired[character.id] = list(dict.fromkeys(character_expired))
         revisions_result = None
-        if updates or world_time is not None:
+        if updates or world_time is not None or world_state_changed:
             revisions_result = StateMutationService(storage.database).replace(
                 campaign_id,
-                campaign_state=next_state if world_time is not None else None,
+                campaign_state=(
+                    next_state if world_time is not None or world_state_changed else None
+                ),
                 character_updates=updates,
                 expected_campaign_revision=campaign.revision,
                 operation="campaign.effects.advance",
@@ -3104,12 +3211,18 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 rule_receipts=rule_receipts,
             )
         response = {
-            "status": "committed" if updates or world_time is not None else "no_change",
+            "status": (
+                "committed"
+                if updates or world_time is not None or world_state_changed
+                else "no_change"
+            ),
             "period": normalized_period,
             "count": count,
             "world_time": world_time,
             "advanced": advanced,
             "expired": expired,
+            "world_advanced": list(dict.fromkeys(world_advanced)),
+            "world_expired": list(dict.fromkeys(world_expired)),
             "rule_receipts": rule_receipts,
             "ruleset_fingerprint": rule_context.fingerprint,
             "campaign_revision": mutation_revision(campaign_id),
@@ -6950,6 +7063,18 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "label": str(world_time.get("label") or ""),
         }
         next_state["world_time"] = next_world_time
+        world_advanced: list[str] = []
+        world_expired: list[str] = []
+        for effect_period, amount in (
+            ("minute", recovery_hours * 60),
+            ("hour", recovery_hours),
+        ):
+            world_result = advance_world_effect_durations(
+                next_state, period=effect_period, amount=amount
+            )
+            next_state = world_result["state"]
+            world_advanced.extend(world_result["advanced"])
+            world_expired.extend(world_result["expired"])
         rules = effective_rule_context(
             current.campaign_id,
             facts={"actor_id": character_id, "recovery_hours": recovery_hours},
@@ -7033,6 +7158,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "world_time": next_world_time,
             "advanced": advanced,
             "expired": expired,
+            "world_advanced": list(dict.fromkeys(world_advanced)),
+            "world_expired": list(dict.fromkeys(world_expired)),
             "rule_receipts": receipts,
         }
         return remember_idempotent(
@@ -10500,6 +10627,19 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         }
         next_state["world_time"] = next_world_time
 
+        world_advanced: list[str] = []
+        world_expired: list[str] = []
+        world_duration_periods = [("minute", minutes)]
+        if minutes % 60 == 0:
+            world_duration_periods.append(("hour", minutes // 60))
+        for effect_period, amount in world_duration_periods:
+            world_result = advance_world_effect_durations(
+                next_state, period=effect_period, amount=amount
+            )
+            next_state = world_result["state"]
+            world_advanced.extend(world_result["advanced"])
+            world_expired.extend(world_result["expired"])
+
         branch_id = require_current_branch(campaign_id, None)
         request_payload = {
             "operation": "character.spellbook.copy",
@@ -10601,6 +10741,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "world_time": next_world_time,
             "advanced": advanced,
             "expired": expired,
+            "world_advanced": list(dict.fromkeys(world_advanced)),
+            "world_expired": list(dict.fromkeys(world_expired)),
             "rule_receipts": receipts,
         }
         return remember_idempotent(
@@ -12388,13 +12530,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     def campaign_change(
         campaign_id: str,
         payload: dict[str, Any],
-        action: Literal["update", "clock_set", "clock_advance"] = "update",
+        action: Literal[
+            "update", "clock_set", "clock_advance", "effect_add", "effect_remove"
+        ] = "update",
         principal_id: str = "system:local",
         expected_revision: int | None = None,
         branch_id: str | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
-        """Update campaign metadata or manage its branch-local narrative clock."""
+        """Update campaign metadata, its clock, or structured campaign-space effects."""
         data = facade_payload(payload)
         if action == "clock_set":
             result = campaign_clock_set_legacy(
@@ -12413,6 +12557,16 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 campaign_id,
                 required(data, "period"),
                 data.get("count", 1),
+                principal_id,
+                expected_revision,
+                branch_id,
+                idempotency_key,
+            )
+        elif action in {"effect_add", "effect_remove"}:
+            result = campaign_world_effect_change(
+                campaign_id,
+                action,
+                data,
                 principal_id,
                 expected_revision,
                 branch_id,
