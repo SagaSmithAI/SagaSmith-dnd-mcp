@@ -8414,29 +8414,29 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         replay = replay_idempotent(scope, idempotency_key, request_payload)
         if replay is not None:
             return replay
-        created = events.add(
-            campaign_id,
-            summary=summary,
-            event_type=event_type,
-            payload=payload,
-            audience_scope=audience_scope,
-            branch_id=branch_id,
-        )
-        knowledge_ids: list[str] = []
         if known_by_actor_ids:
-            for actor_id in known_by_actor_ids:
-                knowledge_ids.append(
-                    knowledge.add(
-                        campaign_id,
-                        actor_id=actor_id,
-                        knowledge_key=knowledge_key,
-                        proposition=knowledge_proposition,
-                        source_event_id=created.id,
-                        cause="witnessed",
-                        disclosure_scope=knowledge_disclosure_scope,
-                        branch_id=branch_id,
-                    ).id
-                )
+            created, knowledge_ids = events.add_with_actor_knowledge(
+                campaign_id,
+                summary=summary,
+                actor_ids=known_by_actor_ids,
+                knowledge_key=knowledge_key,
+                proposition=knowledge_proposition,
+                event_type=event_type,
+                payload=payload,
+                audience_scope=audience_scope,
+                disclosure_scope=knowledge_disclosure_scope,
+                branch_id=branch_id,
+            )
+        else:
+            created = events.add(
+                campaign_id,
+                summary=summary,
+                event_type=event_type,
+                payload=payload,
+                audience_scope=audience_scope,
+                branch_id=branch_id,
+            )
+            knowledge_ids = []
         response = {**asdict(created), "actor_knowledge_ids": knowledge_ids}
         return remember_idempotent(
             scope,

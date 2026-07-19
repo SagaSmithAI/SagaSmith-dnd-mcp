@@ -93,6 +93,38 @@ def test_actor_scoped_event_is_visible_only_to_witnesses(tmp_path: Path) -> None
         assert hidden["events"] == []
         assert hidden["actor_knowledge"] == []
 
+        before = await _call(
+            server,
+            "event_list",
+            {"campaign_id": campaign["id"]},
+        )
+        with pytest.raises(Exception, match="knowledge key already exists"):
+            await _call(
+                server,
+                "event_add",
+                {
+                    "campaign_id": campaign["id"],
+                    "summary": "A duplicate witnessed fact must roll back.",
+                    "audience_scope": "party",
+                    "known_by_actor_ids": [unaware["id"], witness["id"]],
+                    "knowledge_key": "masked-visitor-departed",
+                    "knowledge_proposition": "A conflicting departure account.",
+                    "idempotency_key": "duplicate-event",
+                },
+            )
+        after = await _call(
+            server,
+            "event_list",
+            {"campaign_id": campaign["id"]},
+        )
+        assert [item["id"] for item in after] == [item["id"] for item in before]
+        unaware_knowledge = await _call(
+            server,
+            "actor_knowledge_list",
+            {"campaign_id": campaign["id"], "actor_id": unaware["id"]},
+        )
+        assert unaware_knowledge == []
+
         with pytest.raises(Exception, match="require known_by_actor_ids"):
             await _call(
                 server,
