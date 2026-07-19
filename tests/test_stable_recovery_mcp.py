@@ -167,6 +167,61 @@ def test_stable_recovery_rejects_a_healthy_actor(tmp_path: Path) -> None:
     asyncio.run(exercise())
 
 
+def test_stable_recovery_validates_clock_before_rolling(tmp_path: Path, monkeypatch) -> None:
+    def unexpected_roll(_expression: str):
+        raise AssertionError("RNG must not be consumed before clock validation")
+
+    monkeypatch.setattr(server_module, "roll", unexpected_roll)
+    config = McpConfig(
+        home=tmp_path / "home",
+        database_url=None,
+        chroma_url=None,
+        chroma_path_override=None,
+        dnd_skills_dir=tmp_path / "dnd",
+        modulegen_skills_dir=tmp_path / "modulegen",
+        auto_seed_rules=False,
+    )
+
+    async def exercise() -> None:
+        server = create_server(config)
+        campaign = await _call(
+            server,
+            "campaign_create",
+            {"name": "Clock first", "edition": "2014", "idempotency_key": "campaign"},
+        )
+        sheet = default_character_sheet()
+        sheet["combat"]["hp"] = {"value": 0, "max": 12, "temp": 0}
+        sheet["conditions"] = ["stable", "unconscious"]
+        actor = await _call(
+            server,
+            "character_create_from",
+            {
+                "mode": "direct",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "name": "Stable without clock",
+                    "sheet": sheet,
+                },
+                "idempotency_key": "actor",
+            },
+        )
+
+        with pytest.raises(Exception, match="set the campaign clock"):
+            await _call(
+                server,
+                "character_state_change",
+                {
+                    "character_id": actor["id"],
+                    "action": "stable_recovery",
+                    "payload": {},
+                    "expected_revision": actor["revision"],
+                    "idempotency_key": "recover",
+                },
+            )
+
+    asyncio.run(exercise())
+
+
 def test_recovered_actor_can_stand_through_restricted_state_action(tmp_path: Path) -> None:
     config = McpConfig(
         home=tmp_path / "home",

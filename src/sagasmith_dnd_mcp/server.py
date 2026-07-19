@@ -7082,14 +7082,16 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         replay = replay_idempotent(scope, idempotency_key, request_payload)
         if replay is not None:
             return replay
-        recovery_roll = asdict(roll("1d4"))
-        recovery_hours = int(recovery_roll["total"])
-        recover_stable_creature(current.sheet, recovery_hours=recovery_hours)
+        # Validate the actor before touching RNG; the actual rolled duration is
+        # applied to a fresh sheet inside the atomic mutation below.
+        recover_stable_creature(current.sheet, recovery_hours=1)
         campaign = campaigns.get(current.campaign_id)
         next_state = validate_party_state(deepcopy(campaign.state or {}))
         world_time = dict(next_state.get("world_time") or {})
         if not world_time:
             raise ValueError("set the campaign clock before resolving stable recovery")
+        recovery_roll = asdict(roll("1d4"))
+        recovery_hours = int(recovery_roll["total"])
         elapsed = int(world_time.get("elapsed_minutes", 0) or 0) + recovery_hours * 60
         next_world_time = {
             "schema_version": 1,
@@ -7933,6 +7935,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             raise ValueError(
                 "expected campaign/character revisions and idempotency_key are required"
             )
+        campaign = campaigns.get(campaign_id)
+        character = characters.get(character_id)
+        if character.campaign_id != campaign_id:
+            raise ValueError("character must belong to the campaign")
+        access.require_actor(campaign_id, character_id, principal_id, control=True)
+        branch_id = require_current_branch(campaign_id, None)
         payload = {
             "campaign_id": campaign_id,
             "character_id": character_id,
@@ -7941,16 +7949,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "quantity": quantity,
             "expected_campaign_revision": expected_campaign_revision,
             "expected_character_revision": expected_character_revision,
+            "branch_id": branch_id,
         }
-        scope = f"party-inventory:{campaign_id}:{principal_id}"
+        scope = f"party-inventory:{campaign_id}:{branch_id}:{principal_id}"
         replay = replay_idempotent(scope, idempotency_key, payload)
         if replay is not None:
             return replay
-        campaign = campaigns.get(campaign_id)
-        character = characters.get(character_id)
-        if character.campaign_id != campaign_id:
-            raise ValueError("character must belong to the campaign")
-        access.require_actor(campaign_id, character_id, principal_id, control=True)
         shared = party_sheet(campaign.state)
         if direction == "deposit":
             character_sheet, moved = remove_inventory_item(character.sheet, item_id, quantity)
@@ -7971,7 +7975,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 )
             ],
             operation=f"party.inventory.{direction}",
-            actor="mcp",
+            actor=principal_id,
+            branch_id=branch_id,
             expected_campaign_revision=expected_campaign_revision,
             idempotency_key=idempotency_key,
         )
@@ -8059,6 +8064,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             raise ValueError(
                 "expected campaign/character revisions and idempotency_key are required"
             )
+        campaign = campaigns.get(campaign_id)
+        character = characters.get(character_id)
+        if character.campaign_id != campaign_id:
+            raise ValueError("character must belong to the campaign")
+        access.require_actor(campaign_id, character_id, principal_id, control=True)
+        branch_id = require_current_branch(campaign_id, None)
         payload = {
             "campaign_id": campaign_id,
             "character_id": character_id,
@@ -8067,16 +8078,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "direction": direction,
             "expected_campaign_revision": expected_campaign_revision,
             "expected_character_revision": expected_character_revision,
+            "branch_id": branch_id,
         }
-        scope = f"party-wallet:{campaign_id}:{principal_id}"
+        scope = f"party-wallet:{campaign_id}:{branch_id}:{principal_id}"
         replay = replay_idempotent(scope, idempotency_key, payload)
         if replay is not None:
             return replay
-        campaign = campaigns.get(campaign_id)
-        character = characters.get(character_id)
-        if character.campaign_id != campaign_id:
-            raise ValueError("character must belong to the campaign")
-        access.require_actor(campaign_id, character_id, principal_id, control=True)
         if campaign.revision != expected_campaign_revision:
             raise ValueError(f"campaign revision conflict: {campaign_id}")
         shared = party_sheet(campaign.state)
@@ -8097,7 +8104,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 )
             ],
             operation=f"party.wallet.{direction}",
-            actor="mcp",
+            actor=principal_id,
+            branch_id=branch_id,
             expected_campaign_revision=expected_campaign_revision,
             idempotency_key=idempotency_key,
         )
