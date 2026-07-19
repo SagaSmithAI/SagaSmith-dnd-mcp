@@ -5768,10 +5768,29 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             )
         target = combat_actor_snapshot(target_id)
         existing_encounter = dict(campaign.state or {}).get("combat")
+        target_uses_death_saves = target.get("character_type") == "pc"
+        ruleset = str(target["sheet"].get("edition") or "2014")
         if isinstance(existing_encounter, dict) and existing_encounter.get("active", False):
             require_no_blocking_pending(existing_encounter)
+            ruleset = str(existing_encounter.get("ruleset") or ruleset)
+            target_combatant = next(
+                (
+                    item
+                    for item in existing_encounter.get("combatants", [])
+                    if str(item.get("actor_id") or "") == target_id
+                ),
+                None,
+            )
+            if target_combatant is None:
+                raise CombatEngineError("damage target is not a combatant")
+            target_uses_death_saves = bool(target_combatant.get("death_saves", False))
         applied = apply_damage_parts_to_sheet(
-            target["sheet"], parts, source=principal_id, critical=critical
+            target["sheet"],
+            parts,
+            source=principal_id,
+            critical=critical,
+            ruleset=ruleset,
+            death_saves=target_uses_death_saves,
         )
         applied_result = {key: value for key, value in applied.items() if key != "sheet"}
         damage_receipts = core_receipts(
