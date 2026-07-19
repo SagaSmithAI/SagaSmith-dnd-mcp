@@ -1004,6 +1004,105 @@ def test_legacy_campaign_without_core_lock_fails_closed(tmp_path: Path) -> None:
     asyncio.run(exercise())
 
 
+def test_checkpointed_core_relock_preserves_profile_and_adopts_current_runtime(
+    tmp_path: Path,
+) -> None:
+    config = McpConfig(
+        home=tmp_path / "home",
+        database_url=None,
+        chroma_url=None,
+        chroma_path_override=None,
+        dnd_skills_dir=tmp_path / "dnd",
+        modulegen_skills_dir=tmp_path / "modulegen",
+    )
+
+    async def call(server, name: str, arguments: dict):
+        _, result = await server.call_tool(name, arguments)
+        return result.get("result", result) if isinstance(result, dict) else result
+
+    async def exercise() -> None:
+        server = create_server(config)
+        campaign = await call(
+            server,
+            "campaign_create",
+            {"name": "Checkpointed relock", "idempotency_key": "relock-campaign"},
+        )
+        database = Database(sqlite_database_url(config.database_path))
+        try:
+            RuleProfileService(database).set(
+                campaign["id"],
+                edition="2014",
+                locale="zh-CN",
+                publications=["srd-5.1"],
+                options={
+                    "house_option": "preserved",
+                    "_core_rule_pack_lock": {
+                        "id": "dnd5e.core.2014",
+                        "version": "0.9.0",
+                        "fingerprint": "old-core-fingerprint",
+                    },
+                },
+            )
+        finally:
+            database.dispose()
+        changed = await call(server, "campaign_get", {"campaign_id": campaign["id"]})
+        snapshot = await call(
+            server,
+            "snapshot_create",
+            {
+                "campaign_id": campaign["id"],
+                "label": "Before Core relock",
+                "expected_revision": changed["revision"],
+                "expected_head_snapshot_id": "",
+                "idempotency_key": "before-relock",
+            },
+        )
+        branch = next(
+            item
+            for item in await call(
+                server, "branch_list", {"campaign_id": campaign["id"]}
+            )
+            if item["is_current"]
+        )
+        relocked = await call(
+            server,
+            "campaign_core_relock",
+            {
+                "campaign_id": campaign["id"],
+                "expected_core_fingerprint": "old-core-fingerprint",
+                "reason": "Reviewed runtime upgrade during a checkpointed encounter.",
+                "branch_id": branch["id"],
+                "expected_revision": changed["revision"],
+                "expected_head_snapshot_id": snapshot["id"],
+                "idempotency_key": "adopt-current-core",
+            },
+        )
+        assert relocked["previous_core_pack"]["version"] == "0.9.0"
+        assert relocked["core_pack"]["id"] == "dnd5e.core.2014"
+        assert relocked["core_pack"]["version"] != "0.9.0"
+        assert relocked["core_pack"]["fingerprint"] != "old-core-fingerprint"
+        assert relocked["profile"]["locale"] == "zh-CN"
+        assert list(relocked["profile"]["publications"]) == ["srd-5.1"]
+        assert relocked["profile"]["options"]["house_option"] == "preserved"
+        assert relocked["checkpoint_snapshot_id"] == snapshot["id"]
+        replayed = await call(
+            server,
+            "campaign_core_relock",
+            {
+                "campaign_id": campaign["id"],
+                "expected_core_fingerprint": "old-core-fingerprint",
+                "reason": "Reviewed runtime upgrade during a checkpointed encounter.",
+                "branch_id": branch["id"],
+                "expected_revision": changed["revision"],
+                "expected_head_snapshot_id": snapshot["id"],
+                "idempotency_key": "adopt-current-core",
+            },
+        )
+        assert replayed == relocked
+
+    asyncio.run(exercise())
+
+
 def test_snapshot_and_branch_checkout_reject_unavailable_core_lock(
     tmp_path: Path,
 ) -> None:

@@ -10187,6 +10187,80 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
 
     @mcp.tool()
+    def campaign_core_relock(
+        campaign_id: str,
+        expected_core_fingerprint: str,
+        reason: str,
+        principal_id: str = "system:local",
+        branch_id: str | None = None,
+        expected_revision: int | None = None,
+        expected_head_snapshot_id: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Explicitly adopt the current built-in Core after a checkpointed runtime upgrade."""
+
+        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        require_write_contract(expected_revision, idempotency_key)
+        if not expected_head_snapshot_id:
+            raise ValueError("expected_head_snapshot_id is required for a Core relock")
+        normalized_reason = str(reason or "").strip()
+        if not normalized_reason:
+            raise ValueError("reason is required for a Core relock")
+        if len(normalized_reason) > 500:
+            raise ValueError("Core relock reason exceeds 500 characters")
+        resolved_branch_id = require_current_branch(campaign_id, branch_id)
+        payload = {
+            "expected_core_fingerprint": expected_core_fingerprint,
+            "reason": normalized_reason,
+            "branch_id": resolved_branch_id,
+            "expected_head_snapshot_id": expected_head_snapshot_id,
+        }
+        scope = f"campaign-core-relock:{campaign_id}:{resolved_branch_id}:{principal_id}"
+        replay = replay_idempotent(scope, idempotency_key, payload)
+        if replay is not None:
+            return replay
+        branch = branches.current(campaign_id)
+        if branch.id != resolved_branch_id or branch.head_snapshot_id != expected_head_snapshot_id:
+            raise ValueError("current branch head changed before Core relock")
+        profile = rule_profiles.get(campaign_id)
+        if profile is None:
+            raise RulePackError("campaign has no rule profile to relock")
+        options = dict(profile.options or {})
+        previous = dict(options.get("_core_rule_pack_lock") or {})
+        if previous.get("fingerprint") != expected_core_fingerprint:
+            raise ValueError("expected_core_fingerprint does not match the campaign lock")
+        latest = get_core_rule_pack(profile.edition)
+        user_options = {
+            key: value for key, value in options.items() if key != "_core_rule_pack_lock"
+        }
+        updated = rule_profiles.set(
+            campaign_id,
+            edition=profile.edition,
+            locale=profile.locale,
+            publications=list(profile.publications),
+            options=profile_options_with_core_lock(profile.edition, user_options),
+            expected_campaign_revision=expected_revision,
+        )
+        response = {
+            "status": "relocked",
+            "reason": normalized_reason,
+            "previous_core_pack": previous,
+            "core_pack": {
+                "id": latest.id,
+                "version": latest.version,
+                "edition": latest.edition,
+                "fingerprint": latest.fingerprint,
+            },
+            "profile": asdict(updated),
+            "branch_id": resolved_branch_id,
+            "checkpoint_snapshot_id": expected_head_snapshot_id,
+            "campaign_revision": mutation_revision(campaign_id),
+        }
+        return remember_idempotent(
+            scope, idempotency_key, payload, response, campaign_id=campaign_id
+        )
+
+    @mcp.tool()
     def campaign_rule_pack_set(
         campaign_id: str,
         pack_id: str,

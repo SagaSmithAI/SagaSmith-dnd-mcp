@@ -78,6 +78,8 @@ def test_phase_groups_separate_player_reads_from_dm_control() -> None:
     assert "combat_end" not in GROUP_BY_ID["combat.turn"].tools
     assert GROUP_BY_ID["combat.control"].roles == frozenset({"owner", "dm"})
     assert GROUP_BY_ID["combat.save"].roles == frozenset({"owner", "dm"})
+    assert GROUP_BY_ID["combat.maintenance"].roles == frozenset({"owner", "dm"})
+    assert GROUP_BY_ID["combat.maintenance"].tools == frozenset({"campaign_core_relock"})
     assert GROUP_BY_ID["combat.map"].roles == frozenset({"owner", "dm"})
 
 

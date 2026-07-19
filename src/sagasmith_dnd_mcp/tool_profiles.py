@@ -141,6 +141,7 @@ TOOL_GROUPS = (
         "rule_search",
         "rule_expand",
         "campaign_rules",
+        "campaign_core_relock",
         roles=("owner", "dm"),
     ),
     _group(
@@ -216,6 +217,7 @@ TOOL_GROUPS = (
         "actor_knowledge_change",
         "snapshot_create",
         "snapshot_query",
+        "campaign_core_relock",
         roles=("owner", "dm"),
     ),
     _group(
@@ -316,6 +318,15 @@ TOOL_GROUPS = (
         "write",
         "snapshot_create",
         "snapshot_query",
+        roles=("owner", "dm"),
+    ),
+    _group(
+        "combat.maintenance",
+        PROFILE_COMBAT,
+        "Combat rules maintenance",
+        "Relock only the built-in Core after an explicit checkpointed runtime upgrade.",
+        "admin",
+        "campaign_core_relock",
         roles=("owner", "dm"),
     ),
     _group(
