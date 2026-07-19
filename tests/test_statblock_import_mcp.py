@@ -143,6 +143,45 @@ def test_imported_rule_source_creates_a_source_bound_combat_actor(tmp_path: Path
         assert club["damage_expression"] == "1d4"
         assert "rule-source:srd/commoner" in actor["notes"]["profile"]["dm_notes"]
 
+        variant = await _call(
+            server,
+            "character_create_from",
+            {
+                "mode": "statblock",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "source_id": ingested["source_id"],
+                    "name": "Source-bound Variant",
+                    "character_type": "npc",
+                    "variant": {
+                        "source_ref": "module-scene:d12",
+                        "current_hit_points": 1,
+                        "armor_class": 12,
+                        "languages": ["Common", "Elvish"],
+                        "action_overrides": {
+                            "club": {
+                                "id": "gauntlet-slam",
+                                "name": "Gauntlet Slam",
+                                "damage_type": "force",
+                            }
+                        },
+                    },
+                },
+                "idempotency_key": "actor-source-bound-variant",
+            },
+        )
+        variant_actor = variant["character"]
+        assert variant_actor["sheet"]["combat"]["hp"] == {"value": 1, "max": 4, "temp": 0}
+        assert variant_actor["derived"]["armor_class"] == 12
+        assert variant_actor["sheet"]["traits"]["languages"] == ["Common", "Elvish"]
+        assert variant_actor["derived"]["inventory"]["weapon_attacks"][0]["item_id"] == (
+            "gauntlet-slam"
+        )
+        assert "Variant source: module-scene:d12" in (
+            variant_actor["notes"]["profile"]["dm_notes"]
+        )
+        assert variant["variant"]["source_ref"] == "module-scene:d12"
+
     asyncio.run(exercise())
 
 

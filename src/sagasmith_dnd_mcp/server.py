@@ -142,7 +142,7 @@ from sagasmith_dnd.spells import (
     validate_magic_missile_allocations,
     validate_spell_grant,
 )
-from sagasmith_dnd.statblocks import parse_2014_statblock
+from sagasmith_dnd.statblocks import apply_statblock_variant, parse_2014_statblock
 from sagasmith_dnd.system import DND5E
 
 from sagasmith_dnd_mcp.config import McpConfig
@@ -12012,6 +12012,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 rule_refs=[f"module-scene:{review['scene_id']}", f"module-review:{review_id}"],
                 name=str(data.get("name") or "").strip() or None,
             )
+            variant = data.get("variant")
+            sheet = (
+                apply_statblock_variant(parsed.sheet, variant)
+                if variant is not None
+                else parsed.sheet
+            )
             character_type = str(data.get("character_type") or "monster")
             if character_type not in {"npc", "monster"}:
                 raise ValueError("module statblock import creates only npc or monster actors")
@@ -12027,6 +12033,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             )
             if parsed.warnings:
                 provenance += " Manual rulings: " + "; ".join(parsed.warnings) + "."
+            if variant is not None:
+                changed_fields = ", ".join(sorted(set(variant) - {"source_ref"})) or "none"
+                provenance += (
+                    f" Variant source: {variant['source_ref']}; applied fields: "
+                    f"{changed_fields}."
+                )
             existing_dm_notes = str(profile.get("dm_notes") or "").strip()
             profile["dm_notes"] = "\n".join(
                 item for item in (existing_dm_notes, provenance) if item
@@ -12037,7 +12049,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 character_type,
                 data.get("player_name"),
                 str(data.get("summary") or parsed.summary),
-                parsed.sheet,
+                sheet,
                 notes,
                 principal_id,
                 idempotency_key,
@@ -12051,6 +12063,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "warnings": list(parsed.warnings),
                     "settlement": "automatic" if not parsed.warnings else "mixed",
                 },
+                "variant": deepcopy(variant) if variant is not None else None,
             }
         else:
             campaign_id = str(required(data, "campaign_id"))
@@ -12114,6 +12127,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 rule_refs=selected_chunk_ids,
                 name=str(data.get("name") or source.get("title") or "").strip() or None,
             )
+            variant = data.get("variant")
+            sheet = (
+                apply_statblock_variant(parsed.sheet, variant)
+                if variant is not None
+                else parsed.sheet
+            )
             character_type = str(data.get("character_type") or "npc")
             if character_type not in {"npc", "monster"}:
                 raise ValueError("statblock import creates only npc or monster actors")
@@ -12127,6 +12146,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             )
             if parsed.warnings:
                 provenance += " Manual rulings: " + "; ".join(parsed.warnings) + "."
+            if variant is not None:
+                changed_fields = ", ".join(sorted(set(variant) - {"source_ref"})) or "none"
+                provenance += (
+                    f" Variant source: {variant['source_ref']}; applied fields: "
+                    f"{changed_fields}."
+                )
             existing_dm_notes = str(profile.get("dm_notes") or "").strip()
             profile["dm_notes"] = "\n".join(
                 item for item in (existing_dm_notes, provenance) if item
@@ -12137,7 +12162,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 character_type,
                 data.get("player_name"),
                 str(data.get("summary") or parsed.summary),
-                parsed.sheet,
+                sheet,
                 notes,
                 principal_id,
                 idempotency_key,
@@ -12158,6 +12183,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "warnings": list(parsed.warnings),
                     "settlement": "automatic" if not parsed.warnings else "mixed",
                 },
+                "variant": deepcopy(variant) if variant is not None else None,
             }
         return facade_result(mode, result)
 
