@@ -7238,6 +7238,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         replay = replay_idempotent(scope, idempotency_key, request_payload)
         if replay is not None:
             return replay
+        if current.revision != expected_revision:
+            raise ValueError(f"character revision conflict: {character_id}")
         # Validate the actor before touching RNG; the actual rolled duration is
         # applied to a fresh sheet inside the atomic mutation below.
         recover_stable_creature(current.sheet, recovery_hours=1)
