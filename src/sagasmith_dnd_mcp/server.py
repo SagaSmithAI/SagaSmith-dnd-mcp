@@ -88,6 +88,7 @@ from sagasmith_dnd.combat_engine import (
     resolve_readied_action_window,
     resolve_readied_spell_window,
     roll_attack_action,
+    settle_core_activity_effect,
     spend_movement,
     stabilize_sheet,
     stand_up,
@@ -5316,14 +5317,16 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 f"expected {expected_revision}, found {campaign.revision}"
             )
         current = characters.get(actor_id)
+        rule_context = effective_rule_context(
+            campaign_id,
+            facts={"actor_id": actor_id, "activity_id": activity_id},
+            branch_id=resolved_branch_id,
+        )
         try:
             applied = consume_activity(
                 current.sheet,
                 activity_id=activity_id,
-                rules=effective_rule_context(
-                    campaign_id,
-                    facts={"actor_id": actor_id, "activity_id": activity_id},
-                ),
+                rules=rule_context,
             )
         except ActivityError as exc:
             raise CombatEngineError(str(exc)) from exc
@@ -5357,13 +5360,36 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 raise CombatEngineError("resolve the earlier pending save or choice first")
         else:
             require_no_blocking_pending(encounter)
-        if activation_type == "special" and not is_dm(campaign_id, principal_id):
+        engine_owned_special = (
+            activity_id == "dnd5e.content.srd2014.feature.fighter-action-surge"
+        )
+        if (
+            activation_type == "special"
+            and not engine_owned_special
+            and not is_dm(campaign_id, principal_id)
+        ):
             raise CombatEngineError("special activity triggers require a DM resolution")
         next_encounter = pay_activity_activation(
             encounter,
             actor_id_value=actor_id,
             activation_type=activation_type,
         )
+        next_encounter, core_effect = settle_core_activity_effect(
+            next_encounter,
+            actor_id_value=actor_id,
+            activity_id=activity_id,
+        )
+        if core_effect is not None:
+            applied["requires_ruling"] = False
+            applied["core_effect"] = core_effect
+            applied["rule_receipts"] = [
+                *list(applied.get("rule_receipts") or []),
+                *core_receipts(
+                    rule_context,
+                    ["dnd5e.core.activity.action_surge"],
+                    "combat.activity.action_surge",
+                ),
+            ]
         if activation_type == "reaction":
             assert choice_id is not None
             next_encounter = resolve_choice_window(

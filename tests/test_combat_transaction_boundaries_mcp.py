@@ -16,6 +16,11 @@ async def _call(server, name: str, arguments: dict):
     return result.get("result", result) if isinstance(result, dict) else result
 
 
+async def _call_raw(server, name: str, arguments: dict):
+    _, result = await server.call_tool(name, arguments)
+    return result
+
+
 def _config(tmp_path: Path) -> McpConfig:
     return McpConfig(
         home=tmp_path / "home",
@@ -126,3 +131,81 @@ def test_invalid_branch_is_rejected_before_noncombat_check_rolls(
 
     asyncio.run(exercise())
     assert rolled is False
+
+
+def test_action_surge_is_settled_without_a_manual_ruling(tmp_path: Path) -> None:
+    async def exercise() -> None:
+        server = create_server(_config(tmp_path))
+        campaign = await _call(
+            server,
+            "campaign_create",
+            {"name": "Action Surge", "edition": "2014", "idempotency_key": "campaign"},
+        )
+        sheet = default_character_sheet()
+        sheet["content"]["features"] = [
+            {
+                "id": "dnd5e.content.srd2014.feature.fighter-action-surge",
+                "name": "Action Surge",
+                "source_key": "Fighter",
+                "description": "Take one additional action on your turn.",
+                "uses": {
+                    "label": "Action Surge",
+                    "value": 1,
+                    "max": 1,
+                    "recovers_on": "short_rest",
+                },
+                "resource_key": "",
+                "activation": {"type": "special", "cost": 0, "trigger": ""},
+                "scaling": [],
+                "choices": {"outcome": "take one additional action on this turn"},
+            }
+        ]
+        actor = await _call(
+            server,
+            "character_create",
+            {
+                "campaign_id": campaign["id"],
+                "name": "Fighter",
+                "sheet": sheet,
+                "idempotency_key": "actor",
+            },
+        )
+        campaign = await _call(server, "campaign_get", {"campaign_id": campaign["id"]})
+        started = await _call_raw(
+            server,
+            "combat_start",
+            {
+                "campaign_id": campaign["id"],
+                "participant_ids": [actor["id"]],
+                "participant_config": [{"actor_id": actor["id"], "initiative": 10}],
+                "expected_revision": campaign["revision"],
+                "idempotency_key": "start",
+            },
+        )
+        surged = await _call_raw(
+            server,
+            "combat_use_activity",
+            {
+                "campaign_id": campaign["id"],
+                "actor_id": actor["id"],
+                "activity_id": "dnd5e.content.srd2014.feature.fighter-action-surge",
+                "expected_revision": started["campaign_revision"],
+                "idempotency_key": "surge",
+            },
+        )
+
+        assert surged["status"] == "committed"
+        assert surged["result"]["requires_ruling"] is False
+        assert surged["result"]["core_effect"]["extra_actions_granted"] == 1
+        current = surged["combat"]["combatants"][surged["combat"]["turn_index"]]
+        assert current["turn_budget"]["extra_action"] == 1
+        assert any(
+            item["mechanic_id"] == "dnd5e.core.activity.action_surge"
+            for item in surged["result"]["rule_receipts"]
+        )
+        actor_after = await _call(
+            server, "character_get", {"character_id": actor["id"]}
+        )
+        assert actor_after["sheet"]["content"]["features"][0]["uses"]["value"] == 0
+
+    asyncio.run(exercise())
