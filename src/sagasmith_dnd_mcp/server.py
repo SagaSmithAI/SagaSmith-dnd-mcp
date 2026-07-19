@@ -2223,9 +2223,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "scope_id": scope_id,
             "battle_map": battle_map,
             "ruleset": ruleset,
-            "branch_id": branch_id,
+            "branch_id": resolved_branch_id,
         }
-        scope = f"combat-start:{campaign_id}:{principal_id}"
+        scope = f"combat-start:{campaign_id}:{resolved_branch_id}:{principal_id}"
         replay = replay_idempotent(scope, idempotency_key, payload)
         if replay is not None:
             return combat_response(campaign_id, principal_id, replay)
@@ -2576,9 +2576,31 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         if combatant is None:
             raise CombatEngineError("actor is not a combatant")
+        actions = available_actions(encounter, actor_id)
+        actor = combat_actor_snapshot(actor_id)
+        hit_points = int(dict(actor.get("derived", {}).get("hit_points") or {}).get("value", 0))
+        conditions = {
+            str(item).casefold()
+            for item in actor.get("sheet", {}).get("conditions", [])
+        }
+        current = current_combatant(encounter)
+        death_save_used = bool(
+            dict(combatant.get("turn_flags") or {}).get("death_save_used")
+        )
+        if (
+            current is not None
+            and current.get("actor_id") == actor_id
+            and bool(combatant.get("death_saves", False))
+            and hit_points == 0
+        ):
+            actions = (
+                ["death_save"]
+                if not conditions & {"dead", "stable"} and not death_save_used
+                else []
+            )
         return {
             "actor_id": actor_id,
-            "actions": available_actions(encounter, actor_id),
+            "actions": actions,
             "turn_budget": combatant.get("turn_budget", {}),
         }
 
@@ -2655,9 +2677,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "actor_id": actor_id,
             "target_id": target_id,
             "action": action_payload,
-            "branch_id": branch_id,
+            "branch_id": resolved_branch_id,
         }
-        scope = f"combat-attack:{campaign_id}:{principal_id}"
+        scope = f"combat-attack:{campaign_id}:{resolved_branch_id}:{principal_id}"
         replay = replay_idempotent(scope, idempotency_key, payload)
         if replay is not None:
             return combat_response(campaign_id, principal_id, replay)
@@ -5415,6 +5437,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
         require_campaign_actor(campaign_id, actor_id)
         require_write_contract(expected_revision, idempotency_key)
+        resolved_branch_id = require_current_branch(campaign_id, branch_id)
         settlement_facts = checked_rule_facts(rule_facts)
         payload = {
             "actor_id": actor_id,
@@ -5426,9 +5449,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "advantage": advantage,
             "disadvantage": disadvantage,
             "rule_facts": settlement_facts,
-            "branch_id": branch_id,
+            "branch_id": resolved_branch_id,
         }
-        scope = f"character-check:{campaign_id}:{principal_id}"
+        scope = f"character-check:{campaign_id}:{resolved_branch_id}:{principal_id}"
         replay = replay_idempotent(scope, idempotency_key, payload)
         if replay is not None:
             return replay
@@ -5458,7 +5481,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "ability": ability,
                     "dc": dc,
                 },
-                branch_id=branch_id,
+                branch_id=resolved_branch_id,
             ),
         )
         next_state = dict(campaign.state or {})
@@ -5472,7 +5495,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             expected_campaign_revision=campaign.revision,
             operation=f"character.{kind}",
             actor=principal_id,
-            branch_id=require_current_branch(campaign_id, branch_id),
+            branch_id=resolved_branch_id,
             idempotency_key=idempotency_key,
             rule_receipts=list(result.get("rule_receipts") or []),
         )
@@ -5508,6 +5531,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         """Resolve a check/save/death-save or an atomic Medicine stabilization."""
         access.require_actor(campaign_id, actor_id, principal_id, control=True)
         require_write_contract(expected_revision, idempotency_key)
+        resolved_branch_id = require_current_branch(campaign_id, branch_id)
         settlement_facts = checked_rule_facts(rule_facts)
         if not is_dm(campaign_id, principal_id):
             if kind != "death_save":
@@ -5562,9 +5586,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "advantage": advantage,
             "disadvantage": disadvantage,
             "rule_facts": settlement_facts,
-            "branch_id": branch_id,
+            "branch_id": resolved_branch_id,
         }
-        scope = f"combat-check:{campaign_id}:{principal_id}"
+        scope = f"combat-check:{campaign_id}:{resolved_branch_id}:{principal_id}"
         replay = replay_idempotent(scope, idempotency_key, payload)
         if replay is not None:
             return combat_response(campaign_id, principal_id, replay)
@@ -5677,6 +5701,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "ability": "wisdom",
                     "dc": 10,
                 },
+                branch_id=resolved_branch_id,
             )
             check = resolve_actor_check(
                 actor,
@@ -5767,6 +5792,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         "ability": ability,
                         "dc": dc,
                     },
+                    branch_id=resolved_branch_id,
                 ),
             )
             if derived_skill:
@@ -5815,7 +5841,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             expected_campaign_revision=campaign.revision,
             operation=f"combat.{kind}",
             actor=principal_id,
-            branch_id=require_current_branch(campaign_id, branch_id),
+            branch_id=resolved_branch_id,
             idempotency_key=idempotency_key,
             rule_receipts=list(result.get("rule_receipts") or []),
         )
@@ -5846,13 +5872,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         """Resolve a pending concentration save and deactivate effects only on failure."""
         access.require_actor(campaign_id, target_id, principal_id, control=True)
         require_write_contract(expected_revision, idempotency_key)
+        resolved_branch_id = require_current_branch(campaign_id, branch_id)
         payload = {
             "target_id": target_id,
             "dc": dc,
             "effect_ids": list(effect_ids),
-            "branch_id": branch_id,
+            "branch_id": resolved_branch_id,
         }
-        scope = f"combat-concentration:{campaign_id}:{principal_id}"
+        scope = f"combat-concentration:{campaign_id}:{resolved_branch_id}:{principal_id}"
         replay = replay_idempotent(scope, idempotency_key, payload)
         if replay is not None:
             return combat_response(campaign_id, principal_id, replay)
@@ -5895,6 +5922,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "ability": "constitution",
                     "dc": dc,
                 },
+                branch_id=resolved_branch_id,
             ),
         )
         updated_sheet = apply_concentration_result(
@@ -5940,7 +5968,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             expected_campaign_revision=campaign.revision,
             operation="combat.concentration.check",
             actor=principal_id,
-            branch_id=require_current_branch(campaign_id, branch_id),
+            branch_id=resolved_branch_id,
             idempotency_key=idempotency_key,
         )
         response = {
@@ -5972,6 +6000,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         """Apply DM-approved damage parts; automatic trait and HP settlement is deterministic."""
         access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
         require_write_contract(expected_revision, idempotency_key)
+        resolved_branch_id = require_current_branch(campaign_id, branch_id)
         require_campaign_actor(campaign_id, target_id)
         payload = {
             "target_id": target_id,
@@ -5979,9 +6008,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "critical": critical,
             "knock_out": knock_out,
             "melee": melee,
-            "branch_id": branch_id,
+            "branch_id": resolved_branch_id,
         }
-        scope = f"combat-damage:{campaign_id}:{principal_id}"
+        scope = f"combat-damage:{campaign_id}:{resolved_branch_id}:{principal_id}"
         replay = replay_idempotent(scope, idempotency_key, payload)
         if replay is not None:
             return combat_response(campaign_id, principal_id, replay)
@@ -6014,7 +6043,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         applied_result = {key: value for key, value in applied.items() if key != "sheet"}
         damage_receipts = core_receipts(
-            effective_rule_context(campaign_id),
+            effective_rule_context(campaign_id, branch_id=resolved_branch_id),
             ["dnd5e.core.damage.zero_hp"] if int(applied["after_hp"]) == 0 else [],
             "damage.apply",
         )
@@ -6049,7 +6078,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             expected_campaign_revision=campaign.revision,
             operation="combat.damage.apply",
             actor=principal_id,
-            branch_id=require_current_branch(campaign_id, branch_id),
+            branch_id=resolved_branch_id,
             idempotency_key=idempotency_key,
             rule_receipts=damage_receipts,
         )
@@ -6082,6 +6111,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         """Apply source-aware healing with feature modifiers and max-HP clamping."""
         access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
         require_write_contract(expected_revision, idempotency_key)
+        resolved_branch_id = require_current_branch(campaign_id, branch_id)
         require_campaign_actor(campaign_id, target_id)
         if source_actor_id:
             require_campaign_actor(campaign_id, source_actor_id)
@@ -6090,15 +6120,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         payload = {
             "target_id": target_id,
             "amount": amount,
-            "branch_id": branch_id,
+            "branch_id": resolved_branch_id,
             "source_actor_id": source_actor_id,
             "spell_id": spell_id,
             "spell_level": spell_level,
         }
-        scope = f"combat-heal:{campaign_id}:{principal_id}"
+        scope = f"combat-heal:{campaign_id}:{resolved_branch_id}:{principal_id}"
         replay = replay_idempotent(scope, idempotency_key, payload)
         if replay is not None:
-            return replay
+            return combat_response(campaign_id, principal_id, replay)
         campaign = campaigns.get(campaign_id)
         if expected_revision is not None and campaign.revision != expected_revision:
             raise ValueError(
@@ -6142,7 +6172,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             expected_campaign_revision=campaign.revision,
             operation="combat.heal.apply",
             actor=principal_id,
-            branch_id=require_current_branch(campaign_id, branch_id),
+            branch_id=resolved_branch_id,
             idempotency_key=idempotency_key,
         )
         response = {
@@ -6173,15 +6203,16 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         """Open a reaction/ruling window; the engine never guesses a narrative choice."""
         access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
         require_write_contract(expected_revision, idempotency_key)
+        resolved_branch_id = require_current_branch(campaign_id, branch_id)
         require_campaign_actor(campaign_id, actor_id)
         payload = {
             "actor_id": actor_id,
             "event": event,
             "candidates": candidates or [],
             "kind": kind,
-            "branch_id": branch_id,
+            "branch_id": resolved_branch_id,
         }
-        scope = f"combat-choice-open:{campaign_id}:{principal_id}"
+        scope = f"combat-choice-open:{campaign_id}:{resolved_branch_id}:{principal_id}"
         replay = replay_idempotent(scope, idempotency_key, payload)
         if replay is not None:
             return combat_response(campaign_id, principal_id, replay)
@@ -6206,7 +6237,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             expected_campaign_revision=campaign.revision,
             operation="combat.choice.open",
             actor=principal_id,
-            branch_id=require_current_branch(campaign_id, branch_id),
+            branch_id=resolved_branch_id,
             idempotency_key=idempotency_key,
         )
         window = next_encounter["pending"][-1]
@@ -6236,13 +6267,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         """Commit one actor/DM choice and leave its downstream effect explicit."""
         access.require_actor(campaign_id, actor_id, principal_id, control=True)
         require_write_contract(expected_revision, idempotency_key)
+        resolved_branch_id = require_current_branch(campaign_id, branch_id)
         payload = {
             "actor_id": actor_id,
             "choice_id": choice_id,
             "selection": selection,
-            "branch_id": branch_id,
+            "branch_id": resolved_branch_id,
         }
-        scope = f"combat-choice-resolve:{campaign_id}:{principal_id}"
+        scope = f"combat-choice-resolve:{campaign_id}:{resolved_branch_id}:{principal_id}"
         replay = replay_idempotent(scope, idempotency_key, payload)
         if replay is not None:
             return combat_response(campaign_id, principal_id, replay)
@@ -6301,7 +6333,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             expected_campaign_revision=campaign.revision,
             operation="combat.choice.resolve",
             actor=principal_id,
-            branch_id=require_current_branch(campaign_id, branch_id),
+            branch_id=resolved_branch_id,
             idempotency_key=idempotency_key,
         )
         response = {
