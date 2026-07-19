@@ -14,7 +14,7 @@ from mcp.client.stdio import StdioServerParameters, stdio_client
 from sagasmith_dnd_mcp.config import McpConfig
 from sagasmith_dnd_mcp.exposure import ExposureError, ExposureRegistry
 from sagasmith_dnd_mcp.server import create_server
-from sagasmith_dnd_mcp.tool_profiles import CORE_TOOLS
+from sagasmith_dnd_mcp.tool_profiles import CORE_TOOLS, GROUP_BY_ID
 
 
 def test_exposures_are_session_scoped_and_phase_safe() -> None:
@@ -60,6 +60,91 @@ def test_unbound_exposure_only_loads_bootstrap_or_local_admin() -> None:
         registry.load(exposure, "lobby.rules")
     with pytest.raises(ExposureError, match="system:local"):
         registry.load(exposure, "lobby.storage_admin")
+
+
+def test_phase_groups_separate_player_reads_from_dm_control() -> None:
+    assert GROUP_BY_ID["lobby.memory"].roles == frozenset()
+    assert GROUP_BY_ID["lobby.memory_control"].roles == frozenset({"owner", "dm"})
+    assert "memory_query" not in GROUP_BY_ID["lobby.memory"].tools
+    assert "memory_query" in GROUP_BY_ID["lobby.memory_control"].tools
+
+    assert GROUP_BY_ID["play.scene"].roles == frozenset()
+    assert GROUP_BY_ID["play.scene_control"].roles == frozenset({"owner", "dm"})
+    assert "snapshot_query" not in GROUP_BY_ID["play.scene"].tools
+    assert "snapshot_query" in GROUP_BY_ID["play.scene_control"].tools
+    assert "combat_start" not in GROUP_BY_ID["play.resolution"].tools
+    assert GROUP_BY_ID["play.combat_control"].roles == frozenset({"owner", "dm"})
+
+    assert "combat_end" not in GROUP_BY_ID["combat.turn"].tools
+    assert GROUP_BY_ID["combat.control"].roles == frozenset({"owner", "dm"})
+    assert GROUP_BY_ID["combat.save"].roles == frozenset({"owner", "dm"})
+    assert GROUP_BY_ID["combat.map"].roles == frozenset({"owner", "dm"})
+
+
+def test_player_exposure_loads_scene_reads_but_not_scene_control(tmp_path: Path) -> None:
+    config = McpConfig(
+        home=tmp_path / "home",
+        database_url=None,
+        chroma_url=None,
+        chroma_path_override=None,
+        dnd_skills_dir=tmp_path / "dnd",
+        modulegen_skills_dir=tmp_path / "modulegen",
+        auto_seed_rules=False,
+    )
+
+    async def exercise() -> None:
+        server = create_server(config)
+
+        async def call(name: str, arguments: dict):
+            _, result = await server.call_tool(name, arguments)
+            return result.get("result", result) if isinstance(result, dict) else result
+
+        campaign = await call(
+            "campaign_create",
+            {"name": "Player exposure", "idempotency_key": "campaign"},
+        )
+        campaign = await call(
+            "campaign_change",
+            {
+                "campaign_id": campaign["id"],
+                "action": "update",
+                "payload": {"state": {"game_phase": "play"}},
+                "expected_revision": campaign["revision"],
+                "idempotency_key": "play-phase",
+            },
+        )
+        await call(
+            "access_grant",
+            {
+                "scope": "campaign",
+                "campaign_id": campaign["id"],
+                "principal_id": "player:alice",
+                "payload": {"role": "player"},
+            },
+        )
+        opened = await call(
+            "exposure_open",
+            {"campaign_id": campaign["id"], "principal_id": "player:alice"},
+        )
+
+        loaded = await call(
+            "exposure_load",
+            {"exposure_id": opened["exposure_id"], "group_id": "play.scene"},
+        )
+        assert "module_query" in loaded["visible_tools"]
+        assert "snapshot_query" not in loaded["visible_tools"]
+        assert "memory_query" not in loaded["visible_tools"]
+
+        with pytest.raises(Exception, match="cannot access"):
+            await call(
+                "exposure_load",
+                {
+                    "exposure_id": opened["exposure_id"],
+                    "group_id": "play.scene_control",
+                },
+            )
+
+    asyncio.run(exercise())
 
 
 def test_exposure_ttl_is_deterministic_and_expired_sessions_are_pruned() -> None:
