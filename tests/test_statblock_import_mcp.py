@@ -154,7 +154,7 @@ def test_imported_rule_source_creates_a_source_bound_combat_actor(tmp_path: Path
                     "name": "Source-bound Variant",
                     "character_type": "npc",
                     "variant": {
-                        "source_ref": "module-scene:d12",
+                        "source_ref": f"rule-chunk:{created['source']['chunk_ids'][0]}",
                         "current_hit_points": 1,
                         "armor_class": 12,
                         "languages": ["Common", "Elvish"],
@@ -177,10 +177,11 @@ def test_imported_rule_source_creates_a_source_bound_combat_actor(tmp_path: Path
         assert variant_actor["derived"]["inventory"]["weapon_attacks"][0]["item_id"] == (
             "gauntlet-slam"
         )
-        assert "Variant source: module-scene:d12" in (
+        assert "Variant source: rule-chunk:" in (
             variant_actor["notes"]["profile"]["dm_notes"]
         )
-        assert variant["variant"]["source_ref"] == "module-scene:d12"
+        assert variant["variant_evidence"]["kind"] == "rule-chunk"
+        assert variant["variant_evidence"]["source_id"] == ingested["source_id"]
 
     asyncio.run(exercise())
 

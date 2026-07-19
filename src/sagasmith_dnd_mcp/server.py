@@ -762,6 +762,62 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "unarmed_fallback": not attacks,
         }
 
+    def statblock_variant_evidence(
+        campaign_id: str,
+        variant: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        """Resolve a variant citation instead of trusting a free-form source label."""
+        if variant is None:
+            return None
+        if not isinstance(variant, dict):
+            raise ValueError("statblock variant must be an object")
+        source_ref = str(variant.get("source_ref") or "").strip()
+        kind, separator, identifier = source_ref.partition(":")
+        if not separator or not identifier:
+            raise ValueError("statblock variant source_ref must identify a managed source")
+        if kind == "module-chunk":
+            expanded = modules.expand(identifier)
+            if str(expanded.get("campaign_id") or "") != campaign_id:
+                raise ValueError("statblock variant module chunk does not belong to campaign")
+            return {
+                "source_ref": source_ref,
+                "kind": kind,
+                "id": identifier,
+                "module_id": expanded["module"]["id"],
+                "scene_id": expanded["scene"]["id"],
+                "page_start": expanded.get("page_start"),
+                "page_end": expanded.get("page_end"),
+            }
+        if kind == "module-review":
+            review = modules.get_content_review(campaign_id, identifier)
+            return {
+                "source_ref": source_ref,
+                "kind": kind,
+                "id": identifier,
+                "module_id": review["module_id"],
+                "scene_id": review["scene_id"],
+                "evidence": deepcopy(review.get("evidence") or {}),
+            }
+        if kind == "rule-chunk":
+            expanded = rules.expand(identifier)
+            source = rules.source(str(expanded["source"]["id"]))
+            campaign_edition = str(campaigns.get(campaign_id).settings.get("edition") or "2024")
+            if str(source.get("system_id") or "") != "dnd5e":
+                raise ValueError("statblock variant rule chunk must belong to D&D")
+            if str(source.get("edition") or "") != campaign_edition:
+                raise ValueError("statblock variant rule chunk edition does not match campaign")
+            return {
+                "source_ref": source_ref,
+                "kind": kind,
+                "id": identifier,
+                "source_id": source["id"],
+                "source_key": source["source_key"],
+                "checksum": source["checksum"],
+            }
+        raise ValueError(
+            "statblock variant source_ref must use module-chunk, module-review, or rule-chunk"
+        )
+
     def combat_view(campaign_id: str, principal_id: str) -> dict[str, Any] | None:
         campaign = campaigns.get(campaign_id)
         encounter = dict(campaign.state or {}).get("combat")
@@ -12013,6 +12069,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 name=str(data.get("name") or "").strip() or None,
             )
             variant = data.get("variant")
+            variant_evidence = statblock_variant_evidence(campaign_id, variant)
             sheet = (
                 apply_statblock_variant(parsed.sheet, variant)
                 if variant is not None
@@ -12064,6 +12121,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "settlement": "automatic" if not parsed.warnings else "mixed",
                 },
                 "variant": deepcopy(variant) if variant is not None else None,
+                "variant_evidence": variant_evidence,
             }
         else:
             campaign_id = str(required(data, "campaign_id"))
@@ -12128,6 +12186,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 name=str(data.get("name") or source.get("title") or "").strip() or None,
             )
             variant = data.get("variant")
+            variant_evidence = statblock_variant_evidence(campaign_id, variant)
             sheet = (
                 apply_statblock_variant(parsed.sheet, variant)
                 if variant is not None
@@ -12184,6 +12243,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "settlement": "automatic" if not parsed.warnings else "mixed",
                 },
                 "variant": deepcopy(variant) if variant is not None else None,
+                "variant_evidence": variant_evidence,
             }
         return facade_result(mode, result)
 
