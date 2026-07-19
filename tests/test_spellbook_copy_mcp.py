@@ -84,6 +84,38 @@ def test_discovered_spellbook_copy_is_source_bound_paid_timed_and_atomic(
                 "idempotency_key": "wizard",
             },
         )
+        savant_sheet = default_character_sheet()
+        savant_sheet["edition"] = "2014"
+        savant_sheet["progression"].update(
+            {
+                "level": 2,
+                "classes": [{"name": "Wizard", "level": 2, "subclass": "", "hit_die": 6}],
+            }
+        )
+        savant_sheet["spellcasting"]["preparation"].update(
+            {"mode": "spellbook", "max_prepared": 4, "changes_on": "long_rest"}
+        )
+        savant_sheet["spellcasting"]["spellbook"]["enabled"] = True
+        savant_sheet["inventory"]["wallet"]["gp"] = 25
+        savant_sheet["content"]["features"].append(
+            {
+                "id": (
+                    "dnd5e.content.srd2014.feature."
+                    "school-of-evocation-evocation-savant"
+                ),
+                "name": "Evocation Savant",
+            }
+        )
+        savant = await call(
+            server,
+            "character_create",
+            {
+                "campaign_id": created["id"],
+                "name": "Evocation Savant",
+                "sheet": savant_sheet,
+                "idempotency_key": "savant",
+            },
+        )
         current_campaign = await campaign(server, created["id"])
         book = await call(
             server,
@@ -179,6 +211,42 @@ def test_discovered_spellbook_copy_is_source_bound_paid_timed_and_atomic(
         assert after["state"]["party"]["inventory"]["items"][0]["id"] == (
             "d11-red-spellbook"
         )
+        current_savant = await call(
+            server,
+            "character_query",
+            {"view": "get", "payload": {"character_id": savant["id"]}},
+        )
+        discounted = await call(
+            server,
+            "character_content_apply",
+            {
+                "character_id": savant["id"],
+                "artifact_id": burning_hands["id"],
+                "selection": {
+                    "source_class": "Wizard",
+                    "method": "spellbook_copy",
+                    "source_owner": "party",
+                    "source_item_id": "d11-red-spellbook",
+                    "payment_owner": "character",
+                    "payment": {"gp": 25},
+                },
+                "expected_revision": current_savant["revision"],
+                "idempotency_key": "savant-copy",
+            },
+        )
+        assert discounted["sheet"]["inventory"]["wallet"]["gp"] == 0
+        assert discounted["spellbook_copy"]["cost_cp"] == 2500
+        assert discounted["spellbook_copy"]["cost_percent"] == 50
+        assert discounted["spellbook_copy"]["minutes"] == 60
+        assert discounted["spellbook_copy"]["hours"] == 1
+        assert discounted["spellbook_copy"]["world_time"]["hour"] == 13
+        assert {
+            receipt["mechanic_id"]
+            for receipt in discounted["spellbook_copy"]["rule_receipts"]
+        } >= {
+            "dnd5e.core.spell.spellbook_copy",
+            "dnd5e.core.spell.evocation_savant",
+        }
         receipts = await call(
             server,
             "campaign_rules",
@@ -188,7 +256,7 @@ def test_discovered_spellbook_copy_is_source_bound_paid_timed_and_atomic(
                 "payload": {"mechanic_id": "dnd5e.core.spell.spellbook_copy"},
             },
         )
-        assert len(receipts) == 1
-        assert receipts[0]["event"] == "character.spellbook.copy"
+        assert len(receipts) == 2
+        assert all(item["event"] == "character.spellbook.copy" for item in receipts)
 
     asyncio.run(exercise())

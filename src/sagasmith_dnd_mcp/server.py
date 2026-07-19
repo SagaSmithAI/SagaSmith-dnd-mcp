@@ -10380,6 +10380,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         pack_id: str,
         version: str,
         level: int,
+        school: str,
         selection: dict[str, Any],
         principal_id: str,
         expected_revision: int,
@@ -10429,8 +10430,50 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if artifact_id not in set(mechanics.get("spell_ids") or []):
             raise ValueError("requested spell is not recorded in the source spellbook")
 
-        cost_cp = level * 5000
-        hours = level * 2
+        feature_ids = {
+            str(feature.get("id") or "")
+            for feature in sheet.get("content", {}).get("features", [])
+        }
+        normalized_school = school.strip().casefold().split(" ", 1)[0]
+        rule_facts = {
+            "actor_id": current.id,
+            "spell_id": artifact_id,
+            "spell_level": level,
+            "spell_school": normalized_school,
+            "source_item_id": source_item_id,
+            **{f"has_feature:{feature_id}": True for feature_id in feature_ids if feature_id},
+        }
+        rule_context = effective_rule_context(campaign_id, facts=rule_facts)
+        copy_rules = apply_rule_event(sheet, "spellbook.copy.before", rule_context)
+        if copy_rules.status != "committed":
+            return {
+                "status": copy_rules.status,
+                "pending": list(copy_rules.pending),
+                "rule_receipts": list(copy_rules.receipts),
+            }
+        cost_percent = 100
+        time_percent = 100
+        for modifier in copy_rules.modifiers:
+            if modifier.get("target") == "copy_cost_percent":
+                cost_percent += int(modifier.get("value", 0) or 0)
+            elif modifier.get("target") == "copy_time_percent":
+                time_percent += int(modifier.get("value", 0) or 0)
+        core_boundaries = ["dnd5e.core.spell.spellbook_copy"]
+        if (
+            normalized_school == "evocation"
+            and "dnd5e.content.srd2014.feature.school-of-evocation-evocation-savant"
+            in feature_ids
+        ):
+            cost_percent -= 50
+            time_percent -= 50
+            core_boundaries.append("dnd5e.core.spell.evocation_savant")
+        if cost_percent <= 0 or time_percent <= 0:
+            raise ValueError("spellbook copy modifiers must leave positive cost and time")
+        base_cost_cp = level * 5000
+        base_minutes = level * 120
+        cost_cp = (base_cost_cp * cost_percent + 99) // 100
+        minutes = (base_minutes * time_percent + 99) // 100
+        hours = minutes / 60
         payment_owner = str(selection.get("payment_owner") or "character").strip().casefold()
         if payment_owner not in {"party", "character"}:
             raise ValueError("spellbook copy payment_owner must be party or character")
@@ -10446,7 +10489,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         world_time = dict(next_state.get("world_time") or {})
         if not world_time:
             raise ValueError("set the campaign clock before copying a spell")
-        elapsed = int(world_time.get("elapsed_minutes", 0) or 0) + hours * 60
+        elapsed = int(world_time.get("elapsed_minutes", 0) or 0) + minutes
         next_world_time = {
             "schema_version": 1,
             "day": elapsed // 1440 + 1,
@@ -10471,18 +10514,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if replay is not None:
             return replay
 
-        rule_context = effective_rule_context(
-            campaign_id,
-            facts={
-                "actor_id": current.id,
-                "spell_id": artifact_id,
-                "spell_level": level,
-                "copy_hours": hours,
-                "copy_cost_cp": cost_cp,
-                "source_item_id": source_item_id,
-            },
+        rule_context = context_with_facts(
+            rule_context,
+            copy_hours=hours,
+            copy_minutes=minutes,
+            copy_cost_cp=cost_cp,
+            copy_cost_percent=cost_percent,
+            copy_time_percent=time_percent,
         )
-        receipts: list[dict[str, Any]] = []
+        receipts: list[dict[str, Any]] = list(copy_rules.receipts)
         updates: list[CharacterStateUpdate] = []
         advanced: dict[str, list[str]] = {}
         expired: dict[str, list[str]] = {}
@@ -10490,7 +10530,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             updated_sheet = sheet if character.id == current.id else character.sheet
             character_advanced: list[str] = []
             character_expired: list[str] = []
-            for period, amount in (("minute", hours * 60), ("hour", hours)):
+            duration_periods = [("minute", minutes)]
+            if minutes % 60 == 0:
+                duration_periods.append(("hour", minutes // 60))
+            for period, amount in duration_periods:
                 duration = advance_effect_durations(updated_sheet, period=period, amount=amount)
                 extension = apply_rule_event(
                     duration["sheet"],
@@ -10526,7 +10569,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         receipts.extend(
             core_receipts(
                 rule_context,
-                ["dnd5e.core.spell.spellbook_copy"],
+                core_boundaries,
                 "character.spellbook.copy",
             )
         )
@@ -10549,7 +10592,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "payment_owner": payment_owner,
             "payment": payment,
             "cost_cp": cost_cp,
+            "base_cost_cp": base_cost_cp,
+            "cost_percent": cost_percent,
+            "minutes": minutes,
             "hours": hours,
+            "base_minutes": base_minutes,
+            "time_percent": time_percent,
             "world_time": next_world_time,
             "advanced": advanced,
             "expired": expired,
@@ -11157,6 +11205,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 pack_id=pack_id,
                 version=version,
                 level=int(spellbook_copy["level"]),
+                school=str(card.get("definition", {}).get("school") or card.get("school") or ""),
                 selection=selection,
                 principal_id=principal_id,
                 expected_revision=expected_revision,
