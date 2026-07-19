@@ -927,7 +927,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "hit",
                 "critical",
                 "fumble",
+                "natural",
+                "rolls",
+                "rerolls",
+                "total",
+                "bonus",
                 "success",
+                "successes",
+                "failures",
+                "outcome",
                 "amount",
                 "applied_amount",
                 "hp_damage",
@@ -5540,7 +5548,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         campaign_id: str,
         actor_id: str,
         kind: str,
-        ability: str,
+        ability: str = "",
         target_id: str | None = None,
         action: str | None = None,
         dc: int = 0,
@@ -5572,6 +5580,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             raise CombatEngineError("death saves do not accept a target_id")
         if kind in {"death_save", "stabilize"} and action is not None:
             raise CombatEngineError(f"{kind} manages its own action boundary")
+        if kind != "death_save" and not str(ability).strip():
+            raise CombatEngineError("ability is required for checks, saves, and stabilization")
         normalized_check_action = (
             str(action).strip().lower().replace("-", "_") if action is not None else None
         )

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import random
 from pathlib import Path
 
 import pytest
@@ -34,8 +35,17 @@ def _config(tmp_path: Path) -> McpConfig:
 
 
 def test_available_actions_explicitly_discovers_required_death_save(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    original_death_save = server_module.resolve_death_save_to_sheet
+
+    def deterministic_death_save(sheet, **kwargs):
+        return original_death_save(sheet, **kwargs, rng=random.Random(1))
+
+    monkeypatch.setattr(
+        server_module, "resolve_death_save_to_sheet", deterministic_death_save
+    )
+
     async def exercise() -> None:
         server = create_server(_config(tmp_path))
         campaign = await _call(
@@ -79,6 +89,26 @@ def test_available_actions_explicitly_discovers_required_death_save(
 
         assert started["combat"]["round"] == 1
         assert available["actions"] == ["death_save"]
+        resolved = await _call_raw(
+            server,
+            "combat_check",
+            {
+                "campaign_id": campaign["id"],
+                "actor_id": actor["id"],
+                "kind": "death_save",
+                "expected_revision": started["campaign_revision"],
+                "idempotency_key": "death-save",
+            },
+        )
+        assert resolved["result"]["kind"] == "death_save"
+        assert resolved["result"]["outcome"] == "pending"
+
+        after = await _call(
+            server,
+            "combat_available_actions",
+            {"campaign_id": campaign["id"], "actor_id": actor["id"]},
+        )
+        assert after["actions"] == []
 
     asyncio.run(exercise())
 
