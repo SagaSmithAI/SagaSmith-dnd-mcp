@@ -10260,7 +10260,18 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "fields": ["source_class", "method"],
                     "level": int(card.get("level", 0) or 0),
                     "eligible_classes": list(card.get("classes") or []),
-                    "methods": ["known", "spellbook", "class_prepared"],
+                    "methods": [
+                        "known",
+                        "spellbook",
+                        "spellbook_copy",
+                        "class_prepared",
+                    ],
+                    "spellbook_copy_fields": [
+                        "source_owner",
+                        "source_item_id",
+                        "payment_owner",
+                        "payment",
+                    ],
                 }
             elif artifact_kind == "subclass":
                 selection_requirements = {
@@ -10333,6 +10344,225 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             key=lambda item: (str(item["kind"]), str(item["name"]), str(item["id"])),
         )
 
+    def spend_exact_wallet_payment(
+        wallet: dict[str, Any], payment: Any, *, required_cp: int
+    ) -> dict[str, int]:
+        """Validate an explicit coin payment without inventing currency exchange or change."""
+        if not isinstance(payment, dict):
+            raise ValueError("spellbook copy selection.payment must be a coin object")
+        multipliers = {"cp": 1, "sp": 10, "ep": 50, "gp": 100, "pp": 1000}
+        unknown = set(payment) - set(multipliers)
+        if unknown:
+            raise ValueError(f"spellbook copy payment has unknown coins: {sorted(unknown)}")
+        normalized: dict[str, int] = {}
+        total_cp = 0
+        for denomination, multiplier in multipliers.items():
+            amount = payment.get(denomination, 0)
+            if isinstance(amount, bool) or not isinstance(amount, int) or amount < 0:
+                raise ValueError("spellbook copy coin amounts must be non-negative integers")
+            if amount > int(wallet.get(denomination, 0) or 0):
+                raise ValueError(f"insufficient {denomination} for spellbook copy")
+            normalized[denomination] = amount
+            total_cp += amount * multiplier
+        if total_cp != required_cp:
+            raise ValueError(
+                f"spellbook copy payment must equal exactly {required_cp} cp; got {total_cp} cp"
+            )
+        for denomination, amount in normalized.items():
+            wallet[denomination] = int(wallet.get(denomination, 0) or 0) - amount
+        return normalized
+
+    def settle_spellbook_copy(
+        *,
+        current: Any,
+        sheet: dict[str, Any],
+        artifact_id: str,
+        pack_id: str,
+        version: str,
+        level: int,
+        selection: dict[str, Any],
+        principal_id: str,
+        expected_revision: int,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Pay, wait, expire effects, and record one discovered spell atomically."""
+        assert current.campaign_id is not None
+        campaign_id = current.campaign_id
+        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        if level < 1:
+            raise ValueError("cantrips cannot be copied from a spellbook")
+        campaign = campaigns.get(campaign_id)
+        next_state = validate_party_state(deepcopy(campaign.state or {}))
+        if next_state.get("game_phase", PROFILE_LOBBY) != PROFILE_PLAY:
+            raise CombatEngineError("spellbook copying is available only during play")
+        source_owner = str(selection.get("source_owner") or "party").strip().casefold()
+        if source_owner not in {"party", "character"}:
+            raise ValueError("spellbook copy source_owner must be party or character")
+        source_item_id = str(selection.get("source_item_id") or "").strip()
+        if not source_item_id:
+            raise ValueError("spellbook copy requires source_item_id")
+        source_inventory = (
+            next_state["party"]["inventory"]
+            if source_owner == "party"
+            else sheet["inventory"]
+        )
+        source_item = next(
+            (
+                item
+                for item in source_inventory.get("items", [])
+                if str(item.get("id") or "") == source_item_id
+            ),
+            None,
+        )
+        if source_item is None:
+            raise ValueError("spellbook copy source item is not in the selected inventory")
+        mechanics = dict(source_item.get("mechanics") or {})
+        if source_item.get("kind") != "spellbook":
+            raise ValueError("spellbook copy source item must have kind=spellbook")
+        campaign_edition = str(campaign.settings.get("edition") or "2014")
+        if str(mechanics.get("edition") or "") != campaign_edition:
+            raise ValueError("spellbook copy source edition does not match the campaign")
+        if not mechanics.get("copyable", False):
+            raise ValueError("spellbook copy source is not marked copyable")
+        if not mechanics.get("deciphered", False):
+            raise ValueError("spellbook copy source has not been deciphered")
+        if artifact_id not in set(mechanics.get("spell_ids") or []):
+            raise ValueError("requested spell is not recorded in the source spellbook")
+
+        cost_cp = level * 5000
+        hours = level * 2
+        payment_owner = str(selection.get("payment_owner") or "character").strip().casefold()
+        if payment_owner not in {"party", "character"}:
+            raise ValueError("spellbook copy payment_owner must be party or character")
+        payment_wallet = (
+            next_state["party"]["inventory"]["wallet"]
+            if payment_owner == "party"
+            else sheet["inventory"]["wallet"]
+        )
+        payment = spend_exact_wallet_payment(
+            payment_wallet, selection.get("payment"), required_cp=cost_cp
+        )
+
+        world_time = dict(next_state.get("world_time") or {})
+        if not world_time:
+            raise ValueError("set the campaign clock before copying a spell")
+        elapsed = int(world_time.get("elapsed_minutes", 0) or 0) + hours * 60
+        next_world_time = {
+            "schema_version": 1,
+            "day": elapsed // 1440 + 1,
+            "hour": (elapsed % 1440) // 60,
+            "minute": elapsed % 60,
+            "elapsed_minutes": elapsed,
+            "label": str(world_time.get("label") or ""),
+        }
+        next_state["world_time"] = next_world_time
+
+        branch_id = require_current_branch(campaign_id, None)
+        request_payload = {
+            "operation": "character.spellbook.copy",
+            "character_id": current.id,
+            "artifact_id": artifact_id,
+            "pack_id": pack_id,
+            "version": version,
+            "selection": selection,
+        }
+        scope = f"character-write:{campaign_id}:{branch_id}:{principal_id}:{current.id}"
+        replay = replay_idempotent(scope, idempotency_key, request_payload)
+        if replay is not None:
+            return replay
+
+        rule_context = effective_rule_context(
+            campaign_id,
+            facts={
+                "actor_id": current.id,
+                "spell_id": artifact_id,
+                "spell_level": level,
+                "copy_hours": hours,
+                "copy_cost_cp": cost_cp,
+                "source_item_id": source_item_id,
+            },
+        )
+        receipts: list[dict[str, Any]] = []
+        updates: list[CharacterStateUpdate] = []
+        advanced: dict[str, list[str]] = {}
+        expired: dict[str, list[str]] = {}
+        for character in characters.list(campaign_id=campaign_id):
+            updated_sheet = sheet if character.id == current.id else character.sheet
+            character_advanced: list[str] = []
+            character_expired: list[str] = []
+            for period, amount in (("minute", hours * 60), ("hour", hours)):
+                duration = advance_effect_durations(updated_sheet, period=period, amount=amount)
+                extension = apply_rule_event(
+                    duration["sheet"],
+                    "duration.advance",
+                    context_with_facts(
+                        rule_context,
+                        actor_id=character.id,
+                        period=period,
+                        amount=amount,
+                    ),
+                )
+                receipts.extend(extension.receipts)
+                updated_sheet = extension.sheet
+                character_advanced.extend(duration["advanced"])
+                character_expired.extend(duration["expired"])
+            if updated_sheet != character.sheet:
+                updates.append(
+                    CharacterStateUpdate(
+                        character_id=character.id,
+                        sheet=validate_character_sheet(updated_sheet),
+                        notes=validate_character_notes(character.notes),
+                        expected_revision=(
+                            expected_revision
+                            if character.id == current.id
+                            else character.revision
+                        ),
+                    )
+                )
+            if character_advanced:
+                advanced[character.id] = list(dict.fromkeys(character_advanced))
+            if character_expired:
+                expired[character.id] = list(dict.fromkeys(character_expired))
+        receipts.extend(
+            core_receipts(
+                rule_context,
+                ["dnd5e.core.spell.spellbook_copy"],
+                "character.spellbook.copy",
+            )
+        )
+        StateMutationService(storage.database).replace(
+            campaign_id,
+            campaign_state=next_state,
+            character_updates=updates,
+            expected_campaign_revision=campaign.revision,
+            operation="character.spellbook.copy",
+            actor=principal_id,
+            branch_id=branch_id,
+            idempotency_key=idempotency_key,
+            rule_receipts=receipts,
+        )
+        response = character_view(characters.get(current.id))
+        response["spellbook_copy"] = {
+            "spell_id": artifact_id,
+            "source_owner": source_owner,
+            "source_item_id": source_item_id,
+            "payment_owner": payment_owner,
+            "payment": payment,
+            "cost_cp": cost_cp,
+            "hours": hours,
+            "world_time": next_world_time,
+            "advanced": advanced,
+            "expired": expired,
+            "rule_receipts": receipts,
+        }
+        return remember_idempotent(
+            scope,
+            idempotency_key,
+            request_payload,
+            response,
+            campaign_id=campaign_id,
+        )
+
     @mcp.tool()
     def character_content_apply(
         character_id: str,
@@ -10370,6 +10600,31 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         card = deepcopy(dict(artifact.get("card") or {}))
         selection = deepcopy(selection or {})
         sheet = deepcopy(current.sheet)
+        campaign = campaigns.get(current.campaign_id)
+        phase = str(dict(campaign.state or {}).get("game_phase") or PROFILE_LOBBY)
+        spellbook_copy: dict[str, Any] | None = None
+        requested_method = str(selection.get("method") or "").strip().casefold()
+        operation = (
+            "character.spellbook.copy"
+            if requested_method == "spellbook_copy"
+            else "character.content.apply"
+        )
+        branch_id = require_current_branch(current.campaign_id, None)
+        request_payload = {
+            "operation": operation,
+            "character_id": current.id,
+            "artifact_id": artifact_id,
+            "pack_id": pack_id,
+            "version": version,
+            "selection": selection,
+        }
+        replay = replay_idempotent(
+            f"character-write:{current.campaign_id}:{branch_id}:{principal_id}:{current.id}",
+            idempotency_key,
+            request_payload,
+        )
+        if replay is not None:
+            return replay
         provenance = {
             "id": artifact_id,
             "pack_id": pack_id,
@@ -10399,17 +10654,29 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     if level == 0 or preparation_mode == "known"
                     else ("spellbook" if preparation_mode == "spellbook" else "class_prepared")
                 )
-            if method not in {"known", "spellbook", "class_prepared"}:
+            if method not in {"known", "spellbook", "spellbook_copy", "class_prepared"}:
                 raise ValueError(
-                    "spell selection method must be known, spellbook, or class_prepared"
+                    "spell selection method must be known, spellbook, spellbook_copy, "
+                    "or class_prepared"
                 )
-            if method == "spellbook" and preparation_mode != "spellbook":
+            if method in {"spellbook", "spellbook_copy"} and preparation_mode != "spellbook":
                 raise ValueError("only a spellbook caster can select a spellbook grant")
             if method == "class_prepared" and preparation_mode != "prepared":
                 raise ValueError("class_prepared requires prepared-caster configuration")
             if method == "known" and level > 0 and preparation_mode != "known":
                 raise ValueError(
                     "this caster records level 1+ spells as prepared or spellbook grants"
+                )
+            if method == "spellbook_copy":
+                if source_class != "wizard":
+                    raise ValueError("only wizard spells can be copied into this spellbook")
+                if phase != PROFILE_PLAY:
+                    raise CombatEngineError("spellbook copying is available only during play")
+                spellbook_copy = {"level": level}
+            elif phase != PROFILE_LOBBY:
+                raise CombatEngineError(
+                    "content grants belong to lobby setup or level advancement; "
+                    "only source-bound spellbook_copy is legal during play"
                 )
             card["grant"] = {
                 "source_type": "class",
@@ -10418,7 +10685,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             }
             card.setdefault("access", {})["known"] = method == "known"
             card["access"]["prepared"] = False
-            if method == "spellbook":
+            if method in {"spellbook", "spellbook_copy"}:
                 spellbook = sheet["spellcasting"]["spellbook"]
                 if not spellbook.get("enabled"):
                     raise ValueError("spellbook grant requires spellcasting.spellbook.enabled")
@@ -10881,6 +11148,23 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "mechanic_refs": list(artifact.get("mechanic_refs") or []),
                     "selection": selection,
                 }
+            )
+        if spellbook_copy is not None:
+            return settle_spellbook_copy(
+                current=current,
+                sheet=sheet,
+                artifact_id=artifact_id,
+                pack_id=pack_id,
+                version=version,
+                level=int(spellbook_copy["level"]),
+                selection=selection,
+                principal_id=principal_id,
+                expected_revision=expected_revision,
+                idempotency_key=idempotency_key,
+            )
+        if phase != PROFILE_LOBBY:
+            raise CombatEngineError(
+                "content grants belong to lobby setup or level advancement"
             )
         return update_sheet(
             character_id,
