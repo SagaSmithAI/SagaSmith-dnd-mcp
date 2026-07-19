@@ -10552,8 +10552,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             raise ValueError("spellbook copy source edition does not match the campaign")
         if not mechanics.get("copyable", False):
             raise ValueError("spellbook copy source is not marked copyable")
-        if not mechanics.get("deciphered", False):
-            raise ValueError("spellbook copy source has not been deciphered")
         if artifact_id not in set(mechanics.get("spell_ids") or []):
             raise ValueError("requested spell is not recorded in the source spellbook")
 
@@ -10568,6 +10566,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "spell_level": level,
             "spell_school": normalized_school,
             "source_item_id": source_item_id,
+            "source_was_previously_deciphered": bool(mechanics.get("deciphered", False)),
             **{f"has_feature:{feature_id}": True for feature_id in feature_ids if feature_id},
         }
         rule_context = effective_rule_context(campaign_id, facts=rule_facts)
@@ -10729,6 +10728,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "spell_id": artifact_id,
             "source_owner": source_owner,
             "source_item_id": source_item_id,
+            "deciphered_during_copy": not bool(mechanics.get("deciphered", False)),
             "payment_owner": payment_owner,
             "payment": payment,
             "cost_cp": cost_cp,

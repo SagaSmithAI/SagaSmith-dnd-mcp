@@ -134,7 +134,7 @@ def test_discovered_spellbook_copy_is_source_bound_paid_timed_and_atomic(
                             "edition": "2014",
                             "spell_ids": [burning_hands["id"]],
                             "source_scene_id": "d11",
-                            "deciphered": True,
+                            "deciphered": False,
                             "copyable": True,
                         },
                     }
@@ -223,6 +223,7 @@ def test_discovered_spellbook_copy_is_source_bound_paid_timed_and_atomic(
             "spell_ids"
         ]
         assert copied["spellbook_copy"]["cost_cp"] == 5000
+        assert copied["spellbook_copy"]["deciphered_during_copy"] is True
         assert copied["spellbook_copy"]["hours"] == 2
         assert copied["spellbook_copy"]["world_time"]["hour"] == 12
         assert copied["spellbook_copy"]["world_expired"] == ["copy-room-light"]
