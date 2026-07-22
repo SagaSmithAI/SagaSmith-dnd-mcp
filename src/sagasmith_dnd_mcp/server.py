@@ -1128,6 +1128,29 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     combatant.pop("turned", None)
                 return
 
+    def reveal_attacker_to_target(
+        encounter: dict[str, Any], attacker_id: str, target_id: str
+    ) -> None:
+        """Reveal a hidden attacker to the creature it attacked, hit or miss."""
+        attacker = next(
+            item
+            for item in encounter.get("combatants", [])
+            if item.get("actor_id") == attacker_id
+        )
+        attacker["hidden"] = False
+        current_visibility = attacker.get("visible_to_actor_ids")
+        if current_visibility is None:
+            return
+        visible_to = {
+            str(item) for item in list(current_visibility or [])
+        } | {attacker_id, target_id}
+        participant_ids = {
+            str(item.get("actor_id")) for item in encounter.get("combatants", [])
+        }
+        attacker["visible_to_actor_ids"] = (
+            None if participant_ids <= visible_to else sorted(visible_to)
+        )
+
     def apply_cast_visibility_ruling(
         encounter: dict[str, Any],
         campaign_id: str,
@@ -2955,7 +2978,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 item for item in next_encounter["combatants"] if item.get("actor_id") == actor_id
             )
             if plan.get("attacker_was_hidden"):
-                current["hidden"] = False
+                reveal_attacker_to_target(next_encounter, actor_id, target_id)
                 result["reveals_attacker"] = True
             if plan.get("helped_by"):
                 helper = next(
@@ -3064,7 +3087,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             flags["sneak_attack_turn_token"] = sneak_attack["turn_token"]
             current["turn_flags"] = flags
         if result.get("reveals_attacker"):
-            current["hidden"] = False
+            reveal_attacker_to_target(next_encounter, actor_id, target_id)
         if plan.get("helped_by"):
             helper = next(
                 (
@@ -3720,7 +3743,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         budget["reaction"] = int(budget["reaction"]) - 1
         combatant["turn_budget"] = budget
         if plan.get("attacker_was_hidden"):
-            combatant["hidden"] = False
+            reveal_attacker_to_target(next_encounter, actor_id, target_id)
         if plan.get("helped_by"):
             helper = next(
                 (
@@ -4075,7 +4098,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             flags["sneak_attack_turn_token"] = sneak_attack["turn_token"]
             attacker_combatant["turn_flags"] = flags
         if result.get("reveals_attacker"):
-            attacker_combatant["hidden"] = False
+            reveal_attacker_to_target(next_encounter, attacker_id, actor_id)
         sync_combatant_conditions(next_encounter, attacker_id, updated_attacker["sheet"])
         sync_combatant_conditions(next_encounter, actor_id, updated_target["sheet"])
         reconcile_readied_spells(next_encounter, actor_id, updated_target["sheet"])
