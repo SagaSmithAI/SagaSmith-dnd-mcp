@@ -2,6 +2,7 @@ import asyncio
 import random
 from pathlib import Path
 
+import pytest
 from sagasmith_dnd.character_schema import default_character_sheet
 from sagasmith_dnd.engine import roll as engine_roll
 from sagasmith_dnd.spells import (
@@ -67,7 +68,12 @@ async def _raw(server, name: str, arguments: dict):
     return result
 
 
-async def _campaign_with_combat(server, sheets: list[tuple[str, dict]]) -> tuple[dict, list[dict]]:
+async def _campaign_with_combat(
+    server,
+    sheets: list[tuple[str, dict]],
+    *,
+    hidden_caster: bool = False,
+) -> tuple[dict, list[dict]]:
     campaign = await _call(
         server,
         "campaign_create",
@@ -111,6 +117,14 @@ async def _campaign_with_combat(server, sheets: list[tuple[str, dict]]) -> tuple
                     "initiative": 20 - index,
                     "position": {"x": index, "y": 0},
                     "disposition": "friendly" if index == 0 else "hostile",
+                    **(
+                        {
+                            "hidden": True,
+                            "visible_to_actor_ids": [actors[0]["id"]],
+                        }
+                        if hidden_caster and index == 0
+                        else {}
+                    ),
                 }
                 for index, item in enumerate(actors)
             ],
@@ -119,6 +133,83 @@ async def _campaign_with_combat(server, sheets: list[tuple[str, dict]]) -> tuple
         },
     )
     return {**campaign, "revision": started["campaign_revision"]}, actors
+
+
+def test_hidden_perceivable_cast_requires_dm_observer_matrix(tmp_path: Path) -> None:
+    async def exercise() -> None:
+        server = create_server(_config(tmp_path))
+        caster_sheet = default_character_sheet()
+        caster_sheet["spellcasting"]["spell_slots"] = _slots()
+        caster_sheet["content"]["spells"] = [
+            _spell(
+                CORE_MAGIC_MISSILE_SPELL_ID,
+                "Magic Missile",
+                CORE_MAGIC_MISSILE_MECHANIC_ID,
+                "1 action",
+            )
+        ]
+        target_sheet = default_character_sheet()
+        target_sheet["combat"]["hp"] = {"value": 20, "max": 20, "temp": 0}
+        campaign, actors = await _campaign_with_combat(
+            server,
+            [("Hidden Caster", caster_sheet), ("Observer", target_sheet)],
+            hidden_caster=True,
+        )
+
+        with pytest.raises(Exception, match="casting_perception"):
+            await _raw(
+                server,
+                "combat_cast_spell",
+                {
+                    "campaign_id": campaign["id"],
+                    "actor_id": actors[0]["id"],
+                    "spell_id": CORE_MAGIC_MISSILE_SPELL_ID,
+                    "cast_level": 1,
+                    "target_allocations": [{"target_id": actors[1]["id"], "darts": 3}],
+                    "expected_revision": campaign["revision"],
+                    "idempotency_key": "missing-perception",
+                },
+            )
+        unchanged = await _call(
+            server, "character_get", {"character_id": actors[0]["id"]}
+        )
+        assert unchanged["sheet"]["spellcasting"]["spell_slots"]["1"]["value"] == 1
+
+        cast = await _raw(
+            server,
+            "combat_cast_spell",
+            {
+                "campaign_id": campaign["id"],
+                "actor_id": actors[0]["id"],
+                "spell_id": CORE_MAGIC_MISSILE_SPELL_ID,
+                "cast_level": 1,
+                "component_ruling": {
+                    "casting_perception": [
+                        {
+                            "observer_id": actors[1]["id"],
+                            "perceived": True,
+                            "reason": "The observer hears the verbal component.",
+                        }
+                    ]
+                },
+                "target_allocations": [{"target_id": actors[1]["id"], "darts": 3}],
+                "expected_revision": campaign["revision"],
+                "idempotency_key": "perceived-cast",
+            },
+        )
+
+        assert cast["status"] == "committed"
+        caster = next(
+            item for item in cast["combat"]["combatants"] if item["actor_id"] == actors[0]["id"]
+        )
+        assert caster["hidden"] is False
+        assert caster["visible_to_actor_ids"] is None
+        assert any(
+            item["type"] == "spell_casting_perception"
+            for item in cast["combat"]["log"]
+        )
+
+    asyncio.run(exercise())
 
 
 def test_magic_missile_targeting_opens_real_shield_reaction(tmp_path: Path, monkeypatch) -> None:

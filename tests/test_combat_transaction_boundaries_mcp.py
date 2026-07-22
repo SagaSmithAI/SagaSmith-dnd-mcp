@@ -443,6 +443,8 @@ def test_combat_move_charges_reviewed_difficult_cells_and_records_core_receipt(
                         "actor_id": mover["id"],
                         "initiative": 20,
                         "position": {"x": 0, "y": 0},
+                        "hidden": True,
+                        "visible_to_actor_ids": [mover["id"]],
                     },
                     {
                         "actor_id": other["id"],
@@ -485,5 +487,33 @@ def test_combat_move_charges_reviewed_difficult_cells_and_records_core_receipt(
             item["mechanic_id"] == "dnd5e.core.movement.difficult_terrain"
             for item in receipts
         )
+        revealed = await _call_raw(
+            server,
+            "combat_map_patch",
+            {
+                "campaign_id": campaign["id"],
+                "patches": [
+                    {
+                        "key": "combatant_visibility",
+                        "value": {
+                            "actor_id": mover["id"],
+                            "hidden": False,
+                            "visible_to_actor_ids": None,
+                            "reason": "The hidden actor shouted from its new position.",
+                        },
+                    }
+                ],
+                "expected_revision": moved["campaign_revision"],
+                "idempotency_key": "reveal",
+            },
+        )
+        mover_after = next(
+            item
+            for item in revealed["combat"]["combatants"]
+            if item["actor_id"] == mover["id"]
+        )
+        assert mover_after["hidden"] is False
+        assert mover_after["visible_to_actor_ids"] is None
+        assert revealed["campaign_revision"] == moved["campaign_revision"] + 1
 
     asyncio.run(exercise())

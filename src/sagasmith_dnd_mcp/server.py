@@ -1128,6 +1128,111 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     combatant.pop("turned", None)
                 return
 
+    def apply_cast_visibility_ruling(
+        encounter: dict[str, Any],
+        campaign_id: str,
+        actor_id: str,
+        spell: dict[str, Any],
+        component_ruling: dict[str, Any] | None,
+        principal_id: str,
+    ) -> None:
+        """Apply a DM-owned observer matrix when perceivable casting breaks hiding."""
+        caster = next(
+            item
+            for item in encounter.get("combatants", [])
+            if item.get("actor_id") == actor_id
+        )
+        if not caster.get("hidden", False):
+            return
+        components = dict(dict(spell.get("definition") or {}).get("components") or {})
+        source_unknown = (
+            dict(spell.get("custom_definition") or {}).get("component_details")
+            == "not_repeated_in_statblock"
+        )
+        if not (components.get("verbal") or components.get("somatic") or source_unknown):
+            return
+        visible_to = {
+            str(item) for item in list(caster.get("visible_to_actor_ids") or [])
+        }
+        observers = {
+            str(item.get("actor_id"))
+            for item in encounter.get("combatants", [])
+            if str(item.get("actor_id")) != actor_id
+            and "dead" not in {str(value).casefold() for value in item.get("conditions", [])}
+            and str(item.get("actor_id")) not in visible_to
+        }
+        if not observers:
+            return
+        if not is_dm(campaign_id, principal_id):
+            raise NeedsRulingError(
+                "a hidden caster's perceivable components require a DM observer ruling",
+                missing=("spell_casting_perception",),
+            )
+        ruling = dict(component_ruling or {})
+        entries = ruling.get("casting_perception")
+        if not isinstance(entries, list):
+            raise NeedsRulingError(
+                "perceivable casting while hidden requires casting_perception",
+                missing=("spell_casting_perception",),
+            )
+        normalized: dict[str, dict[str, Any]] = {}
+        for entry in entries:
+            if not isinstance(entry, dict) or set(entry) - {
+                "observer_id",
+                "perceived",
+                "reason",
+            }:
+                raise CombatEngineError(
+                    "each casting_perception entry requires observer_id, perceived, "
+                    "and optional reason"
+                )
+            observer_id = str(entry.get("observer_id") or "")
+            if observer_id not in observers or observer_id in normalized:
+                raise CombatEngineError(
+                    "casting_perception observers must be unique hidden-state observers"
+                )
+            perceived = entry.get("perceived")
+            if not isinstance(perceived, bool):
+                raise CombatEngineError("casting_perception perceived must be boolean")
+            reason = str(entry.get("reason") or "").strip()
+            if not perceived and not reason:
+                raise CombatEngineError(
+                    "an observer that did not perceive casting requires a reason"
+                )
+            normalized[observer_id] = {
+                "observer_id": observer_id,
+                "perceived": perceived,
+                "reason": reason,
+            }
+        if set(normalized) != observers:
+            raise CombatEngineError(
+                "casting_perception must adjudicate every observer that cannot see the caster"
+            )
+        visible_to.update(
+            observer_id
+            for observer_id, entry in normalized.items()
+            if entry["perceived"]
+        )
+        all_other_ids = {
+            str(item.get("actor_id"))
+            for item in encounter.get("combatants", [])
+            if str(item.get("actor_id")) != actor_id
+        }
+        if all_other_ids <= visible_to:
+            caster["hidden"] = False
+            caster["visible_to_actor_ids"] = None
+        else:
+            caster["visible_to_actor_ids"] = sorted(visible_to | {actor_id})
+        encounter["log"] = [
+            *list(encounter.get("log") or []),
+            {
+                "type": "spell_casting_perception",
+                "actor_id": actor_id,
+                "spell_id": spell.get("id"),
+                "observers": list(normalized.values()),
+            },
+        ][-100:]
+
     def add_concentration_window(
         encounter: dict[str, Any],
         target_id: str,
@@ -4634,6 +4739,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             raise CombatEngineError(
                 "target_allocations are currently executable only for source-bound Magic Missile"
             )
+        visibility_preview = deepcopy(encounter)
+        apply_cast_visibility_ruling(
+            visibility_preview,
+            campaign_id,
+            actor_id,
+            spell_entry,
+            component_ruling,
+            principal_id,
+        )
         applied = consume_spell_cast(
             current.sheet,
             spell_id=spell_id,
@@ -4714,6 +4828,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             action="cast",
             payload={"spell_id": spell_id, "cast_level": cast_level, "ritual": ritual},
             payment=payment,
+        )
+        apply_cast_visibility_ruling(
+            next_encounter,
+            campaign_id,
+            actor_id,
+            spell_entry,
+            component_ruling,
+            principal_id,
         )
         if payment == "reaction":
             assert choice_id is not None
@@ -9637,6 +9759,59 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         next_encounter = deepcopy(encounter)
         next_map = patch_battle_map(dict(next_encounter["battle_map"]), normalized)
         next_encounter["battle_map"] = next_map
+        participant_ids = {
+            str(item.get("actor_id")) for item in next_encounter.get("combatants", [])
+        }
+        seen_visibility_actors: set[str] = set()
+        for patch in normalized:
+            if patch["key"] != "combatant_visibility":
+                continue
+            visibility = patch.get("value")
+            if not isinstance(visibility, dict) or set(visibility) - {
+                "actor_id",
+                "hidden",
+                "visible_to_actor_ids",
+                "reason",
+            }:
+                raise ValueError(
+                    "combatant_visibility requires actor_id, reason, and optional "
+                    "hidden/visible_to_actor_ids"
+                )
+            target_id = str(visibility.get("actor_id") or "")
+            if target_id not in participant_ids or target_id in seen_visibility_actors:
+                raise ValueError(
+                    "combatant_visibility actor_id must be a unique encounter participant"
+                )
+            seen_visibility_actors.add(target_id)
+            if not str(visibility.get("reason") or "").strip():
+                raise ValueError("combatant_visibility requires a DM ruling reason")
+            if "hidden" not in visibility and "visible_to_actor_ids" not in visibility:
+                raise ValueError(
+                    "combatant_visibility must change hidden or visible_to_actor_ids"
+                )
+            if "hidden" in visibility and not isinstance(visibility["hidden"], bool):
+                raise ValueError("combatant_visibility hidden must be boolean")
+            visible_to = visibility.get("visible_to_actor_ids")
+            if "visible_to_actor_ids" in visibility and visible_to is not None:
+                if (
+                    not isinstance(visible_to, list)
+                    or len({str(item) for item in visible_to}) != len(visible_to)
+                    or any(str(item) not in participant_ids for item in visible_to)
+                ):
+                    raise ValueError(
+                        "combatant_visibility visible_to_actor_ids must be unique participants"
+                    )
+            combatant = next(
+                item
+                for item in next_encounter["combatants"]
+                if str(item.get("actor_id")) == target_id
+            )
+            if "hidden" in visibility:
+                combatant["hidden"] = visibility["hidden"]
+            if "visible_to_actor_ids" in visibility:
+                combatant["visible_to_actor_ids"] = (
+                    None if visible_to is None else [str(item) for item in visible_to]
+                )
         state = dict(campaign.state or {})
         state["combat"] = next_encounter
         runtime = dict(state.get("scene_runtime") or {})
@@ -9656,7 +9831,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             branch_id=resolved_branch_id,
             idempotency_key=idempotency_key,
         )
-        response = {"battle_map": next_map, "world_patches": normalized}
+        response = {
+            "battle_map": next_map,
+            "world_patches": normalized,
+            "combat": next_encounter,
+            "campaign_revision": mutation_revision(campaign_id),
+        }
         return remember_idempotent(
             scope,
             idempotency_key,
