@@ -7447,7 +7447,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         hp_method: str,
         reason: str,
         source_ref: str,
-        hp_roll: int | None = None,
         principal_id: str = "system:local",
         expected_revision: int | None = None,
         idempotency_key: str | None = None,
@@ -7476,6 +7475,26 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if len(audit_source) > 300:
             raise ValueError("combined source_ref and reason must not exceed 300 characters")
         branch_id = require_current_branch(current.campaign_id, None)
+        mutation_payload = {
+            "class_name": class_name,
+            "hp_method": hp_method,
+            "reason": normalized_reason,
+            "source_ref": normalized_source_ref,
+        }
+        request_payload = {
+            "operation": "character.level.advance",
+            "character_id": character_id,
+            **mutation_payload,
+        }
+        scope = (
+            f"character-write:{current.campaign_id}:{branch_id}:"
+            f"{principal_id}:{character_id}"
+        )
+        replay = replay_idempotent(scope, idempotency_key, request_payload)
+        if replay is not None:
+            return replay
+        if current.revision != expected_revision:
+            raise ValueError(f"character revision conflict: {character_id}")
         old_level = int(current.sheet.get("progression", {}).get("level", 0) or 0)
         context = level_advancement_content_context(
             current.campaign_id,
@@ -7484,23 +7503,22 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             new_level=old_level + 1,
             branch_id=branch_id,
         )
-        applied = advance_single_class_level(
-            current.sheet,
-            class_name=class_name,
-            hp_method=hp_method,
-            hp_roll=hp_roll,
-            hp_per_level_bonus=int(context["hp_per_level_bonus"]),
-            source=audit_source,
-        )
         rules = effective_rule_context(
             current.campaign_id,
             facts={
                 "actor_id": character_id,
                 "class_name": class_name,
-                "old_level": applied["old_level"],
-                "new_level": applied["new_level"],
+                "old_level": old_level,
+                "new_level": old_level + 1,
                 "source_ref": normalized_source_ref,
             },
+        )
+        applied = advance_single_class_level(
+            current.sheet,
+            class_name=class_name,
+            hp_method=hp_method,
+            hp_per_level_bonus=int(context["hp_per_level_bonus"]),
+            source=audit_source,
         )
         receipts = core_receipts(
             rules,
@@ -7535,13 +7553,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             principal_id=principal_id,
             expected_revision=expected_revision,
             idempotency_key=idempotency_key,
-            payload={
-                "class_name": class_name,
-                "hp_method": hp_method,
-                "hp_roll": hp_roll,
-                "reason": normalized_reason,
-                "source_ref": normalized_source_ref,
-            },
+            payload=mutation_payload,
             response_extra={
                 "status": "committed",
                 "advancement": result,
@@ -12746,13 +12758,18 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 idempotency_key,
             )
         elif action == "level_advance":
+            unexpected = set(data) - {"class_name", "hp_method", "reason", "source_ref"}
+            if unexpected:
+                raise ValueError(
+                    "level_advance payload accepts only class_name, hp_method, reason, "
+                    f"and source_ref; unexpected fields: {sorted(unexpected)}"
+                )
             result = character_level_advance(
                 character_id,
                 required(data, "class_name"),
                 required(data, "hp_method"),
                 required(data, "reason"),
                 required(data, "source_ref"),
-                data.get("hp_roll"),
                 principal_id,
                 expected_revision,
                 idempotency_key,

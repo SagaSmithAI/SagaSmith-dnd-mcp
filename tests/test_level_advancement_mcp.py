@@ -2,10 +2,22 @@ import asyncio
 from pathlib import Path
 
 import pytest
+import sagasmith_dnd.progression as progression_module
 from sagasmith_dnd.character_schema import default_character_sheet
+from sagasmith_dnd.engine import roll as engine_roll
 
 from sagasmith_dnd_mcp.config import McpConfig
 from sagasmith_dnd_mcp.server import create_server
+
+
+class _SequenceRng:
+    def __init__(self, *values: int) -> None:
+        self.values = list(values)
+
+    def randint(self, minimum: int, maximum: int) -> int:
+        value = self.values.pop(0)
+        assert minimum <= value <= maximum
+        return value
 
 
 async def _call(server, name: str, arguments: dict):
@@ -237,6 +249,111 @@ def test_lobby_level_advance_is_source_bound_and_reports_catalog_follow_up(
                     "idempotency_key": "unresolvable-level",
                 },
             )
+
+    asyncio.run(exercise())
+
+
+def test_rolled_level_hp_is_engine_owned_idempotent_and_revision_safe(
+    tmp_path: Path, monkeypatch
+) -> None:
+    workspace = Path(__file__).resolve().parents[2]
+    config = McpConfig(
+        home=tmp_path / "home",
+        database_url=None,
+        chroma_url=None,
+        chroma_path_override=None,
+        dnd_skills_dir=workspace / "SagaSmith-dnd-skills",
+        modulegen_skills_dir=workspace / "SagaSmith-module-gen-skills",
+        auto_seed_rules=True,
+    )
+    calls: list[str] = []
+
+    def fixed_roll(expression: str, *, rng=None):
+        calls.append(expression)
+        return engine_roll(expression, rng=_SequenceRng(3))
+
+    monkeypatch.setattr(progression_module, "roll", fixed_roll)
+
+    async def exercise() -> None:
+        server = create_server(config)
+        campaign = await _call(
+            server,
+            "campaign_create",
+            {"name": "Rolled level", "edition": "2014", "idempotency_key": "campaign"},
+        )
+        actor = await _call(
+            server,
+            "character_create_from",
+            {
+                "mode": "direct",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "name": "Mara",
+                    "sheet": _cleric_sheet(),
+                },
+                "idempotency_key": "actor",
+            },
+        )
+        arguments = {
+            "character_id": actor["id"],
+            "action": "level_advance",
+            "payload": {
+                "class_name": "Cleric",
+                "hp_method": "rolled",
+                "reason": "milestone",
+                "source_ref": "module:test",
+            },
+            "expected_revision": actor["revision"],
+            "idempotency_key": "rolled-level",
+        }
+
+        advanced = await _call(server, "character_state_change", arguments)
+        replay = await _call(server, "character_state_change", arguments)
+
+        assert replay == advanced
+        assert calls == ["1d8"]
+        assert advanced["advancement"]["hit_points"]["roll"]["total"] == 3
+        assert advanced["character"]["sheet"]["combat"]["hp"]["max"] == 19
+
+        stale = await _call(
+            server,
+            "character_create_from",
+            {
+                "mode": "direct",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "name": "Stale Mara",
+                    "sheet": _cleric_sheet(),
+                },
+                "idempotency_key": "stale-actor",
+            },
+        )
+        with pytest.raises(Exception, match="character revision conflict"):
+            await _call(
+                server,
+                "character_state_change",
+                {
+                    **arguments,
+                    "character_id": stale["id"],
+                    "expected_revision": stale["revision"] + 1,
+                    "idempotency_key": "stale-level",
+                },
+            )
+        assert calls == ["1d8"]
+
+        with pytest.raises(Exception, match="unexpected fields.*hp_roll"):
+            await _call(
+                server,
+                "character_state_change",
+                {
+                    **arguments,
+                    "character_id": stale["id"],
+                    "payload": {**arguments["payload"], "hp_roll": 8},
+                    "expected_revision": stale["revision"],
+                    "idempotency_key": "forged-level",
+                },
+            )
+        assert calls == ["1d8"]
 
     asyncio.run(exercise())
 
