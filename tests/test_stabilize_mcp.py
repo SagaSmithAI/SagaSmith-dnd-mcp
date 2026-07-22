@@ -3,6 +3,7 @@ import random
 from pathlib import Path
 
 import pytest
+from mcp.server.fastmcp.exceptions import ToolError
 from sagasmith_dnd.character_schema import default_character_sheet
 
 import sagasmith_dnd_mcp.server as server_module
@@ -105,6 +106,51 @@ def test_medicine_stabilization_pays_action_and_commits_target_atomically(
                 "idempotency_key": "stabilize-start",
             },
         )
+        moved_far = await _call(
+            server,
+            "combat_movement",
+            {
+                "campaign_id": campaign["id"],
+                "actor_id": helper["id"],
+                "action": "move",
+                "payload": {"distance": 10, "destination": {"x": 0, "y": 2}},
+                "expected_revision": started["campaign_revision"],
+                "idempotency_key": "stabilize-move-far",
+            },
+        )
+        before_far_attempt = await _call(
+            server, "campaign_get", {"campaign_id": campaign["id"]}
+        )
+        with pytest.raises(ToolError, match="within 5 feet"):
+            await _call(
+                server,
+                "combat_check",
+                {
+                    "campaign_id": campaign["id"],
+                    "actor_id": helper["id"],
+                    "target_id": target["id"],
+                    "kind": "stabilize",
+                    "ability": "wisdom",
+                    "expected_revision": moved_far["campaign_revision"],
+                    "idempotency_key": "stabilize-too-far",
+                },
+            )
+        after_far_attempt = await _call(
+            server, "campaign_get", {"campaign_id": campaign["id"]}
+        )
+        assert after_far_attempt["revision"] == before_far_attempt["revision"]
+        moved_back = await _call(
+            server,
+            "combat_movement",
+            {
+                "campaign_id": campaign["id"],
+                "actor_id": helper["id"],
+                "action": "move",
+                "payload": {"distance": 10, "destination": {"x": 0, "y": 0}},
+                "expected_revision": after_far_attempt["revision"],
+                "idempotency_key": "stabilize-move-back",
+            },
+        )
         result = await _call(
             server,
             "combat_check",
@@ -114,7 +160,7 @@ def test_medicine_stabilization_pays_action_and_commits_target_atomically(
                 "target_id": target["id"],
                 "kind": "stabilize",
                 "ability": "wisdom",
-                "expected_revision": started["campaign_revision"],
+                "expected_revision": moved_back["campaign_revision"],
                 "idempotency_key": "stabilize-medicine",
             },
         )
