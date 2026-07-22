@@ -357,6 +357,10 @@ def test_statblock_spellcasting_binds_slots_and_active_content(tmp_path: Path) -
         assert spells["Scorching Ray"]["resolution"]["attack"][
             "range_ft_override"
         ] == 60
+        assert spells["Scorching Ray"]["definition"]["range"]["normal_ft"] == 60
+        assert spells["Scorching Ray"]["definition"]["range"]["long_ft"] == 60
+        assert "range 60 ft." in spells["Scorching Ray"]["definition"]["effect"]
+        assert "Statblock action overrides" in spells["Scorching Ray"]["notes"]
         assert spells["Ray of Sickness"]["resolution"]["attack"][
             "attack_bonus_override"
         ] == 6

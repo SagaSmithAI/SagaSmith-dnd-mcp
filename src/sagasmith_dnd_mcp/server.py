@@ -146,7 +146,7 @@ from sagasmith_dnd.spatial import (
 )
 from sagasmith_dnd.spell_resolution import (
     SPELL_RESOLUTION_MECHANIC_ID,
-    overlay_spell_attack_action,
+    overlay_spell_attack_card,
     scaled_roll_expression,
     spell_attack_action_resolution,
     spell_attack_count,
@@ -12327,9 +12327,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     specification.get("action_description") or ""
                 ).strip()
                 if action_description and isinstance(card.get("resolution"), dict):
-                    card["resolution"] = overlay_spell_attack_action(
-                        card["resolution"], action_description
-                    )
+                    card = overlay_spell_attack_card(card, action_description)
             elif len(exact) > 1:
                 warnings.append(
                     f"{name}: multiple active spell artifacts match the statblock entry"
