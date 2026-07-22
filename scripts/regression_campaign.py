@@ -12,6 +12,7 @@ import asyncio
 import json
 import os
 import sys
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
@@ -28,7 +29,13 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument(
         "--action",
-        choices=("audit", "relock-core", "prepare-statblock", "structured-combat"),
+        choices=(
+            "audit",
+            "relock-core",
+            "prepare-statblock",
+            "prepare-core-wizard",
+            "structured-combat",
+        ),
         default="audit",
         help="Read-only audit or checkpointed adoption of the current built-in Core",
     )
@@ -45,7 +52,26 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument(
         "--actor-name",
         default="Structured regression actor",
-        help="Canonical actor name for prepare-statblock",
+        help="Canonical actor name for actor preparation actions",
+    )
+    parser.add_argument(
+        "--ability-method",
+        choices=("manual", "standard_array"),
+        default="standard_array",
+        help="Ability-score input method for prepare-core-wizard",
+    )
+    parser.add_argument(
+        "--ability-assignments",
+        type=json.loads,
+        default={
+            "strength": 8,
+            "dexterity": 13,
+            "constitution": 14,
+            "intelligence": 15,
+            "wisdom": 12,
+            "charisma": 10,
+        },
+        help="JSON object containing all six ability assignments",
     )
     parser.add_argument(
         "--isolate-branch",
@@ -63,10 +89,9 @@ def _arguments() -> argparse.Namespace:
         "--support-actor-id", help="Optional second source-grounded hostile combatant"
     )
     parser.add_argument("--scene-id", help="Encounter scene for structured-combat")
-    parser.add_argument("--location-key", default="d13-morgue")
+    parser.add_argument("--location-key", help="Exact scene-atlas location for structured-combat")
     parser.add_argument(
         "--source-excerpt",
-        default="她的脸隐藏在兜帽之下，她的脚底下围绕着一群骷髅鼠。",
         help="Exact encounter-scene text supporting the hostile manifest",
     )
     parser.add_argument(
@@ -200,9 +225,7 @@ def _character_summary(character: dict[str, Any]) -> dict[str, Any]:
         derived.get("spellcasting") if isinstance(derived.get("spellcasting"), dict) else {}
     )
     sheet_inventory = sheet.get("inventory") if isinstance(sheet.get("inventory"), dict) else {}
-    source_items = [
-        item for item in (sheet_inventory.get("items") or []) if isinstance(item, dict)
-    ]
+    source_items = [item for item in (sheet_inventory.get("items") or []) if isinstance(item, dict)]
     for collection in (sheet.get("content") or {}).values():
         if isinstance(collection, list):
             source_items.extend(item for item in collection if isinstance(item, dict))
@@ -336,9 +359,7 @@ async def _audit(args: argparse.Namespace) -> dict[str, Any]:
                 )
             )
             latest_snapshot = (
-                max(snapshots, key=lambda item: int(item.get("slot") or 0))
-                if snapshots
-                else None
+                max(snapshots, key=lambda item: int(item.get("slot") or 0)) if snapshots else None
             )
             snapshot_verification = None
             snapshot_lineage = None
@@ -696,9 +717,7 @@ async def _prepare_statblock(args: argparse.Namespace) -> dict[str, Any]:
     """Create a fresh source-bound actor in lobby, optionally on a disposable branch."""
 
     if bool(args.review_id) == bool(args.candidate_id):
-        raise ValueError(
-            "prepare-statblock requires exactly one of --review-id or --candidate-id"
-        )
+        raise ValueError("prepare-statblock requires exactly one of --review-id or --candidate-id")
     token = _idempotency_token(args.run_id)
     async with stdio_client(_server_parameters(args)) as (read, write):
         async with ClientSession(read, write) as session:
@@ -817,9 +836,7 @@ async def _prepare_statblock(args: argparse.Namespace) -> dict[str, Any]:
                         )
                     )
                     matches.extend(
-                        item
-                        for item in module_candidates
-                        if item.get("id") == args.candidate_id
+                        item for item in module_candidates if item.get("id") == args.candidate_id
                     )
                 if len(matches) != 1:
                     raise RuntimeError(
@@ -891,9 +908,7 @@ async def _prepare_statblock(args: argparse.Namespace) -> dict[str, Any]:
                 _spell_card_summary(card)
                 for card in (actor.get("sheet", {}).get("content", {}).get("spells") or [])
             ]
-            if not all(
-                item["display_settlement_range_consistent"] for item in spell_cards
-            ):
+            if not all(item["display_settlement_range_consistent"] for item in spell_cards):
                 raise RuntimeError("source-bound spell display and settlement ranges disagree")
 
             campaign_in_lobby = _facade_value(
@@ -955,12 +970,9 @@ async def _prepare_statblock(args: argparse.Namespace) -> dict[str, Any]:
                         "campaign_id": args.campaign_id,
                         "label": snapshot_label,
                         "expected_revision": campaign_after["revision"],
-                        "expected_head_snapshot_id": (
-                            branch_after.get("head_snapshot_id") or ""
-                        ),
+                        "expected_head_snapshot_id": (branch_after.get("head_snapshot_id") or ""),
                         "idempotency_key": (
-                            f"{token}-prepared-actor-snapshot-"
-                            f"r{campaign_after['revision']}"
+                            f"{token}-prepared-actor-snapshot-r{campaign_after['revision']}"
                         ),
                     },
                 )
@@ -1137,11 +1149,527 @@ async def _prepare_statblock(args: argparse.Namespace) -> dict[str, Any]:
             }
 
 
+async def _prepare_core_wizard(args: argparse.Namespace) -> dict[str, Any]:
+    """Build one complete level-3 Wizard through public lobby tools and Core content."""
+
+    assignments = args.ability_assignments
+    if not isinstance(assignments, dict):
+        raise ValueError("--ability-assignments must decode to a JSON object")
+    token = _idempotency_token(args.run_id)
+    async with stdio_client(_server_parameters(args)) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            client = CampaignMcp(session, args.campaign_id)
+            phase_payload = await client.core(
+                "game_phase", {"campaign_id": args.campaign_id, "action": "get"}
+            )
+            initial_phase = str(_facade_value(phase_payload)["tool_profile"])
+            if initial_phase == "combat":
+                raise RuntimeError("prepare-core-wizard cannot run during active combat")
+            await client.open()
+            await client.load(*_phase_groups(initial_phase))
+            branches = _facade_value(
+                await client.domain(
+                    "branch_query", {"campaign_id": args.campaign_id, "view": "list"}
+                )
+            )
+            current_branch = next((item for item in branches if item.get("is_current")), None)
+            if current_branch is None:
+                raise RuntimeError("campaign has no current branch")
+            if initial_phase != "lobby":
+                campaign = _facade_value(
+                    await client.core(
+                        "campaign_query",
+                        {"view": "get", "payload": {"campaign_id": args.campaign_id}},
+                    )
+                )
+                await client.core(
+                    "game_phase",
+                    {
+                        "campaign_id": args.campaign_id,
+                        "action": "set",
+                        "tool_profile": "lobby",
+                        "expected_revision": campaign["revision"],
+                        "branch_id": current_branch["id"],
+                        "idempotency_key": _phase_transition_key(
+                            token, "wizard-enter-lobby", campaign
+                        ),
+                    },
+                )
+            await client.open()
+            await client.load("lobby.campaign", "lobby.rules", "lobby.characters")
+
+            built = _facade_value(
+                await client.domain(
+                    "character_create_from",
+                    {
+                        "mode": "build",
+                        "payload": {
+                            "campaign_id": args.campaign_id,
+                            "name": args.actor_name,
+                            "summary": (
+                                "Regression PC built from the active D&D 5e 2014 Core "
+                                "content catalog."
+                            ),
+                        },
+                        "idempotency_key": f"{token}-build-wizard",
+                    },
+                )
+            )
+            actor = dict(built["instance"])
+            ability = _facade_value(
+                await client.domain(
+                    "character_ability_apply",
+                    {
+                        "character_id": actor["id"],
+                        "method": args.ability_method,
+                        "assignments": assignments,
+                        "expected_revision": actor["revision"],
+                        "idempotency_key": f"{token}-wizard-abilities",
+                    },
+                )
+            )
+            actor = dict(ability["character"])
+            sheet = deepcopy(actor["sheet"])
+            sheet["progression"]["level"] = 1
+            sheet["progression"]["classes"] = [
+                {"name": "Wizard", "level": 1, "subclass": "", "hit_die": 6}
+            ]
+            sheet["abilities"]["intelligence"]["save_proficient"] = True
+            sheet["abilities"]["wisdom"]["save_proficient"] = True
+            sheet["skills"]["arcana"]["proficiency"] = "proficient"
+            sheet["skills"]["investigation"]["proficiency"] = "proficient"
+            constitution = int(sheet["abilities"]["constitution"]["score"])
+            intelligence = int(sheet["abilities"]["intelligence"]["score"])
+            constitution_modifier = (constitution - 10) // 2
+            intelligence_modifier = (intelligence - 10) // 2
+            level_one_hp = 6 + constitution_modifier
+            sheet["combat"]["hp"] = {
+                "value": level_one_hp,
+                "max": level_one_hp,
+                "temp": 0,
+            }
+            sheet["combat"]["hit_dice"] = {
+                "d6": {
+                    "label": "d6",
+                    "value": 1,
+                    "max": 1,
+                    "recovers_on": "long_rest",
+                    "source_key": "Wizard",
+                }
+            }
+            sheet["combat"]["hp_progression"] = [
+                {
+                    "level": 1,
+                    "method": "fixed",
+                    "value": level_one_hp,
+                    "source": "dnd5e.core.2014 Wizard level 1",
+                }
+            ]
+            sheet["traits"]["proficiencies"]["weapons"] = [
+                "daggers",
+                "darts",
+                "slings",
+                "quarterstaffs",
+                "light crossbows",
+            ]
+            sheet["spellcasting"]["ability"] = "intelligence"
+            sheet["spellcasting"]["spell_slots"] = {
+                "1": {
+                    "label": "Level 1 spell slots",
+                    "value": 2,
+                    "max": 2,
+                    "recovers_on": "long_rest",
+                    "source_key": "Wizard",
+                    "slot_level": 1,
+                }
+            }
+            sheet["spellcasting"]["preparation"] = {
+                "mode": "spellbook",
+                "max_prepared": max(1, 1 + intelligence_modifier),
+                "changes_on": "long_rest",
+                "selected_spell_ids": [],
+            }
+            sheet["spellcasting"]["ritual_casting"] = True
+            sheet["spellcasting"]["spellbook"] = {"enabled": True, "spell_ids": []}
+            actor = _facade_value(
+                await client.domain(
+                    "character_sheet_replace",
+                    {
+                        "character_id": actor["id"],
+                        "sheet": sheet,
+                        "expected_revision": actor["revision"],
+                        "idempotency_key": f"{token}-wizard-level-one-sheet",
+                    },
+                )
+            )
+
+            async def catalog(kind: str, query: str = "") -> list[dict[str, Any]]:
+                return list(
+                    _facade_value(
+                        await client.domain(
+                            "rule_pack_query",
+                            {
+                                "view": "content_catalog",
+                                "payload": {
+                                    "campaign_id": args.campaign_id,
+                                    "kind": kind,
+                                    "query": query,
+                                },
+                            },
+                        )
+                    )
+                )
+
+            async def apply_artifact(
+                current: dict[str, Any],
+                artifact: dict[str, Any],
+                suffix: str,
+                selection: dict[str, Any] | None = None,
+            ) -> dict[str, Any]:
+                return dict(
+                    _facade_value(
+                        await client.domain(
+                            "character_content_apply",
+                            {
+                                "character_id": current["id"],
+                                "artifact_id": artifact["id"],
+                                "selection": selection,
+                                "expected_revision": current["revision"],
+                                "idempotency_key": f"{token}-{suffix}",
+                            },
+                        )
+                    )
+                )
+
+            human = next(
+                item for item in await catalog("species", "Human") if item["name"] == "Human"
+            )
+            human_languages = int(human["selection_requirements"].get("language_count", 0) or 0)
+            actor = await apply_artifact(
+                actor,
+                human,
+                "wizard-species-human",
+                {"languages": ["Elvish"][:human_languages]} if human_languages else {},
+            )
+            acolyte = next(
+                item for item in await catalog("background", "Acolyte") if item["name"] == "Acolyte"
+            )
+            background_languages = int(
+                acolyte["selection_requirements"].get("language_count", 0) or 0
+            )
+            actor = await apply_artifact(
+                actor,
+                acolyte,
+                "wizard-background-acolyte",
+                {"languages": ["Celestial", "Draconic"][:background_languages]},
+            )
+
+            advancements: list[dict[str, Any]] = []
+            applied_features: list[str] = []
+            selected_subclass: dict[str, Any] | None = None
+            for new_level in (2, 3):
+                await client.domain(
+                    "campaign_event",
+                    {
+                        "campaign_id": args.campaign_id,
+                        "action": "add",
+                        "payload": {
+                            "summary": (
+                                f"Prepared {args.actor_name} as a level {new_level} "
+                                "Core regression Wizard."
+                            ),
+                            "event_type": "regression_setup",
+                            "audience_scope": "dm",
+                        },
+                        "idempotency_key": f"{token}-wizard-level-{new_level}-event",
+                    },
+                )
+                advanced = _facade_value(
+                    await client.domain(
+                        "character_state_change",
+                        {
+                            "character_id": actor["id"],
+                            "action": "level_advance",
+                            "payload": {
+                                "class_name": "Wizard",
+                                "hp_method": "fixed",
+                                "reason": "prepare a rules-complete campaign regression PC",
+                                "source_ref": "dnd5e.core.2014",
+                            },
+                            "expected_revision": actor["revision"],
+                            "idempotency_key": f"{token}-wizard-level-{new_level}",
+                        },
+                    )
+                )
+                actor = dict(advanced["character"])
+                follow_up = dict(advanced["advancement"]["follow_up"])
+                for feature in follow_up.get("feature_artifacts") or []:
+                    actor = await apply_artifact(
+                        actor,
+                        {"id": feature["artifact_id"]},
+                        f"wizard-feature-{_idempotency_token(str(feature['artifact_id']))}",
+                    )
+                    applied_features.append(str(feature["artifact_id"]))
+                if selected_subclass is None and follow_up.get("subclass_options"):
+                    selected_subclass = sorted(
+                        follow_up["subclass_options"],
+                        key=lambda item: (str(item.get("name")), str(item.get("artifact_id"))),
+                    )[0]
+                    actor = await apply_artifact(
+                        actor,
+                        {"id": selected_subclass["artifact_id"]},
+                        "wizard-subclass",
+                        {"target_class_name": "Wizard"},
+                    )
+                advancements.append(
+                    {
+                        "level": new_level,
+                        "hit_points": advanced["advancement"]["hit_points"],
+                        "spell_choices": advanced["advancement"]["spell_choices"],
+                        "follow_up": follow_up,
+                    }
+                )
+
+            spells = await catalog("spell")
+            wizard_spells = [
+                item
+                for item in spells
+                if "wizard"
+                in {
+                    str(value).casefold()
+                    for value in item["selection_requirements"].get("eligible_classes", [])
+                }
+                and int(item["selection_requirements"].get("level", 0) or 0) <= 2
+            ]
+            cantrips = sorted(
+                (
+                    item
+                    for item in wizard_spells
+                    if int(item["selection_requirements"].get("level", 0) or 0) == 0
+                ),
+                key=lambda item: (item["name"], item["id"]),
+            )[:3]
+            leveled = sorted(
+                (
+                    item
+                    for item in wizard_spells
+                    if int(item["selection_requirements"].get("level", 0) or 0) in {1, 2}
+                ),
+                key=lambda item: (
+                    int(item["selection_requirements"].get("level", 0) or 0),
+                    item["name"],
+                    item["id"],
+                ),
+            )
+            scorching_ray = next((item for item in leveled if item["id"] == args.spell_id), None)
+            if scorching_ray is None:
+                raise RuntimeError(
+                    "the active Core catalog does not expose the requested Wizard spell"
+                )
+            spellbook = [
+                scorching_ray,
+                *[item for item in leveled if item["id"] != args.spell_id][:9],
+            ]
+            if len(cantrips) != 3 or len(spellbook) != 10:
+                raise RuntimeError(
+                    "the active Core catalog cannot complete a level-3 Wizard spell loadout"
+                )
+            applied_spells: list[str] = []
+            for spell in [*cantrips, *spellbook]:
+                level = int(spell["selection_requirements"].get("level", 0) or 0)
+                actor = await apply_artifact(
+                    actor,
+                    spell,
+                    f"wizard-spell-{_idempotency_token(str(spell['id']))}",
+                    {
+                        "source_class": "Wizard",
+                        "method": "known" if level == 0 else "spellbook",
+                    },
+                )
+                applied_spells.append(str(spell["id"]))
+            max_prepared = int(actor["sheet"]["spellcasting"]["preparation"]["max_prepared"])
+            prepared_ids = [
+                args.spell_id,
+                *[item["id"] for item in spellbook if item["id"] != args.spell_id],
+            ][:max_prepared]
+            prepared = _facade_value(
+                await client.domain(
+                    "character_spell_prepare",
+                    {
+                        "character_id": actor["id"],
+                        "mode": "replace_all",
+                        "payload": {"spell_ids": prepared_ids, "event": "level_up"},
+                        "expected_revision": actor["revision"],
+                        "idempotency_key": f"{token}-wizard-prepared-spells",
+                    },
+                )
+            )
+            actor = dict(prepared["character"] if "character" in prepared else prepared)
+            campaign_before_rest = _facade_value(
+                await client.core(
+                    "campaign_query",
+                    {"view": "get", "payload": {"campaign_id": args.campaign_id}},
+                )
+            )
+            if not dict(campaign_before_rest.get("state") or {}).get("world_time"):
+                clock = _facade_value(
+                    await client.domain(
+                        "campaign_change",
+                        {
+                            "campaign_id": args.campaign_id,
+                            "action": "clock_set",
+                            "payload": {
+                                "day": 1,
+                                "hour": 0,
+                                "minute": 0,
+                                "label": "Campaign regression setup",
+                            },
+                            "expected_revision": campaign_before_rest["revision"],
+                            "idempotency_key": f"{token}-wizard-clock",
+                        },
+                    )
+                )
+                rest_campaign_revision = int(clock["campaign_revision"])
+            else:
+                rest_campaign_revision = int(campaign_before_rest["revision"])
+            rested = _facade_value(
+                await client.domain(
+                    "campaign_change",
+                    {
+                        "campaign_id": args.campaign_id,
+                        "action": "party_rest",
+                        "payload": {
+                            "members": [
+                                {
+                                    "character_id": actor["id"],
+                                    "expected_revision": actor["revision"],
+                                    "prepared_spell_ids": prepared_ids,
+                                    "food_and_drink": True,
+                                }
+                            ]
+                        },
+                        "expected_revision": rest_campaign_revision,
+                        "idempotency_key": f"{token}-wizard-ready-long-rest",
+                    },
+                )
+            )
+            if actor["id"] not in set(rested["member_ids"]):
+                raise RuntimeError("party rest did not settle the prepared Wizard")
+            actor = dict(
+                _facade_value(
+                    await client.domain(
+                        "character_query",
+                        {"view": "get", "payload": {"character_id": actor["id"]}},
+                    )
+                )
+            )
+
+            branches_after = _facade_value(
+                await client.domain(
+                    "branch_query", {"campaign_id": args.campaign_id, "view": "list"}
+                )
+            )
+            branch_after = next(item for item in branches_after if item.get("is_current"))
+            campaign_after = _facade_value(
+                await client.core(
+                    "campaign_query",
+                    {"view": "get", "payload": {"campaign_id": args.campaign_id}},
+                )
+            )
+            snapshot_label = f"Prepared Core Wizard: {args.actor_name}"
+            snapshots = _facade_value(
+                await client.domain(
+                    "snapshot_query", {"campaign_id": args.campaign_id, "view": "list"}
+                )
+            )
+            snapshot = next(
+                (
+                    item
+                    for item in snapshots
+                    if item.get("id") == branch_after.get("head_snapshot_id")
+                    and item.get("label") == snapshot_label
+                ),
+                None,
+            )
+            if snapshot is None:
+                snapshot = await client.domain(
+                    "snapshot_create",
+                    {
+                        "campaign_id": args.campaign_id,
+                        "label": snapshot_label,
+                        "expected_revision": campaign_after["revision"],
+                        "expected_head_snapshot_id": branch_after.get("head_snapshot_id") or "",
+                        "idempotency_key": (
+                            f"{token}-wizard-snapshot-r{campaign_after['revision']}"
+                        ),
+                    },
+                )
+            verified = _facade_value(
+                await client.domain(
+                    "snapshot_query",
+                    {
+                        "campaign_id": args.campaign_id,
+                        "view": "verify",
+                        "payload": {"slot": snapshot["slot"]},
+                    },
+                )
+            )
+            campaign_lobby = _facade_value(
+                await client.core(
+                    "campaign_query",
+                    {"view": "get", "payload": {"campaign_id": args.campaign_id}},
+                )
+            )
+            phase_change = _facade_value(
+                await client.core(
+                    "game_phase",
+                    {
+                        "campaign_id": args.campaign_id,
+                        "action": "set",
+                        "tool_profile": "play",
+                        "expected_revision": campaign_lobby["revision"],
+                        "branch_id": branch_after["id"],
+                        "idempotency_key": _phase_transition_key(
+                            token, "wizard-return-play", campaign_lobby
+                        ),
+                    },
+                )
+            )
+            return {
+                "action": "prepare-core-wizard",
+                "transport": "stdio",
+                "campaign_id": args.campaign_id,
+                "initial_phase": initial_phase,
+                "ability_generation": {
+                    "method": args.ability_method,
+                    "assignments": assignments,
+                    "status": ability.get("status"),
+                },
+                "species": human["id"],
+                "background": acolyte["id"],
+                "advancements": advancements,
+                "selected_subclass": selected_subclass,
+                "applied_features": applied_features,
+                "applied_spells": applied_spells,
+                "prepared_spell_ids": prepared_ids,
+                "character": _character_summary(actor),
+                "snapshot": snapshot,
+                "snapshot_verification": verified,
+                "phase_change": phase_change,
+            }
+
+
 async def _structured_combat(args: argparse.Namespace) -> dict[str, Any]:
     """Run structured spell combat on a disposable branch and restore the source branch."""
 
-    if not args.caster_id or not args.scene_id or not args.target_id:
-        raise ValueError("--caster-id, --scene-id, and at least one --target-id are required")
+    if not all(
+        (args.caster_id, args.scene_id, args.location_key, args.source_excerpt, args.target_id)
+    ):
+        raise ValueError(
+            "--caster-id, --scene-id, --location-key, --source-excerpt, and at least "
+            "one --target-id are required"
+        )
     token = _idempotency_token(args.run_id)
     async with stdio_client(_server_parameters(args)) as (read, write):
         async with ClientSession(read, write) as session:
@@ -1236,7 +1764,7 @@ async def _structured_combat(args: argparse.Namespace) -> dict[str, Any]:
                     "snapshot_create",
                     {
                         "campaign_id": args.campaign_id,
-                        "label": "Avernus structured-combat regression source",
+                        "label": "Campaign structured-combat regression source",
                         "expected_revision": campaign_lobby["revision"],
                         "expected_head_snapshot_id": source_branch.get("head_snapshot_id") or "",
                         "idempotency_key": f"{token}-source-checkpoint",
@@ -1287,7 +1815,7 @@ async def _structured_combat(args: argparse.Namespace) -> dict[str, Any]:
                 "play.combat_control",
             )
 
-            hostile_ids = [args.caster_id]
+            hostile_ids = list(args.target_id)
             if args.support_actor_id:
                 hostile_ids.append(args.support_actor_id)
             manifest = {
@@ -1329,7 +1857,7 @@ async def _structured_combat(args: argparse.Namespace) -> dict[str, Any]:
                     "initiative": 30,
                     "tie_breaker": 0,
                     "position": {"x": 2, "y": 2},
-                    "disposition": "hostile",
+                    "disposition": "friendly",
                 }
             ]
             participant_config.extend(
@@ -1338,7 +1866,7 @@ async def _structured_combat(args: argparse.Namespace) -> dict[str, Any]:
                     "initiative": 20 - index,
                     "tie_breaker": index,
                     "position": {"x": 7, "y": 2 + index},
-                    "disposition": "friendly",
+                    "disposition": "hostile",
                 }
                 for index, target_id in enumerate(args.target_id, start=1)
             )
@@ -1365,7 +1893,7 @@ async def _structured_combat(args: argparse.Namespace) -> dict[str, Any]:
                     "participant_ids": participant_ids,
                     "participant_config": participant_config,
                     "participant_manifest": manifest,
-                    "name": "D13 structured spell regression",
+                    "name": f"{args.location_key} structured spell regression",
                     "scene_id": args.scene_id,
                     "scope_id": "party",
                     "battle_map": {"location_key": args.location_key},
@@ -1447,8 +1975,8 @@ async def _structured_combat(args: argparse.Namespace) -> dict[str, Any]:
                     "outcome": {
                         "status": "truce",
                         "summary": (
-                            "Regression encounter ended after all source-bound Scorching Ray "
-                            "attacks were settled; story continuity remains on the source branch."
+                            "Regression encounter ended after every structured spell attack "
+                            "was settled; story continuity remains on the source branch."
                         ),
                     },
                     "branch_id": regression_branch_id,
@@ -1459,6 +1987,10 @@ async def _structured_combat(args: argparse.Namespace) -> dict[str, Any]:
 
             await client.open()
             await client.load("play.scene", "play.scene_control", "play.characters")
+            caster_name = str(source_actors[args.caster_id].get("name") or args.caster_id)
+            witness_name = str(source_actors[args.target_id[0]].get("name") or args.target_id[0])
+            witness_key = f"regression.{token}.witnessed-spell"
+            caster_key = f"regression.{token}.observed-outcomes"
             witness_event = _facade_value(
                 await client.domain(
                     "campaign_event",
@@ -1466,14 +1998,14 @@ async def _structured_combat(args: argparse.Namespace) -> dict[str, Any]:
                         "campaign_id": args.campaign_id,
                         "action": "add",
                         "payload": {
-                            "summary": "A party witness saw Flennis cast Scorching Ray.",
+                            "summary": f"{witness_name} saw {caster_name} cast the spell.",
                             "event_type": "regression",
                             "audience_scope": "actor",
                             "branch_id": regression_branch_id,
                             "known_by_actor_ids": [args.target_id[0]],
-                            "knowledge_key": "regression.flennis.scorching-ray",
+                            "knowledge_key": witness_key,
                             "knowledge_proposition": (
-                                "Flennis can cast a three-ray Scorching Ray at 2nd level."
+                                f"{caster_name} cast Scorching Ray during this encounter."
                             ),
                             "knowledge_disclosure_scope": "owner",
                         },
@@ -1488,14 +2020,15 @@ async def _structured_combat(args: argparse.Namespace) -> dict[str, Any]:
                         "campaign_id": args.campaign_id,
                         "action": "add",
                         "payload": {
-                            "summary": "Flennis observed the party withstand the spell volley.",
+                            "summary": f"{caster_name} observed the spell attack outcomes.",
                             "event_type": "regression",
                             "audience_scope": "actor",
                             "branch_id": regression_branch_id,
                             "known_by_actor_ids": [args.caster_id],
-                            "knowledge_key": "regression.party.spell-resilience",
+                            "knowledge_key": caster_key,
                             "knowledge_proposition": (
-                                "The tested party members remained standing after one ray each."
+                                f"{caster_name} observed the resolved outcomes of every "
+                                "Scorching Ray attack."
                             ),
                             "knowledge_disclosure_scope": "owner",
                         },
@@ -1509,11 +2042,11 @@ async def _structured_combat(args: argparse.Namespace) -> dict[str, Any]:
                     {
                         "campaign_id": args.campaign_id,
                         "content": (
-                            "Structured Scorching Ray regression completed on the disposable "
-                            "D13 branch."
+                            "Structured spell regression completed on the disposable "
+                            f"{args.location_key} branch."
                         ),
                         "kind": "regression",
-                        "subject": "D13 structured combat",
+                        "subject": f"{args.location_key} structured combat",
                         "metadata": {"spell_id": args.spell_id},
                         "branch_id": regression_branch_id,
                         "idempotency_key": f"{token}-branch-memory",
@@ -1721,8 +2254,6 @@ async def _structured_combat(args: argparse.Namespace) -> dict[str, Any]:
                     },
                 )
             )
-            witness_key = "regression.flennis.scorching-ray"
-            caster_key = "regression.party.spell-resilience"
             source_witness_keys = {
                 str(item.get("knowledge_key")) for item in source_witness_knowledge
             }
@@ -1790,6 +2321,7 @@ def main() -> int:
         "audit": _audit,
         "relock-core": _relock_core,
         "prepare-statblock": _prepare_statblock,
+        "prepare-core-wizard": _prepare_core_wizard,
         "structured-combat": _structured_combat,
     }[args.action]
     report = asyncio.run(operation(args))
