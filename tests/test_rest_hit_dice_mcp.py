@@ -128,6 +128,17 @@ def test_short_rest_atomically_applies_arcane_recovery_choice(tmp_path: Path) ->
             "campaign_create",
             {"name": "Arcane rest", "edition": "2014", "idempotency_key": "campaign"},
         )
+        await _call(
+            server,
+            "campaign_change",
+            {
+                "campaign_id": campaign["id"],
+                "action": "clock_set",
+                "payload": {"day": 1, "hour": 12, "minute": 0, "label": "Test day"},
+                "expected_revision": campaign["revision"],
+                "idempotency_key": "clock",
+            },
+        )
         actor = await _call(
             server,
             "character_create_from",
@@ -166,6 +177,8 @@ def test_short_rest_atomically_applies_arcane_recovery_choice(tmp_path: Path) ->
         )
         assert feature["uses"]["value"] == 0
         assert feature["uses"]["max"] == 1
+        assert feature["uses"]["recovers_on"] == "manual"
+        assert feature["choices"]["_arcane_recovery_last_used_day"] == 1
 
     asyncio.run(exercise())
 

@@ -7181,6 +7181,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             arcane_recovery=arcane_recovery,
             food_and_drink=food_and_drink,
             rules=rest_rules,
+            world_day=int(
+                dict(dict(campaign.state or {}).get("world_time") or {}).get("day", 0) or 0
+            ),
         )
         if applied.get("status") in {"pending_choice", "pending_ruling"}:
             response = {
