@@ -39,6 +39,10 @@ def _arguments() -> argparse.Namespace:
     )
     parser.add_argument("--review-id", help="Reviewed module statblock for prepare-statblock")
     parser.add_argument(
+        "--candidate-id",
+        help="Review-ready text candidate to review and create during prepare-statblock",
+    )
+    parser.add_argument(
         "--actor-name",
         default="Structured regression actor",
         help="Canonical actor name for prepare-statblock",
@@ -389,6 +393,16 @@ async def _audit(args: argparse.Namespace) -> dict[str, Any]:
                         },
                     )
                 )
+                candidates = _facade_value(
+                    await client.domain(
+                        "module_query",
+                        {
+                            "campaign_id": args.campaign_id,
+                            "view": "candidates",
+                            "payload": {"module_id": module_id},
+                        },
+                    )
+                )
                 scenes = index.get("scenes", index) if isinstance(index, dict) else index
                 module_reports.append(
                     {
@@ -399,6 +413,32 @@ async def _audit(args: argparse.Namespace) -> dict[str, Any]:
                             {str(item.get("media_type") or "unknown") for item in assets or []}
                         ),
                         "content_reviews": [_review_summary(item) for item in reviews or []],
+                        "statblock_candidates": {
+                            "count": len(candidates or []),
+                            "review_ready": sum(
+                                item.get("execution_state") == "review_ready"
+                                for item in candidates or []
+                            ),
+                            "blocked": sum(
+                                item.get("execution_state") == "blocked"
+                                for item in candidates or []
+                            ),
+                            "items": [
+                                {
+                                    key: item.get(key)
+                                    for key in (
+                                        "id",
+                                        "name",
+                                        "page_start",
+                                        "page_end",
+                                        "execution_state",
+                                        "review_error",
+                                        "validation",
+                                    )
+                                }
+                                for item in candidates or []
+                            ],
+                        },
                     }
                 )
             current_scene = _facade_value(
@@ -643,8 +683,10 @@ async def _relock_core(args: argparse.Namespace) -> dict[str, Any]:
 async def _prepare_statblock(args: argparse.Namespace) -> dict[str, Any]:
     """Create a fresh source-bound actor in lobby, optionally on a disposable branch."""
 
-    if not args.review_id:
-        raise ValueError("--review-id is required for prepare-statblock")
+    if bool(args.review_id) == bool(args.candidate_id):
+        raise ValueError(
+            "prepare-statblock requires exactly one of --review-id or --candidate-id"
+        )
     token = _idempotency_token(args.run_id)
     async with stdio_client(_server_parameters(args)) as (read, write):
         async with ClientSession(read, write) as session:
@@ -740,16 +782,73 @@ async def _prepare_statblock(args: argparse.Namespace) -> dict[str, Any]:
             )
             if rules.get("effective_error"):
                 raise RuntimeError(str(rules["effective_error"]))
-            review = _facade_value(
-                await client.domain(
-                    "module_query",
-                    {
-                        "campaign_id": args.campaign_id,
-                        "view": "content",
-                        "payload": {"review_id": args.review_id},
-                    },
+            candidate: dict[str, Any] | None = None
+            if args.candidate_id:
+                module_sources = _facade_value(
+                    await client.domain(
+                        "module_query",
+                        {"campaign_id": args.campaign_id, "view": "list"},
+                    )
                 )
-            )
+                matches: list[dict[str, Any]] = []
+                for module in module_sources:
+                    module_candidates = _facade_value(
+                        await client.domain(
+                            "module_query",
+                            {
+                                "campaign_id": args.campaign_id,
+                                "view": "candidates",
+                                "payload": {"module_id": module["id"]},
+                            },
+                        )
+                    )
+                    matches.extend(
+                        item
+                        for item in module_candidates
+                        if item.get("id") == args.candidate_id
+                    )
+                if len(matches) != 1:
+                    raise RuntimeError(
+                        f"candidate id must resolve exactly once; found {len(matches)}"
+                    )
+                candidate = matches[0]
+                if candidate.get("execution_state") != "review_ready":
+                    raise RuntimeError(
+                        str(candidate.get("review_error") or "candidate is not review-ready")
+                    )
+                reviewed = _facade_value(
+                    await client.domain(
+                        "module_content_review",
+                        {
+                            "campaign_id": args.campaign_id,
+                            "module_id": candidate["module_id"],
+                            "scene_id": candidate["scene_id"],
+                            "content_key": (
+                                f"{_idempotency_token(str(candidate['name'])).lower()}-"
+                                f"{str(candidate['id']).split(':')[-1][:10]}"
+                            ),
+                            "normalized_content": candidate["normalized_content"],
+                            "source_chunk_ids": candidate["source_chunk_ids"],
+                            "observation": (
+                                "Regression DM reviewed the normalized statblock against "
+                                "every cited module text chunk."
+                            ),
+                            "idempotency_key": f"{token}-review-candidate",
+                        },
+                    )
+                )
+                review = dict(reviewed["review"])
+            else:
+                review = _facade_value(
+                    await client.domain(
+                        "module_query",
+                        {
+                            "campaign_id": args.campaign_id,
+                            "view": "content",
+                            "payload": {"review_id": args.review_id},
+                        },
+                    )
+                )
             if review.get("content_kind") != "dnd5e_2014_statblock":
                 raise RuntimeError("review is not a D&D 2014 statblock")
             created = _facade_value(
@@ -966,6 +1065,23 @@ async def _prepare_statblock(args: argparse.Namespace) -> dict[str, Any]:
                 "initial_phase": initial_phase,
                 "phase_changes": phase_changes,
                 "review": _review_summary(review),
+                "candidate": (
+                    {
+                        key: candidate.get(key)
+                        for key in (
+                            "id",
+                            "name",
+                            "module_id",
+                            "scene_id",
+                            "page_start",
+                            "page_end",
+                            "execution_state",
+                            "validation",
+                        )
+                    }
+                    if candidate is not None
+                    else None
+                ),
                 "created": {
                     "statblock": created.get("statblock"),
                     "spell_warnings": created.get("spell_warnings"),
