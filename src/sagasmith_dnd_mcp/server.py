@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from copy import deepcopy
 from dataclasses import asdict
 from typing import Any, Literal
@@ -10802,6 +10803,146 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             values.extend((pack.pack_id, pack.version, dict(item)) for item in pack.artifacts)
         return [item for item in values if kind is None or item[2].get("kind") == kind]
 
+    def hydrate_statblock_spellcasting(
+        campaign_id: str,
+        parsed: Any,
+        *,
+        source_key: str,
+        rule_refs: list[str],
+    ) -> tuple[dict[str, Any], list[str]]:
+        """Bind a parsed statblock spell list to exact active content artifacts."""
+        sheet = deepcopy(parsed.sheet)
+        spellcasting = deepcopy(parsed.spellcasting)
+        if not isinstance(spellcasting, dict):
+            return sheet, []
+
+        sheet["spellcasting"]["ability"] = spellcasting["ability"]
+        sheet["spellcasting"]["spell_slots"] = {
+            str(level): {
+                "label": f"Level {level} spell slots",
+                "value": int(count),
+                "max": int(count),
+                "recovers_on": "long_rest",
+                "source_key": source_key,
+                "slot_level": int(level),
+            }
+            for level, count in dict(spellcasting.get("slots") or {}).items()
+        }
+
+        candidates = available_content_artifacts(campaign_id, kind="spell")
+        prepared_ids: list[str] = []
+        warnings: list[str] = []
+        for specification in spellcasting.get("spells", []):
+            name = str(specification.get("name") or "").strip()
+            level = int(specification.get("level", 0) or 0)
+            exact = [
+                item
+                for item in candidates
+                if str(dict(item[2].get("card") or {}).get("name") or "").casefold()
+                == name.casefold()
+                and int(dict(item[2].get("card") or {}).get("level", 0) or 0) == level
+            ]
+            if len(exact) == 1:
+                pack_id, version, artifact = exact[0]
+                card = deepcopy(dict(artifact.get("card") or {}))
+                card.pop("classes", None)
+                card.update(
+                    {
+                        "id": str(artifact["id"]),
+                        "pack_id": pack_id,
+                        "pack_version": version,
+                        "rule_refs": list(artifact.get("rule_refs") or []),
+                        "mechanic_refs": list(artifact.get("mechanic_refs") or []),
+                    }
+                )
+            elif len(exact) > 1:
+                warnings.append(
+                    f"{name}: multiple active spell artifacts match the statblock entry"
+                )
+                continue
+            else:
+                action_description = str(
+                    specification.get("action_description") or ""
+                ).strip()
+                if not action_description:
+                    warnings.append(
+                        f"{name}: no active spell artifact or complete statblock action exists"
+                    )
+                    continue
+                display_name = re.sub(
+                    r"\s*\([^)]*\)\s*$",
+                    "",
+                    str(specification.get("action_name") or name),
+                ).strip()
+                slug = re.sub(r"[^a-z0-9]+", "-", name.casefold()).strip("-")
+                range_match = re.search(
+                    r"(?i)range\s+(\d+)(?:\s*/\s*(\d+))?\s*ft",
+                    action_description,
+                )
+                normal_range = int(range_match.group(1)) if range_match else 0
+                long_range = (
+                    int(range_match.group(2) or range_match.group(1))
+                    if range_match
+                    else 0
+                )
+                card = {
+                    "id": f"{source_key}.spell.{slug}",
+                    "source_key": source_key,
+                    "name": display_name,
+                    "level": level,
+                    "definition": {
+                        "casting_time": "1 action",
+                        "range": {
+                            "kind": "distance" if range_match else "special",
+                            "normal_ft": normal_range,
+                            "long_ft": long_range,
+                        },
+                        "duration": {"kind": "instantaneous"},
+                        "components": {},
+                        "effect": action_description,
+                    },
+                    "custom_definition": {
+                        "source": source_key,
+                        "component_details": "not_repeated_in_statblock",
+                    },
+                    "notes": (
+                        "Source-bound statblock spell action. Component legality and "
+                        "effect settlement require a DM ruling."
+                    ),
+                    "pack_id": "",
+                    "pack_version": "",
+                    "rule_refs": list(rule_refs),
+                    "mechanic_refs": [],
+                }
+                warnings.append(
+                    f"{display_name}: source-bound statblock spell requires component "
+                    "and effect ruling"
+                )
+
+            card["grant"] = {
+                "source_type": "statblock",
+                "source_key": source_key,
+                "method": "known",
+            }
+            card["access"] = {
+                "known": True,
+                "prepared": True,
+                "always_prepared": True,
+                "in_spellbook": False,
+                "ritual_available": False,
+                "at_will": bool(specification.get("at_will", False)),
+            }
+            sheet["content"]["spells"].append(card)
+            prepared_ids.append(str(card["id"]))
+
+        sheet["spellcasting"]["preparation"] = {
+            "mode": "known",
+            "max_prepared": len(prepared_ids),
+            "changes_on": "manual",
+            "selected_spell_ids": prepared_ids,
+        }
+        return validate_character_sheet(sheet), warnings
+
     def level_advancement_content_context(
         campaign_id: str,
         sheet: dict[str, Any],
@@ -12567,12 +12708,24 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 rule_refs=[f"module-scene:{review['scene_id']}", f"module-review:{review_id}"],
                 name=str(data.get("name") or "").strip() or None,
             )
+            source_key = f"module-review:{review_id}"
+            source_rule_refs = [
+                f"module-scene:{review['scene_id']}",
+                f"module-review:{review_id}",
+            ]
+            hydrated_sheet, spell_warnings = hydrate_statblock_spellcasting(
+                campaign_id,
+                parsed,
+                source_key=source_key,
+                rule_refs=source_rule_refs,
+            )
+            statblock_warnings = [*parsed.warnings, *spell_warnings]
             variant = data.get("variant")
             variant_evidence = statblock_variant_evidence(campaign_id, variant)
             sheet = (
-                apply_statblock_variant(parsed.sheet, variant)
+                apply_statblock_variant(hydrated_sheet, variant)
                 if variant is not None
-                else parsed.sheet
+                else hydrated_sheet
             )
             character_type = str(data.get("character_type") or "monster")
             if character_type not in {"npc", "monster"}:
@@ -12593,8 +12746,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     f"\nVariant source: {variant['source_ref']}; applied fields: "
                     f"{changed_fields}."
                 )
-            if parsed.warnings:
-                provenance += "\nManual rulings: " + "; ".join(parsed.warnings) + "."
+            if statblock_warnings:
+                provenance += "\nManual rulings: " + "; ".join(statblock_warnings) + "."
             existing_dm_notes = str(profile.get("dm_notes") or "").strip()
             profile["dm_notes"] = "\n".join(
                 item for item in (existing_dm_notes, provenance) if item
@@ -12616,8 +12769,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "statblock": {
                     "challenge_rating": parsed.challenge_rating,
                     "experience_points": parsed.experience_points,
-                    "warnings": list(parsed.warnings),
-                    "settlement": "automatic" if not parsed.warnings else "mixed",
+                    "warnings": list(statblock_warnings),
+                    "settlement": "automatic" if not statblock_warnings else "mixed",
                 },
                 "variant": deepcopy(variant) if variant is not None else None,
                 "variant_evidence": variant_evidence,
@@ -12684,12 +12837,20 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 rule_refs=selected_chunk_ids,
                 name=str(data.get("name") or source.get("title") or "").strip() or None,
             )
+            source_key = f"rule-source:{source['source_key']}"
+            hydrated_sheet, spell_warnings = hydrate_statblock_spellcasting(
+                campaign_id,
+                parsed,
+                source_key=source_key,
+                rule_refs=selected_chunk_ids,
+            )
+            statblock_warnings = [*parsed.warnings, *spell_warnings]
             variant = data.get("variant")
             variant_evidence = statblock_variant_evidence(campaign_id, variant)
             sheet = (
-                apply_statblock_variant(parsed.sheet, variant)
+                apply_statblock_variant(hydrated_sheet, variant)
                 if variant is not None
-                else parsed.sheet
+                else hydrated_sheet
             )
             character_type = str(data.get("character_type") or "npc")
             if character_type not in {"npc", "monster"}:
@@ -12708,8 +12869,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     f"\nVariant source: {variant['source_ref']}; applied fields: "
                     f"{changed_fields}."
                 )
-            if parsed.warnings:
-                provenance += "\nManual rulings: " + "; ".join(parsed.warnings) + "."
+            if statblock_warnings:
+                provenance += "\nManual rulings: " + "; ".join(statblock_warnings) + "."
             existing_dm_notes = str(profile.get("dm_notes") or "").strip()
             profile["dm_notes"] = "\n".join(
                 item for item in (existing_dm_notes, provenance) if item
@@ -12738,8 +12899,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "statblock": {
                     "challenge_rating": parsed.challenge_rating,
                     "experience_points": parsed.experience_points,
-                    "warnings": list(parsed.warnings),
-                    "settlement": "automatic" if not parsed.warnings else "mixed",
+                    "warnings": list(statblock_warnings),
+                    "settlement": "automatic" if not statblock_warnings else "mixed",
                 },
                 "variant": deepcopy(variant) if variant is not None else None,
                 "variant_evidence": variant_evidence,

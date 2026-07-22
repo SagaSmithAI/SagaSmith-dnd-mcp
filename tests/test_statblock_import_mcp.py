@@ -39,6 +39,52 @@ REACTIVE_COMMONER = COMMONER + """
 """
 
 
+STATBLOCK_SPELLCASTER = """### Master of Souls
+
+*Medium humanoid (human), neutral evil*
+
+**Armor Class** 12
+**Hit Points** 45 (6d8 + 18)
+**Speed** 30 ft.
+
+| STR | DEX | CON | INT | WIS | CHA |
+|:---:|:---:|:---:|:---:|:---:|:---:|
+| 10 (+0) | 14 (+2) | 17 (+3) | 19 (+4) | 14 (+2) | 13 (+1) |
+
+**Senses** passive Perception 12
+**Languages** Common
+**Challenge** 4 (1,100 XP)
+
+***Spellcasting***. The master of souls is a 5th-level spellcaster. Its spellcasting
+ability is Intelligence (spell save DC 14, +6 to hit with spell attacks). It has the
+following wizard spells prepared:
+
+Cantrips (at will): chill touch, mage hand
+
+1st level (4 slots): ray of sickness, shield
+
+2nd level (3 slots): scorching ray
+
+###### Actions
+
+***Multiattack***. The master of souls makes two attacks with its silvered skull flail.
+
+***Silvered Skull Flail***. *Melee Weapon Attack:* +2 to hit, reach 5 ft., one target.
+*Hit:* 4 (1d8) bludgeoning damage.
+
+***Chill Touch***. *Ranged Spell Attack:* +6 to hit, range 120 ft., one target.
+*Hit:* 13 (2d8) necrotic damage.
+
+***Ray of Sickness (1st-Level Spell; Requires a Spell Slot)***.
+*Ranged Spell Attack:* +6 to hit, range 60 ft., one target.
+*Hit:* 9 (2d8) poison damage.
+
+***Scorching Ray (2nd-Level Spell; Requires a Spell Slot)***.
+*Ranged Spell Attack:* +6 to hit, range 60 ft., one target.
+*Hit:* 7 (2d6) fire damage.
+"""
+
+
 async def _call(server, name: str, arguments: dict):
     _, result = await server.call_tool(name, arguments)
     value = result.get("result", result) if isinstance(result, dict) else result
@@ -184,6 +230,136 @@ def test_imported_rule_source_creates_a_source_bound_combat_actor(tmp_path: Path
         )
         assert variant["variant_evidence"]["kind"] == "rule-chunk"
         assert variant["variant_evidence"]["source_id"] == ingested["source_id"]
+
+    asyncio.run(exercise())
+
+
+def test_statblock_spellcasting_binds_slots_and_active_content(tmp_path: Path) -> None:
+    workspace = Path(__file__).resolve().parents[2]
+    import_root = tmp_path / "rules"
+    import_root.mkdir()
+    source_path = import_root / "master-of-souls.md"
+    source_path.write_text(STATBLOCK_SPELLCASTER, encoding="utf-8")
+    config = McpConfig(
+        home=tmp_path / "home",
+        database_url=None,
+        chroma_url=None,
+        chroma_path_override=None,
+        dnd_skills_dir=workspace / "SagaSmith-dnd-skills",
+        modulegen_skills_dir=tmp_path / "modulegen",
+        rule_import_roots=(import_root,),
+        auto_seed_rules=False,
+    )
+
+    async def exercise() -> None:
+        server = create_server(config)
+        campaign = await _call(
+            server,
+            "campaign_create",
+            {"name": "Spellcaster import", "edition": "2014", "idempotency_key": "campaign"},
+        )
+        staged = await _call(
+            server,
+            "rule_import",
+            {
+                "campaign_id": campaign["id"],
+                "action": "stage",
+                "payload": {
+                    "source_path": str(source_path),
+                    "source_key": "module/master-of-souls",
+                    "title": "Master of Souls",
+                    "edition": "2014",
+                    "publication_id": "module",
+                },
+                "idempotency_key": "stage",
+            },
+        )
+        await _call(
+            server,
+            "rule_import",
+            {
+                "campaign_id": campaign["id"],
+                "action": "inspect",
+                "payload": {"job_id": staged["job"]["id"]},
+                "idempotency_key": "inspect",
+            },
+        )
+        ingested = await _call(
+            server,
+            "rule_import",
+            {
+                "campaign_id": campaign["id"],
+                "action": "ingest",
+                "payload": {"job_id": staged["job"]["id"]},
+                "idempotency_key": "ingest",
+            },
+        )
+        created = await _call(
+            server,
+            "character_create_from",
+            {
+                "mode": "statblock",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "source_id": ingested["source_id"],
+                    "name": "Flennis",
+                    "character_type": "monster",
+                },
+                "idempotency_key": "create",
+            },
+        )
+
+        actor = created["character"]
+        assert actor["sheet"]["spellcasting"]["ability"] == "intelligence"
+        assert actor["sheet"]["spellcasting"]["spell_slots"] == {
+            "1": {
+                "label": "Level 1 spell slots",
+                "value": 4,
+                "max": 4,
+                "recovers_on": "long_rest",
+                "source_key": "rule-source:module/master-of-souls",
+                "slot_level": 1,
+            },
+            "2": {
+                "label": "Level 2 spell slots",
+                "value": 3,
+                "max": 3,
+                "recovers_on": "long_rest",
+                "source_key": "rule-source:module/master-of-souls",
+                "slot_level": 2,
+            },
+        }
+        spells = {item["name"]: item for item in actor["sheet"]["content"]["spells"]}
+        assert spells["Chill Touch"]["id"] == "dnd5e.content.srd2014.spell.chill-touch"
+        assert spells["Shield"]["id"] == "dnd5e.content.srd2014.spell.shield"
+        assert spells["Scorching Ray"]["id"] == (
+            "dnd5e.content.srd2014.spell.scorching-ray"
+        )
+        assert spells["Ray of Sickness"]["id"] == (
+            "rule-source:module/master-of-souls.spell.ray-of-sickness"
+        )
+        assert spells["Ray of Sickness"]["custom_definition"] == {
+            "source": "rule-source:module/master-of-souls",
+            "component_details": "not_repeated_in_statblock",
+        }
+        assert [
+            item["item_id"] for item in actor["derived"]["inventory"]["weapon_attacks"]
+        ] == ["silvered-skull-flail"]
+        assert actor["derived"]["multiattack_options"] == [
+            {
+                "id": "melee",
+                "attacks": [
+                    {
+                        "weapon_id": "silvered-skull-flail",
+                        "attack_mode": "melee",
+                        "count": 2,
+                    }
+                ],
+            }
+        ]
+        assert created["statblock"]["warnings"] == [
+            "Ray of Sickness: source-bound statblock spell requires component and effect ruling"
+        ]
 
     asyncio.run(exercise())
 
