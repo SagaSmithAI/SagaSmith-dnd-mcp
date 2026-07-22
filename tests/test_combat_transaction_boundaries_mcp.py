@@ -239,3 +239,165 @@ def test_action_surge_is_settled_without_a_manual_ruling(tmp_path: Path) -> None
         assert actor_after["sheet"]["content"]["features"][0]["uses"]["value"] == 0
 
     asyncio.run(exercise())
+
+
+def test_second_wind_heals_and_pays_bonus_action_atomically(tmp_path: Path) -> None:
+    async def exercise() -> None:
+        server = create_server(_config(tmp_path))
+        campaign = await _call(
+            server,
+            "campaign_create",
+            {"name": "Second Wind", "edition": "2014", "idempotency_key": "campaign"},
+        )
+        sheet = default_character_sheet()
+        sheet["progression"]["level"] = 2
+        sheet["progression"]["classes"] = [
+            {"name": "Fighter", "level": 2, "subclass": "", "hit_die": 10}
+        ]
+        sheet["combat"]["hp"] = {"value": 1, "max": 20, "temp": 0}
+        sheet["content"]["features"] = [
+            {
+                "id": "dnd5e.content.srd2014.feature.fighter-second-wind",
+                "name": "Second Wind",
+                "source_key": "Fighter",
+                "description": "Regain 1d10 + Fighter level hit points.",
+                "uses": {
+                    "label": "Second Wind",
+                    "value": 1,
+                    "max": 1,
+                    "recovers_on": "short_rest",
+                },
+                "resource_key": "",
+                "activation": {"type": "bonus_action", "cost": 1, "trigger": ""},
+                "scaling": [],
+                "choices": {"outcome": "roll 1d10 + fighter level"},
+            }
+        ]
+        actor = await _call(
+            server,
+            "character_create",
+            {
+                "campaign_id": campaign["id"],
+                "name": "Fighter",
+                "sheet": sheet,
+                "idempotency_key": "actor",
+            },
+        )
+        campaign = await _call(server, "campaign_get", {"campaign_id": campaign["id"]})
+        started = await _call_raw(
+            server,
+            "combat_start",
+            {
+                "campaign_id": campaign["id"],
+                "participant_ids": [actor["id"]],
+                "participant_config": [{"actor_id": actor["id"], "initiative": 10}],
+                "expected_revision": campaign["revision"],
+                "idempotency_key": "start",
+            },
+        )
+
+        result = await _call_raw(
+            server,
+            "combat_use_activity",
+            {
+                "campaign_id": campaign["id"],
+                "actor_id": actor["id"],
+                "activity_id": "dnd5e.content.srd2014.feature.fighter-second-wind",
+                "expected_revision": started["campaign_revision"],
+                "idempotency_key": "second-wind",
+            },
+        )
+
+        assert result["status"] == "committed"
+        assert result["result"]["requires_ruling"] is False
+        effect = result["result"]["core_effect"]
+        assert effect["kind"] == "second_wind"
+        assert effect["fighter_level"] == 2
+        assert 4 <= effect["after_hp"] <= 13
+        current = result["combat"]["combatants"][result["combat"]["turn_index"]]
+        assert current["turn_budget"]["bonus_action"] == 0
+        actor_after = await _call(server, "character_get", {"character_id": actor["id"]})
+        assert actor_after["sheet"]["combat"]["hp"]["value"] == effect["after_hp"]
+        assert actor_after["sheet"]["content"]["features"][0]["uses"]["value"] == 0
+        assert any(
+            item["mechanic_id"] == "dnd5e.core.activity.second_wind"
+            for item in result["result"]["rule_receipts"]
+        )
+
+    asyncio.run(exercise())
+
+
+def test_cunning_action_dash_uses_bonus_action_and_doubles_movement(tmp_path: Path) -> None:
+    async def exercise() -> None:
+        server = create_server(_config(tmp_path))
+        campaign = await _call(
+            server,
+            "campaign_create",
+            {"name": "Cunning Action", "edition": "2014", "idempotency_key": "campaign"},
+        )
+        sheet = default_character_sheet()
+        sheet["progression"]["level"] = 2
+        sheet["progression"]["classes"] = [
+            {"name": "Rogue", "level": 2, "subclass": "", "hit_die": 8}
+        ]
+        sheet["content"]["features"] = [
+            {
+                "id": "dnd5e.content.srd2014.feature.rogue-cunning-action",
+                "name": "Cunning Action",
+                "source_key": "Rogue",
+                "description": "Dash, Disengage, or Hide as a bonus action.",
+                "uses": {"label": "", "value": 0, "max": 0, "recovers_on": "none"},
+                "resource_key": "",
+                "activation": {"type": "bonus_action", "cost": 1, "trigger": ""},
+                "scaling": [],
+                "choices": {"options": ["Dash", "Disengage", "Hide"]},
+            }
+        ]
+        actor = await _call(
+            server,
+            "character_create",
+            {
+                "campaign_id": campaign["id"],
+                "name": "Rogue",
+                "sheet": sheet,
+                "idempotency_key": "actor",
+            },
+        )
+        campaign = await _call(server, "campaign_get", {"campaign_id": campaign["id"]})
+        started = await _call_raw(
+            server,
+            "combat_start",
+            {
+                "campaign_id": campaign["id"],
+                "participant_ids": [actor["id"]],
+                "participant_config": [{"actor_id": actor["id"], "initiative": 10}],
+                "expected_revision": campaign["revision"],
+                "idempotency_key": "start",
+            },
+        )
+
+        result = await _call_raw(
+            server,
+            "combat_use_activity",
+            {
+                "campaign_id": campaign["id"],
+                "actor_id": actor["id"],
+                "activity_id": "dnd5e.content.srd2014.feature.rogue-cunning-action",
+                "declaration": {"action": "dash"},
+                "expected_revision": started["campaign_revision"],
+                "idempotency_key": "cunning-dash",
+            },
+        )
+
+        assert result["status"] == "committed"
+        assert result["result"]["requires_ruling"] is False
+        current = result["combat"]["combatants"][result["combat"]["turn_index"]]
+        assert current["turn_budget"]["movement"] == 60
+        assert current["turn_budget"]["bonus_action"] == 0
+        assert current["turn_budget"]["main_action"] == 1
+        assert any(
+            item["mechanic_id"] == "dnd5e.core.activity.cunning_action"
+            for item in result["result"]["rule_receipts"]
+        )
+
+    asyncio.run(exercise())

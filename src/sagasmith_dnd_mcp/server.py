@@ -87,6 +87,7 @@ from sagasmith_dnd.combat_engine import (
     resolve_death_save_to_sheet,
     resolve_readied_action_window,
     resolve_readied_spell_window,
+    resolve_second_wind_to_sheet,
     roll_attack_action,
     settle_core_activity_effect,
     spend_movement,
@@ -5386,16 +5387,26 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             next_encounter,
             actor_id_value=actor_id,
             activity_id=activity_id,
+            declaration=declaration,
         )
+        if activity_id == "dnd5e.content.srd2014.feature.fighter-second-wind":
+            second_wind = resolve_second_wind_to_sheet(applied["sheet"])
+            applied["sheet"] = second_wind.pop("sheet")
+            core_effect = second_wind
         if core_effect is not None:
-            applied["requires_ruling"] = False
+            applied["requires_ruling"] = bool(core_effect.get("requires_ruling", False))
             applied["core_effect"] = core_effect
+            mechanic_id = {
+                "action_surge": "dnd5e.core.activity.action_surge",
+                "cunning_action": "dnd5e.core.activity.cunning_action",
+                "second_wind": "dnd5e.core.activity.second_wind",
+            }[str(core_effect["kind"])]
             applied["rule_receipts"] = [
                 *list(applied.get("rule_receipts") or []),
                 *core_receipts(
                     rule_context,
-                    ["dnd5e.core.activity.action_surge"],
-                    "combat.activity.action_surge",
+                    [mechanic_id],
+                    f"combat.activity.{core_effect['kind']}",
                 ),
             ]
         if activation_type == "reaction":
