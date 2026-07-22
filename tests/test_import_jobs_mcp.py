@@ -7,6 +7,126 @@ from sagasmith_dnd_mcp.config import McpConfig
 from sagasmith_dnd_mcp.server import create_server
 
 
+def test_rule_import_discovers_nested_allowlisted_rulebooks(tmp_path: Path) -> None:
+    import_root = tmp_path / "imports"
+    nested = import_root / "third-party"
+    nested.mkdir(parents=True)
+    (import_root / "core.pdf").write_bytes(b"pdf")
+    (nested / "supplement.md").write_text("# Supplement\n", encoding="utf-8")
+    (nested / "ignored.exe").write_bytes(b"ignored")
+    config = McpConfig(
+        home=tmp_path / "home",
+        database_url=None,
+        chroma_url=None,
+        chroma_path_override=None,
+        dnd_skills_dir=tmp_path / "dnd",
+        modulegen_skills_dir=tmp_path / "modulegen",
+        rule_import_roots=(import_root,),
+    )
+
+    async def exercise() -> None:
+        server = create_server(config)
+        _, campaign = await server.call_tool(
+            "campaign_create",
+            {"name": "Discovery", "idempotency_key": "campaign"},
+        )
+        _, discovered = await server.call_tool(
+            "rule_import",
+            {"campaign_id": campaign["id"], "action": "discover"},
+        )
+
+        assert discovered["result"]["count"] == 2
+        assert {item["relative_path"] for item in discovered["result"]["documents"]} == {
+            "core.pdf",
+            str(Path("third-party") / "supplement.md"),
+        }
+
+    asyncio.run(exercise())
+
+
+def test_rule_import_requires_explicit_dm_acknowledgement_for_warnings(tmp_path: Path) -> None:
+    import_root = tmp_path / "imports"
+    import_root.mkdir()
+    source = import_root / "unstructured.txt"
+    source.write_text("Unstructured optional rule text.", encoding="utf-8")
+    config = McpConfig(
+        home=tmp_path / "home",
+        database_url=None,
+        chroma_url=None,
+        chroma_path_override=None,
+        dnd_skills_dir=tmp_path / "dnd",
+        modulegen_skills_dir=tmp_path / "modulegen",
+        rule_import_roots=(import_root,),
+    )
+
+    async def exercise() -> None:
+        server = create_server(config)
+        _, campaign = await server.call_tool(
+            "campaign_create",
+            {"name": "Warning gate", "idempotency_key": "campaign"},
+        )
+        _, staged = await server.call_tool(
+            "rule_import",
+            {
+                "campaign_id": campaign["id"],
+                "action": "stage",
+                "payload": {
+                    "source_path": str(source),
+                    "source_key": "warning-source",
+                    "title": "Warning source",
+                    "edition": "2014",
+                },
+                "idempotency_key": "stage",
+            },
+        )
+        job_id = staged["result"]["job"]["id"]
+        _, inspected = await server.call_tool(
+            "rule_import",
+            {
+                "campaign_id": campaign["id"],
+                "action": "inspect",
+                "payload": {"job_id": job_id},
+                "idempotency_key": "inspect",
+            },
+        )
+        assert inspected["result"]["inspection"]["warnings"]
+        with pytest.raises(Exception, match="must be a boolean"):
+            await server.call_tool(
+                "rule_import",
+                {
+                    "campaign_id": campaign["id"],
+                    "action": "ingest",
+                    "payload": {
+                        "job_id": job_id,
+                        "acknowledge_warnings": "false",
+                    },
+                    "idempotency_key": "ingest-string-false",
+                },
+            )
+        with pytest.raises(Exception, match="acknowledge_warnings"):
+            await server.call_tool(
+                "rule_import",
+                {
+                    "campaign_id": campaign["id"],
+                    "action": "ingest",
+                    "payload": {"job_id": job_id},
+                    "idempotency_key": "ingest-blocked",
+                },
+            )
+        _, ingested = await server.call_tool(
+            "rule_import",
+            {
+                "campaign_id": campaign["id"],
+                "action": "ingest",
+                "payload": {"job_id": job_id, "acknowledge_warnings": True},
+                "idempotency_key": "ingest-acknowledged",
+            },
+        )
+        assert ingested["result"]["source"]["source_key"] == "warning-source"
+
+    asyncio.run(exercise())
+
+
 def test_rule_and_module_import_jobs_are_reviewable_and_activation_safe(tmp_path: Path) -> None:
     import_root = tmp_path / "imports"
     import_root.mkdir()

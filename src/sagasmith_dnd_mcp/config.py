@@ -24,6 +24,8 @@ class McpConfig:
     auto_seed_rules: bool = True
     rule_import_roots: tuple[Path, ...] = ()
     module_import_roots: tuple[Path, ...] = ()
+    rule_ocr_enabled: bool = True
+    rule_ocr_scale: float = 2.0
 
     @classmethod
     def from_environment(cls) -> "McpConfig":
@@ -75,6 +77,10 @@ class McpConfig:
             auto_seed_rules=os.environ.get("SAGASMITH_DND_MCP_AUTO_SEED", "1") == "1",
             rule_import_roots=tuple(path.resolve() for path in rule_roots),
             module_import_roots=tuple(path.resolve() for path in module_roots),
+            rule_ocr_enabled=os.environ.get("SAGASMITH_DND_MCP_RULE_OCR", "1") == "1",
+            rule_ocr_scale=float(
+                os.environ.get("SAGASMITH_DND_MCP_RULE_OCR_SCALE", "2.0")
+            ),
         )
 
     @property
@@ -98,6 +104,10 @@ class McpConfig:
         return self.artifacts_dir / "rulebooks"
 
     @property
+    def normalized_rulebooks_dir(self) -> Path:
+        return self.artifacts_dir / "normalized-rulebooks"
+
+    @property
     def module_assets_dir(self) -> Path:
         return self.artifacts_dir / "module-assets"
 
@@ -108,6 +118,7 @@ class McpConfig:
             self.modules_dir,
             self.module_assets_dir,
             self.rulebooks_dir,
+            self.normalized_rulebooks_dir,
         ):
             directory.mkdir(parents=True, exist_ok=True)
         os.environ.setdefault("SAGASMITH_DATA_DIR", str(self.home / "data"))

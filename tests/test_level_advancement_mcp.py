@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 import sagasmith_dnd.progression as progression_module
 from sagasmith_dnd.character_schema import default_character_sheet
+from sagasmith_dnd.core_content import PACK_VERSION as CORE_CONTENT_PACK_VERSION
 from sagasmith_dnd.engine import roll as engine_roll
 
 from sagasmith_dnd_mcp.config import McpConfig
@@ -69,7 +70,7 @@ def _cleric_sheet() -> dict:
             "kind": "species",
             "name": "Hill Dwarf",
             "pack_id": "dnd5e.content.srd2014",
-            "pack_version": "1.5.0",
+            "pack_version": CORE_CONTENT_PACK_VERSION,
             "rule_refs": ["bundled:srd2014/01_Races/Races_Each/Dwarf.md"],
             "mechanic_refs": [],
             "selection": {},
@@ -82,7 +83,7 @@ def _cleric_sheet() -> dict:
             "source_key": "Hill Dwarf",
             "description": "Maximum hit points increase again whenever the actor gains a level.",
             "pack_id": "dnd5e.content.srd2014",
-            "pack_version": "1.5.0",
+            "pack_version": CORE_CONTENT_PACK_VERSION,
             "rule_refs": ["bundled:srd2014/01_Races/Races_Each/Dwarf.md"],
             "mechanic_refs": [],
         }

@@ -12,6 +12,7 @@ from weakref import WeakValueDictionary
 
 from mcp.server.fastmcp import FastMCP, Image
 from sagasmith_core import (
+    DOCUMENT_NORMALIZER_VERSION,
     AccessService,
     ActorKnowledgeService,
     BranchService,
@@ -85,6 +86,7 @@ from sagasmith_dnd.combat_engine import (
     pay_activity_activation,
     pay_attack_action,
     preflight_attack,
+    preflight_spell_attack,
     queue_combatant,
     resolve_actor_check,
     resolve_attack_damage,
@@ -141,6 +143,13 @@ from sagasmith_dnd.spatial import (
     compile_battle_map,
     patch_battle_map,
     validate_position,
+)
+from sagasmith_dnd.spell_resolution import (
+    SPELL_RESOLUTION_MECHANIC_ID,
+    overlay_spell_attack_action,
+    scaled_roll_expression,
+    spell_attack_action_resolution,
+    spell_attack_count,
 )
 from sagasmith_dnd.spells import (
     available_shield_attack_defenses,
@@ -362,6 +371,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         modulegen_root=config.modulegen_skills_dir,
     )
     native_rule_providers = load_native_rule_providers()
+
+    def rule_document_options(checksum: str | None = None) -> dict[str, Any]:
+        return {
+            "ocr_provider": storage.rule_ocr_provider(),
+            "document_cache_dir": config.normalized_rulebooks_dir,
+            "expected_checksum": checksum or None,
+        }
 
     def profile_options_with_core_lock(
         edition: str, options: dict[str, Any] | None = None
@@ -808,6 +824,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             spell = spells_by_id.get(str(spell_id))
             if spell is not None and (
                 is_core_magic_missile_spell(spell) or is_core_shield_spell(spell)
+                or (
+                    isinstance(spell.get("resolution"), dict)
+                    and SPELL_RESOLUTION_MECHANIC_ID
+                    in {str(item) for item in spell.get("mechanic_refs", [])}
+                )
             ):
                 automatic_spell_ids.append(str(spell_id))
             else:
@@ -1022,6 +1043,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "defense",
                 "reaction_defense",
                 "pending_reaction",
+                "spell_id",
+                "cast_level",
+                "resolution_id",
+                "attack_count",
+                "remaining_attacks",
+                "spell_resolution",
             }
             value["result"] = {key: item for key, item in result.items() if key in allowed}
         value.pop("revisions", None)
@@ -1484,6 +1511,251 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 )
         return result
 
+    def combat_coordinates(position: Any) -> tuple[float, float] | None:
+        if isinstance(position, dict) and "x" in position and "y" in position:
+            return float(position["x"]), float(position["y"])
+        if isinstance(position, (list, tuple)) and len(position) == 2:
+            return float(position[0]), float(position[1])
+        return None
+
+    def combat_distance(left: Any, right: Any) -> int | None:
+        left_coordinates = combat_coordinates(left)
+        right_coordinates = combat_coordinates(right)
+        if left_coordinates is None or right_coordinates is None:
+            return None
+        return int(
+            max(
+                abs(left_coordinates[0] - right_coordinates[0]),
+                abs(left_coordinates[1] - right_coordinates[1]),
+            )
+            * 5
+        )
+
+    def source_spell_resolution(sheet: dict[str, Any], spell_id: str) -> dict[str, Any]:
+        spell = next(
+            (
+                item
+                for item in sheet.get("content", {}).get("spells", [])
+                if str(item.get("id") or "") == str(spell_id)
+            ),
+            None,
+        )
+        if spell is None:
+            raise CombatEngineError("spell is not recorded on the caster card")
+        resolution = spell.get("resolution")
+        if not isinstance(resolution, dict):
+            raise CombatEngineError("spell does not have a reviewed structured resolution")
+        if SPELL_RESOLUTION_MECHANIC_ID not in {
+            str(item) for item in spell.get("mechanic_refs", [])
+        }:
+            raise CombatEngineError("spell resolution is not bound to the Core executor")
+        return resolution
+
+    def validate_spell_creature_target(
+        encounter: dict[str, Any],
+        *,
+        caster_id: str,
+        target_id: str,
+        spell: dict[str, Any],
+        resolution: dict[str, Any],
+    ) -> dict[str, Any]:
+        combatants = {
+            str(item.get("actor_id") or ""): item for item in encounter.get("combatants", [])
+        }
+        caster = combatants.get(caster_id)
+        target = combatants.get(target_id)
+        if caster is None:
+            raise CombatEngineError("spell caster is not in this encounter")
+        if target is None:
+            raise CombatEngineError(f"spell target is not in this encounter: {target_id}")
+        conditions = {str(item).casefold() for item in target.get("conditions", [])}
+        if "dead" in conditions:
+            raise CombatEngineError("a dead combatant is not a creature target")
+        distance = combat_distance(caster.get("position"), target.get("position"))
+        if distance is None:
+            raise CombatEngineError("spell targeting requires recorded map positions")
+        spell_range = dict(dict(spell.get("definition") or {}).get("range") or {})
+        range_kind = str(spell_range.get("kind") or "special")
+        maximum = 5 if range_kind == "touch" else int(spell_range.get("normal_ft", 0) or 0)
+        attack = dict(resolution.get("attack") or {})
+        if attack.get("range_ft_override") is not None:
+            maximum = int(attack["range_ft_override"])
+        if range_kind == "self" and target_id != caster_id:
+            raise CombatEngineError("self-range spell must target its caster")
+        if range_kind not in {"self", "touch"} and maximum <= 0:
+            raise CombatEngineError("spell has no executable target range")
+        if range_kind != "self" and distance > maximum:
+            raise CombatEngineError("spell target is outside range")
+        targeting = dict(resolution.get("targeting") or {})
+        concealed = bool(target.get("hidden", False)) or "invisible" in conditions
+        visible_to = {str(item) for item in target.get("visible_to_actor_ids") or []}
+        if targeting.get("requires_sight") and concealed and caster_id not in visible_to:
+            raise CombatEngineError("spell requires a target the caster can see")
+        creature_type = str(
+            characters.get(target_id).sheet.get("progression", {}).get("species") or ""
+        ).casefold()
+        for excluded in targeting.get("excluded_creature_types", []):
+            if str(excluded).casefold() in creature_type:
+                raise CombatEngineError(
+                    f"spell has no effect on the target creature type: {excluded}"
+                )
+        return {"target_id": target_id, "distance_ft": distance}
+
+    def normalize_single_target_declaration(
+        encounter: dict[str, Any],
+        *,
+        caster_id: str,
+        spell: dict[str, Any],
+        resolution: dict[str, Any],
+        declaration: dict[str, Any] | None,
+        cover_required: bool = False,
+    ) -> dict[str, Any]:
+        value = dict(declaration or {})
+        if set(value) != {"target_id"} and set(value) != {"target_id", "cover"}:
+            raise CombatEngineError("spell declaration requires target_id and optional cover")
+        target_id = str(value.get("target_id") or "")
+        if not target_id:
+            raise CombatEngineError("spell declaration target_id is required")
+        target = validate_spell_creature_target(
+            encounter,
+            caster_id=caster_id,
+            target_id=target_id,
+            spell=spell,
+            resolution=resolution,
+        )
+        cover = str(value.get("cover") or "").strip().casefold().replace("-", "_")
+        if cover_required and cover not in {"none", "half", "three_quarters"}:
+            raise CombatEngineError(
+                "a Dexterity-save spell requires cover: none, half, or three_quarters"
+            )
+        if not cover_required and cover:
+            raise CombatEngineError("this spell declaration does not accept cover")
+        if cover:
+            target["cover"] = cover
+        return target
+
+    def normalize_area_spell_declaration(
+        encounter: dict[str, Any],
+        *,
+        caster_id: str,
+        spell: dict[str, Any],
+        resolution: dict[str, Any],
+        declaration: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        value = dict(declaration or {})
+        if set(value) != {"origin", "target_contexts"}:
+            raise CombatEngineError("area spell declaration requires origin and target_contexts")
+        origin = value.get("origin")
+        if not isinstance(origin, dict) or set(origin) != {"x", "y"}:
+            raise CombatEngineError("area spell origin requires x and y")
+        if isinstance(encounter.get("battle_map"), dict):
+            validate_position(dict(encounter["battle_map"]), origin)
+        combatants = {
+            str(item.get("actor_id") or ""): item for item in encounter.get("combatants", [])
+        }
+        caster = combatants.get(caster_id)
+        if caster is None:
+            raise CombatEngineError("spell caster is not in this encounter")
+        range_ft = int(
+            dict(dict(spell.get("definition") or {}).get("range") or {}).get("normal_ft", 0)
+            or 0
+        )
+        distance_to_origin = combat_distance(caster.get("position"), origin)
+        if distance_to_origin is None or range_ft <= 0:
+            raise CombatEngineError("area spell requires caster position and executable range")
+        if distance_to_origin > range_ft:
+            raise CombatEngineError("area spell origin is outside range")
+        radius = int(
+            dict(dict(resolution.get("targeting") or {}).get("area") or {}).get(
+                "radius_ft", 0
+            )
+            or 0
+        )
+        affected: dict[str, dict[str, Any]] = {}
+        for target_id, combatant in combatants.items():
+            conditions = {str(item).casefold() for item in combatant.get("conditions", [])}
+            if "dead" in conditions:
+                continue
+            distance = combat_distance(origin, combatant.get("position"))
+            if distance is None:
+                raise CombatEngineError(
+                    "area spell cannot enumerate all living combatants without positions"
+                )
+            if distance <= radius:
+                affected[target_id] = {"target_id": target_id, "distance_ft": distance}
+        contexts = value.get("target_contexts")
+        if not isinstance(contexts, list):
+            raise CombatEngineError("area spell target_contexts must be a list")
+        normalized_contexts: dict[str, str] = {}
+        for item in contexts:
+            if not isinstance(item, dict) or set(item) != {"target_id", "cover"}:
+                raise CombatEngineError(
+                    "each area target context requires only target_id and cover"
+                )
+            target_id = str(item.get("target_id") or "")
+            cover = str(item.get("cover") or "").casefold().replace("-", "_")
+            if (
+                not target_id
+                or target_id in normalized_contexts
+                or cover not in {"none", "half", "three_quarters"}
+            ):
+                raise CombatEngineError(
+                    "area target contexts require unique targets and valid cover"
+                )
+            normalized_contexts[target_id] = cover
+        if set(normalized_contexts) != set(affected):
+            raise CombatEngineError(
+                "area spell target_contexts must cover every living combatant in the area"
+            )
+        for target_id, cover in normalized_contexts.items():
+            affected[target_id]["cover"] = cover
+        return {
+            "origin": {"x": float(origin["x"]), "y": float(origin["y"])},
+            "distance_ft": distance_to_origin,
+            "radius_ft": radius,
+            "targets": list(affected.values()),
+        }
+
+    def advance_spell_attack_resolution(
+        encounter: dict[str, Any],
+        *,
+        resolution_id: str,
+        result: dict[str, Any],
+    ) -> dict[str, Any]:
+        resolutions = dict(encounter.get("spell_resolutions") or {})
+        resolution = deepcopy(dict(resolutions.get(resolution_id) or {}))
+        if resolution.get("kind") != "spell_attack":
+            raise CombatEngineError("spell attack resolution is unavailable")
+        remaining = int(resolution.get("remaining_attacks", 0) or 0)
+        if remaining < 1:
+            raise CombatEngineError("spell attack resolution has no attacks remaining")
+        resolution["remaining_attacks"] = remaining - 1
+        resolution["results"] = [
+            *list(resolution.get("results") or []),
+            deepcopy(result),
+        ]
+        if resolution["remaining_attacks"] == 0:
+            resolutions.pop(resolution_id, None)
+            encounter["pending"] = [
+                item
+                for item in encounter.get("pending", [])
+                if str(item.get("id") or "") != resolution_id
+            ]
+        else:
+            resolutions[resolution_id] = resolution
+            for item in encounter.get("pending", []):
+                if str(item.get("id") or "") == resolution_id:
+                    item["remaining_attacks"] = resolution["remaining_attacks"]
+        if resolutions:
+            encounter["spell_resolutions"] = resolutions
+        else:
+            encounter.pop("spell_resolutions", None)
+        return {
+            "id": resolution_id,
+            "remaining_attacks": resolution["remaining_attacks"],
+            "completed": resolution["remaining_attacks"] == 0,
+        }
+
     def validate_magic_missile_targets(
         encounter: dict[str, Any],
         *,
@@ -1500,14 +1772,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if caster is None:
             raise CombatEngineError("Magic Missile caster is not in this encounter")
 
-        def coordinates(position: Any) -> tuple[float, float] | None:
-            if isinstance(position, dict) and "x" in position and "y" in position:
-                return float(position["x"]), float(position["y"])
-            if isinstance(position, (list, tuple)) and len(position) == 2:
-                return float(position[0]), float(position[1])
-            return None
-
-        caster_position = coordinates(caster.get("position"))
+        caster_position = combat_coordinates(caster.get("position"))
         if caster_position is None:
             raise CombatEngineError("Magic Missile range requires the caster's map position")
         for allocation in normalized:
@@ -1520,7 +1785,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             conditions = {str(item).casefold() for item in target.get("conditions", [])}
             if "dead" in conditions:
                 raise CombatEngineError("Magic Missile cannot target a dead creature")
-            target_position = coordinates(target.get("position"))
+            target_position = combat_coordinates(target.get("position"))
             if target_position is None:
                 raise CombatEngineError("Magic Missile range requires every target's map position")
             distance = int(
@@ -1866,9 +2131,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             },
             "rulebook_import": {
                 "stages": [
+                    "rule_import(discover)",
                     "rule_import(stage)",
                     "rule_import(inspect)",
                     "rule_import(ingest)",
+                    "rule_import(extract_candidates)",
+                    "rule_import(review)",
+                    "rule_import(compile)",
+                    "rule_import(install)",
+                    "rule_import(activate)",
                     "rule_search",
                     "rule_expand",
                     "rule_pack_compile(from_source)",
@@ -1876,6 +2147,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "rule_pack_change(install)",
                     "campaign_rules(set_pack)",
                 ],
+                "normalizer": f"sagasmith-core/pdf-layout-v{DOCUMENT_NORMALIZER_VERSION}",
+                "normalization_cache": "content-addressed",
+                "page_extraction_cache": "content-addressed",
+                "text_extractor": "pypdfium2",
+                "ocr_provider": "rapidocr" if config.rule_ocr_enabled else None,
                 "source_citation_fields": [
                     "source_id",
                     "source_key",
@@ -2151,8 +2427,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             raise ValueError("imported D&D rulebooks require edition 2014 or 2024")
         if not idempotency_key:
             raise ValueError("idempotency_key is required for an import job")
-        path = storage.artifact_rulebook_path(artifact)
-        inspection = rules.inspect_path(path)
         payload = {
             "artifact": artifact,
             "source_key": source_key,
@@ -2167,11 +2441,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         replay = replay_idempotent(scope, idempotency_key, payload)
         if replay is not None:
             return replay
+        storage.artifact_rulebook_path(artifact)
         job = import_jobs.create(
             campaign_id=campaign_id,
             kind="rulebook",
             artifact=artifact,
-            artifact_checksum=str(inspection.get("checksum") or ""),
+            artifact_checksum=storage.rulebook_checksum(artifact),
             payload=payload,
         )
         response = {"job": asdict(job)}
@@ -2196,7 +2471,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         replay = replay_idempotent(scope, idempotency_key, payload)
         if replay is not None:
             return replay
-        inspection = rules.inspect_path(storage.artifact_rulebook_path(job.artifact))
+        inspection = rules.inspect_path(
+            storage.artifact_rulebook_path(job.artifact),
+            **rule_document_options(job.artifact_checksum),
+        )
         updated = import_jobs.record_inspection(job_id, inspection)
         response = {"job": asdict(updated), "inspection": inspection}
         return remember_idempotent(
@@ -2207,6 +2485,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     def rule_import_job_ingest(
         campaign_id: str,
         job_id: str,
+        acknowledge_warnings: bool = False,
         principal_id: str = "system:local",
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
@@ -2217,7 +2496,16 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         job = require_import_job(campaign_id, job_id, "rulebook")
         if job.state not in {"inspected", "failed"}:
             raise ValueError("rule import job must be inspected before indexing")
-        payload = {"job_id": job_id, "operation": "ingest"}
+        warnings = list(dict(job.inspection or {}).get("warnings") or [])
+        if warnings and not acknowledge_warnings:
+            raise ValueError(
+                "rule import inspection has warnings; DM must set acknowledge_warnings=true"
+            )
+        payload = {
+            "job_id": job_id,
+            "operation": "ingest",
+            "acknowledge_warnings": acknowledge_warnings,
+        }
         scope = f"import-job:{campaign_id}:{job_id}:{principal_id}"
         replay = replay_idempotent(scope, idempotency_key, payload)
         if replay is not None:
@@ -2236,6 +2524,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             authority=str(values.get("authority") or "supplement"),
             embedder=embedder,
             vector_store=vectors,
+            **rule_document_options(job.artifact_checksum),
         )
         source = rules.source(result.source_id)
         updated = import_jobs.record_result(
@@ -2268,7 +2557,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         replay = replay_idempotent(scope, idempotency_key, payload)
         if replay is not None:
             return replay
-        candidates = extract_content_candidates(rules.source_chunks(job.source_id))
+        source = rules.source(job.source_id)
+        candidates = extract_content_candidates(
+            rules.source_chunks(job.source_id),
+            source_title=str(source.get("title") or ""),
+        )
         for candidate in candidates:
             candidate["source_citations"] = [
                 rules.citation(chunk_id, source_id=job.source_id)
@@ -2898,10 +3191,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             raise CombatEngineError("an actor cannot attack itself")
         campaign = campaigns.get(campaign_id)
         action_payload = sanitize_attack_action(campaign_id, principal_id, dict(action or {}))
+        spell_resolution_id = str(action_payload.pop("spell_resolution_id", "") or "")
         payload = {
             "actor_id": actor_id,
             "target_id": target_id,
             "action": action_payload,
+            "spell_resolution_id": spell_resolution_id,
             "branch_id": resolved_branch_id,
         }
         scope = f"combat-attack:{campaign_id}:{resolved_branch_id}:{principal_id}"
@@ -2914,39 +3209,107 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 f"expected {expected_revision}, found {campaign.revision}"
             )
         _, encounter = active_encounter(campaign_id)
-        require_no_blocking_pending(encounter)
+        spell_resolution: dict[str, Any] | None = None
+        if spell_resolution_id:
+            spell_resolution = deepcopy(
+                dict(
+                    dict(encounter.get("spell_resolutions") or {}).get(
+                        spell_resolution_id
+                    )
+                    or {}
+                )
+            )
+            if (
+                spell_resolution.get("kind") != "spell_attack"
+                or str(spell_resolution.get("caster_id") or "") != actor_id
+                or int(spell_resolution.get("remaining_attacks", 0) or 0) < 1
+            ):
+                raise CombatEngineError(
+                    "spell_resolution_id is not an active spell attack for this actor"
+                )
+            blocking = [
+                item
+                for item in encounter.get("pending", [])
+                if item.get("status", "pending") == "pending"
+                and str(item.get("id") or "") != spell_resolution_id
+            ]
+            if blocking:
+                raise CombatEngineError("resolve the pending save or choice before this attack")
+            if str(spell_resolution.get("spell_id") or "") == "":
+                raise CombatEngineError("spell attack resolution has no source spell")
+        else:
+            require_no_blocking_pending(encounter)
         require_campaign_actor(campaign_id, target_id)
         attacker = combat_actor_snapshot(actor_id)
         target = combat_actor_snapshot(target_id)
         rule_context = effective_rule_context(
             campaign_id,
-            facts={"actor_id": actor_id, "target_id": target_id, "kind": "attack"},
+            facts={
+                "actor_id": actor_id,
+                "target_id": target_id,
+                "kind": "spell_attack" if spell_resolution is not None else "attack",
+                "spell_id": (
+                    str(spell_resolution.get("spell_id") or "")
+                    if spell_resolution is not None
+                    else ""
+                ),
+            },
         )
         try:
-            plan = preflight_attack(
-                attacker,
-                target,
-                action=action_payload,
-                encounter=encounter,
-                rules=rule_context,
-            )
+            if spell_resolution is not None:
+                plan = preflight_spell_attack(
+                    attacker,
+                    target,
+                    spell_id=str(spell_resolution["spell_id"]),
+                    cast_level=int(spell_resolution["cast_level"]),
+                    encounter=encounter,
+                    context=dict(action_payload.get("context") or {}),
+                    rules=rule_context,
+                )
+            else:
+                plan = preflight_attack(
+                    attacker,
+                    target,
+                    action=action_payload,
+                    encounter=encounter,
+                    rules=rule_context,
+                )
         except NeedsRulingError:
             if access.require_campaign(campaign_id, principal_id).role not in {"owner", "dm"}:
                 raise CombatEngineError("attack requires a DM ruling") from None
             raise
-        next_encounter, attack_payment = pay_attack_action(
-            encounter,
-            attacker,
-            weapon_id=str(plan.get("weapon_id") or ""),
-            attack_mode=str(plan.get("attack_mode") or "melee"),
-            multiattack_option_id=action_payload.get("multiattack_option_id"),
-        )
-        attack_payment_receipts = core_receipts(
-            rule_context,
-            ["dnd5e.core.action.multiattack_choice"],
-            "combat.attack.payment",
-        )
+        if spell_resolution is not None:
+            next_encounter = deepcopy(encounter)
+            attack_payment = {
+                "kind": "spell_attack",
+                "payment": "spell_cast",
+                "spell_resolution_id": spell_resolution_id,
+            }
+            attack_payment_receipts = core_receipts(
+                rule_context,
+                [SPELL_RESOLUTION_MECHANIC_ID],
+                "combat.spell.attack.payment",
+            )
+        else:
+            next_encounter, attack_payment = pay_attack_action(
+                encounter,
+                attacker,
+                weapon_id=str(plan.get("weapon_id") or ""),
+                attack_mode=str(plan.get("attack_mode") or "melee"),
+                multiattack_option_id=action_payload.get("multiattack_option_id"),
+            )
+            attack_payment_receipts = core_receipts(
+                rule_context,
+                ["dnd5e.core.action.multiattack_choice"],
+                "combat.attack.payment",
+            )
         attack_roll = roll_attack_action(plan=plan)
+        if spell_resolution is not None:
+            attack_roll.update(
+                spell_id=str(spell_resolution["spell_id"]),
+                cast_level=int(spell_resolution["cast_level"]),
+                spell_resolution_id=spell_resolution_id,
+            )
         defenses = post_hit_attack_defenses(
             campaign_id,
             target,
@@ -2957,7 +3320,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         updated_attacker = deepcopy(attacker)
         ammunition = None
         weapon_id = plan.get("weapon_id")
-        if weapon_id and weapon_id != "unarmed-strike":
+        if spell_resolution is None and weapon_id and weapon_id != "unarmed-strike":
             weapon = next(
                 item for item in attacker["sheet"]["inventory"]["items"] if item["id"] == weapon_id
             )
@@ -3009,6 +3372,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 attack=deepcopy(attack_roll),
                 attack_payment=deepcopy(attack_payment),
                 ammunition=deepcopy(ammunition),
+                spell_resolution_id=spell_resolution_id or None,
             )
             next_encounter["log"] = [
                 *list(next_encounter.get("log") or []),
@@ -3116,6 +3480,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             result["damage"] = {
                 key: value for key, value in result["damage"].items() if key != "sheet"
             }
+        if spell_resolution is not None:
+            result["spell_resolution"] = advance_spell_attack_resolution(
+                next_encounter,
+                resolution_id=spell_resolution_id,
+                result=result,
+            )
         next_encounter["log"] = [
             *list(next_encounter.get("log") or []),
             {"type": "attack", "result": result},
@@ -4113,6 +4483,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             result["damage"] = {
                 key: value for key, value in damage_result.items() if key != "sheet"
             }
+        spell_resolution_id = str(window.get("spell_resolution_id") or "")
+        if spell_resolution_id:
+            result["spell_resolution"] = advance_spell_attack_resolution(
+                next_encounter,
+                resolution_id=spell_resolution_id,
+                result=result,
+            )
         next_encounter["log"] = [
             *list(next_encounter.get("log") or []),
             {
@@ -4724,6 +5101,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         branch_id: str | None = None,
         idempotency_key: str | None = None,
         target_allocations: list[dict[str, Any]] | None = None,
+        declaration: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Pay a combat action and settle source-bound spell workflows atomically."""
         access.require_actor(campaign_id, actor_id, principal_id, control=True)
@@ -4737,6 +5115,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "component_ruling": component_ruling or {},
             "choice_id": choice_id,
             "target_allocations": target_allocations,
+            "declaration": declaration or {},
             "branch_id": resolved_branch_id,
         }
         scope = f"combat-cast:{campaign_id}:{resolved_branch_id}:{principal_id}"
@@ -4756,12 +5135,59 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             if item.get("id") == spell_id
         )
         magic_missile = is_core_magic_missile_spell(spell_entry)
+        structured_resolution = (
+            source_spell_resolution(current.sheet, spell_id)
+            if isinstance(spell_entry.get("resolution"), dict)
+            else None
+        )
         if magic_missile and target_allocations is None:
             raise CombatEngineError("Magic Missile requires target_allocations at cast time")
         if not magic_missile and target_allocations is not None:
             raise CombatEngineError(
                 "target_allocations are currently executable only for source-bound Magic Missile"
             )
+        if magic_missile and declaration:
+            raise CombatEngineError("Magic Missile uses target_allocations, not declaration")
+        if structured_resolution is None and declaration:
+            raise CombatEngineError("unstructured spells do not accept an effect declaration")
+        structured_target: dict[str, Any] | None = None
+        if structured_resolution is not None:
+            kind = str(structured_resolution.get("kind") or "")
+            if kind == "spell_attack":
+                if declaration:
+                    raise CombatEngineError(
+                        "spell attack targets are selected one attack at a time after casting"
+                    )
+            elif kind == "healing":
+                structured_target = normalize_single_target_declaration(
+                    encounter,
+                    caster_id=actor_id,
+                    spell=spell_entry,
+                    resolution=structured_resolution,
+                    declaration=declaration,
+                )
+            elif kind == "saving_throw":
+                save = dict(structured_resolution.get("save") or {})
+                if dict(structured_resolution.get("targeting") or {}).get("mode") == "area":
+                    structured_target = normalize_area_spell_declaration(
+                        encounter,
+                        caster_id=actor_id,
+                        spell=spell_entry,
+                        resolution=structured_resolution,
+                        declaration=declaration,
+                    )
+                else:
+                    structured_target = normalize_single_target_declaration(
+                        encounter,
+                        caster_id=actor_id,
+                        spell=spell_entry,
+                        resolution=structured_resolution,
+                        declaration=declaration,
+                        cover_required=(
+                            str(save.get("ability") or "") == "dexterity"
+                            and not bool(save.get("ignores_cover"))
+                        ),
+                    )
         visibility_preview = deepcopy(encounter)
         apply_cast_visibility_ruling(
             visibility_preview,
@@ -4877,6 +5303,346 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             casting_time=normalized_casting_time,
             spent_slot=spent_slot,
         )
+        resolved_cast_level = int(applied.get("cast_level", cast_level or spell_level) or 0)
+        if structured_resolution is not None:
+            structured_kind = str(structured_resolution.get("kind") or "")
+            structured_receipts = [
+                *list(applied.get("rule_receipts") or []),
+                *core_receipts(
+                    effective_rule_context(campaign_id),
+                    [
+                        SPELL_RESOLUTION_MECHANIC_ID,
+                        "dnd5e.core.mcp.combat_spell_boundary",
+                    ],
+                    f"combat.spell.{structured_kind}",
+                ),
+            ]
+            sync_combatant_conditions(next_encounter, actor_id, applied["sheet"])
+            if structured_kind == "spell_attack":
+                total_attacks = spell_attack_count(
+                    structured_resolution, cast_level=resolved_cast_level
+                )
+                resolution_id = f"spell-resolution-{uuid4().hex}"
+                resolution = {
+                    "id": resolution_id,
+                    "kind": "spell_attack",
+                    "caster_id": actor_id,
+                    "spell_id": spell_id,
+                    "cast_level": resolved_cast_level,
+                    "total_attacks": total_attacks,
+                    "remaining_attacks": total_attacks,
+                    "results": [],
+                }
+                resolutions = dict(next_encounter.get("spell_resolutions") or {})
+                resolutions[resolution_id] = resolution
+                next_encounter["spell_resolutions"] = resolutions
+                next_encounter["pending"] = [
+                    *list(next_encounter.get("pending") or []),
+                    {
+                        "id": resolution_id,
+                        "kind": "spell_attack_resolution",
+                        "status": "pending",
+                        "actor_id": actor_id,
+                        "spell_id": spell_id,
+                        "remaining_attacks": total_attacks,
+                    },
+                ]
+                next_encounter["log"] = [
+                    *list(next_encounter.get("log") or []),
+                    {
+                        "type": "spell_attack_cast",
+                        "resolution_id": resolution_id,
+                        "actor_id": actor_id,
+                        "spell_id": spell_id,
+                        "cast_level": resolved_cast_level,
+                        "attack_count": total_attacks,
+                    },
+                ][-100:]
+                next_state = {**dict(campaign.state or {}), "combat": next_encounter}
+                revisions_result = StateMutationService(storage.database).replace(
+                    campaign_id,
+                    campaign_state=validate_party_state(next_state),
+                    character_updates=[
+                        CharacterStateUpdate(
+                            character_id=actor_id,
+                            sheet=validate_character_sheet(applied["sheet"]),
+                            notes=validate_character_notes(current.notes),
+                            expected_revision=current.revision,
+                        )
+                    ],
+                    expected_campaign_revision=campaign.revision,
+                    operation="combat.spell.attack.cast",
+                    actor=principal_id,
+                    branch_id=resolved_branch_id,
+                    idempotency_key=idempotency_key,
+                    rule_receipts=structured_receipts,
+                )
+                response = {
+                    "status": "pending_resolution",
+                    "result": {
+                        "kind": structured_kind,
+                        "resolution_id": resolution_id,
+                        "spell_id": spell_id,
+                        "cast_level": resolved_cast_level,
+                        "attack_count": total_attacks,
+                        "remaining_attacks": total_attacks,
+                        "payment": deepcopy(applied.get("payment") or {}),
+                    },
+                    "combat": next_encounter,
+                    "campaign_revision": mutation_revision(campaign_id),
+                    "revisions": [asdict(item) for item in revisions_result or []],
+                }
+                return combat_response(
+                    campaign_id,
+                    principal_id,
+                    remember_idempotent(
+                        scope, idempotency_key, payload, response, campaign_id
+                    ),
+                )
+
+            if structured_kind == "healing":
+                assert structured_target is not None
+                target_id = str(structured_target["target_id"])
+                target_record = characters.get(target_id)
+                target_sheet = (
+                    deepcopy(applied["sheet"])
+                    if target_id == actor_id
+                    else deepcopy(target_record.sheet)
+                )
+                healing = dict(structured_resolution.get("healing") or {})
+                expression = scaled_roll_expression(
+                    healing,
+                    cast_level=resolved_cast_level,
+                    actor_level=int(applied["sheet"].get("progression", {}).get("level", 1) or 1),
+                )
+                dice = asdict(roll(expression))
+                ability_modifier = 0
+                if healing.get("add_spellcasting_modifier"):
+                    derived_caster = derive_character_sheet(applied["sheet"])
+                    ability = str(
+                        dict(derived_caster.get("spellcasting") or {}).get("ability") or ""
+                    )
+                    ability_modifier = int(
+                        dict(derived_caster.get("ability_modifiers") or {}).get(ability, 0)
+                        or 0
+                    )
+                rolled_amount = max(0, int(dice["total"]) + ability_modifier)
+                healed = apply_healing_to_sheet(
+                    target_sheet,
+                    amount=rolled_amount,
+                    source_sheet=applied["sheet"],
+                    spell_id=spell_id,
+                    spell_level=resolved_cast_level,
+                )
+                if healed.get("source") is not None:
+                    healed["source"]["actor_id"] = actor_id
+                final_sheets = {actor_id: deepcopy(applied["sheet"]), target_id: healed["sheet"]}
+                sync_combatant_conditions(next_encounter, target_id, healed["sheet"])
+                result = {
+                    "kind": structured_kind,
+                    "spell_id": spell_id,
+                    "cast_level": resolved_cast_level,
+                    "target_id": target_id,
+                    "amount": int(healed["amount"]),
+                    "target": structured_target,
+                    "roll": dice,
+                    "spellcasting_modifier": ability_modifier,
+                    "rolled_amount": rolled_amount,
+                    "healing": {key: item for key, item in healed.items() if key != "sheet"},
+                    "payment": deepcopy(applied.get("payment") or {}),
+                }
+                next_encounter["log"] = [
+                    *list(next_encounter.get("log") or []),
+                    {"type": "spell_healing", "actor_id": actor_id, "result": result},
+                ][-100:]
+                next_state = {**dict(campaign.state or {}), "combat": next_encounter}
+                revisions_result = StateMutationService(storage.database).replace(
+                    campaign_id,
+                    campaign_state=validate_party_state(next_state),
+                    character_updates=[
+                        CharacterStateUpdate(
+                            character_id=target_actor_id,
+                            sheet=validate_character_sheet(sheet),
+                            notes=validate_character_notes(characters.get(target_actor_id).notes),
+                            expected_revision=characters.get(target_actor_id).revision,
+                        )
+                        for target_actor_id, sheet in final_sheets.items()
+                    ],
+                    expected_campaign_revision=campaign.revision,
+                    operation="combat.spell.healing",
+                    actor=principal_id,
+                    branch_id=resolved_branch_id,
+                    idempotency_key=idempotency_key,
+                    rule_receipts=structured_receipts,
+                )
+                response = {
+                    "status": "committed",
+                    "result": result,
+                    "combat": next_encounter,
+                    "campaign_revision": mutation_revision(campaign_id),
+                    "revisions": [asdict(item) for item in revisions_result or []],
+                }
+                return combat_response(
+                    campaign_id,
+                    principal_id,
+                    remember_idempotent(
+                        scope, idempotency_key, payload, response, campaign_id
+                    ),
+                )
+
+            assert structured_kind == "saving_throw" and structured_target is not None
+            save_spec = dict(structured_resolution.get("save") or {})
+            damage_spec = dict(save_spec.get("damage") or {})
+            damage_expression = scaled_roll_expression(
+                damage_spec,
+                cast_level=resolved_cast_level,
+                actor_level=int(applied["sheet"].get("progression", {}).get("level", 1) or 1),
+            )
+            damage_roll = asdict(roll(damage_expression))
+            derived_caster = derive_character_sheet(applied["sheet"])
+            save_dc = save_spec.get("save_dc_override")
+            if save_dc is None:
+                save_dc = dict(derived_caster.get("spellcasting") or {}).get("save_dc")
+            if save_dc is None:
+                raise CombatEngineError("spell save DC is not derivable from the caster card")
+            target_contexts = (
+                list(structured_target["targets"])
+                if "targets" in structured_target
+                else [structured_target]
+            )
+            final_sheets: dict[str, dict[str, Any]] = {actor_id: deepcopy(applied["sheet"])}
+            target_results: list[dict[str, Any]] = []
+            pending_rulings: list[dict[str, Any]] = []
+            resolution_receipts = list(structured_receipts)
+            for target_context in target_contexts:
+                target_id = str(target_context["target_id"])
+                target_record = characters.get(target_id)
+                target_sheet = deepcopy(
+                    final_sheets.get(target_id, target_record.sheet)
+                )
+                target_actor = combat_actor_snapshot(target_id)
+                target_actor["sheet"] = target_sheet
+                target_actor["derived"] = derive_character_sheet(target_sheet)
+                cover_bonus = {
+                    "half": 2,
+                    "three_quarters": 5,
+                }.get(str(target_context.get("cover") or "none"), 0)
+                saved = resolve_actor_check(
+                    target_actor,
+                    kind="save",
+                    ability=str(save_spec["ability"]),
+                    dc=int(save_dc),
+                    bonus=cover_bonus,
+                    ruleset=str(next_encounter.get("ruleset") or "2014"),
+                    rules=effective_rule_context(
+                        campaign_id,
+                        facts={
+                            "actor_id": target_id,
+                            "caster_id": actor_id,
+                            "spell_id": spell_id,
+                            "kind": "spell_save",
+                        },
+                    ),
+                )
+                resolution_receipts.extend(saved.get("rule_receipts") or [])
+                if saved["success"]:
+                    damage_amount = (
+                        int(damage_roll["total"]) // 2
+                        if save_spec.get("success") == "half"
+                        else 0
+                    )
+                else:
+                    damage_amount = int(damage_roll["total"])
+                damage_result: dict[str, Any] | None = None
+                if damage_amount > 0:
+                    combatant = require_encounter_combatant(
+                        next_encounter, target_id, role="spell target"
+                    )
+                    damaged = apply_damage_to_sheet(
+                        target_sheet,
+                        amount=damage_amount,
+                        damage_type=str(damage_spec["damage_type"]),
+                        source=spell_id,
+                        ruleset=str(next_encounter.get("ruleset") or "2014"),
+                        death_saves=bool(combatant.get("death_saves", False)),
+                    )
+                    final_sheets[target_id] = damaged["sheet"]
+                    sync_combatant_conditions(next_encounter, target_id, damaged["sheet"])
+                    reconcile_readied_spells(next_encounter, target_id, damaged["sheet"])
+                    add_concentration_window(
+                        next_encounter,
+                        target_id,
+                        damaged.get("concentration"),
+                        next_revision=campaign.revision + 1,
+                    )
+                    damage_result = {
+                        key: item for key, item in damaged.items() if key != "sheet"
+                    }
+                else:
+                    final_sheets.setdefault(target_id, target_sheet)
+                if not saved["success"] and save_spec.get("on_failed_save_ruling"):
+                    pending_rulings.append(
+                        {
+                            "target_id": target_id,
+                            "effect": str(save_spec["on_failed_save_ruling"]),
+                        }
+                    )
+                target_results.append(
+                    {
+                        "target_id": target_id,
+                        "context": target_context,
+                        "save": saved,
+                        "damage_amount": damage_amount,
+                        "damage": damage_result,
+                    }
+                )
+            result = {
+                "kind": structured_kind,
+                "spell_id": spell_id,
+                "cast_level": resolved_cast_level,
+                "save_dc": int(save_dc),
+                "damage_roll": damage_roll,
+                "area": structured_target if "targets" in structured_target else None,
+                "targets": target_results,
+                "pending_rulings": pending_rulings,
+                "payment": deepcopy(applied.get("payment") or {}),
+            }
+            next_encounter["log"] = [
+                *list(next_encounter.get("log") or []),
+                {"type": "spell_save", "actor_id": actor_id, "result": result},
+            ][-100:]
+            next_state = {**dict(campaign.state or {}), "combat": next_encounter}
+            revisions_result = StateMutationService(storage.database).replace(
+                campaign_id,
+                campaign_state=validate_party_state(next_state),
+                character_updates=[
+                    CharacterStateUpdate(
+                        character_id=target_actor_id,
+                        sheet=validate_character_sheet(sheet),
+                        notes=validate_character_notes(characters.get(target_actor_id).notes),
+                        expected_revision=characters.get(target_actor_id).revision,
+                    )
+                    for target_actor_id, sheet in final_sheets.items()
+                ],
+                expected_campaign_revision=campaign.revision,
+                operation="combat.spell.save",
+                actor=principal_id,
+                branch_id=resolved_branch_id,
+                idempotency_key=idempotency_key,
+                rule_receipts=resolution_receipts,
+            )
+            response = {
+                "status": "pending_ruling" if pending_rulings else "committed",
+                "result": result,
+                "combat": next_encounter,
+                "campaign_revision": mutation_revision(campaign_id),
+                "revisions": [asdict(item) for item in revisions_result or []],
+            }
+            return combat_response(
+                campaign_id,
+                principal_id,
+                remember_idempotent(scope, idempotency_key, payload, response, campaign_id),
+            )
         if magic_missile:
             assert normalized_allocations is not None
             resolution_id = f"spell-resolution-{uuid4().hex}"
@@ -10786,15 +11552,21 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         query: str,
         edition: str | None = None,
         locale: str | None = None,
+        publications: list[str] | None = None,
+        source_ids: list[str] | None = None,
+        source_keys: list[str] | None = None,
         top_k: int = 8,
     ) -> list[dict[str, Any]]:
-        """Search D&D rule documents previously ingested into the MCP-owned database."""
+        """Search rules, optionally constrained to exact imported sources/publications."""
         embedder, vectors = storage.dense_components()
         hits = rules.search(
             system_id="dnd5e",
             query=query,
             edition=edition,
             locale=locale,
+            publications=publications,
+            source_ids=source_ids,
+            source_keys=source_keys,
             top_k=top_k,
             embedder=embedder,
             vector_store=vectors,
@@ -10824,7 +11596,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     ) -> dict[str, Any]:
         """Run Core document normalization and report structure/warnings without importing."""
         access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
-        return rules.inspect_path(storage.artifact_rulebook_path(artifact))
+        return rules.inspect_path(
+            storage.artifact_rulebook_path(artifact),
+            **rule_document_options(storage.rulebook_checksum(artifact)),
+        )
 
     @mcp.tool()
     def rule_document_import(
@@ -10874,6 +11649,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             authority=authority,
             embedder=embedder,
             vector_store=vectors,
+            **rule_document_options(storage.rulebook_checksum(artifact)),
         )
         source = rules.source(result.source_id)
         source_metadata = dict(source.get("metadata") or {})
@@ -11473,6 +12249,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             return sheet, []
 
         sheet["spellcasting"]["ability"] = spellcasting["ability"]
+        sheet["spellcasting"]["attack_bonus_override"] = spellcasting.get("attack_bonus")
+        sheet["spellcasting"]["save_dc_override"] = spellcasting.get("save_dc")
         sheet["spellcasting"]["spell_slots"] = {
             str(level): {
                 "label": f"Level {level} spell slots",
@@ -11511,6 +12289,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         "mechanic_refs": list(artifact.get("mechanic_refs") or []),
                     }
                 )
+                action_description = str(
+                    specification.get("action_description") or ""
+                ).strip()
+                if action_description and isinstance(card.get("resolution"), dict):
+                    card["resolution"] = overlay_spell_attack_action(
+                        card["resolution"], action_description
+                    )
             elif len(exact) > 1:
                 warnings.append(
                     f"{name}: multiple active spell artifacts match the statblock entry"
@@ -11570,10 +12355,22 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "rule_refs": list(rule_refs),
                     "mechanic_refs": [],
                 }
-                warnings.append(
-                    f"{display_name}: source-bound statblock spell requires component "
-                    "and effect ruling"
-                )
+                resolution = spell_attack_action_resolution(action_description)
+                if resolution is not None:
+                    card["resolution"] = resolution
+                    card["mechanic_refs"] = [SPELL_RESOLUTION_MECHANIC_ID]
+                    card["notes"] = (
+                        "Source-bound statblock spell attack. Component legality still "
+                        "requires a DM ruling."
+                    )
+                    warnings.append(
+                        f"{display_name}: source-bound statblock spell requires component ruling"
+                    )
+                else:
+                    warnings.append(
+                        f"{display_name}: source-bound statblock spell requires component "
+                        "and effect ruling"
+                    )
 
             card["grant"] = {
                 "source_type": "statblock",
@@ -12968,6 +13765,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     def rule_import(
         campaign_id: str,
         action: Literal[
+            "discover",
             "stage",
             "inspect",
             "ingest",
@@ -12985,10 +13783,18 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     ) -> dict[str, Any]:
         """Run the reviewed rulebook-import state machine; direct rule ingestion is not public."""
         data = facade_payload(payload)
+        if action == "discover":
+            access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+            discovered = storage.discover_rulebooks()
+            return facade_result(
+                action,
+                {"count": len(discovered), "documents": discovered},
+            )
         if action == "stage":
-            artifact = rule_document_stage(
+            staged = rule_document_stage(
                 campaign_id, required(data, "source_path"), principal_id
-            )["artifact"]
+            )
+            artifact = staged["artifact"]
             result = rule_import_job_create(
                 campaign_id,
                 artifact,
@@ -13002,15 +13808,25 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 principal_id,
                 idempotency_key,
             )
-            return facade_result(action, {"artifact": artifact, **result})
+            return facade_result(action, {**staged, **result})
         job_id = required(data, "job_id")
         if action == "inspect":
             return facade_result(
                 action, rule_import_job_inspect(campaign_id, job_id, principal_id, idempotency_key)
             )
         if action == "ingest":
+            acknowledge_warnings = data.get("acknowledge_warnings", False)
+            if not isinstance(acknowledge_warnings, bool):
+                raise ValueError("payload.acknowledge_warnings must be a boolean")
             return facade_result(
-                action, rule_import_job_ingest(campaign_id, job_id, principal_id, idempotency_key)
+                action,
+                rule_import_job_ingest(
+                    campaign_id,
+                    job_id,
+                    acknowledge_warnings,
+                    principal_id,
+                    idempotency_key,
+                ),
             )
         if action == "extract_candidates":
             return facade_result(

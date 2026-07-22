@@ -24,6 +24,7 @@ def test_config_owns_local_storage(tmp_path: Path) -> None:
     assert config.chroma_path.is_dir()
     assert config.modules_dir.is_dir()
     assert config.rulebooks_dir.is_dir()
+    assert config.normalized_rulebooks_dir.is_dir()
 
 
 def test_environment_config_has_separate_rule_and_module_import_roots(monkeypatch) -> None:
@@ -221,5 +222,11 @@ def test_server_capabilities_publish_the_rulebook_import_contract(tmp_path: Path
             "combat": "combat_check",
         }
         assert "rule_pack_compile(from_source)" in capabilities["rulebook_import"]["stages"]
+        assert "rule_import(extract_candidates)" in capabilities["rulebook_import"]["stages"]
+        assert capabilities["rulebook_import"]["normalization_cache"] == "content-addressed"
+        assert capabilities["rulebook_import"]["page_extraction_cache"] == "content-addressed"
+        assert capabilities["rulebook_import"]["normalizer"].startswith(
+            "sagasmith-core/pdf-layout-v"
+        )
 
     asyncio.run(inspect_capabilities())

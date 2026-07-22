@@ -315,6 +315,10 @@ def test_statblock_spellcasting_binds_slots_and_active_content(tmp_path: Path) -
 
         actor = created["character"]
         assert actor["sheet"]["spellcasting"]["ability"] == "intelligence"
+        assert actor["sheet"]["spellcasting"]["attack_bonus_override"] == 6
+        assert actor["sheet"]["spellcasting"]["save_dc_override"] == 14
+        assert actor["derived"]["spellcasting"]["attack_bonus"] == 6
+        assert actor["derived"]["spellcasting"]["save_dc"] == 14
         assert actor["sheet"]["spellcasting"]["spell_slots"] == {
             "1": {
                 "label": "Level 1 spell slots",
@@ -346,6 +350,19 @@ def test_statblock_spellcasting_binds_slots_and_active_content(tmp_path: Path) -
             "source": "rule-source:module/master-of-souls",
             "component_details": "not_repeated_in_statblock",
         }
+        assert spells["Scorching Ray"]["resolution"]["attack"]["count"]["base"] == 3
+        assert spells["Scorching Ray"]["resolution"]["attack"][
+            "attack_bonus_override"
+        ] == 6
+        assert spells["Scorching Ray"]["resolution"]["attack"][
+            "range_ft_override"
+        ] == 60
+        assert spells["Ray of Sickness"]["resolution"]["attack"][
+            "attack_bonus_override"
+        ] == 6
+        assert spells["Ray of Sickness"]["mechanic_refs"] == [
+            "dnd5e.core.spell.structured_resolution"
+        ]
         ray_id = spells["Ray of Sickness"]["id"]
         with pytest.raises(Exception, match="source_components_confirmed"):
             await _call(
@@ -409,7 +426,7 @@ def test_statblock_spellcasting_binds_slots_and_active_content(tmp_path: Path) -
         ]
         assert created["statblock"]["warnings"] == [
             "Silvered Skull Flail: on-hit effect requires DM settlement",
-            "Ray of Sickness: source-bound statblock spell requires component and effect ruling"
+            "Ray of Sickness: source-bound statblock spell requires component ruling",
         ]
 
     asyncio.run(exercise())

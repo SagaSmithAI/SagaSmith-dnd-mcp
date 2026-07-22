@@ -12,7 +12,7 @@ license = { text = "MIT" }
 authors = [{ name = "SagaSmithAI" }]
 dependencies = [
     "mcp>=1.26.0,<2.0.0",
-    "sagasmith-core[vector,documents]>=0.2.0,<0.3.0",
+    "sagasmith-core[vector,documents,ocr]>=0.2.0,<0.3.0",
     "sagasmith-dnd>=0.2.0,<0.3.0",
 ]
 

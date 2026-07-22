@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
-import hashlib
 import re
 import shutil
 from pathlib import Path
 from typing import Any
 
-from sagasmith_core import Database, VectorStore, create_embedder
+from sagasmith_core import (
+    Database,
+    RapidOcrProvider,
+    VectorStore,
+    create_embedder,
+    file_sha256,
+)
 from sagasmith_core.database import sqlite_database_url
 
 from sagasmith_dnd_mcp.config import McpConfig
@@ -20,6 +25,7 @@ class SagaSmithStorage:
         self.config.prepare()
         self.database = Database(config.database_url or sqlite_database_url(config.database_path))
         self.vectors = VectorStore("dnd5e")
+        self._rule_ocr_provider: RapidOcrProvider | None = None
 
     def migrate(self) -> None:
         self.database.upgrade_schema()
@@ -51,7 +57,13 @@ class SagaSmithStorage:
                 "auto_seed": self.config.auto_seed_rules,
                 "seed_root": str(self.config.dnd_skills_dir / "full" / "skills" / "dnd-dm" / "srd"),
                 "rulebooks_dir": str(self.config.rulebooks_dir),
+                "normalized_rulebooks_dir": str(self.config.normalized_rulebooks_dir),
                 "import_roots": [str(path) for path in self.config.rule_import_roots],
+                "ocr": {
+                    "enabled": self.config.rule_ocr_enabled,
+                    "provider": "rapidocr" if self.config.rule_ocr_enabled else None,
+                    "scale": self.config.rule_ocr_scale,
+                },
             },
             "modules": {
                 "artifacts_dir": str(self.config.modules_dir),
@@ -73,7 +85,7 @@ class SagaSmithStorage:
         size = source.stat().st_size
         if size > 100 * 1024 * 1024:
             raise ValueError("rulebook exceeds the 100 MiB safety limit")
-        checksum = hashlib.sha256(source.read_bytes()).hexdigest()
+        checksum = file_sha256(source)
         safe_name = re.sub(r"[^A-Za-z0-9._-]+", "-", source.name).strip("-.")
         safe_name = safe_name or f"rulebook{source.suffix.casefold()}"
         artifact = f"{checksum[:12]}-{safe_name}"
@@ -82,7 +94,7 @@ class SagaSmithStorage:
             raise ValueError("invalid rulebook artifact name")
         if not target.exists():
             shutil.copy2(source, target)
-        elif hashlib.sha256(target.read_bytes()).hexdigest() != checksum:
+        elif file_sha256(target) != checksum:
             raise RuntimeError("managed rulebook artifact checksum mismatch")
         return {
             "artifact": artifact,
@@ -91,6 +103,50 @@ class SagaSmithStorage:
             "size": size,
             "staged": True,
         }
+
+    def discover_rulebooks(self) -> list[dict[str, Any]]:
+        """List importable documents under configured roots without staging them."""
+        allowed = {".pdf", ".md", ".markdown", ".txt"}
+        seen: set[Path] = set()
+        result: list[dict[str, Any]] = []
+        for root in self.config.rule_import_roots:
+            resolved_root = root.resolve()
+            if not resolved_root.is_dir():
+                continue
+            for source in sorted(resolved_root.rglob("*"), key=lambda item: str(item).casefold()):
+                resolved = source.resolve()
+                if (
+                    not resolved.is_file()
+                    or resolved.suffix.casefold() not in allowed
+                    or resolved in seen
+                ):
+                    continue
+                seen.add(resolved)
+                result.append(
+                    {
+                        "path": str(resolved),
+                        "root": str(resolved_root),
+                        "relative_path": str(resolved.relative_to(resolved_root)),
+                        "name": resolved.name,
+                        "media_type": (
+                            "application/pdf"
+                            if resolved.suffix.casefold() == ".pdf"
+                            else "text/markdown"
+                        ),
+                        "size": resolved.stat().st_size,
+                    }
+                )
+        return result
+
+    def rulebook_checksum(self, name: str) -> str:
+        return file_sha256(self.artifact_rulebook_path(name))
+
+    def rule_ocr_provider(self) -> RapidOcrProvider | None:
+        if not self.config.rule_ocr_enabled:
+            return None
+        if self._rule_ocr_provider is None:
+            self._rule_ocr_provider = RapidOcrProvider(scale=self.config.rule_ocr_scale)
+        return self._rule_ocr_provider
 
     def artifact_rulebook_path(self, name: str) -> Path:
         target = (self.config.rulebooks_dir / name).resolve()
@@ -133,7 +189,7 @@ class SagaSmithStorage:
         size = source.stat().st_size
         if size > 100 * 1024 * 1024:
             raise ValueError("module exceeds the 100 MiB safety limit")
-        checksum = hashlib.sha256(source.read_bytes()).hexdigest()
+        checksum = file_sha256(source)
         safe_name = re.sub(r"[^A-Za-z0-9._-]+", "-", source.name).strip("-.")
         safe_name = safe_name or f"module{source.suffix.casefold()}"
         artifact = f"{checksum[:12]}-{safe_name}"
@@ -142,7 +198,7 @@ class SagaSmithStorage:
             raise ValueError("invalid module artifact name")
         if not target.exists():
             shutil.copy2(source, target)
-        elif hashlib.sha256(target.read_bytes()).hexdigest() != checksum:
+        elif file_sha256(target) != checksum:
             raise RuntimeError("managed module artifact checksum mismatch")
         return {
             "artifact": artifact,
@@ -196,7 +252,7 @@ class SagaSmithStorage:
         if target.parent != directory:
             raise ValueError("invalid rendered module asset path")
         if target.exists():
-            if hashlib.sha256(target.read_bytes()).hexdigest() != checksum:
+            if file_sha256(target) != checksum:
                 raise RuntimeError("managed rendered page checksum mismatch")
         else:
             target.write_bytes(content)
