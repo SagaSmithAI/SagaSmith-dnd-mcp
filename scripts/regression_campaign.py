@@ -28,7 +28,7 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument(
         "--action",
-        choices=("audit", "relock-core"),
+        choices=("audit", "relock-core", "prepare-statblock"),
         default="audit",
         help="Read-only audit or checkpointed adoption of the current built-in Core",
     )
@@ -36,6 +36,12 @@ def _arguments() -> argparse.Namespace:
         "--run-id",
         default="campaign-regression-v1",
         help="Stable idempotency namespace for mutating actions",
+    )
+    parser.add_argument("--review-id", help="Reviewed module statblock for prepare-statblock")
+    parser.add_argument(
+        "--actor-name",
+        default="Structured regression actor",
+        help="Canonical actor name for prepare-statblock",
     )
     parser.add_argument(
         "--module-root",
@@ -62,6 +68,10 @@ def _server_parameters(args: argparse.Namespace) -> StdioServerParameters:
         cwd=repo,
         env=env,
     )
+
+
+def _idempotency_token(run_id: str) -> str:
+    return "".join(character if character.isalnum() else "-" for character in run_id)
 
 
 def _decode(result: Any) -> Any:
@@ -178,6 +188,20 @@ def _review_summary(review: dict[str, Any]) -> dict[str, Any]:
         "checksum": review.get("checksum"),
         "content_preview": content[:160].replace("\n", " "),
         "evidence": review.get("evidence"),
+    }
+
+
+def _spell_card_summary(card: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": card.get("id"),
+        "name": card.get("name"),
+        "level": card.get("level"),
+        "grant": card.get("grant"),
+        "pack_id": card.get("pack_id"),
+        "pack_version": card.get("pack_version"),
+        "rule_refs": card.get("rule_refs"),
+        "mechanic_refs": card.get("mechanic_refs"),
+        "resolution": card.get("resolution"),
     }
 
 
@@ -463,7 +487,7 @@ async def _relock_core(args: argparse.Namespace) -> dict[str, Any]:
                     },
                 )
             )
-            token = "".join(character if character.isalnum() else "-" for character in args.run_id)
+            token = _idempotency_token(args.run_id)
             pre_snapshot = await client.domain(
                 "snapshot_create",
                 {
@@ -561,9 +585,183 @@ async def _relock_core(args: argparse.Namespace) -> dict[str, Any]:
             }
 
 
+async def _prepare_statblock(args: argparse.Namespace) -> dict[str, Any]:
+    """Create a fresh source-bound actor in lobby, then checkpoint back in play."""
+
+    if not args.review_id:
+        raise ValueError("--review-id is required for prepare-statblock")
+    token = _idempotency_token(args.run_id)
+    async with stdio_client(_server_parameters(args)) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            client = CampaignMcp(session, args.campaign_id)
+            phase_payload = await client.core(
+                "game_phase", {"campaign_id": args.campaign_id, "action": "get"}
+            )
+            initial_phase = str(_facade_value(phase_payload)["tool_profile"])
+            if initial_phase == "combat":
+                raise RuntimeError("prepare-statblock cannot run during active combat")
+            await client.open()
+            await client.load(*_phase_groups(initial_phase))
+            branches = _facade_value(
+                await client.domain(
+                    "branch_query", {"campaign_id": args.campaign_id, "view": "list"}
+                )
+            )
+            current_branch = next((item for item in branches if item.get("is_current")), None)
+            if current_branch is None:
+                raise RuntimeError("campaign has no current branch")
+
+            phase_changes: list[dict[str, Any]] = []
+            if initial_phase != "lobby":
+                campaign = _facade_value(
+                    await client.core(
+                        "campaign_query",
+                        {"view": "get", "payload": {"campaign_id": args.campaign_id}},
+                    )
+                )
+                changed = _facade_value(
+                    await client.core(
+                        "game_phase",
+                        {
+                            "campaign_id": args.campaign_id,
+                            "action": "set",
+                            "tool_profile": "lobby",
+                            "expected_revision": campaign["revision"],
+                            "branch_id": current_branch["id"],
+                            "idempotency_key": f"{token}-enter-lobby",
+                        },
+                    )
+                )
+                phase_changes.append(changed)
+            await client.open()
+            await client.load("lobby.campaign", "lobby.rules", "lobby.modules", "lobby.characters")
+            rules = _facade_value(
+                await client.domain(
+                    "campaign_rules",
+                    {"campaign_id": args.campaign_id, "action": "get_profile"},
+                )
+            )
+            if rules.get("effective_error"):
+                raise RuntimeError(str(rules["effective_error"]))
+            review = _facade_value(
+                await client.domain(
+                    "module_query",
+                    {
+                        "campaign_id": args.campaign_id,
+                        "view": "content",
+                        "payload": {"review_id": args.review_id},
+                    },
+                )
+            )
+            if review.get("content_kind") != "dnd5e_2014_statblock":
+                raise RuntimeError("review is not a D&D 2014 statblock")
+            created = _facade_value(
+                await client.domain(
+                    "character_create_from",
+                    {
+                        "mode": "module_statblock",
+                        "payload": {
+                            "campaign_id": args.campaign_id,
+                            "review_id": args.review_id,
+                            "name": args.actor_name,
+                            "character_type": "monster",
+                        },
+                        "idempotency_key": f"{token}-create-statblock",
+                    },
+                )
+            )
+            actor_id = str(created["character"]["id"])
+            actor = _facade_value(
+                await client.domain(
+                    "character_query",
+                    {"view": "get", "payload": {"character_id": actor_id}},
+                )
+            )
+
+            campaign_in_lobby = _facade_value(
+                await client.core(
+                    "campaign_query",
+                    {"view": "get", "payload": {"campaign_id": args.campaign_id}},
+                )
+            )
+            returned_to_play = _facade_value(
+                await client.core(
+                    "game_phase",
+                    {
+                        "campaign_id": args.campaign_id,
+                        "action": "set",
+                        "tool_profile": "play",
+                        "expected_revision": campaign_in_lobby["revision"],
+                        "branch_id": current_branch["id"],
+                        "idempotency_key": f"{token}-return-play",
+                    },
+                )
+            )
+            phase_changes.append(returned_to_play)
+            await client.open()
+            await client.load("play.scene", "play.scene_control", "play.characters")
+            branches_after = _facade_value(
+                await client.domain(
+                    "branch_query", {"campaign_id": args.campaign_id, "view": "list"}
+                )
+            )
+            branch_after = next(item for item in branches_after if item.get("is_current"))
+            campaign_after = _facade_value(
+                await client.core(
+                    "campaign_query",
+                    {"view": "get", "payload": {"campaign_id": args.campaign_id}},
+                )
+            )
+            snapshot = await client.domain(
+                "snapshot_create",
+                {
+                    "campaign_id": args.campaign_id,
+                    "label": f"Prepared source-bound actor: {args.actor_name}",
+                    "expected_revision": campaign_after["revision"],
+                    "expected_head_snapshot_id": branch_after.get("head_snapshot_id") or "",
+                    "idempotency_key": f"{token}-prepared-actor-snapshot",
+                },
+            )
+            verified = _facade_value(
+                await client.domain(
+                    "snapshot_query",
+                    {
+                        "campaign_id": args.campaign_id,
+                        "view": "verify",
+                        "payload": {"slot": snapshot["slot"]},
+                    },
+                )
+            )
+            return {
+                "action": "prepare-statblock",
+                "transport": "stdio",
+                "campaign_id": args.campaign_id,
+                "branch_id": current_branch["id"],
+                "initial_phase": initial_phase,
+                "phase_changes": phase_changes,
+                "review": _review_summary(review),
+                "created": {
+                    "statblock": created.get("statblock"),
+                    "spell_warnings": created.get("spell_warnings"),
+                    "character": _character_summary(actor),
+                    "spell_cards": [
+                        _spell_card_summary(card)
+                        for card in (actor.get("sheet", {}).get("content", {}).get("spells") or [])
+                    ],
+                },
+                "snapshot": snapshot,
+                "snapshot_verification": verified,
+            }
+
+
 def main() -> int:
     args = _arguments()
-    operation = _audit if args.action == "audit" else _relock_core
+    operation = {
+        "audit": _audit,
+        "relock-core": _relock_core,
+        "prepare-statblock": _prepare_statblock,
+    }[args.action]
     report = asyncio.run(operation(args))
     output = args.output.expanduser().resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
