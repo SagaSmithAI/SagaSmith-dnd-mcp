@@ -153,5 +153,8 @@ def test_text_module_statblock_candidate_can_create_a_source_bound_actor(
         assert created["character"]["name"] == "Cragmaw Goblin"
         assert created["character"]["derived"]["armor_class"] == 15
         assert created["character"]["derived"]["hit_points"]["max"] == 7
+        assert {
+            item["source_key"] for item in created["character"]["sheet"]["inventory"]["items"]
+        } == {f"module-review:{reviewed['review']['id']}"}
 
     asyncio.run(exercise())

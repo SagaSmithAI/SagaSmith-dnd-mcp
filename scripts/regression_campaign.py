@@ -108,6 +108,12 @@ def _idempotency_token(run_id: str) -> str:
     return "".join(character if character.isalnum() else "-" for character in run_id)
 
 
+def _phase_transition_key(token: str, action: str, campaign: dict[str, Any]) -> str:
+    """Make transient phase writes retryable without replaying a stale state change."""
+
+    return f"{token}-{action}-r{campaign['revision']}"
+
+
 def _decode(result: Any) -> Any:
     texts = [item.text for item in result.content if getattr(item, "text", None)]
     message = "\n".join(texts)
@@ -193,10 +199,16 @@ def _character_summary(character: dict[str, Any]) -> dict[str, Any]:
     spellcasting = (
         derived.get("spellcasting") if isinstance(derived.get("spellcasting"), dict) else {}
     )
-    spells = (sheet.get("content") or {}).get("spells") or []
+    sheet_inventory = sheet.get("inventory") if isinstance(sheet.get("inventory"), dict) else {}
+    source_items = [
+        item for item in (sheet_inventory.get("items") or []) if isinstance(item, dict)
+    ]
+    for collection in (sheet.get("content") or {}).values():
+        if isinstance(collection, list):
+            source_items.extend(item for item in collection if isinstance(item, dict))
     source_bound = any(
         item.get("source_key") or item.get("rule_refs") or item.get("mechanic_refs")
-        for item in [*attacks, *spells]
+        for item in source_items
         if isinstance(item, dict)
     )
     return {
@@ -729,7 +741,9 @@ async def _prepare_statblock(args: argparse.Namespace) -> dict[str, Any]:
                             "tool_profile": "lobby",
                             "expected_revision": campaign["revision"],
                             "branch_id": current_branch["id"],
-                            "idempotency_key": f"{token}-enter-lobby",
+                            "idempotency_key": _phase_transition_key(
+                                token, "enter-lobby", campaign
+                            ),
                         },
                     )
                 )
@@ -858,7 +872,7 @@ async def _prepare_statblock(args: argparse.Namespace) -> dict[str, Any]:
                         "mode": "module_statblock",
                         "payload": {
                             "campaign_id": args.campaign_id,
-                            "review_id": args.review_id,
+                            "review_id": review["id"],
                             "name": args.actor_name,
                             "character_type": "monster",
                         },
@@ -897,7 +911,9 @@ async def _prepare_statblock(args: argparse.Namespace) -> dict[str, Any]:
                         "tool_profile": "play",
                         "expected_revision": campaign_in_lobby["revision"],
                         "branch_id": current_branch["id"],
-                        "idempotency_key": f"{token}-return-play",
+                        "idempotency_key": _phase_transition_key(
+                            token, "return-play", campaign_in_lobby
+                        ),
                     },
                 )
             )
@@ -916,16 +932,38 @@ async def _prepare_statblock(args: argparse.Namespace) -> dict[str, Any]:
                     {"view": "get", "payload": {"campaign_id": args.campaign_id}},
                 )
             )
-            snapshot = await client.domain(
-                "snapshot_create",
-                {
-                    "campaign_id": args.campaign_id,
-                    "label": f"Prepared source-bound actor: {args.actor_name}",
-                    "expected_revision": campaign_after["revision"],
-                    "expected_head_snapshot_id": branch_after.get("head_snapshot_id") or "",
-                    "idempotency_key": f"{token}-prepared-actor-snapshot",
-                },
+            snapshot_label = f"Prepared source-bound actor: {args.actor_name}"
+            snapshots = _facade_value(
+                await client.domain(
+                    "snapshot_query",
+                    {"campaign_id": args.campaign_id, "view": "list"},
+                )
             )
+            snapshot = next(
+                (
+                    item
+                    for item in snapshots
+                    if item.get("id") == branch_after.get("head_snapshot_id")
+                    and item.get("label") == snapshot_label
+                ),
+                None,
+            )
+            if snapshot is None:
+                snapshot = await client.domain(
+                    "snapshot_create",
+                    {
+                        "campaign_id": args.campaign_id,
+                        "label": snapshot_label,
+                        "expected_revision": campaign_after["revision"],
+                        "expected_head_snapshot_id": (
+                            branch_after.get("head_snapshot_id") or ""
+                        ),
+                        "idempotency_key": (
+                            f"{token}-prepared-actor-snapshot-"
+                            f"r{campaign_after['revision']}"
+                        ),
+                    },
+                )
             verified = _facade_value(
                 await client.domain(
                     "snapshot_query",
@@ -952,7 +990,9 @@ async def _prepare_statblock(args: argparse.Namespace) -> dict[str, Any]:
                             "tool_profile": "lobby",
                             "expected_revision": campaign_working_play["revision"],
                             "branch_id": current_branch["id"],
-                            "idempotency_key": f"{token}-close-enter-lobby",
+                            "idempotency_key": _phase_transition_key(
+                                token, "close-enter-lobby", campaign_working_play
+                            ),
                         },
                     )
                 )
@@ -1003,7 +1043,9 @@ async def _prepare_statblock(args: argparse.Namespace) -> dict[str, Any]:
                             "tool_profile": "play",
                             "expected_revision": campaign_source_lobby["revision"],
                             "branch_id": source_branch["id"],
-                            "idempotency_key": f"{token}-source-return-play",
+                            "idempotency_key": _phase_transition_key(
+                                token, "source-return-play", campaign_source_lobby
+                            ),
                         },
                     )
                 )
@@ -1177,7 +1219,9 @@ async def _structured_combat(args: argparse.Namespace) -> dict[str, Any]:
                             "tool_profile": "lobby",
                             "expected_revision": campaign["revision"],
                             "branch_id": source_branch["id"],
-                            "idempotency_key": f"{token}-source-enter-lobby",
+                            "idempotency_key": _phase_transition_key(
+                                token, "source-enter-lobby", campaign
+                            ),
                         },
                     )
                 await client.open()
@@ -1230,7 +1274,9 @@ async def _structured_combat(args: argparse.Namespace) -> dict[str, Any]:
                         "tool_profile": "play",
                         "expected_revision": campaign_on_branch["revision"],
                         "branch_id": regression_branch_id,
-                        "idempotency_key": f"{token}-branch-enter-play",
+                        "idempotency_key": _phase_transition_key(
+                            token, "branch-enter-play", campaign_on_branch
+                        ),
                     },
                 )
             await client.open()
@@ -1536,7 +1582,9 @@ async def _structured_combat(args: argparse.Namespace) -> dict[str, Any]:
                     "tool_profile": "lobby",
                     "expected_revision": campaign_before_lobby["revision"],
                     "branch_id": regression_branch_id,
-                    "idempotency_key": f"{token}-regression-enter-lobby",
+                    "idempotency_key": _phase_transition_key(
+                        token, "regression-enter-lobby", campaign_before_lobby
+                    ),
                 },
             )
             await client.open()
@@ -1584,7 +1632,9 @@ async def _structured_combat(args: argparse.Namespace) -> dict[str, Any]:
                     "tool_profile": "play",
                     "expected_revision": campaign_source_lobby["revision"],
                     "branch_id": source_branch["id"],
-                    "idempotency_key": f"{token}-source-return-play",
+                    "idempotency_key": _phase_transition_key(
+                        token, "source-return-play", campaign_source_lobby
+                    ),
                 },
             )
             await client.open()
