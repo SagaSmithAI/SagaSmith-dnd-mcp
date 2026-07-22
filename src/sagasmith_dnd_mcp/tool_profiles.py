@@ -140,6 +140,7 @@ TOOL_GROUPS = (
         "rule_seed_bundled",
         "rule_search",
         "rule_expand",
+        "rule_document_page_render",
         "campaign_rules",
         "campaign_core_relock",
         roles=("owner", "dm"),

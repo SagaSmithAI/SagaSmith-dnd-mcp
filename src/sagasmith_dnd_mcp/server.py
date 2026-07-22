@@ -2134,6 +2134,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "rule_import(discover)",
                     "rule_import(stage)",
                     "rule_import(inspect)",
+                    "rule_document_page_render",
                     "rule_import(ingest)",
                     "rule_import(extract_candidates)",
                     "rule_import(review)",
@@ -11600,6 +11601,39 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             storage.artifact_rulebook_path(artifact),
             **rule_document_options(storage.rulebook_checksum(artifact)),
         )
+
+    @mcp.tool()
+    def rule_document_page_render(
+        campaign_id: str,
+        job_id: str,
+        page_number: int,
+        scale: float = 1.5,
+        principal_id: str = "system:local",
+    ) -> Any:
+        """Render one staged rulebook PDF page as checksum-bound DM review evidence."""
+        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        job = require_import_job(campaign_id, job_id, "rulebook")
+        source = storage.artifact_rulebook_path(job.artifact)
+        if source.suffix.casefold() != ".pdf":
+            raise ValueError("rulebook page rendering requires a staged PDF")
+        rendered = render_pdf_page(source, page_number, scale=scale)
+        if rendered.source_checksum != job.artifact_checksum:
+            raise RuntimeError("rulebook PDF no longer matches its staged checksum")
+        return [
+            {
+                "campaign_id": campaign_id,
+                "job_id": job_id,
+                "artifact": job.artifact,
+                "source_checksum": rendered.source_checksum,
+                "page_number": rendered.page_number,
+                "page_count": rendered.page_count,
+                "width": rendered.width,
+                "height": rendered.height,
+                "scale": rendered.scale,
+                "image_checksum": rendered.checksum,
+            },
+            Image(data=rendered.content, format="png"),
+        ]
 
     @mcp.tool()
     def rule_document_import(

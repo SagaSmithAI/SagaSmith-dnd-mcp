@@ -1,7 +1,10 @@
 import asyncio
+import json
 from pathlib import Path
 
 import pytest
+from mcp.types import ImageContent, TextContent
+from pypdf import PdfWriter
 
 from sagasmith_dnd_mcp.config import McpConfig
 from sagasmith_dnd_mcp.server import create_server
@@ -40,6 +43,64 @@ def test_rule_import_discovers_nested_allowlisted_rulebooks(tmp_path: Path) -> N
             "core.pdf",
             str(Path("third-party") / "supplement.md"),
         }
+
+    asyncio.run(exercise())
+
+
+def test_rule_import_renders_a_checksum_bound_review_page(tmp_path: Path) -> None:
+    import_root = tmp_path / "imports"
+    import_root.mkdir()
+    source = import_root / "review.pdf"
+    writer = PdfWriter()
+    writer.add_blank_page(width=200, height=100)
+    with source.open("wb") as stream:
+        writer.write(stream)
+    config = McpConfig(
+        home=tmp_path / "home",
+        database_url=None,
+        chroma_url=None,
+        chroma_path_override=None,
+        dnd_skills_dir=tmp_path / "dnd",
+        modulegen_skills_dir=tmp_path / "modulegen",
+        rule_import_roots=(import_root,),
+    )
+
+    async def exercise() -> None:
+        server = create_server(config)
+        _, campaign = await server.call_tool(
+            "campaign_create",
+            {"name": "Page review", "idempotency_key": "campaign"},
+        )
+        _, staged = await server.call_tool(
+            "rule_import",
+            {
+                "campaign_id": campaign["id"],
+                "action": "stage",
+                "payload": {
+                    "source_path": str(source),
+                    "source_key": "review",
+                    "title": "Review",
+                    "edition": "2014",
+                },
+                "idempotency_key": "stage",
+            },
+        )
+        job_id = staged["result"]["job"]["id"]
+        rendered = await server.call_tool(
+            "rule_document_page_render",
+            {
+                "campaign_id": campaign["id"],
+                "job_id": job_id,
+                "page_number": 1,
+            },
+        )
+
+        assert isinstance(rendered[0], TextContent)
+        assert isinstance(rendered[1], ImageContent)
+        metadata = json.loads(rendered[0].text)
+        assert metadata["page_number"] == 1
+        assert metadata["source_checksum"] == staged["result"]["checksum"]
+        assert rendered[1].mimeType == "image/png"
 
     asyncio.run(exercise())
 
