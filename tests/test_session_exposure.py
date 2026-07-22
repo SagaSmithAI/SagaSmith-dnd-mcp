@@ -274,6 +274,9 @@ def test_stdio_session_uses_native_refresh_and_exposure_call_fallback(tmp_path) 
                     {"exposure_id": exposure_id, "group_id": "lobby.rules"},
                 )
                 assert not loaded.isError
+                assert "rule_document_page_render" in {
+                    tool.name for tool in (await session.list_tools()).tools
+                }
                 fallback = await session.call_tool(
                     "exposure_call",
                     {
