@@ -53,6 +53,15 @@ def _arguments() -> argparse.Namespace:
         action="store_true",
         help="Include compact scene and spatial summaries for parser diagnosis",
     )
+    parser.add_argument(
+        "--campaign-layout",
+        choices=("document", "campaign-folder"),
+        default="document",
+        help=(
+            "Create one campaign per document, or group documents below the same "
+            "top-level folder into one campaign while keeping root documents separate"
+        ),
+    )
     return parser.parse_args()
 
 
@@ -118,6 +127,13 @@ def _documents(root: Path, selected: list[str]) -> list[Path]:
         for path in root.rglob("*")
         if path.is_file() and path.suffix.casefold() in SUPPORTED_SUFFIXES
     )
+
+
+def _campaign_key(root: Path, path: Path, layout: str) -> str:
+    relative = path.relative_to(root)
+    if layout == "campaign-folder" and len(relative.parts) > 1:
+        return relative.parts[0]
+    return path.stem
 
 
 class ExposureClient:
@@ -227,6 +243,8 @@ async def _import_document(
     args: argparse.Namespace,
     root: Path,
     path: Path,
+    campaign_key: str,
+    campaign: dict[str, Any],
     index: int,
     total: int,
 ) -> dict[str, Any]:
@@ -235,18 +253,6 @@ async def _import_document(
     print(f"[{index}/{total}] {relative}", file=sys.stderr, flush=True)
     started = perf_counter()
 
-    await client.open()
-    await client.load("lobby.bootstrap")
-    campaign = await client.domain(
-        "campaign_create",
-        {
-            "name": f"Module regression: {path.stem} [{_token(args.run_id, length=8)}]",
-            "edition": args.edition,
-            "locale": args.locale,
-            "principal_id": PRINCIPAL_ID,
-            "idempotency_key": f"module-corpus-campaign-{identity}",
-        },
-    )
     campaign_id = str(campaign["id"])
     await client.open(campaign_id)
     await client.load(
@@ -276,6 +282,7 @@ async def _import_document(
         return {
             "relative_path": relative,
             "document_role": document_inspection["document_kind"],
+            "campaign_key": campaign_key,
             "campaign_id": campaign_id,
             "checksum": (document_inspection.get("source") or {}).get("checksum"),
             "page_count": (document_inspection.get("source") or {}).get("page_count"),
@@ -397,6 +404,7 @@ async def _import_document(
     return {
         "relative_path": relative,
         "document_role": "module",
+        "campaign_key": campaign_key,
         "campaign_id": campaign_id,
         "module_id": module_id,
         "job_id": job_id,
@@ -443,7 +451,9 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
         "home": str(home),
         "run_id": args.run_id,
         "edition": args.edition,
+        "campaign_layout": args.campaign_layout,
         "document_count": len(documents),
+        "campaigns": [],
         "documents": [],
         "errors": [],
     }
@@ -455,13 +465,47 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             client = ExposureClient(session)
             storage = await client.core("storage_status", {})
             report["storage"] = storage
+            campaigns: dict[str, dict[str, Any]] = {}
             for index, path in enumerate(documents, start=1):
                 try:
+                    campaign_key = _campaign_key(root, path, args.campaign_layout)
+                    campaign = campaigns.get(campaign_key)
+                    if campaign is None:
+                        campaign_identity = _token(
+                            f"{args.run_id}\0campaign\0{campaign_key}"
+                        )
+                        await client.open()
+                        await client.load("lobby.bootstrap")
+                        campaign = await client.domain(
+                            "campaign_create",
+                            {
+                                "name": (
+                                    f"Campaign regression: {campaign_key} "
+                                    f"[{_token(args.run_id, length=8)}]"
+                                ),
+                                "edition": args.edition,
+                                "locale": args.locale,
+                                "principal_id": PRINCIPAL_ID,
+                                "idempotency_key": (
+                                    f"module-corpus-campaign-{campaign_identity}"
+                                ),
+                            },
+                        )
+                        campaigns[campaign_key] = campaign
+                        report["campaigns"].append(
+                            {
+                                "campaign_key": campaign_key,
+                                "campaign_id": campaign["id"],
+                                "name": campaign.get("name"),
+                            }
+                        )
                     result = await _import_document(
                         client,
                         args=args,
                         root=root,
                         path=path,
+                        campaign_key=campaign_key,
+                        campaign=campaign,
                         index=index,
                         total=len(documents),
                     )
