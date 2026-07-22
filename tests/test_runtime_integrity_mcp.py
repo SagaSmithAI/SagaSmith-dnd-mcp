@@ -101,6 +101,18 @@ def test_2024_prepared_spell_changes_follow_phase_and_long_rest_rules(tmp_path: 
                 "idempotency_key": "prep-play",
             },
         )
+        campaign = await call(server, "campaign_get", {"campaign_id": campaign["id"]})
+        clock = await call(
+            server,
+            "campaign_change",
+            {
+                "campaign_id": campaign["id"],
+                "action": "clock_set",
+                "payload": {"day": 1, "hour": 21, "minute": 0},
+                "expected_revision": campaign["revision"],
+                "idempotency_key": "prep-clock",
+            },
+        )
         with pytest.raises(Exception):
             await call(
                 server,
@@ -113,23 +125,57 @@ def test_2024_prepared_spell_changes_follow_phase_and_long_rest_rules(tmp_path: 
                     "idempotency_key": "prep-live-toggle",
                 },
             )
-        rested = await call_raw(
+        with pytest.raises(Exception):
+            await call(
+                server,
+                "campaign_change",
+                {
+                    "campaign_id": campaign["id"],
+                    "action": "party_rest",
+                    "payload": {
+                        "members": [
+                            {
+                                "character_id": ranger["id"],
+                                "expected_revision": ranger["revision"],
+                                "prepared_spell_ids": ["a", "missing"],
+                            }
+                        ]
+                    },
+                    "expected_revision": clock["campaign_revision"],
+                    "idempotency_key": "prep-rest-too-many",
+                },
+            )
+        rested = await call(
             server,
-            "character_rest",
+            "campaign_change",
             {
-                "character_id": ranger["id"],
-                "rest_type": "long_rest",
-                "prepared_spell_ids": ["a", "c"],
-                "expected_revision": ranger["revision"],
+                "campaign_id": campaign["id"],
+                "action": "party_rest",
+                "payload": {
+                    "members": [
+                        {
+                            "character_id": ranger["id"],
+                            "expected_revision": ranger["revision"],
+                            "prepared_spell_ids": ["a", "c"],
+                        }
+                    ]
+                },
+                "expected_revision": clock["campaign_revision"],
                 "idempotency_key": "prep-rest",
             },
         )
         assert rested["status"] == "committed"
-        assert rested["preparation"]["added"] == ["c"]
-        assert rested["preparation"]["removed"] == ["b"]
-        assert rested["character"]["sheet"]["spellcasting"]["preparation"][
-            "selected_spell_ids"
-        ] == ["a", "c"]
+        assert rested["preparations"][ranger["id"]]["added"] == ["c"]
+        assert rested["preparations"][ranger["id"]]["removed"] == ["b"]
+        ranger = await call(
+            server,
+            "character_query",
+            {"view": "get", "payload": {"character_id": ranger["id"]}},
+        )
+        assert ranger["sheet"]["spellcasting"]["preparation"]["selected_spell_ids"] == [
+            "a",
+            "c",
+        ]
         preparation_receipts = await call(
             server,
             "campaign_rule_receipts",
@@ -139,18 +185,6 @@ def test_2024_prepared_spell_changes_follow_phase_and_long_rest_rules(tmp_path: 
             },
         )
         assert preparation_receipts[0]["event"] == "spell.prepare.long_rest"
-        with pytest.raises(Exception):
-            await call(
-                server,
-                "character_rest",
-                {
-                    "character_id": ranger["id"],
-                    "rest_type": "long_rest",
-                    "prepared_spell_ids": ["b", "d"],
-                    "expected_revision": rested["character"]["revision"],
-                    "idempotency_key": "prep-rest-too-many",
-                },
-            )
 
     asyncio.run(exercise())
 

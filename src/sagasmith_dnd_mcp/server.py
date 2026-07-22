@@ -118,6 +118,7 @@ from sagasmith_dnd.lifecycle import (
     advance_effect_durations,
     advance_world_effect_durations,
     apply_rest,
+    record_rest_completion,
     recover_stable_creature,
     stand_outside_combat,
 )
@@ -7211,6 +7212,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         normalized_rest_type = str(rest_type).strip().lower().replace("-", "_")
         if normalized_rest_type not in {"short_rest", "long_rest"}:
             raise CombatEngineError("rest_type must be short_rest or long_rest")
+        if normalized_rest_type == "long_rest":
+            raise CombatEngineError(
+                "long rests must use campaign_change(action='party_rest') so campaign time, "
+                "all actor effects, and the 24-hour limit settle atomically"
+            )
         if prepared_spell_ids is not None and normalized_rest_type != "long_rest":
             raise CombatEngineError("prepared spells can be changed only as part of a long rest")
         payload = {
@@ -7717,6 +7723,263 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             payload,
             response,
             campaign_id=current.campaign_id,
+        )
+
+    def campaign_party_rest(
+        campaign_id: str,
+        members: list[dict[str, Any]],
+        duration_minutes: int = 480,
+        principal_id: str = "system:local",
+        expected_revision: int | None = None,
+        branch_id: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Advance one long rest and settle every named member in one mutation."""
+        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        require_write_contract(expected_revision, idempotency_key)
+        resolved_branch_id = require_current_branch(campaign_id, branch_id)
+        if isinstance(duration_minutes, bool) or not isinstance(duration_minutes, int):
+            raise ValueError("duration_minutes must be an integer")
+        if duration_minutes < 480:
+            raise CombatEngineError("a long rest requires at least 480 minutes")
+        if not isinstance(members, list) or not members:
+            raise ValueError("party rest requires at least one member")
+        allowed_member_fields = {
+            "character_id",
+            "expected_revision",
+            "prepared_spell_ids",
+            "hit_dice_recovery",
+            "food_and_drink",
+        }
+        normalized_members: list[dict[str, Any]] = []
+        member_ids: list[str] = []
+        for index, raw_member in enumerate(members):
+            if not isinstance(raw_member, dict):
+                raise ValueError(f"members[{index}] must be an object")
+            unknown = sorted(set(raw_member) - allowed_member_fields)
+            if unknown:
+                raise ValueError(f"members[{index}] has unsupported fields: {unknown}")
+            character_id = str(raw_member.get("character_id") or "").strip()
+            if not character_id:
+                raise ValueError(f"members[{index}].character_id is required")
+            character_revision = raw_member.get("expected_revision")
+            if isinstance(character_revision, bool) or not isinstance(character_revision, int):
+                raise ValueError(f"members[{index}].expected_revision is required")
+            prepared_ids = raw_member.get("prepared_spell_ids")
+            if prepared_ids is not None and not isinstance(prepared_ids, list):
+                raise ValueError(f"members[{index}].prepared_spell_ids must be an array")
+            recovery = raw_member.get("hit_dice_recovery")
+            if recovery is not None and not isinstance(recovery, dict):
+                raise ValueError(f"members[{index}].hit_dice_recovery must be an object")
+            normalized_members.append(
+                {
+                    "character_id": character_id,
+                    "expected_revision": character_revision,
+                    "prepared_spell_ids": prepared_ids,
+                    "hit_dice_recovery": recovery,
+                    "food_and_drink": bool(raw_member.get("food_and_drink", False)),
+                }
+            )
+            member_ids.append(character_id)
+        if len(member_ids) != len(set(member_ids)):
+            raise ValueError("party rest member ids must be unique")
+        request_payload = {
+            "members": normalized_members,
+            "duration_minutes": duration_minutes,
+            "branch_id": resolved_branch_id,
+        }
+        scope = f"campaign-party-rest:{campaign_id}:{resolved_branch_id}:{principal_id}"
+        replay = replay_idempotent(scope, idempotency_key, request_payload)
+        if replay is not None:
+            return replay
+        campaign = campaigns.get(campaign_id)
+        if campaign.revision != expected_revision:
+            raise ValueError(
+                "campaign revision conflict: "
+                f"expected {expected_revision}, found {campaign.revision}"
+            )
+        next_state = validate_party_state(deepcopy(campaign.state or {}))
+        if bool(dict(next_state.get("combat") or {}).get("active")):
+            raise CombatEngineError("rest is not allowed while combat is active")
+        current_clock = dict(next_state.get("world_time") or {})
+        if not current_clock:
+            raise ValueError("set the campaign clock before resolving a party rest")
+        started_elapsed = int(current_clock.get("elapsed_minutes", 0) or 0)
+        completed_elapsed = started_elapsed + duration_minutes
+        completed_clock = {
+            "schema_version": 1,
+            "day": completed_elapsed // 1440 + 1,
+            "hour": (completed_elapsed % 1440) // 60,
+            "minute": completed_elapsed % 60,
+            "elapsed_minutes": completed_elapsed,
+            "label": str(current_clock.get("label") or ""),
+        }
+        all_characters = {item.id: item for item in characters.list(campaign_id=campaign_id)}
+        for member in normalized_members:
+            current = all_characters.get(member["character_id"])
+            if current is None:
+                raise ValueError(
+                    f"party rest actor is not in this campaign: {member['character_id']}"
+                )
+            if current.revision != member["expected_revision"]:
+                raise ValueError(f"character revision conflict: {current.id}")
+            record_rest_completion(
+                current.sheet,
+                rest_type="long_rest",
+                started_elapsed_minutes=started_elapsed,
+                completed_elapsed_minutes=completed_elapsed,
+            )
+
+        effect_steps = {
+            "minute": duration_minutes,
+            "hour": duration_minutes // 60,
+            "day": duration_minutes // 1440,
+        }
+        effect_steps = {key: amount for key, amount in effect_steps.items() if amount > 0}
+        world_advanced: list[str] = []
+        world_expired: list[str] = []
+        for effect_period, amount in effect_steps.items():
+            world_result = advance_world_effect_durations(
+                next_state, period=effect_period, amount=amount
+            )
+            next_state = world_result["state"]
+            world_advanced.extend(world_result["advanced"])
+            world_expired.extend(world_result["expired"])
+        next_state["world_time"] = completed_clock
+
+        member_by_id = {item["character_id"]: item for item in normalized_members}
+        updates: list[CharacterStateUpdate] = []
+        recovered: dict[str, Any] = {}
+        preparations: dict[str, Any] = {}
+        advanced: dict[str, list[str]] = {}
+        expired: dict[str, list[str]] = {}
+        rule_receipts: list[dict[str, Any]] = []
+        rule_context = effective_rule_context(campaign_id)
+        for current in all_characters.values():
+            sheet = current.sheet
+            actor_advanced: list[str] = []
+            actor_expired: list[str] = []
+            for effect_period, amount in effect_steps.items():
+                duration = advance_effect_durations(sheet, period=effect_period, amount=amount)
+                extension = apply_rule_event(
+                    duration["sheet"],
+                    "duration.advance",
+                    context_with_facts(
+                        rule_context,
+                        actor_id=current.id,
+                        period=effect_period,
+                        amount=amount,
+                    ),
+                )
+                if extension.status != "committed":
+                    raise CombatEngineError(
+                        f"party rest duration for {current.id} requires an unresolved rule choice"
+                    )
+                sheet = extension.sheet
+                actor_advanced.extend(duration["advanced"])
+                actor_expired.extend(duration["expired"])
+                rule_receipts.extend(extension.receipts)
+            member = member_by_id.get(current.id)
+            if member is not None:
+                rest_rules = effective_rule_context(
+                    campaign_id,
+                    facts={"actor_id": current.id, "rest_type": "long_rest"},
+                )
+                applied = apply_rest(
+                    sheet,
+                    rest_type="long_rest",
+                    hit_dice_recovery=member["hit_dice_recovery"],
+                    food_and_drink=member["food_and_drink"],
+                    rules=rest_rules,
+                    world_day=completed_clock["day"],
+                )
+                if applied.get("status") != "committed":
+                    raise CombatEngineError(
+                        f"party rest for {current.id} requires an unresolved rule choice"
+                    )
+                sheet = record_rest_completion(
+                    applied["sheet"],
+                    rest_type="long_rest",
+                    started_elapsed_minutes=started_elapsed,
+                    completed_elapsed_minutes=completed_elapsed,
+                )
+                preparation_result = None
+                if member["prepared_spell_ids"] is not None:
+                    preparation_result = replace_prepared_spells(
+                        sheet,
+                        spell_ids=member["prepared_spell_ids"],
+                        event="long_rest",
+                    )
+                    sheet = preparation_result["sheet"]
+                    preparations[current.id] = {
+                        key: value
+                        for key, value in preparation_result.items()
+                        if key != "sheet"
+                    }
+                recovered[current.id] = {
+                    key: value
+                    for key, value in applied.items()
+                    if key not in {"sheet", "rule_receipts"}
+                }
+                rule_receipts.extend(applied.get("rule_receipts") or [])
+                rule_receipts.extend(
+                    core_receipts(
+                        rest_rules,
+                        ["dnd5e.core.rest.long_rest_timing"],
+                        "party.rest.long_rest",
+                    )
+                )
+                if preparation_result is not None:
+                    rule_receipts.extend(
+                        core_receipts(
+                            rest_rules,
+                            ["dnd5e.core.spell.preparation"],
+                            "spell.prepare.long_rest",
+                        )
+                    )
+            if sheet != current.sheet:
+                updates.append(
+                    CharacterStateUpdate(
+                        character_id=current.id,
+                        sheet=validate_character_sheet(sheet),
+                        notes=validate_character_notes(current.notes),
+                        expected_revision=current.revision,
+                    )
+                )
+            if actor_advanced:
+                advanced[current.id] = list(dict.fromkeys(actor_advanced))
+            if actor_expired:
+                expired[current.id] = list(dict.fromkeys(actor_expired))
+        revisions_result = StateMutationService(storage.database).replace(
+            campaign_id,
+            campaign_state=validate_party_state(next_state),
+            character_updates=updates,
+            expected_campaign_revision=campaign.revision,
+            operation="campaign.party.rest.long_rest",
+            actor=principal_id,
+            branch_id=resolved_branch_id,
+            idempotency_key=idempotency_key,
+            rule_receipts=rule_receipts,
+        )
+        response = {
+            "status": "committed",
+            "rest_type": "long_rest",
+            "duration_minutes": duration_minutes,
+            "member_ids": member_ids,
+            "world_time": completed_clock,
+            "recovered": recovered,
+            "preparations": preparations,
+            "advanced": advanced,
+            "expired": expired,
+            "world_advanced": list(dict.fromkeys(world_advanced)),
+            "world_expired": list(dict.fromkeys(world_expired)),
+            "campaign_revision": mutation_revision(campaign_id),
+            "revisions": [asdict(item) for item in revisions_result or []],
+            "rule_receipts": rule_receipts,
+            "ruleset_fingerprint": rule_context.fingerprint,
+        }
+        return remember_idempotent(
+            scope, idempotency_key, request_payload, response, campaign_id=campaign_id
         )
 
     @mcp.tool()
@@ -13330,7 +13593,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         campaign_id: str,
         payload: dict[str, Any],
         action: Literal[
-            "update", "clock_set", "clock_advance", "effect_add", "effect_remove"
+            "update",
+            "clock_set",
+            "clock_advance",
+            "party_rest",
+            "effect_add",
+            "effect_remove",
         ] = "update",
         principal_id: str = "system:local",
         expected_revision: int | None = None,
@@ -13356,6 +13624,16 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 campaign_id,
                 required(data, "period"),
                 data.get("count", 1),
+                principal_id,
+                expected_revision,
+                branch_id,
+                idempotency_key,
+            )
+        elif action == "party_rest":
+            result = campaign_party_rest(
+                campaign_id,
+                required(data, "members"),
+                data.get("duration_minutes", 480),
                 principal_id,
                 expected_revision,
                 branch_id,
