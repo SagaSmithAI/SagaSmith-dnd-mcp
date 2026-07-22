@@ -34,6 +34,7 @@ def _arguments() -> argparse.Namespace:
             "relock-core",
             "prepare-statblock",
             "prepare-core-wizard",
+            "branch-continuity",
             "structured-combat",
         ),
         default="audit",
@@ -214,6 +215,14 @@ def _module_summary(module: dict[str, Any]) -> dict[str, Any]:
         for key in ("id", "title", "revision", "status", "source_key", "checksum")
         if key in module
     }
+
+
+def _scene_locations(scene: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return atlas locations from either compact indexes or detailed scenes."""
+
+    spatial = scene.get("spatial") if isinstance(scene.get("spatial"), dict) else {}
+    values = spatial.get("locations") or scene.get("locations") or []
+    return [item for item in values if isinstance(item, dict)]
 
 
 def _character_summary(character: dict[str, Any]) -> dict[str, Any]:
@@ -437,10 +446,30 @@ async def _audit(args: argparse.Namespace) -> dict[str, Any]:
                     )
                 )
                 scenes = index.get("scenes", index) if isinstance(index, dict) else index
+                scene_values = [item for item in scenes or [] if isinstance(item, dict)]
+                scene_locations = [_scene_locations(item) for item in scene_values]
                 module_reports.append(
                     {
                         **_module_summary(module),
-                        "scene_count": len(scenes or []),
+                        "scene_count": len(scene_values),
+                        "scene_atlas": {
+                            "scenes_with_locations": sum(
+                                bool(locations) for locations in scene_locations
+                            ),
+                            "location_count": sum(len(locations) for locations in scene_locations),
+                            "scene_types": {
+                                scene_type: sum(
+                                    str(item.get("scene_type") or "unknown") == scene_type
+                                    for item in scene_values
+                                )
+                                for scene_type in sorted(
+                                    {
+                                        str(item.get("scene_type") or "unknown")
+                                        for item in scene_values
+                                    }
+                                )
+                            },
+                        },
                         "asset_count": len(assets or []),
                         "asset_media_types": sorted(
                             {str(item.get("media_type") or "unknown") for item in assets or []}
@@ -1660,6 +1689,517 @@ async def _prepare_core_wizard(args: argparse.Namespace) -> dict[str, Any]:
             }
 
 
+async def _branch_continuity(args: argparse.Namespace) -> dict[str, Any]:
+    """Write scene continuity on a disposable branch and prove source isolation."""
+
+    token = _idempotency_token(args.run_id)
+    fact_key = f"regression:{token}:scene-progress"
+    async with stdio_client(_server_parameters(args)) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            client = CampaignMcp(session, args.campaign_id)
+            phase_payload = await client.core(
+                "game_phase", {"campaign_id": args.campaign_id, "action": "get"}
+            )
+            initial_phase = str(_facade_value(phase_payload)["tool_profile"])
+            if initial_phase == "combat":
+                raise RuntimeError("branch-continuity cannot run during active combat")
+            await client.open()
+            await client.load(*_phase_groups(initial_phase))
+            branches = _facade_value(
+                await client.domain(
+                    "branch_query", {"campaign_id": args.campaign_id, "view": "list"}
+                )
+            )
+            source_branch = next((item for item in branches if item.get("is_current")), None)
+            if source_branch is None:
+                raise RuntimeError("campaign has no current branch")
+            recovery: dict[str, Any] | None = None
+            if str(source_branch.get("name", "")).startswith("continuity-campaign-continuity-"):
+                snapshots = _facade_value(
+                    await client.domain(
+                        "snapshot_query",
+                        {"campaign_id": args.campaign_id, "view": "list"},
+                    )
+                )
+                base_snapshot = next(
+                    (
+                        item
+                        for item in snapshots
+                        if item.get("id") == source_branch.get("base_snapshot_id")
+                    ),
+                    None,
+                )
+                recovered_source = next(
+                    (
+                        item
+                        for item in branches
+                        if base_snapshot is not None
+                        and item.get("id") == base_snapshot.get("branch_id")
+                    ),
+                    None,
+                )
+                if recovered_source is None:
+                    raise RuntimeError(
+                        "cannot identify the source branch for interrupted continuity regression"
+                    )
+                campaign_interrupted = _facade_value(
+                    await client.core(
+                        "campaign_query",
+                        {"view": "get", "payload": {"campaign_id": args.campaign_id}},
+                    )
+                )
+                recovery_snapshot = await client.domain(
+                    "snapshot_create",
+                    {
+                        "campaign_id": args.campaign_id,
+                        "label": "Recovered interrupted branch continuity regression",
+                        "expected_revision": campaign_interrupted["revision"],
+                        "expected_head_snapshot_id": (source_branch.get("head_snapshot_id") or ""),
+                        "idempotency_key": (
+                            f"{token}-continuity-interrupted-recovery-{source_branch['id']}"
+                        ),
+                    },
+                )
+                recovery_checkout = _facade_value(
+                    await client.domain(
+                        "branch_change",
+                        {
+                            "campaign_id": args.campaign_id,
+                            "action": "checkout",
+                            "payload": {"branch_id": recovered_source["id"]},
+                            "expected_revision": campaign_interrupted["revision"],
+                            "expected_branch_id": source_branch["id"],
+                            "idempotency_key": (
+                                f"{token}-continuity-interrupted-checkout-{source_branch['id']}"
+                            ),
+                        },
+                    )
+                )
+                recovery = {
+                    "interrupted_branch_id": source_branch["id"],
+                    "snapshot": recovery_snapshot,
+                    "checkout": recovery_checkout,
+                }
+                source_branch = recovered_source
+                # An interrupted run has already converted its disposable branch to
+                # lobby.  The corpus harness normally starts and ends in play, so
+                # preserve that contract when resuming from this known branch name.
+                initial_phase = "play"
+                await client.open()
+                await client.load("lobby.campaign", "lobby.modules", "lobby.memory_control")
+
+            source_current_before = _facade_value(
+                await client.domain(
+                    "module_query",
+                    {"campaign_id": args.campaign_id, "view": "current"},
+                )
+            )
+
+            modules = _facade_value(
+                await client.domain(
+                    "module_query", {"campaign_id": args.campaign_id, "view": "list"}
+                )
+            )
+            scenes: list[dict[str, Any]] = []
+            for module in modules:
+                index = _facade_value(
+                    await client.domain(
+                        "module_query",
+                        {
+                            "campaign_id": args.campaign_id,
+                            "view": "index",
+                            "payload": {"module_id": module["id"]},
+                        },
+                    )
+                )
+                values = index.get("scenes", index) if isinstance(index, dict) else index
+                scenes.extend(values or [])
+            if args.scene_id:
+                selected_scene = next(
+                    (item for item in scenes if item.get("scene_id") == args.scene_id),
+                    None,
+                )
+                if selected_scene is None:
+                    raise RuntimeError("--scene-id does not belong to this campaign")
+            else:
+                selected_scene = next(
+                    (
+                        item
+                        for item in scenes
+                        if item.get("scene_type") not in {"reference", "overview"}
+                        and _scene_locations(item)
+                    ),
+                    None,
+                )
+                if selected_scene is None:
+                    selected_scene = next(
+                        (item for item in scenes if item.get("scene_type") != "reference"),
+                        None,
+                    )
+            if selected_scene is None:
+                raise RuntimeError("campaign has no playable scene")
+
+            if initial_phase != "lobby":
+                campaign = _facade_value(
+                    await client.core(
+                        "campaign_query",
+                        {"view": "get", "payload": {"campaign_id": args.campaign_id}},
+                    )
+                )
+                await client.core(
+                    "game_phase",
+                    {
+                        "campaign_id": args.campaign_id,
+                        "action": "set",
+                        "tool_profile": "lobby",
+                        "expected_revision": campaign["revision"],
+                        "branch_id": source_branch["id"],
+                        "idempotency_key": _phase_transition_key(
+                            token, "continuity-enter-lobby", campaign
+                        ),
+                    },
+                )
+            await client.open()
+            await client.load("lobby.campaign", "lobby.modules", "lobby.memory_control")
+            campaign_lobby = _facade_value(
+                await client.core(
+                    "campaign_query",
+                    {"view": "get", "payload": {"campaign_id": args.campaign_id}},
+                )
+            )
+            source_checkpoint = await client.domain(
+                "snapshot_create",
+                {
+                    "campaign_id": args.campaign_id,
+                    "label": f"Before branch continuity regression: {token}",
+                    "expected_revision": campaign_lobby["revision"],
+                    "expected_head_snapshot_id": source_branch.get("head_snapshot_id") or "",
+                    "idempotency_key": f"{token}-continuity-source-checkpoint",
+                },
+            )
+            regression_branch = _facade_value(
+                await client.domain(
+                    "branch_change",
+                    {
+                        "campaign_id": args.campaign_id,
+                        "action": "create",
+                        "payload": {
+                            "name": f"continuity-{token}",
+                            "from_snapshot_id": source_checkpoint["id"],
+                            "checkout": True,
+                        },
+                        "expected_revision": campaign_lobby["revision"],
+                        "expected_branch_id": source_branch["id"],
+                        "idempotency_key": f"{token}-continuity-branch-create",
+                    },
+                )
+            )
+            campaign_branch_lobby = _facade_value(
+                await client.core(
+                    "campaign_query",
+                    {"view": "get", "payload": {"campaign_id": args.campaign_id}},
+                )
+            )
+            await client.core(
+                "game_phase",
+                {
+                    "campaign_id": args.campaign_id,
+                    "action": "set",
+                    "tool_profile": "play",
+                    "expected_revision": campaign_branch_lobby["revision"],
+                    "branch_id": regression_branch["id"],
+                    "idempotency_key": _phase_transition_key(
+                        token, "continuity-enter-play", campaign_branch_lobby
+                    ),
+                },
+            )
+            await client.open()
+            await client.load("play.scene", "play.scene_control")
+            scene = _facade_value(
+                await client.domain(
+                    "module_query",
+                    {
+                        "campaign_id": args.campaign_id,
+                        "view": "scene",
+                        "payload": {"scene_id": selected_scene["scene_id"]},
+                    },
+                )
+            )
+            progress_index = _facade_value(
+                await client.domain(
+                    "module_query",
+                    {"campaign_id": args.campaign_id, "view": "progress"},
+                )
+            )
+            progress_before = next(
+                (
+                    item
+                    for item in progress_index
+                    if item.get("scene_id") == selected_scene["scene_id"]
+                ),
+                None,
+            )
+            state_version = int((progress_before or {}).get("state_version", 0) or 0)
+            spatial = dict(scene.get("spatial") or {})
+            locations = list(spatial.get("locations") or [])
+            location_key = str(locations[0].get("key")) if locations else None
+            progress_after = _facade_value(
+                await client.domain(
+                    "module_set_progress",
+                    {
+                        "campaign_id": args.campaign_id,
+                        "scene_id": selected_scene["scene_id"],
+                        "status": "active",
+                        "progress": 1,
+                        "state": {"regression_run_id": token},
+                        "current_location_key": location_key,
+                        "expected_state_version": state_version,
+                        "idempotency_key": f"{token}-continuity-scene-progress",
+                    },
+                )
+            )
+            campaign_before_commit = _facade_value(
+                await client.core(
+                    "campaign_query",
+                    {"view": "get", "payload": {"campaign_id": args.campaign_id}},
+                )
+            )
+            committed = _facade_value(
+                await client.domain(
+                    "continuity_commit",
+                    {
+                        "campaign_id": args.campaign_id,
+                        "payload": {
+                            "event": {
+                                "summary": (f"Regression entered module scene {scene['title']}."),
+                                "event_type": "regression",
+                                "audience_scope": "dm",
+                            },
+                            "facts": [
+                                {
+                                    "fact_key": fact_key,
+                                    "subject": scene["title"],
+                                    "subject_ref": (f"module-scene:{selected_scene['scene_id']}"),
+                                    "predicate": "regression-progress",
+                                    "content": (
+                                        f"Disposable branch entered {scene['title']} at "
+                                        f"location {location_key or 'scene fallback'}."
+                                    ),
+                                    "importance": 1,
+                                    "disclosure_scope": "dm",
+                                }
+                            ],
+                            "snapshot": {
+                                "label": f"Branch continuity checkpoint: {scene['title']}"
+                            },
+                            "branch_id": regression_branch["id"],
+                        },
+                        "expected_revision": campaign_before_commit["revision"],
+                        "idempotency_key": f"{token}-continuity-commit",
+                    },
+                )
+            )
+            regression_snapshot = dict(committed["snapshot"])
+            regression_verified = _facade_value(
+                await client.domain(
+                    "snapshot_query",
+                    {
+                        "campaign_id": args.campaign_id,
+                        "view": "verify",
+                        "payload": {"slot": regression_snapshot["slot"]},
+                    },
+                )
+            )
+            diagnostics = _facade_value(
+                await client.domain("continuity_diagnostics", {"campaign_id": args.campaign_id})
+            )
+            campaign_regression_play = _facade_value(
+                await client.core(
+                    "campaign_query",
+                    {"view": "get", "payload": {"campaign_id": args.campaign_id}},
+                )
+            )
+            await client.core(
+                "game_phase",
+                {
+                    "campaign_id": args.campaign_id,
+                    "action": "set",
+                    "tool_profile": "lobby",
+                    "expected_revision": campaign_regression_play["revision"],
+                    "branch_id": regression_branch["id"],
+                    "idempotency_key": _phase_transition_key(
+                        token, "continuity-close-lobby", campaign_regression_play
+                    ),
+                },
+            )
+            await client.open()
+            await client.load("lobby.campaign", "lobby.modules", "lobby.memory_control")
+            campaign_regression_lobby = _facade_value(
+                await client.core(
+                    "campaign_query",
+                    {"view": "get", "payload": {"campaign_id": args.campaign_id}},
+                )
+            )
+            regression_branches = _facade_value(
+                await client.domain(
+                    "branch_query", {"campaign_id": args.campaign_id, "view": "list"}
+                )
+            )
+            regression_branch_lobby = next(
+                item for item in regression_branches if item.get("is_current")
+            )
+            regression_lobby_snapshot = await client.domain(
+                "snapshot_create",
+                {
+                    "campaign_id": args.campaign_id,
+                    "label": f"Branch continuity lobby checkpoint: {scene['title']}",
+                    "expected_revision": campaign_regression_lobby["revision"],
+                    "expected_head_snapshot_id": (
+                        regression_branch_lobby.get("head_snapshot_id") or ""
+                    ),
+                    "idempotency_key": f"{token}-continuity-lobby-checkpoint",
+                },
+            )
+            checkout = _facade_value(
+                await client.domain(
+                    "branch_change",
+                    {
+                        "campaign_id": args.campaign_id,
+                        "action": "checkout",
+                        "payload": {"branch_id": source_branch["id"]},
+                        "expected_revision": campaign_regression_lobby["revision"],
+                        "expected_branch_id": regression_branch["id"],
+                        "idempotency_key": f"{token}-continuity-return-source",
+                    },
+                )
+            )
+            campaign_source_lobby = _facade_value(
+                await client.core(
+                    "campaign_query",
+                    {"view": "get", "payload": {"campaign_id": args.campaign_id}},
+                )
+            )
+            await client.core(
+                "game_phase",
+                {
+                    "campaign_id": args.campaign_id,
+                    "action": "set",
+                    "tool_profile": "play",
+                    "expected_revision": campaign_source_lobby["revision"],
+                    "branch_id": source_branch["id"],
+                    "idempotency_key": _phase_transition_key(
+                        token, "continuity-source-play", campaign_source_lobby
+                    ),
+                },
+            )
+            await client.open()
+            await client.load("play.scene", "play.scene_control")
+            source_facts = _facade_value(
+                await client.domain(
+                    "memory_query",
+                    {
+                        "campaign_id": args.campaign_id,
+                        "view": "list",
+                        "payload": {"branch_id": source_branch["id"]},
+                    },
+                )
+            )
+            source_current_after = _facade_value(
+                await client.domain(
+                    "module_query",
+                    {"campaign_id": args.campaign_id, "view": "current"},
+                )
+            )
+            comparison = _facade_value(
+                await client.domain(
+                    "branch_query",
+                    {
+                        "campaign_id": args.campaign_id,
+                        "view": "compare",
+                        "payload": {
+                            "left_branch_id": source_branch["id"],
+                            "right_branch_id": regression_branch["id"],
+                        },
+                    },
+                )
+            )
+            campaign_source_play = _facade_value(
+                await client.core(
+                    "campaign_query",
+                    {"view": "get", "payload": {"campaign_id": args.campaign_id}},
+                )
+            )
+            branches_after = _facade_value(
+                await client.domain(
+                    "branch_query", {"campaign_id": args.campaign_id, "view": "list"}
+                )
+            )
+            source_after = next(item for item in branches_after if item.get("is_current"))
+            final_snapshot = await client.domain(
+                "snapshot_create",
+                {
+                    "campaign_id": args.campaign_id,
+                    "label": f"Returned after branch continuity regression: {token}",
+                    "expected_revision": campaign_source_play["revision"],
+                    "expected_head_snapshot_id": source_after.get("head_snapshot_id") or "",
+                    "idempotency_key": f"{token}-continuity-source-final",
+                },
+            )
+            final_verified = _facade_value(
+                await client.domain(
+                    "snapshot_query",
+                    {
+                        "campaign_id": args.campaign_id,
+                        "view": "verify",
+                        "payload": {"slot": final_snapshot["slot"]},
+                    },
+                )
+            )
+            source_fact_keys = {str(item.get("fact_key")) for item in source_facts}
+            scene_restored = _current_scene_summary(source_current_after) == (
+                _current_scene_summary(source_current_before)
+            )
+            if fact_key in source_fact_keys or not scene_restored:
+                raise RuntimeError("disposable continuity leaked into the source branch")
+            return {
+                "action": "branch-continuity",
+                "transport": "stdio",
+                "campaign_id": args.campaign_id,
+                "recovery": recovery,
+                "scene": {
+                    "scene_id": scene["scene_id"],
+                    "title": scene["title"],
+                    "module_id": scene["module_id"],
+                    "location_key": location_key,
+                },
+                "source_branch_id": source_branch["id"],
+                "regression_branch_id": regression_branch["id"],
+                "source_checkpoint": source_checkpoint,
+                "progress": progress_after,
+                "continuity": {
+                    "event_id": committed["event"]["id"],
+                    "fact_id": committed["facts"][0]["id"],
+                    "fact_key": fact_key,
+                    "skill_manifest_count": len(committed["skill_manifest"]),
+                    "diagnostics": diagnostics,
+                },
+                "regression_snapshot": regression_snapshot,
+                "regression_snapshot_verification": regression_verified,
+                "regression_lobby_snapshot": regression_lobby_snapshot,
+                "checkout": checkout,
+                "source_isolation": {
+                    "fact_absent": fact_key not in source_fact_keys,
+                    "scene_restored": scene_restored,
+                    "current_before": _current_scene_summary(source_current_before),
+                    "current_after": _current_scene_summary(source_current_after),
+                },
+                "branch_comparison": comparison,
+                "final_snapshot": final_snapshot,
+                "final_snapshot_verification": final_verified,
+            }
+
+
 async def _structured_combat(args: argparse.Namespace) -> dict[str, Any]:
     """Run structured spell combat on a disposable branch and restore the source branch."""
 
@@ -2322,6 +2862,7 @@ def main() -> int:
         "relock-core": _relock_core,
         "prepare-statblock": _prepare_statblock,
         "prepare-core-wizard": _prepare_core_wizard,
+        "branch-continuity": _branch_continuity,
         "structured-combat": _structured_combat,
     }[args.action]
     report = asyncio.run(operation(args))
