@@ -2472,6 +2472,19 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     validate_position(compiled_map, entry.get("position"))
             except BattleMapError as error:
                 raise NeedsRulingError(str(error), missing=("battle_map",)) from error
+        elif battle_map is not None:
+            try:
+                compiled_map = compile_battle_map(
+                    {
+                        "scene_id": resolved_scene_id or f"ad-hoc-combat:{campaign_id}",
+                        "spatial": {},
+                    },
+                    deepcopy(battle_map),
+                )
+                for entry in config_by_actor.values():
+                    validate_position(compiled_map, entry.get("position"))
+            except BattleMapError as error:
+                raise NeedsRulingError(str(error), missing=("battle_map",)) from error
         participants = [characters.get(item) for item in participant_ids]
         if any(char.campaign_id != campaign_id for char in participants):
             raise ValueError("all participants must belong to the campaign")
@@ -4103,6 +4116,16 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             movement_boundary_ids.append("dnd5e.core.activity.turn_undead")
         if destination is not None:
             movement_boundary_ids.append("dnd5e.core.movement.occupied_destination")
+        difficult_cells = set(
+            dict(encounter.get("battle_map") or {}).get("difficult_cells") or []
+        )
+        route_points = list(path or ([] if destination is None else [destination]))
+        if any(
+            isinstance(point, dict)
+            and f"{point.get('x')},{point.get('y')}" in difficult_cells
+            for point in route_points
+        ):
+            movement_boundary_ids.append("dnd5e.core.movement.difficult_terrain")
         if any(
             str(item.get("id")) not in pending_before
             and item.get("kind") == "reaction"

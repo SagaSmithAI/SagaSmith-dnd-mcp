@@ -401,3 +401,89 @@ def test_cunning_action_dash_uses_bonus_action_and_doubles_movement(tmp_path: Pa
         )
 
     asyncio.run(exercise())
+
+
+def test_combat_move_charges_reviewed_difficult_cells_and_records_core_receipt(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        server = create_server(_config(tmp_path))
+        campaign = await _call(
+            server,
+            "campaign_create",
+            {"name": "Difficult terrain", "edition": "2014", "idempotency_key": "campaign"},
+        )
+        mover = await _call(
+            server,
+            "character_create",
+            {
+                "campaign_id": campaign["id"],
+                "name": "Mover",
+                "idempotency_key": "mover",
+            },
+        )
+        other = await _call(
+            server,
+            "character_create",
+            {
+                "campaign_id": campaign["id"],
+                "name": "Other",
+                "idempotency_key": "other",
+            },
+        )
+        campaign = await _call(server, "campaign_get", {"campaign_id": campaign["id"]})
+        started = await _call_raw(
+            server,
+            "combat_start",
+            {
+                "campaign_id": campaign["id"],
+                "participant_ids": [mover["id"], other["id"]],
+                "participant_config": [
+                    {
+                        "actor_id": mover["id"],
+                        "initiative": 20,
+                        "position": {"x": 0, "y": 0},
+                    },
+                    {
+                        "actor_id": other["id"],
+                        "initiative": 10,
+                        "position": {"x": 4, "y": 0},
+                    },
+                ],
+                "battle_map": {
+                    "width_cells": 6,
+                    "height_cells": 4,
+                    "difficult_cells": [{"x": 1, "y": 0}],
+                },
+                "expected_revision": campaign["revision"],
+                "idempotency_key": "start",
+            },
+        )
+
+        moved = await _call_raw(
+            server,
+            "combat_move",
+            {
+                "campaign_id": campaign["id"],
+                "actor_id": mover["id"],
+                "distance": 10,
+                "destination": {"x": 2, "y": 0},
+                "path": [{"x": 0, "y": 0}, {"x": 1, "y": 0}, {"x": 2, "y": 0}],
+                "expected_revision": started["campaign_revision"],
+                "idempotency_key": "move",
+            },
+        )
+
+        current = moved["combat"]["combatants"][moved["combat"]["turn_index"]]
+        assert current["turn_budget"]["movement"] == 15
+        receipts = await _call(
+            server,
+            "campaign_rule_receipts",
+            {"campaign_id": campaign["id"]},
+        )
+        assert any(
+            item["mechanic_id"] == "dnd5e.core.movement.difficult_terrain"
+            for item in receipts
+        )
+
+    asyncio.run(exercise())
