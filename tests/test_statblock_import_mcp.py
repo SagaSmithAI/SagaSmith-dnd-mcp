@@ -70,7 +70,9 @@ Cantrips (at will): chill touch, mage hand
 ***Multiattack***. The master of souls makes two attacks with its silvered skull flail.
 
 ***Silvered Skull Flail***. *Melee Weapon Attack:* +2 to hit, reach 5 ft., one target.
-*Hit:* 4 (1d8) bludgeoning damage.
+*Hit:* 4 (1d8) bludgeoning damage plus 14 (4d6) necrotic damage. Until the end of
+the target's next turn, it has disadvantage on saving throws against effects that
+turn undead.
 
 ***Chill Touch***. *Ranged Spell Attack:* +6 to hit, range 120 ft., one target.
 *Hit:* 13 (2d8) necrotic damage.
@@ -345,6 +347,16 @@ def test_statblock_spellcasting_binds_slots_and_active_content(tmp_path: Path) -
         assert [
             item["item_id"] for item in actor["derived"]["inventory"]["weapon_attacks"]
         ] == ["silvered-skull-flail"]
+        flail = actor["derived"]["inventory"]["weapon_attacks"][0]
+        assert flail["additional_damage"] == [
+            {
+                "damage_formula": "4d6",
+                "damage_bonus": 0,
+                "damage_type": "necrotic",
+                "damage_expression": "4d6",
+            }
+        ]
+        assert flail["on_hit_effect"].startswith("Until the end of the target's next turn")
         assert actor["derived"]["multiattack_options"] == [
             {
                 "id": "melee",
@@ -358,6 +370,7 @@ def test_statblock_spellcasting_binds_slots_and_active_content(tmp_path: Path) -
             }
         ]
         assert created["statblock"]["warnings"] == [
+            "Silvered Skull Flail: on-hit effect requires DM settlement",
             "Ray of Sickness: source-bound statblock spell requires component and effect ruling"
         ]
 
