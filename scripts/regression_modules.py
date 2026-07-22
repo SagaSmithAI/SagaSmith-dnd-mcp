@@ -442,6 +442,52 @@ async def _import_document(
     }
 
 
+async def _create_baseline_snapshot(
+    client: ExposureClient,
+    *,
+    campaign_key: str,
+    campaign_id: str,
+    run_id: str,
+) -> dict[str, Any]:
+    baseline_identity = _token(f"{run_id}\0{campaign_key}")
+    await client.open(campaign_id)
+    await client.load("lobby.campaign")
+    campaign = await client.core(
+        "campaign_query",
+        {
+            "view": "get",
+            "payload": {"campaign_id": campaign_id},
+            "principal_id": PRINCIPAL_ID,
+        },
+    )
+    campaign = _facade_value(campaign)
+    branches = await client.domain(
+        "branch_query", {"campaign_id": campaign_id, "view": "list"}
+    )
+    current_branch = next((item for item in branches if item.get("is_current")), None)
+    if current_branch is None:
+        raise RuntimeError(f"campaign has no current branch: {campaign_key}")
+    snapshot = await client.domain(
+        "snapshot_create",
+        {
+            "campaign_id": campaign_id,
+            "label": f"Imported campaign baseline: {campaign_key}",
+            "expected_revision": campaign["revision"],
+            "expected_head_snapshot_id": current_branch.get("head_snapshot_id") or "",
+            "idempotency_key": f"module-corpus-baseline-{baseline_identity}",
+        },
+    )
+    verification = await client.domain(
+        "snapshot_query",
+        {
+            "campaign_id": campaign_id,
+            "view": "verify",
+            "payload": {"slot": snapshot["slot"]},
+        },
+    )
+    return {"snapshot": snapshot, "verification": verification}
+
+
 async def _run(args: argparse.Namespace) -> dict[str, Any]:
     root = args.root.expanduser().resolve()
     home = args.home.expanduser().resolve()
@@ -466,9 +512,11 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             storage = await client.core("storage_status", {})
             report["storage"] = storage
             campaigns: dict[str, dict[str, Any]] = {}
+            campaign_reports: dict[str, dict[str, Any]] = {}
+            failed_campaigns: set[str] = set()
             for index, path in enumerate(documents, start=1):
+                campaign_key = _campaign_key(root, path, args.campaign_layout)
                 try:
-                    campaign_key = _campaign_key(root, path, args.campaign_layout)
                     campaign = campaigns.get(campaign_key)
                     if campaign is None:
                         campaign_identity = _token(
@@ -492,13 +540,13 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                             },
                         )
                         campaigns[campaign_key] = campaign
-                        report["campaigns"].append(
-                            {
-                                "campaign_key": campaign_key,
-                                "campaign_id": campaign["id"],
-                                "name": campaign.get("name"),
-                            }
-                        )
+                        campaign_report = {
+                            "campaign_key": campaign_key,
+                            "campaign_id": campaign["id"],
+                            "name": campaign.get("name"),
+                        }
+                        campaign_reports[campaign_key] = campaign_report
+                        report["campaigns"].append(campaign_report)
                     result = await _import_document(
                         client,
                         args=args,
@@ -511,10 +559,30 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     )
                     report["documents"].append(result)
                 except Exception as error:  # corpus runs must report every document
+                    failed_campaigns.add(campaign_key)
                     report["errors"].append(
                         {
                             "relative_path": path.relative_to(root).as_posix(),
+                            "campaign_key": campaign_key,
                             "error": f"{type(error).__name__}: {error}",
+                        }
+                    )
+            for campaign_key, campaign in campaigns.items():
+                if campaign_key in failed_campaigns:
+                    continue
+                try:
+                    baseline = await _create_baseline_snapshot(
+                        client,
+                        campaign_key=campaign_key,
+                        campaign_id=str(campaign["id"]),
+                        run_id=args.run_id,
+                    )
+                    campaign_reports[campaign_key]["baseline"] = baseline
+                except Exception as error:
+                    report["errors"].append(
+                        {
+                            "campaign_key": campaign_key,
+                            "error": f"baseline {type(error).__name__}: {error}",
                         }
                     )
     report["seconds"] = round(perf_counter() - started, 3)

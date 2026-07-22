@@ -115,6 +115,7 @@ from sagasmith_dnd.combat_engine import (
 from sagasmith_dnd.content_import import (
     compiled_artifacts_from_candidates,
     extract_content_candidates,
+    module_statblock_review_candidates,
     validate_selection_ready_artifacts,
 )
 from sagasmith_dnd.core_content import PACK_ID as CORE_CONTENT_PACK_ID
@@ -11211,9 +11212,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         scene_id: str,
         content_key: str,
         normalized_content: str,
-        source_asset_id: str,
-        page_number: int,
         observation: str,
+        source_asset_id: str | None = None,
+        page_number: int | None = None,
+        source_chunk_ids: list[str] | None = None,
         content_kind: Literal["dnd5e_2014_statblock"] = "dnd5e_2014_statblock",
         metadata: dict[str, Any] | None = None,
         principal_id: str = "system:local",
@@ -11236,6 +11238,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "normalized_content": normalized_content,
             "source_asset_id": source_asset_id,
             "page_number": page_number,
+            "source_chunk_ids": source_chunk_ids,
             "observation": observation,
             "metadata": metadata,
         }
@@ -11252,6 +11255,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             normalized_content=normalized_content,
             source_asset_id=source_asset_id,
             page_number=page_number,
+            source_chunk_ids=source_chunk_ids,
             reviewer=principal_id,
             observation=observation,
             metadata=metadata,
@@ -11273,6 +11277,41 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             response,
             campaign_id=campaign_id,
         )
+
+    def module_content_candidates(
+        campaign_id: str,
+        module_id: str,
+        principal_id: str = "system:local",
+    ) -> list[dict[str, Any]]:
+        """Recover review-only statblock candidates from imported text chunks."""
+        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        module = next(
+            (
+                item
+                for item in modules.list(campaign_id)
+                if str(item.get("id")) == module_id
+            ),
+            None,
+        )
+        if module is None:
+            raise LookupError(module_id)
+        chunks = modules.list_chunks(campaign_id, module_id)
+        candidates = module_statblock_review_candidates(
+            chunks,
+            source_title=str(module.get("title") or ""),
+        )
+        for candidate in candidates:
+            candidate["review_tool"] = "module_content_review"
+            candidate["module_id"] = module_id
+            if len(candidate.get("source_scene_ids") or []) != 1:
+                candidate["execution_state"] = "blocked"
+                candidate["review_status"] = "manual_review_required"
+                candidate["review_error"] = (
+                    "statblock candidate source chunks must belong to one scene"
+                )
+                continue
+            candidate["scene_id"] = candidate["source_scene_ids"][0]
+        return candidates
 
     @mcp.tool()
     def module_read_scene(
@@ -14002,6 +14041,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "readiness",
             "assets",
             "content",
+            "candidates",
         ] = "list",
         payload: dict[str, Any] | None = None,
         principal_id: str = "system:local",
@@ -14041,6 +14081,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     content_kind=data.get("content_kind"),
                     content_key=data.get("content_key"),
                 )
+        elif view == "candidates":
+            result = module_content_candidates(
+                campaign_id,
+                required(data, "module_id"),
+                principal_id,
+            )
         else:
             result = module_progress_index(
                 campaign_id,

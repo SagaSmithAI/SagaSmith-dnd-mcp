@@ -319,27 +319,34 @@ async def _audit(args: argparse.Namespace) -> dict[str, Any]:
                     "snapshot_query", {"campaign_id": args.campaign_id, "view": "list"}
                 )
             )
-            latest_snapshot = max(snapshots, key=lambda item: int(item.get("slot") or 0))
-            snapshot_verification = _facade_value(
-                await client.domain(
-                    "snapshot_query",
-                    {
-                        "campaign_id": args.campaign_id,
-                        "view": "verify",
-                        "payload": {"slot": latest_snapshot["slot"]},
-                    },
-                )
+            latest_snapshot = (
+                max(snapshots, key=lambda item: int(item.get("slot") or 0))
+                if snapshots
+                else None
             )
-            snapshot_lineage = _facade_value(
-                await client.domain(
-                    "snapshot_query",
-                    {
-                        "campaign_id": args.campaign_id,
-                        "view": "lineage",
-                        "payload": {"slot": latest_snapshot["slot"]},
-                    },
+            snapshot_verification = None
+            snapshot_lineage = None
+            if latest_snapshot is not None:
+                snapshot_verification = _facade_value(
+                    await client.domain(
+                        "snapshot_query",
+                        {
+                            "campaign_id": args.campaign_id,
+                            "view": "verify",
+                            "payload": {"slot": latest_snapshot["slot"]},
+                        },
+                    )
                 )
-            )
+                snapshot_lineage = _facade_value(
+                    await client.domain(
+                        "snapshot_query",
+                        {
+                            "campaign_id": args.campaign_id,
+                            "view": "lineage",
+                            "payload": {"slot": latest_snapshot["slot"]},
+                        },
+                    )
+                )
 
             modules = _facade_value(
                 await client.domain(
