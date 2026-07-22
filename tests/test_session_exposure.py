@@ -69,17 +69,22 @@ def test_phase_groups_separate_player_reads_from_dm_control() -> None:
     assert "memory_query" in GROUP_BY_ID["lobby.memory_control"].tools
 
     assert GROUP_BY_ID["play.scene"].roles == frozenset()
+    assert "branch_query" in GROUP_BY_ID["play.scene"].tools
     assert GROUP_BY_ID["play.scene_control"].roles == frozenset({"owner", "dm"})
     assert "snapshot_query" not in GROUP_BY_ID["play.scene"].tools
     assert "snapshot_query" in GROUP_BY_ID["play.scene_control"].tools
+    assert "campaign_rules" in GROUP_BY_ID["play.scene_control"].tools
     assert "combat_start" not in GROUP_BY_ID["play.resolution"].tools
     assert GROUP_BY_ID["play.combat_control"].roles == frozenset({"owner", "dm"})
 
     assert "combat_end" not in GROUP_BY_ID["combat.turn"].tools
+    assert "branch_query" in GROUP_BY_ID["combat.observe"].tools
     assert GROUP_BY_ID["combat.control"].roles == frozenset({"owner", "dm"})
     assert GROUP_BY_ID["combat.save"].roles == frozenset({"owner", "dm"})
     assert GROUP_BY_ID["combat.maintenance"].roles == frozenset({"owner", "dm"})
-    assert GROUP_BY_ID["combat.maintenance"].tools == frozenset({"campaign_core_relock"})
+    assert GROUP_BY_ID["combat.maintenance"].tools == frozenset(
+        {"campaign_core_relock", "campaign_rules"}
+    )
     assert GROUP_BY_ID["combat.map"].roles == frozenset({"owner", "dm"})
 
 
