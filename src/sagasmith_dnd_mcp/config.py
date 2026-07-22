@@ -26,6 +26,8 @@ class McpConfig:
     module_import_roots: tuple[Path, ...] = ()
     rule_ocr_enabled: bool = True
     rule_ocr_scale: float = 2.0
+    module_ocr_enabled: bool = True
+    module_ocr_scale: float = 2.0
 
     @classmethod
     def from_environment(cls) -> "McpConfig":
@@ -81,6 +83,17 @@ class McpConfig:
             rule_ocr_scale=float(
                 os.environ.get("SAGASMITH_DND_MCP_RULE_OCR_SCALE", "2.0")
             ),
+            module_ocr_enabled=os.environ.get(
+                "SAGASMITH_DND_MCP_MODULE_OCR",
+                os.environ.get("SAGASMITH_DND_MCP_RULE_OCR", "1"),
+            )
+            == "1",
+            module_ocr_scale=float(
+                os.environ.get(
+                    "SAGASMITH_DND_MCP_MODULE_OCR_SCALE",
+                    os.environ.get("SAGASMITH_DND_MCP_RULE_OCR_SCALE", "2.0"),
+                )
+            ),
         )
 
     @property
@@ -108,6 +121,10 @@ class McpConfig:
         return self.artifacts_dir / "normalized-rulebooks"
 
     @property
+    def normalized_modules_dir(self) -> Path:
+        return self.artifacts_dir / "normalized-modules"
+
+    @property
     def module_assets_dir(self) -> Path:
         return self.artifacts_dir / "module-assets"
 
@@ -119,6 +136,7 @@ class McpConfig:
             self.module_assets_dir,
             self.rulebooks_dir,
             self.normalized_rulebooks_dir,
+            self.normalized_modules_dir,
         ):
             directory.mkdir(parents=True, exist_ok=True)
         os.environ.setdefault("SAGASMITH_DATA_DIR", str(self.home / "data"))

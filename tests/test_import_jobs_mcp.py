@@ -532,6 +532,7 @@ def test_module_import_facade_stages_only_allowlisted_documents(tmp_path: Path) 
             },
         )
         assert inspected["preview"]["valid"] is True
+        assert inspected["preview"]["metadata"]["normalization_cache_hit"] is True
         validated = await call(
             server,
             "module_import",

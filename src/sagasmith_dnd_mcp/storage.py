@@ -26,6 +26,7 @@ class SagaSmithStorage:
         self.database = Database(config.database_url or sqlite_database_url(config.database_path))
         self.vectors = VectorStore("dnd5e")
         self._rule_ocr_provider: RapidOcrProvider | None = None
+        self._module_ocr_provider: RapidOcrProvider | None = None
 
     def migrate(self) -> None:
         self.database.upgrade_schema()
@@ -67,7 +68,13 @@ class SagaSmithStorage:
             },
             "modules": {
                 "artifacts_dir": str(self.config.modules_dir),
+                "normalized_modules_dir": str(self.config.normalized_modules_dir),
                 "import_roots": [str(path) for path in self.config.module_import_roots],
+                "ocr": {
+                    "enabled": self.config.module_ocr_enabled,
+                    "provider": "rapidocr" if self.config.module_ocr_enabled else None,
+                    "scale": self.config.module_ocr_scale,
+                },
             },
         }
 
@@ -147,6 +154,13 @@ class SagaSmithStorage:
         if self._rule_ocr_provider is None:
             self._rule_ocr_provider = RapidOcrProvider(scale=self.config.rule_ocr_scale)
         return self._rule_ocr_provider
+
+    def module_ocr_provider(self) -> RapidOcrProvider | None:
+        if not self.config.module_ocr_enabled:
+            return None
+        if self._module_ocr_provider is None:
+            self._module_ocr_provider = RapidOcrProvider(scale=self.config.module_ocr_scale)
+        return self._module_ocr_provider
 
     def artifact_rulebook_path(self, name: str) -> Path:
         target = (self.config.rulebooks_dir / name).resolve()

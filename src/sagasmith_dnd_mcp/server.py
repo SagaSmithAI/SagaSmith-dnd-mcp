@@ -381,6 +381,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "expected_checksum": checksum or None,
         }
 
+    def module_document_options(checksum: str | None = None) -> dict[str, Any]:
+        return {
+            "ocr_provider": storage.module_ocr_provider(),
+            "document_cache_dir": config.normalized_modules_dir,
+            "expected_checksum": checksum or None,
+        }
+
     def profile_options_with_core_lock(
         edition: str, options: dict[str, Any] | None = None
     ) -> dict[str, Any]:
@@ -2119,6 +2126,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "module_import_idempotency": True,
                 "managed_module_document_staging": True,
                 "core_pdf_module_normalization": True,
+                "module_document_cache": True,
+                "module_selective_ocr": True,
                 "player_safe_scene_scopes": True,
                 "player_safe_combat_maps": True,
                 "rule_aware_noncombat_checks": True,
@@ -2183,7 +2192,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 ],
                 "stage_inputs": ["source_path", "name+content"],
                 "managed_types": ["pdf", "markdown", "text"],
-                "normalizer": "sagasmith-core",
+                "normalizer": f"sagasmith-core/pdf-layout-v{DOCUMENT_NORMALIZER_VERSION}",
+                "normalization_cache": "content-addressed",
+                "page_extraction_cache": "content-addressed",
+                "text_extractor": "pypdfium2",
+                "ocr_provider": "rapidocr" if config.module_ocr_enabled else None,
             },
             "write_requirements": ["principal_id", "expected_revision", "idempotency_key"],
             "tool_exposure": {
@@ -10818,7 +10831,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if replay is not None:
             return replay
         preview = modules.preview_path(
-            path, parser=MarkdownModuleParser(profile=DndModuleProfile())
+            path,
+            parser=MarkdownModuleParser(profile=DndModuleProfile()),
+            **module_document_options(),
         )
         job = import_jobs.create(
             campaign_id=campaign_id,
@@ -10852,6 +10867,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         preview = modules.preview_path(
             storage.artifact_module_path(job.artifact),
             parser=MarkdownModuleParser(profile=DndModuleProfile()),
+            **module_document_options(job.artifact_checksum),
         )
         updated = import_jobs.record_inspection(job_id, preview)
         response = {"job": asdict(updated), "preview": preview}
@@ -10932,6 +10948,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             vector_store=vectors,
             activate=False,
             logical_source_key=str(values.get("source_key") or job.artifact),
+            **module_document_options(job.artifact_checksum),
         )
         updated = import_jobs.record_result(
             job_id,
@@ -11021,6 +11038,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         return modules.inspect_path(
             storage.artifact_module_path(artifact),
             parser=MarkdownModuleParser(profile=DndModuleProfile()),
+            **module_document_options(),
         )
 
     @mcp.tool()
@@ -11049,6 +11067,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             parser=MarkdownModuleParser(profile=DndModuleProfile()),
             embedder=embedder,
             vector_store=vectors,
+            **module_document_options(),
         )
         response = asdict(result)
         return remember_idempotent(

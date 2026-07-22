@@ -25,6 +25,7 @@ def test_config_owns_local_storage(tmp_path: Path) -> None:
     assert config.modules_dir.is_dir()
     assert config.rulebooks_dir.is_dir()
     assert config.normalized_rulebooks_dir.is_dir()
+    assert config.normalized_modules_dir.is_dir()
 
 
 def test_environment_config_has_separate_rule_and_module_import_roots(monkeypatch) -> None:
@@ -34,11 +35,15 @@ def test_environment_config_has_separate_rule_and_module_import_roots(monkeypatc
     monkeypatch.setenv(
         "SAGASMITH_DND_MCP_MODULE_IMPORT_ROOTS", os.pathsep.join(("modules-a", "modules-b"))
     )
+    monkeypatch.setenv("SAGASMITH_DND_MCP_MODULE_OCR", "0")
+    monkeypatch.setenv("SAGASMITH_DND_MCP_MODULE_OCR_SCALE", "1.5")
 
     config = McpConfig.from_environment()
 
     assert [path.name for path in config.rule_import_roots] == ["rules-a", "rules-b"]
     assert [path.name for path in config.module_import_roots] == ["modules-a", "modules-b"]
+    assert config.module_ocr_enabled is False
+    assert config.module_ocr_scale == 1.5
 
 
 def test_default_rule_import_roots_include_the_dnd_skill_corpus(monkeypatch) -> None:
@@ -214,7 +219,14 @@ def test_server_capabilities_publish_the_rulebook_import_contract(tmp_path: Path
         assert capabilities["features"]["module_import_idempotency"] is True
         assert capabilities["features"]["managed_module_document_staging"] is True
         assert capabilities["features"]["core_pdf_module_normalization"] is True
+        assert capabilities["features"]["module_document_cache"] is True
+        assert capabilities["features"]["module_selective_ocr"] is True
         assert capabilities["module_import"]["stage_inputs"] == ["source_path", "name+content"]
+        assert capabilities["module_import"]["normalization_cache"] == "content-addressed"
+        assert capabilities["module_import"]["page_extraction_cache"] == "content-addressed"
+        assert capabilities["module_import"]["normalizer"].startswith(
+            "sagasmith-core/pdf-layout-v"
+        )
         assert capabilities["features"]["player_safe_scene_scopes"] is True
         assert capabilities["features"]["player_safe_combat_maps"] is True
         assert capabilities["rulebook_import"]["settlement_tools"] == {
