@@ -37,7 +37,12 @@ from sagasmith_core.idempotency import request_hash
 from sagasmith_core.modules import MarkdownModuleParser
 from sagasmith_core.rule_packs import RulePackError, RulesetUnavailableError, content_checksum
 from sagasmith_core.systems import SystemRegistry
-from sagasmith_dnd.ability_generation import apply_ability_generation, roll_ability_scores
+from sagasmith_dnd.ability_generation import (
+    apply_ability_generation,
+    apply_pending_rolled_ability_generation,
+    begin_rolled_ability_generation,
+    roll_ability_scores,
+)
 from sagasmith_dnd.activities import ActivityError, consume_activity
 from sagasmith_dnd.character_schema import (
     add_effect,
@@ -7941,39 +7946,85 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     def character_ability_apply(
         character_id: str,
         method: str,
-        assignments: dict[str, int],
-        rolls: list[int] | None = None,
+        assignments: dict[str, int] | None = None,
+        rolls: None = None,
         principal_id: str = "system:local",
         expected_revision: int | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
-        """Apply a validated ability-generation method to a complete D&D character sheet."""
+        """Generate or assign ability scores without accepting caller-supplied die results."""
         current = characters.get(character_id)
+        if rolls is not None:
+            raise ValueError(
+                "caller-supplied rolls are not accepted; use manual for entered scores"
+            )
         require_character_control(current, principal_id)
         require_outside_active_combat(current, "ability generation")
-        sheet = apply_ability_generation(
-            current.sheet,
-            method=method,
-            assignments=assignments,
-            rolls=rolls,
-        )
-        ability_receipts = (
-            core_receipts(
-                effective_rule_context(current.campaign_id),
-                ["dnd5e.core.ability_generation"],
-                "character.ability.apply",
+        if current.campaign_id is None:
+            raise ValueError("ability generation requires a campaign-bound lobby character")
+        if expected_revision is None or not idempotency_key:
+            raise ValueError(
+                "expected_revision and idempotency_key are required for ability generation"
             )
-            if current.campaign_id
-            else []
+        normalized_method = str(method).strip().casefold().replace("-", "_")
+        rolling = normalized_method == "roll_4d6_drop_lowest" and assignments is None
+        operation = "character.ability.roll" if rolling else "character.ability.apply"
+        mutation_payload = {
+            "method": normalized_method,
+            "assignments": assignments,
+        }
+        branch_id = require_current_branch(current.campaign_id, None)
+        scope = (
+            f"character-write:{current.campaign_id}:{branch_id}:"
+            f"{principal_id}:{character_id}"
+        )
+        request_payload = {
+            "operation": operation,
+            "character_id": character_id,
+            **mutation_payload,
+        }
+        replay = replay_idempotent(scope, idempotency_key, request_payload)
+        if replay is not None:
+            return replay
+        if current.revision != expected_revision:
+            raise ValueError(f"character revision conflict: {character_id}")
+        ability_rules = effective_rule_context(current.campaign_id)
+        if rolling:
+            generated = begin_rolled_ability_generation(current.sheet)
+            sheet = generated["sheet"]
+            status = generated["status"]
+            generated_rolls = generated["rolls"]
+        elif normalized_method == "roll_4d6_drop_lowest":
+            sheet = apply_pending_rolled_ability_generation(
+                current.sheet,
+                assignments=assignments or {},
+            )
+            status = "committed"
+            generated_rolls = list(sheet["ability_generation"]["rolls"])
+        else:
+            if assignments is None:
+                raise ValueError("assignments are required for standard_array and point_buy")
+            sheet = apply_ability_generation(
+                current.sheet,
+                method=normalized_method,
+                assignments=assignments,
+            )
+            status = "committed"
+            generated_rolls = []
+        ability_receipts = core_receipts(
+            ability_rules,
+            ["dnd5e.core.ability_generation"],
+            operation,
         )
         return update_sheet(
             character_id,
             sheet,
-            operation="character.ability.apply",
+            operation=operation,
             principal_id=principal_id,
             expected_revision=expected_revision,
             idempotency_key=idempotency_key,
-            payload={"method": method, "assignments": assignments, "rolls": rolls},
+            payload=mutation_payload,
+            response_extra={"status": status, "rolls": generated_rolls},
             rule_receipts=ability_receipts,
         )
 
