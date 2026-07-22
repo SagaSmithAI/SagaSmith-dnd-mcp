@@ -5,6 +5,7 @@ import random
 from pathlib import Path
 
 import pytest
+from mcp.server.fastmcp.exceptions import ToolError
 
 import sagasmith_dnd_mcp.server as server_module
 from sagasmith_dnd_mcp.config import McpConfig
@@ -1366,6 +1367,31 @@ def test_positioned_movement_opens_and_resolves_an_owned_reaction(tmp_path: Path
         )
         assert resolved["status"] == "committed"
         assert not resolved["combat"]["pending"]
+
+        before_rejected_move = await call(
+            server,
+            "campaign_get",
+            {"campaign_id": campaign["id"]},
+        )
+        with pytest.raises(ToolError, match="cannot willingly end"):
+            await call_raw(
+                server,
+                "combat_movement",
+                {
+                    "campaign_id": campaign["id"],
+                    "actor_id": mover["id"],
+                    "action": "move",
+                    "payload": {"distance": 10, "destination": {"x": 1, "y": 0}},
+                    "expected_revision": before_rejected_move["revision"],
+                    "idempotency_key": "grid-occupied-destination",
+                },
+            )
+        after_rejected_move = await call(
+            server,
+            "campaign_get",
+            {"campaign_id": campaign["id"]},
+        )
+        assert after_rejected_move["revision"] == before_rejected_move["revision"]
 
     asyncio.run(exercise())
 

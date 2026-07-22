@@ -2335,6 +2335,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "visible_to_actor_ids",
                 "disposition",
                 "reach_ft",
+                "can_share_space",
                 "surprised",
                 "death_saves",
                 "initiative",
@@ -2540,6 +2541,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "visible_to_actor_ids",
             "disposition",
             "reach_ft",
+            "can_share_space",
             "surprised",
             "death_saves",
             "initiative",
@@ -4089,6 +4091,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             movement_boundary_ids.append("dnd5e.core.movement.prone_crawl_stand")
         if "grappled" in moving_conditions:
             movement_boundary_ids.append("dnd5e.core.movement.grapple_source")
+        if destination is not None:
+            movement_boundary_ids.append("dnd5e.core.movement.occupied_destination")
         if any(
             str(item.get("id")) not in pending_before
             and item.get("kind") == "reaction"
