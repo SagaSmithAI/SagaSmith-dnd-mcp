@@ -8172,7 +8172,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         expected_revision: int | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
-        """Generate or assign ability scores without accepting caller-supplied die results."""
+        """Apply manual, standard-array, point-buy, or engine-rolled ability scores."""
         current = characters.get(character_id)
         if rolls is not None:
             raise ValueError(
@@ -8223,7 +8223,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             generated_rolls = list(sheet["ability_generation"]["rolls"])
         else:
             if assignments is None:
-                raise ValueError("assignments are required for standard_array and point_buy")
+                raise ValueError(
+                    "assignments are required for manual, standard_array, and point_buy"
+                )
             sheet = apply_ability_generation(
                 current.sheet,
                 method=normalized_method,
