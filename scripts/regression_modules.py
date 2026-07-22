@@ -48,6 +48,11 @@ def _arguments() -> argparse.Namespace:
         action="store_true",
         help="Treat parser warnings as a failed document after inspection",
     )
+    parser.add_argument(
+        "--include-scene-index",
+        action="store_true",
+        help="Include compact scene and spatial summaries for parser diagnosis",
+    )
     return parser.parse_args()
 
 
@@ -186,6 +191,33 @@ def _preview_audit(preview: dict[str, Any]) -> dict[str, Any]:
         "explicit_connection_count": sum(
             len(((scene.get("spatial") or {}).get("connections") or [])) for scene in scenes
         ),
+    }
+
+
+def _scene_summary(scene: dict[str, Any]) -> dict[str, Any]:
+    spatial = dict(scene.get("spatial") or {})
+    return {
+        key: scene.get(key)
+        for key in (
+            "scene_id",
+            "stable_key",
+            "chapter",
+            "title",
+            "page_start",
+            "page_end",
+            "scene_type",
+            "visibility",
+            "tags",
+        )
+    } | {
+        "locations": [
+            {
+                key: location.get(key)
+                for key in ("key", "title", "kind", "confidence", "dimensions_ft")
+            }
+            for location in spatial.get("locations") or []
+        ],
+        "connection_count": len(spatial.get("connections") or []),
     }
 
 
@@ -344,6 +376,11 @@ async def _import_document(
         "parser_version": preview.get("parser_version"),
         "preview_audit": audit,
         "index_scene_count": len(indexed_scenes),
+        "scene_index": (
+            [_scene_summary(scene) for scene in indexed_scenes]
+            if args.include_scene_index
+            else []
+        ),
         "asset_count": len(assets if isinstance(assets, list) else assets.get("assets") or []),
         "core_profile": {
             "edition": ((profile.get("profile") or {}).get("edition")),
@@ -409,6 +446,10 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def main() -> int:
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            reconfigure(encoding="utf-8", errors="backslashreplace")
     args = _arguments()
     report = asyncio.run(_run(args))
     rendered = json.dumps(report, ensure_ascii=False, indent=2)
