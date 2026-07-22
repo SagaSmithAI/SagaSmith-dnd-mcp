@@ -155,6 +155,7 @@ def test_imported_rule_source_creates_a_source_bound_combat_actor(tmp_path: Path
                     "character_type": "npc",
                     "variant": {
                         "source_ref": f"rule-chunk:{created['source']['chunk_ids'][0]}",
+                        "creature_type": "undead",
                         "current_hit_points": 1,
                         "armor_class": 12,
                         "languages": ["Common", "Elvish"],
@@ -171,6 +172,7 @@ def test_imported_rule_source_creates_a_source_bound_combat_actor(tmp_path: Path
             },
         )
         variant_actor = variant["character"]
+        assert variant_actor["sheet"]["progression"]["species"] == "undead"
         assert variant_actor["sheet"]["combat"]["hp"] == {"value": 1, "max": 4, "temp": 0}
         assert variant_actor["derived"]["armor_class"] == 12
         assert variant_actor["sheet"]["traits"]["languages"] == ["Common", "Elvish"]
