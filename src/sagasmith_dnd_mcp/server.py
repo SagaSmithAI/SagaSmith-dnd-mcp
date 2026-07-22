@@ -2137,6 +2137,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "atomic_continuity_commit": True,
                 "skill_manifest_checksums": True,
                 "validated_module_runtime_manifest": True,
+                "shared_continuity_budget": True,
+                "continuity_diagnostics": True,
             },
             "rulebook_import": {
                 "stages": [
@@ -10785,6 +10787,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         audience: str = "dm",
         branch_id: str | None = None,
         limit: int = 8,
+        budget_chars: int = 12_000,
         principal_id: str = "system:local",
     ) -> dict[str, Any]:
         """Retrieve only current-branch facts, events, and optional actor knowledge."""
@@ -10816,7 +10819,45 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             audience=audience,
             branch_id=branch_id,
             limit=limit,
+            budget_chars=budget_chars,
         )
+
+    @mcp.tool()
+    def continuity_diagnostics(
+        campaign_id: str,
+        branch_id: str | None = None,
+        principal_id: str = "system:local",
+    ) -> dict[str, Any]:
+        """Inspect continuity health without returning secret narrative content."""
+        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        branch_id = readable_branch(campaign_id, branch_id, principal_id)
+        result = continuity.diagnostics(campaign_id, branch_id=branch_id)
+        current_manifest = catalog.manifest()
+        latest_manifest = None
+        for item in reversed(events.list(campaign_id, limit=500, branch_id=branch_id)):
+            candidate = item.payload.get("_sagasmith_skill_manifest")
+            if isinstance(candidate, list):
+                latest_manifest = candidate
+                break
+        result["skill_manifest"] = {
+            "current": current_manifest,
+            "latest_event": latest_manifest,
+            "drift": (
+                latest_manifest != current_manifest if latest_manifest is not None else None
+            ),
+        }
+        latest_slot = result["snapshots"]["latest_slot"]
+        recap = snapshots.get(campaign_id, latest_slot).get("recap") if latest_slot else None
+        provenance = dict(recap.get("provenance") or {}) if isinstance(recap, dict) else {}
+        result["recap"] = {
+            "schema_version": recap.get("schema_version") if isinstance(recap, dict) else None,
+            "source": recap.get("source") if isinstance(recap, dict) else None,
+            "has_presentation": bool(
+                isinstance(recap, dict) and recap.get("presentation") is not None
+            ),
+            "evidence_event_count": len(provenance.get("evidence_event_ids") or []),
+        }
+        return result
 
     @mcp.tool()
     def continuity_commit(

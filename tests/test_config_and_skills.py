@@ -230,6 +230,8 @@ def test_server_capabilities_publish_the_rulebook_import_contract(tmp_path: Path
         assert capabilities["features"]["atomic_continuity_commit"] is True
         assert capabilities["features"]["skill_manifest_checksums"] is True
         assert capabilities["features"]["validated_module_runtime_manifest"] is True
+        assert capabilities["features"]["shared_continuity_budget"] is True
+        assert capabilities["features"]["continuity_diagnostics"] is True
         assert capabilities["module_import"]["runtime_manifest_schema"] == 1
         assert capabilities["rulebook_import"]["settlement_tools"] == {
             "play": "character_check",
