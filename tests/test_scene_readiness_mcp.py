@@ -192,6 +192,57 @@ def test_scene_readiness_blocks_missing_combatants_and_reserves(tmp_path: Path) 
             },
         )
 
+        mixed_sheet = deepcopy(actors["bandit1"]["sheet"])
+        mixed_sheet["inventory"]["items"] = [
+            {
+                "id": "mystery-bow",
+                "name": "Mystery Bow",
+                "kind": "weapon",
+                "equipped": True,
+                "equipped_slot": "main_hand",
+                "mechanics": {
+                    "attack_type": "ranged",
+                    "attack_ability": "dexterity",
+                    "damage_formula": "1d6",
+                    "damage_type": "piercing",
+                },
+            }
+        ]
+        mixed_sheet["inventory"]["equipment_slots"]["main_hand"] = "mystery-bow"
+        mixed_sheet["spellcasting"]["ability"] = "intelligence"
+        mixed_sheet["content"]["spells"] = [
+            {
+                "id": "module-spell",
+                "name": "Module Spell",
+                "level": 0,
+                    "access": {
+                        "known": True,
+                        "prepared": True,
+                        "always_prepared": True,
+                        "ritual_available": False,
+                    },
+                "definition": {
+                    "casting_time": "1 action",
+                    "duration": {
+                        "kind": "instantaneous",
+                        "value": 0,
+                        "unit": "round",
+                        "concentration": False,
+                    },
+                },
+            }
+        ]
+        actors["bandit1"] = await _call(
+            server,
+            "character_sheet_replace",
+            {
+                "character_id": actors["bandit1"]["id"],
+                "sheet": mixed_sheet,
+                "expected_revision": actors["bandit1"]["revision"],
+                "idempotency_key": "mixed-bandit-card",
+            },
+        )
+
         complete_manifest = manifest([actors["bandit1"]["id"], actors["bandit2"]["id"]])
         ready = await _call(
             server,
@@ -211,6 +262,17 @@ def test_scene_readiness_blocks_missing_combatants_and_reserves(tmp_path: Path) 
         assert captain_group["actors"][0]["combat_card"]["manual_rulings"] == [
             "Parry requires a reaction decision",
             "Multiattack: Multiattack composition requires a DM ruling",
+        ]
+        bandit_group = next(item for item in ready["groups"] if item["key"] == "rusk-bandits")
+        mixed_card = bandit_group["actors"][0]["combat_card"]
+        assert mixed_card["settlement"] == "mixed"
+        assert mixed_card["ruling_spell_ids"] == ["module-spell"]
+        assert mixed_card["automatic_spell_ids"] == []
+        assert mixed_card["unarmed_fallback"] is True
+        assert mixed_card["unarmed_attack_id"] == "unarmed-strike"
+        assert mixed_card["manual_rulings"] == [
+            "Mystery Bow: ranged weapon range is missing",
+            "Prepared spells require DM effect settlement: module-spell",
         ]
         assert ready["initial_actor_ids"] == [
             actors["captain"]["id"],

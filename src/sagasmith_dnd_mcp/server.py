@@ -146,6 +146,7 @@ from sagasmith_dnd.spells import (
     consume_shield_reaction,
     consume_spell_cast,
     is_core_magic_missile_spell,
+    is_core_shield_spell,
     replace_prepared_spells,
     validate_magic_missile_allocations,
     validate_spell_grant,
@@ -767,6 +768,52 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 and item.split(":", 1)[0] in specific_multiattacks
             )
         ]
+        inventory_items = {
+            str(item.get("id") or ""): item
+            for item in dict(sheet.get("inventory") or {}).get("items", [])
+        }
+        unavailable_attack_ids: list[str] = []
+        for attack in attacks:
+            attack_id = str(attack.get("item_id") or "")
+            attack_name = str(attack.get("name") or attack_id or "Weapon")
+            properties = {
+                str(item).strip().casefold() for item in attack.get("properties", [])
+            }
+            if (
+                str(attack.get("attack_type") or "melee").casefold() == "ranged"
+                and int(dict(attack.get("range_ft") or {}).get("normal", 0) or 0) <= 0
+            ):
+                manual_rulings.append(f"{attack_name}: ranged weapon range is missing")
+            if (
+                "thrown" in properties
+                and int(dict(attack.get("thrown_range_ft") or {}).get("normal", 0) or 0) <= 0
+            ):
+                manual_rulings.append(f"{attack_name}: thrown weapon range is missing")
+            ammunition_id = str(attack.get("ammunition_item_id") or "")
+            if ammunition_id and int(
+                dict(inventory_items.get(ammunition_id) or {}).get("quantity", 0) or 0
+            ) <= 0:
+                unavailable_attack_ids.append(attack_id)
+
+        spells_by_id = {
+            str(item.get("id") or ""): item
+            for item in dict(sheet.get("content") or {}).get("spells", [])
+        }
+        automatic_spell_ids: list[str] = []
+        ruling_spell_ids: list[str] = []
+        for spell_id in prepared_spells:
+            spell = spells_by_id.get(str(spell_id))
+            if spell is not None and (
+                is_core_magic_missile_spell(spell) or is_core_shield_spell(spell)
+            ):
+                automatic_spell_ids.append(str(spell_id))
+            else:
+                ruling_spell_ids.append(str(spell_id))
+        if ruling_spell_ids:
+            manual_rulings.append(
+                "Prepared spells require DM effect settlement: " + ", ".join(ruling_spell_ids)
+            )
+        manual_rulings = list(dict.fromkeys(manual_rulings))
         settlement = (
             "dm_ruling_required" if unresolved else "mixed" if manual_rulings else "automatic"
         )
@@ -782,7 +829,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "weapon_attack_ids": [str(item.get("item_id") or "") for item in attacks],
             "multiattack_option_ids": [str(item.get("id") or "") for item in multiattacks],
             "prepared_spell_ids": prepared_spells,
-            "unarmed_fallback": not attacks,
+            "automatic_spell_ids": automatic_spell_ids,
+            "ruling_spell_ids": ruling_spell_ids,
+            "unavailable_attack_ids": sorted(set(unavailable_attack_ids)),
+            "unarmed_fallback": True,
+            "unarmed_attack_id": "unarmed-strike",
         }
 
     def statblock_variant_evidence(
@@ -848,6 +899,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             return None
         membership = access.require_campaign(campaign_id, principal_id)
         value = dict(encounter)
+        if bool(encounter.get("active", False)):
+            value["snapshot_role"] = "live_encounter"
+            value["combatant_state_is_current"] = True
+            value["current_character_state_source"] = "combat_and_character_query"
+        else:
+            value["snapshot_role"] = "historical_final_encounter"
+            value["combatant_state_is_current"] = False
+            value["current_character_state_source"] = "character_query"
         if membership.role not in {"owner", "dm"}:
             viewer_actor_ids: set[str] = set()
             for item in encounter.get("combatants", []):
@@ -920,11 +979,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         campaign_id: str, principal_id: str, response: dict[str, Any]
     ) -> dict[str, Any]:
         """Project every combat write result through the same audience boundary."""
-        if is_dm(campaign_id, principal_id):
-            return response
         value = dict(response)
         if "combat" in value:
             value["combat"] = combat_view(campaign_id, principal_id)
+        if is_dm(campaign_id, principal_id):
+            return value
         result = value.get("result")
         if isinstance(result, dict):
             allowed = {
@@ -9185,7 +9244,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         scope = f"combat-end:{campaign_id}:{resolved_branch_id}:{principal_id}"
         replay = replay_idempotent(scope, idempotency_key, payload)
         if replay is not None:
-            return replay
+            return combat_response(campaign_id, principal_id, replay)
         if expected_revision is not None and campaign.revision != expected_revision:
             raise ValueError(
                 "campaign revision conflict: "
@@ -9256,7 +9315,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "campaign_revision": mutation_revision(campaign_id),
             "revisions": [asdict(item) for item in revisions_result or []],
         }
-        return remember_idempotent(scope, idempotency_key, payload, response, campaign_id)
+        return combat_response(
+            campaign_id,
+            principal_id,
+            remember_idempotent(scope, idempotency_key, payload, response, campaign_id),
+        )
 
     @mcp.tool()
     def continuity_context(

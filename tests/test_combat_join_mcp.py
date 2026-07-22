@@ -164,5 +164,16 @@ def test_combat_join_queues_actor_until_next_round(tmp_path: Path) -> None:
         )
         assert ended["outcome"]["status"] == "victory"
         assert ended["combat"]["outcome"] == ended["outcome"]
+        assert ended["combat"]["snapshot_role"] == "historical_final_encounter"
+        assert ended["combat"]["combatant_state_is_current"] is False
+        assert ended["combat"]["current_character_state_source"] == "character_query"
+
+        status = await _call(
+            server,
+            "combat_query",
+            {"campaign_id": campaign["id"], "view": "status"},
+        )
+        assert status["snapshot_role"] == "historical_final_encounter"
+        assert status["combatant_state_is_current"] is False
 
     asyncio.run(exercise())
