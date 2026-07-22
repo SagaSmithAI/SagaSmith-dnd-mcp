@@ -179,6 +179,7 @@ TOOL_GROUPS = (
         "memory_change",
         "memory_query",
         "actor_knowledge_change",
+        "continuity_commit",
         roles=("owner", "dm"),
     ),
     _group(
@@ -217,6 +218,7 @@ TOOL_GROUPS = (
         "memory_change",
         "memory_query",
         "actor_knowledge_change",
+        "continuity_commit",
         "snapshot_create",
         "snapshot_query",
         "campaign_rules",

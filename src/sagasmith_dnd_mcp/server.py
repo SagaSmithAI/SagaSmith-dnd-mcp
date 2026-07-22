@@ -7,6 +7,7 @@ import json
 import re
 from copy import deepcopy
 from dataclasses import asdict
+from datetime import datetime
 from typing import Any, Literal
 from uuid import uuid4
 from weakref import WeakValueDictionary
@@ -21,6 +22,7 @@ from sagasmith_core import (
     CampaignService,
     CharacterService,
     CharacterStateUpdate,
+    ContinuityCommitService,
     ContinuityService,
     EventService,
     IdempotencyService,
@@ -354,6 +356,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     characters = CharacterService(storage.database)
     branches = BranchService(storage.database)
     continuity = ContinuityService(storage.database)
+    continuity_commits = ContinuityCommitService(storage.database)
     events = EventService(storage.database)
     knowledge = ActorKnowledgeService(storage.database)
     access = AccessService(storage.database)
@@ -2130,6 +2133,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "campaign_bound_exposure": True,
                 "fallback_principal_binding": True,
                 "exposure_expiry": True,
+                "stable_campaign_fact_identity": True,
+                "atomic_continuity_commit": True,
+                "skill_manifest_checksums": True,
             },
             "rulebook_import": {
                 "stages": [
@@ -10124,10 +10130,19 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         kind: str | None = None,
         branch_id: str | None = None,
         principal_id: str = "system:local",
+        include_inactive: bool = False,
     ) -> list[dict[str, Any]]:
         """List durable world facts visible from one campaign branch."""
         access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
-        return [asdict(item) for item in memories.list(campaign_id, kind=kind, branch_id=branch_id)]
+        return [
+            asdict(item)
+            for item in memories.list(
+                campaign_id,
+                kind=kind,
+                branch_id=branch_id,
+                include_inactive=include_inactive,
+            )
+        ]
 
     @mcp.tool()
     def memory_search(
@@ -10136,12 +10151,19 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         limit: int = 8,
         branch_id: str | None = None,
         principal_id: str = "system:local",
+        include_inactive: bool = False,
     ) -> list[dict[str, Any]]:
         """Retrieve branch-scoped durable world facts for DM administration."""
         access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
         return [
             asdict(item)
-            for item in memories.search(campaign_id, query, limit=limit, branch_id=branch_id)
+            for item in memories.search(
+                campaign_id,
+                query,
+                limit=limit,
+                branch_id=branch_id,
+                include_inactive=include_inactive,
+            )
         ]
 
     @mcp.tool()
@@ -10355,6 +10377,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 cause=cause,
                 disclosure_scope=disclosure_scope,
                 branch_id=branch_id,
+                expected_revision_id=expected_revision_id,
             )
         )
         return remember_idempotent(
@@ -10791,6 +10814,117 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             audience=audience,
             branch_id=branch_id,
             limit=limit,
+        )
+
+    @mcp.tool()
+    def continuity_commit(
+        campaign_id: str,
+        payload: dict[str, Any],
+        principal_id: str = "system:local",
+        expected_revision: int | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Atomically save a scene event, fact changes, actor knowledge, and snapshot."""
+        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        if not idempotency_key:
+            raise ValueError("idempotency_key is required for continuity commits")
+        data = facade_payload(payload)
+        raw_event = required(data, "event")
+        raw_facts = data.get("facts") or []
+        raw_knowledge = data.get("actor_knowledge") or []
+        if not isinstance(raw_event, dict):
+            raise ValueError("payload.event must be an object")
+        if not isinstance(raw_facts, list) or not all(
+            isinstance(item, dict) for item in raw_facts
+        ):
+            raise ValueError("payload.facts must be a list of objects")
+        if not isinstance(raw_knowledge, list) or not all(
+            isinstance(item, dict) for item in raw_knowledge
+        ):
+            raise ValueError("payload.actor_knowledge must be a list of objects")
+        event_data = dict(raw_event)
+        facts_data = [dict(item) for item in raw_facts]
+        knowledge_data = [dict(item) for item in raw_knowledge]
+        snapshot_data = (
+            dict(data["snapshot"]) if data.get("snapshot") is not None else None
+        )
+        if event_data.get("audience_scope") == "actor" and not knowledge_data:
+            raise ValueError("actor-scoped continuity events require actor_knowledge writes")
+        branch_id = require_current_branch(campaign_id, data.get("branch_id"))
+        manifest = catalog.manifest()
+        event_payload = dict(event_data.get("payload") or {})
+        event_payload["_sagasmith_skill_manifest"] = manifest
+        event_data["payload"] = event_payload
+        request_payload = {
+            "event": event_data,
+            "facts": facts_data,
+            "actor_knowledge": knowledge_data,
+            "snapshot": snapshot_data,
+            "branch_id": branch_id,
+            "expected_revision": expected_revision,
+            "skill_manifest": manifest,
+        }
+        scope = f"continuity-commit:{campaign_id}:{branch_id}:{principal_id}"
+        replay = replay_idempotent(scope, idempotency_key, request_payload)
+        if replay is not None:
+            return replay
+        current_facts = {
+            item.fact_key: item
+            for item in memories.list(
+                campaign_id,
+                branch_id=branch_id,
+                include_inactive=True,
+            )
+        }
+        for index, fact in enumerate(facts_data):
+            action = str(fact.get("action", "upsert"))
+            if action == "upsert" and current_facts.get(str(fact.get("fact_key", ""))):
+                if fact.get("expected_revision_id") is None:
+                    raise ValueError(
+                        f"payload.facts[{index}].expected_revision_id is required "
+                        "when upsert revises a fact"
+                    )
+            if action == "revise" and fact.get("expected_revision_id") is None:
+                raise ValueError(
+                    f"payload.facts[{index}].expected_revision_id is required for revisions"
+                )
+            if "valid_from" in fact:
+                fact["valid_from"] = optional_datetime(
+                    fact.get("valid_from"), f"facts[{index}].valid_from"
+                )
+            if "valid_to" in fact:
+                fact["valid_to"] = optional_datetime(
+                    fact.get("valid_to"), f"facts[{index}].valid_to"
+                )
+        for index, item in enumerate(knowledge_data):
+            if str(item.get("action", "add")) == "revise" and item.get(
+                "expected_revision_id"
+            ) is None:
+                raise ValueError(
+                    "payload.actor_knowledge"
+                    f"[{index}].expected_revision_id is required for revisions"
+                )
+        campaign = campaigns.get(campaign_id)
+        if expected_revision is not None and campaign.revision != expected_revision:
+            raise ValueError(
+                f"campaign revision conflict: expected {expected_revision}, "
+                f"found {campaign.revision}"
+            )
+        response = continuity_commits.commit(
+            campaign_id,
+            event=event_data,
+            facts=facts_data,
+            actor_knowledge=knowledge_data,
+            snapshot=snapshot_data,
+            branch_id=branch_id,
+        )
+        response["skill_manifest"] = manifest
+        return remember_idempotent(
+            scope,
+            idempotency_key,
+            request_payload,
+            response,
+            campaign_id=campaign_id,
         )
 
     @mcp.tool()
@@ -13667,7 +13801,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     def skill_list() -> list[dict[str, str]]:
         """List installed D&D DM, campaign-manager, and module-generator skill documents."""
         return [
-            {"id": item.id, "title": item.title, "source": item.source} for item in catalog.list()
+            {
+                "id": item.id,
+                "title": item.title,
+                "source": item.source,
+                "checksum": item.checksum,
+            }
+            for item in catalog.list()
         ]
 
     @mcp.tool()
@@ -13682,6 +13822,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             {
                 "id": asset.id,
                 "source": asset.source,
+                "checksum": asset.checksum,
                 "resource_uri": (f"sagasmith://asset/{catalog.resource_id(asset.id)}"),
             }
             for asset in catalog.assets()
@@ -13708,7 +13849,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         """Expose a static skill resource for MCP clients without template discovery."""
         lines = ["# SagaSmith D&D Skills", ""]
         for document in catalog.list():
-            lines.append(f"- `{document.id}` ({document.source}): {document.title}")
+            lines.append(
+                f"- `{document.id}` ({document.source}, sha256:{document.checksum}): "
+                f"{document.title}"
+            )
         lines.extend(
             [
                 "",
@@ -13774,6 +13918,16 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if value is None or value == "":
             raise ValueError(f"payload.{name} is required")
         return value
+
+    def optional_datetime(value: Any, name: str) -> datetime | None:
+        if value is None or value == "":
+            return None
+        if isinstance(value, datetime):
+            return value
+        try:
+            return datetime.fromisoformat(str(value))
+        except ValueError as exc:
+            raise ValueError(f"payload.{name} must be ISO-8601") from exc
 
     def facade_result(action: str, result: Any) -> dict[str, Any]:
         status = result.get("status", "ok") if isinstance(result, dict) else "ok"
@@ -14976,16 +15130,25 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 data.get("limit", 8),
                 data.get("branch_id"),
                 principal_id,
+                data.get("include_inactive", False),
             )
             if view == "search"
-            else memory_list(campaign_id, data.get("kind"), data.get("branch_id"), principal_id)
+            else memory_list(
+                campaign_id,
+                data.get("kind"),
+                data.get("branch_id"),
+                principal_id,
+                data.get("include_inactive", False),
+            )
         )
         return facade_result(view, result)
 
     @mcp.tool()
     def memory_change(
         campaign_id: str,
-        content: str,
+        action: Literal["add", "upsert", "revise", "supersede"] = "add",
+        payload: dict[str, Any] | None = None,
+        content: str | None = None,
         kind: str = "fact",
         subject: str = "",
         metadata: dict[str, Any] | None = None,
@@ -14993,20 +15156,126 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         principal_id: str = "system:local",
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
-        """Record an objective durable campaign fact."""
-        return facade_result(
-            "add",
-            memory_add(
-                campaign_id,
-                content,
-                kind,
-                subject,
-                metadata,
-                branch_id,
-                principal_id,
-                idempotency_key,
-            ),
+        """Add, upsert, revise, or supersede an objective branch-scoped fact."""
+        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        if not idempotency_key:
+            raise ValueError("idempotency_key is required for memory writes")
+        data = {
+            "content": content,
+            "kind": kind,
+            "subject": subject,
+            "metadata": metadata,
+            "branch_id": branch_id,
+        }
+        data.update(facade_payload(payload))
+        resolved_branch_id = require_current_branch(campaign_id, data.get("branch_id"))
+        request_payload = {"action": action, **data, "branch_id": resolved_branch_id}
+        scope = f"memory-change:{action}:{campaign_id}:{resolved_branch_id}:{principal_id}"
+        replay = replay_idempotent(scope, idempotency_key, request_payload)
+        if replay is not None:
+            return facade_result(action, replay)
+
+        visible = memories.list(
+            campaign_id,
+            branch_id=resolved_branch_id,
+            include_inactive=True,
         )
+        by_id = {item.id: item for item in visible}
+        by_key = {item.fact_key: item for item in visible}
+        if action == "add":
+            result = memories.add(
+                campaign_id,
+                content=str(required(data, "content")),
+                kind=str(data.get("kind") or "fact"),
+                subject=str(data.get("subject") or ""),
+                metadata=dict(data.get("metadata") or {}),
+                branch_id=resolved_branch_id,
+                fact_key=data.get("fact_key"),
+                subject_ref=str(data.get("subject_ref") or ""),
+                predicate=str(data.get("predicate") or ""),
+                status=str(data.get("status") or "active"),
+                valid_from=optional_datetime(data.get("valid_from"), "valid_from"),
+                valid_to=optional_datetime(data.get("valid_to"), "valid_to"),
+                source_event_ids=list(data.get("source_event_ids") or []),
+                importance=int(data.get("importance", 3)),
+                disclosure_scope=data.get("disclosure_scope"),
+            )
+        elif action == "upsert":
+            fact_key = str(required(data, "fact_key"))
+            current = by_key.get(fact_key)
+            expected_revision_id = data.get("expected_revision_id")
+            if current is not None and expected_revision_id is None:
+                raise ValueError("expected_revision_id is required when upsert revises a fact")
+            result = memories.upsert(
+                campaign_id,
+                fact_key=fact_key,
+                content=str(required(data, "content")),
+                kind=str(data.get("kind") or "fact"),
+                subject=str(data.get("subject") or ""),
+                subject_ref=str(data.get("subject_ref") or ""),
+                predicate=str(data.get("predicate") or ""),
+                metadata=(
+                    None
+                    if current is not None and data.get("metadata") is None
+                    else dict(data.get("metadata") or {})
+                ),
+                branch_id=resolved_branch_id,
+                expected_revision_id=expected_revision_id,
+                status=str(data.get("status") or (current.status if current else "active")),
+                valid_from=optional_datetime(data.get("valid_from"), "valid_from"),
+                valid_to=optional_datetime(data.get("valid_to"), "valid_to"),
+                source_event_ids=(
+                    list(data["source_event_ids"])
+                    if data.get("source_event_ids") is not None
+                    else None
+                ),
+                importance=(
+                    int(data["importance"])
+                    if data.get("importance") is not None
+                    else current.importance if current else 3
+                ),
+                disclosure_scope=data.get("disclosure_scope"),
+            )
+        else:
+            memory_id = str(required(data, "memory_id"))
+            current = by_id.get(memory_id)
+            if current is None:
+                raise LookupError(memory_id)
+            expected_revision_id = str(required(data, "expected_revision_id"))
+            result = memories.revise(
+                memory_id,
+                content=(
+                    current.content
+                    if action == "supersede" and not data.get("content")
+                    else str(required(data, "content"))
+                ),
+                metadata=(
+                    dict(data["metadata"]) if data.get("metadata") is not None else None
+                ),
+                branch_id=resolved_branch_id,
+                expected_revision_id=expected_revision_id,
+                status="superseded" if action == "supersede" else data.get("status"),
+                valid_from=optional_datetime(data.get("valid_from"), "valid_from"),
+                valid_to=optional_datetime(data.get("valid_to"), "valid_to"),
+                source_event_ids=(
+                    list(data["source_event_ids"])
+                    if data.get("source_event_ids") is not None
+                    else None
+                ),
+                importance=(
+                    int(data["importance"]) if data.get("importance") is not None else None
+                ),
+                disclosure_scope=data.get("disclosure_scope"),
+            )
+        response = asdict(result)
+        remembered = remember_idempotent(
+            scope,
+            idempotency_key,
+            request_payload,
+            response,
+            campaign_id=campaign_id,
+        )
+        return facade_result(action, remembered)
 
     @mcp.tool()
     def actor_knowledge_query(
