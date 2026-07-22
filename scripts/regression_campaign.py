@@ -226,7 +226,9 @@ def _spell_card_summary(card: dict[str, Any]) -> dict[str, Any]:
     resolution = dict(card.get("resolution") or {})
     attack = dict(resolution.get("attack") or {})
     settlement_range = attack.get("range_ft_override")
-    display_range = dict(definition.get("range") or {}).get("normal_ft")
+    definition_range = dict(definition.get("range") or {})
+    display_range = definition_range.get("normal_ft")
+    display_long_range = definition_range.get("long_ft")
     return {
         "id": card.get("id"),
         "name": card.get("name"),
@@ -245,7 +247,8 @@ def _spell_card_summary(card: dict[str, Any]) -> dict[str, Any]:
         "notes": card.get("notes"),
         "resolution": resolution or None,
         "display_settlement_range_consistent": (
-            settlement_range is None or display_range == settlement_range
+            settlement_range is None
+            or (display_range == settlement_range and display_long_range in {None, 0})
         ),
     }
 

@@ -358,12 +358,14 @@ def test_statblock_spellcasting_binds_slots_and_active_content(tmp_path: Path) -
             "range_ft_override"
         ] == 60
         assert spells["Scorching Ray"]["definition"]["range"]["normal_ft"] == 60
-        assert spells["Scorching Ray"]["definition"]["range"]["long_ft"] == 60
+        assert spells["Scorching Ray"]["definition"]["range"]["long_ft"] == 0
         assert "range 60 ft." in spells["Scorching Ray"]["definition"]["effect"]
         assert "Statblock action overrides" in spells["Scorching Ray"]["notes"]
         assert spells["Ray of Sickness"]["resolution"]["attack"][
             "attack_bonus_override"
         ] == 6
+        assert spells["Ray of Sickness"]["definition"]["range"]["normal_ft"] == 60
+        assert spells["Ray of Sickness"]["definition"]["range"]["long_ft"] == 0
         assert spells["Ray of Sickness"]["mechanic_refs"] == [
             "dnd5e.core.spell.structured_resolution"
         ]

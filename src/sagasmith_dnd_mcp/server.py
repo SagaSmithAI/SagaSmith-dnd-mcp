@@ -12354,7 +12354,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 )
                 normal_range = int(range_match.group(1)) if range_match else 0
                 long_range = (
-                    int(range_match.group(2) or range_match.group(1))
+                    int(range_match.group(2) or 0)
                     if range_match
                     else 0
                 )
