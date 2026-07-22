@@ -34,3 +34,11 @@ Default `memory_query` results contain active revisions only. Set
 `include_inactive` for audit history. Actor knowledge remains isolated by actor
 authorization and disclosure scope; objective facts must never be used to infer
 what a character knows.
+
+`continuity_context` ranks all eligible ledgers under one `budget_chars` limit and
+returns retrieval counts so truncation is visible. Owner/DM callers can use
+`continuity_diagnostics` for inactive revisions, orphan event references,
+unsnapshotted events, checkpoint size, recap evidence, and Skill-manifest drift;
+the diagnostic response contains no narrative content. Snapshot recaps always
+retain a deterministic canonical delta. Optional generated presentation text must
+cite player-safe event ids and cannot replace canonical restore evidence.

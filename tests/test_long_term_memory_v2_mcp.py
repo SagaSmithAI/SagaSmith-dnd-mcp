@@ -184,6 +184,29 @@ def test_continuity_commit_is_atomic_idempotent_and_pins_skill_manifest(tmp_path
         assert committed["actor_knowledge"][0]["source_event_id"] == (
             committed["event"]["id"]
         )
+        context = await _call(
+            server,
+            "continuity_context",
+            {
+                "campaign_id": campaign["id"],
+                "actor_id": actor["id"],
+                "query": "midnight bell",
+                "budget_chars": 1_000,
+            },
+        )
+        assert context["retrieval"]["budget_chars"] == 1_000
+        assert context["retrieval"]["strategy"] == (
+            "lexical_structured_shared_budget_v2"
+        )
+        diagnostics = await _call(
+            server,
+            "continuity_diagnostics",
+            {"campaign_id": campaign["id"]},
+        )
+        assert diagnostics["facts"]["active"] == 1
+        assert diagnostics["actor_knowledge"]["active"] == 1
+        assert diagnostics["skill_manifest"]["drift"] is False
+        assert diagnostics["recap"]["source"] == "deterministic"
 
         before = await _call(
             server,
