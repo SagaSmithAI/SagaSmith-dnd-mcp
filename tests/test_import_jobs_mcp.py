@@ -568,3 +568,82 @@ def test_module_import_facade_stages_only_allowlisted_documents(tmp_path: Path) 
         assert activated["activation"]["module_id"] == ingested["module_id"]
 
     asyncio.run(exercise())
+
+
+def test_module_import_exact_stage_retries_survive_later_job_states(tmp_path: Path) -> None:
+    import_root = tmp_path / "modules"
+    import_root.mkdir()
+    source = import_root / "resume.md"
+    source.write_text("# Chapter One\n\n## Arrival\n\nThe party arrives.\n", encoding="utf-8")
+    config = McpConfig(
+        home=tmp_path / "home",
+        database_url=None,
+        chroma_url=None,
+        chroma_path_override=None,
+        dnd_skills_dir=tmp_path / "dnd",
+        modulegen_skills_dir=tmp_path / "modulegen",
+        module_import_roots=(import_root,),
+    )
+
+    async def call(server, name: str, arguments: dict):
+        _, result = await server.call_tool(name, arguments)
+        return result.get("result", result) if isinstance(result, dict) else result
+
+    async def exercise() -> None:
+        server = create_server(config)
+        campaign = await call(
+            server,
+            "campaign_create",
+            {"name": "Resumable module", "idempotency_key": "campaign"},
+        )
+        campaign_id = campaign["id"]
+        stage_arguments = {
+            "campaign_id": campaign_id,
+            "action": "stage",
+            "payload": {
+                "source_path": str(source),
+                "source_key": "resume-module",
+                "title": "Resume Module",
+            },
+            "idempotency_key": "stage",
+        }
+        staged = await call(server, "module_import", stage_arguments)
+        job_id = staged["job"]["id"]
+        inspect_arguments = {
+            "campaign_id": campaign_id,
+            "action": "inspect",
+            "payload": {"job_id": job_id},
+            "idempotency_key": "inspect",
+        }
+        validate_arguments = {
+            "campaign_id": campaign_id,
+            "action": "validate",
+            "payload": {"job_id": job_id},
+            "idempotency_key": "validate",
+        }
+        ingest_arguments = {
+            "campaign_id": campaign_id,
+            "action": "ingest",
+            "payload": {"job_id": job_id},
+            "idempotency_key": "ingest",
+        }
+        inspected = await call(server, "module_import", inspect_arguments)
+        validated = await call(server, "module_import", validate_arguments)
+        ingested = await call(server, "module_import", ingest_arguments)
+        current = await call(server, "campaign_get", {"campaign_id": campaign_id})
+        activate_arguments = {
+            "campaign_id": campaign_id,
+            "action": "activate",
+            "payload": {"job_id": job_id},
+            "expected_revision": current["revision"],
+            "idempotency_key": "activate",
+        }
+        activated = await call(server, "module_import", activate_arguments)
+
+        assert await call(server, "module_import", stage_arguments) == staged
+        assert await call(server, "module_import", inspect_arguments) == inspected
+        assert await call(server, "module_import", validate_arguments) == validated
+        assert await call(server, "module_import", ingest_arguments) == ingested
+        assert await call(server, "module_import", activate_arguments) == activated
+
+    asyncio.run(exercise())

@@ -10807,9 +10807,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if not idempotency_key:
             raise ValueError("idempotency_key is required for an import job")
         path = storage.artifact_module_path(artifact)
-        preview = modules.preview_path(
-            path, parser=MarkdownModuleParser(profile=DndModuleProfile())
-        )
         logical_key = str(source_key or artifact).strip()
         payload = {
             "artifact": artifact,
@@ -10820,6 +10817,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         replay = replay_idempotent(scope, idempotency_key, payload)
         if replay is not None:
             return replay
+        preview = modules.preview_path(
+            path, parser=MarkdownModuleParser(profile=DndModuleProfile())
+        )
         job = import_jobs.create(
             campaign_id=campaign_id,
             kind="module",
@@ -10871,13 +10871,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if not idempotency_key:
             raise ValueError("idempotency_key is required for module validation")
         job = require_import_job(campaign_id, job_id, "module")
-        if job.state not in {"inspected", "validated", "failed"}:
-            raise ValueError("module import job must be inspected before validation")
         payload = {"job_id": job_id, "operation": "validate"}
         scope = f"import-job:{campaign_id}:{job_id}:{principal_id}"
         replay = replay_idempotent(scope, idempotency_key, payload)
         if replay is not None:
             return replay
+        if job.state not in {"inspected", "validated", "failed"}:
+            raise ValueError("module import job must be inspected before validation")
         preview = dict(job.inspection)
         diff = modules.diff_preview(
             campaign_id,
@@ -10913,13 +10913,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if not idempotency_key:
             raise ValueError("idempotency_key is required for module import")
         job = require_import_job(campaign_id, job_id, "module")
-        if job.state not in {"validated", "imported"} or not job.validation.get("valid"):
-            raise ValueError("module import job must pass validation before import")
         payload = {"job_id": job_id, "operation": "import"}
         scope = f"import-job:{campaign_id}:{job_id}:{principal_id}"
         replay = replay_idempotent(scope, idempotency_key, payload)
         if replay is not None:
             return replay
+        if job.state not in {"validated", "imported"} or not job.validation.get("valid"):
+            raise ValueError("module import job must pass validation before import")
         values = dict(job.payload)
         embedder, vectors = storage.dense_components()
         result = modules.ingest_path(
@@ -10955,16 +10955,16 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         """Atomically promote an imported module revision after its diff was reviewed."""
         access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
         require_write_contract(expected_revision, idempotency_key)
-        if dict(campaigns.get(campaign_id).state or {}).get("combat", {}).get("active", False):
-            raise CombatEngineError("module activation cannot change during active combat")
         job = require_import_job(campaign_id, job_id, "module")
-        if job.state not in {"imported", "activated"} or not job.module_id:
-            raise ValueError("module import job must be imported before activation")
         payload = {"job_id": job_id, "operation": "activate", "module_id": job.module_id}
         scope = f"import-job:{campaign_id}:{job_id}:{principal_id}"
         replay = replay_idempotent(scope, idempotency_key, payload)
         if replay is not None:
             return replay
+        if dict(campaigns.get(campaign_id).state or {}).get("combat", {}).get("active", False):
+            raise CombatEngineError("module activation cannot change during active combat")
+        if job.state not in {"imported", "activated"} or not job.module_id:
+            raise ValueError("module import job must be imported before activation")
         before = campaigns.get(campaign_id)
         if before.revision != expected_revision:
             raise ValueError(f"campaign revision conflict: {campaign_id}")
