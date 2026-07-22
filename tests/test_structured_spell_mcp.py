@@ -252,6 +252,28 @@ def test_scorching_ray_cast_locks_then_settles_each_source_bound_attack(
         resolution_id = cast["result"]["resolution_id"]
         assert cast["result"]["remaining_attacks"] == 3
 
+        with pytest.raises(Exception, match="pending"):
+            await _raw(
+                server,
+                "combat_end_turn",
+                {
+                    "campaign_id": campaign_id,
+                    "actor_id": actors[0]["id"],
+                    "expected_revision": cast["campaign_revision"],
+                    "idempotency_key": "ray-premature-turn-end",
+                },
+            )
+        with pytest.raises(Exception, match="pending"):
+            await _raw(
+                server,
+                "combat_end",
+                {
+                    "campaign_id": campaign_id,
+                    "expected_revision": cast["campaign_revision"],
+                    "idempotency_key": "ray-premature-combat-end",
+                },
+            )
+
         current_revision = cast["campaign_revision"]
         results = []
         for index, remaining in enumerate((2, 1, 0), start=1):
