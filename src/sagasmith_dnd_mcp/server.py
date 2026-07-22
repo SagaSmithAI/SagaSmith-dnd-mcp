@@ -90,6 +90,7 @@ from sagasmith_dnd.combat_engine import (
     resolve_choice_window,
     resolve_common_action,
     resolve_death_save_to_sheet,
+    resolve_preserve_life_to_sheets,
     resolve_readied_action_window,
     resolve_readied_spell_window,
     resolve_second_wind_to_sheet,
@@ -7678,6 +7679,155 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         replay = replay_idempotent(scope, idempotency_key, payload)
         if replay is not None:
             return replay
+        preserve_life = str(activity_id).endswith(
+            "life-domain-channel-divinity-preserve-life"
+        )
+        if preserve_life:
+            if not is_dm(current.campaign_id, principal_id):
+                raise PermissionError("Preserve Life multi-actor settlement requires the DM")
+            if current.revision != expected_revision:
+                raise ValueError(f"character revision conflict: {character_id}")
+            declared = dict(declaration or {})
+            if set(declared) != {"allocations"}:
+                raise CombatEngineError(
+                    "Preserve Life declaration requires only an allocations list"
+                )
+            raw_allocations = declared.get("allocations")
+            if not isinstance(raw_allocations, list) or not raw_allocations:
+                raise CombatEngineError("Preserve Life requires at least one allocation")
+            target_records: dict[str, Any] = {}
+            target_revisions: dict[str, int] = {}
+            mechanical_allocations: list[dict[str, Any]] = []
+            for allocation in raw_allocations:
+                if not isinstance(allocation, dict) or set(allocation) != {
+                    "target_id",
+                    "amount",
+                    "expected_revision",
+                    "within_30_ft",
+                }:
+                    raise CombatEngineError(
+                        "each Preserve Life allocation requires target_id, amount, "
+                        "expected_revision, and within_30_ft"
+                    )
+                target_id = str(allocation.get("target_id") or "")
+                if allocation.get("within_30_ft") is not True:
+                    raise CombatEngineError(
+                        "Preserve Life requires a DM-confirmed target within 30 feet"
+                    )
+                target = characters.get(target_id)
+                if target.campaign_id != current.campaign_id:
+                    raise CombatEngineError("Preserve Life targets must share the campaign")
+                access.require_actor(
+                    current.campaign_id,
+                    target_id,
+                    principal_id,
+                    control=True,
+                )
+                target_revision = allocation.get("expected_revision")
+                if isinstance(target_revision, bool) or not isinstance(target_revision, int):
+                    raise ValueError("Preserve Life target expected_revision must be an integer")
+                if target_id == character_id and target_revision != expected_revision:
+                    raise ValueError("source and target revisions disagree for Preserve Life")
+                if target.revision != target_revision:
+                    raise ValueError(f"character revision conflict: {target_id}")
+                target_records[target_id] = target
+                target_revisions[target_id] = target_revision
+                mechanical_allocations.append(
+                    {"target_id": target_id, "amount": allocation.get("amount")}
+                )
+            preflight_sheets = {
+                target_id: target.sheet for target_id, target in target_records.items()
+            }
+            resolve_preserve_life_to_sheets(
+                current.sheet,
+                preflight_sheets,
+                allocations=mechanical_allocations,
+            )
+            activity_rules = effective_rule_context(
+                current.campaign_id,
+                facts={"actor_id": character_id, "activity_id": activity_id},
+            )
+            try:
+                applied = consume_activity(
+                    current.sheet,
+                    activity_id=activity_id,
+                    rules=activity_rules,
+                )
+            except ActivityError as exc:
+                raise ValueError(str(exc)) from exc
+            settled_inputs = {
+                target_id: (
+                    applied["sheet"] if target_id == character_id else target.sheet
+                )
+                for target_id, target in target_records.items()
+            }
+            settled = resolve_preserve_life_to_sheets(
+                applied["sheet"],
+                settled_inputs,
+                allocations=mechanical_allocations,
+            )
+            updates: list[CharacterStateUpdate] = []
+            updated_ids = {character_id, *target_records}
+            for updated_id in updated_ids:
+                before = current if updated_id == character_id else target_records[updated_id]
+                updated_sheet = (
+                    settled["sheets"].get(updated_id, applied["sheet"])
+                    if updated_id == character_id
+                    else settled["sheets"][updated_id]
+                )
+                updates.append(
+                    CharacterStateUpdate(
+                        character_id=updated_id,
+                        sheet=validate_character_sheet(updated_sheet),
+                        notes=validate_character_notes(before.notes),
+                        expected_revision=(
+                            expected_revision
+                            if updated_id == character_id
+                            else target_revisions[updated_id]
+                        ),
+                    )
+                )
+            receipts = [
+                *list(applied.get("rule_receipts") or []),
+                *core_receipts(
+                    activity_rules,
+                    ["dnd5e.core.activity.preserve_life"],
+                    "activity.preserve_life",
+                ),
+            ]
+            StateMutationService(storage.database).replace(
+                current.campaign_id,
+                character_updates=updates,
+                operation="character.activity.preserve_life",
+                actor=principal_id,
+                branch_id=branch_id,
+                idempotency_key=idempotency_key,
+                rule_receipts=receipts,
+            )
+            response = {
+                "status": "committed",
+                "result": {
+                    "activity_id": activity_id,
+                    "payment": applied.get("payment"),
+                    "pool": settled["pool"],
+                    "allocated": settled["allocated"],
+                    "remaining_unallocated": settled["remaining_unallocated"],
+                    "targets": settled["targets"],
+                    "rule_receipts": receipts,
+                },
+                "character": character_view(characters.get(character_id)),
+                "targets": [
+                    character_view(characters.get(target_id))
+                    for target_id in target_records
+                ],
+            }
+            return remember_idempotent(
+                scope,
+                idempotency_key,
+                payload,
+                response,
+                campaign_id=current.campaign_id,
+            )
         try:
             applied = consume_activity(
                 current.sheet,

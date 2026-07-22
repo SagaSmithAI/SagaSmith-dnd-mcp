@@ -182,6 +182,40 @@ def test_lobby_level_advance_is_source_bound_and_reports_catalog_follow_up(
                 "idempotency_key": "preserve",
             },
         )
+        with pytest.raises(Exception, match="above half"):
+            await _call(
+                server,
+                "character_action",
+                {
+                    "character_id": actor["id"],
+                    "action": "use_activity",
+                    "payload": {
+                        "activity_id": (
+                            "dnd5e.content.srd2014.feature."
+                            "life-domain-channel-divinity-preserve-life"
+                        ),
+                        "declaration": {
+                            "allocations": [
+                                {
+                                    "target_id": actor["id"],
+                                    "amount": 4,
+                                    "expected_revision": preserve["revision"],
+                                    "within_30_ft": True,
+                                }
+                            ]
+                        },
+                    },
+                    "expected_revision": preserve["revision"],
+                    "idempotency_key": "invalid-preserve",
+                },
+            )
+        unchanged = await _call(
+            server,
+            "character_query",
+            {"view": "get", "payload": {"character_id": actor["id"]}},
+        )
+        assert unchanged["revision"] == preserve["revision"]
+        assert unchanged["sheet"]["resources"]["channel_divinity"]["value"] == 1
         used = await _call(
             server,
             "character_action",
@@ -192,7 +226,17 @@ def test_lobby_level_advance_is_source_bound_and_reports_catalog_follow_up(
                     "activity_id": (
                         "dnd5e.content.srd2014.feature."
                         "life-domain-channel-divinity-preserve-life"
-                    )
+                    ),
+                    "declaration": {
+                        "allocations": [
+                            {
+                                "target_id": actor["id"],
+                                "amount": 3,
+                                "expected_revision": preserve["revision"],
+                                "within_30_ft": True,
+                            }
+                        ]
+                    },
                 },
                 "expected_revision": preserve["revision"],
                 "idempotency_key": "use-preserve",
@@ -204,6 +248,7 @@ def test_lobby_level_advance_is_source_bound_and_reports_catalog_follow_up(
             "amount": 1,
         }
         assert used["character"]["sheet"]["resources"]["channel_divinity"]["value"] == 0
+        assert used["character"]["sheet"]["combat"]["hp"]["value"] == 10
 
         receipts = await _call(
             server,
