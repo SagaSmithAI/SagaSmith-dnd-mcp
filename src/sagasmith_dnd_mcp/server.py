@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 from copy import deepcopy
 from dataclasses import asdict
@@ -11,6 +12,7 @@ from uuid import uuid4
 from weakref import WeakValueDictionary
 
 from mcp.server.fastmcp import FastMCP, Image
+from mcp.types import CallToolResult, TextContent
 from sagasmith_core import (
     DOCUMENT_NORMALIZER_VERSION,
     AccessService,
@@ -15532,7 +15534,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         exposure_id: str,
         tool_id: str,
         arguments: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
+    ) -> Any:
         """Call an exposed tool when an MCP host cannot refresh native schemas."""
         if tool_id in CORE_TOOLS or tool_id.startswith("exposure_"):
             raise ExposureError("exposure_call only dispatches a loaded domain tool.")
@@ -15562,7 +15564,41 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 await mcp._refresh(request[0], target_campaign_id)
         elif exposure_changed and request is not None:
             await request[1].send_tool_list_changed()
-        return {"tool_id": tool_id, "result": result, "exposure": exposures.status(exposure)}
+        exposure_status = exposures.status(exposure)
+        if isinstance(result, (list, tuple)) and result and all(
+            hasattr(item, "type") for item in result
+        ):
+            decoded_text: list[Any] = []
+            forwarded_content: list[Any] = []
+            for item in result:
+                if isinstance(item, TextContent):
+                    try:
+                        decoded_text.append(json.loads(item.text))
+                    except json.JSONDecodeError:
+                        decoded_text.append(item.text)
+                else:
+                    forwarded_content.append(item)
+            domain_result: Any
+            if len(decoded_text) == 1:
+                domain_result = decoded_text[0]
+            else:
+                domain_result = decoded_text
+            envelope = {
+                "tool_id": tool_id,
+                "result": domain_result,
+                "exposure": exposure_status,
+            }
+            return CallToolResult(
+                content=[
+                    TextContent(
+                        type="text",
+                        text=json.dumps(envelope, ensure_ascii=False, separators=(",", ":")),
+                    ),
+                    *forwarded_content,
+                ],
+                structuredContent=envelope,
+            )
+        return {"tool_id": tool_id, "result": result, "exposure": exposure_status}
 
     # No compatibility aliases: old tool names are removed before the server
     # advertises its capability list.  The underlying functions remain local
@@ -15700,6 +15736,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
 
 
 def main() -> None:
+    # pypdfium2 imports NumPy-backed bitmap helpers lazily. On Windows that
+    # native import can stall when first attempted from FastMCP's running
+    # asyncio loop, so initialize it on the main thread before the loop starts.
+    import pypdfium2  # noqa: F401
+
     create_server().run(transport="stdio")
 
 

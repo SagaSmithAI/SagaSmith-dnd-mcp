@@ -2,7 +2,7 @@ import asyncio
 import json
 from pathlib import Path
 
-from mcp.types import ImageContent, TextContent
+from mcp.types import CallToolResult, ImageContent, TextContent
 from pypdf import PdfReader, PdfWriter
 from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 
@@ -174,6 +174,37 @@ def test_pdf_page_review_becomes_snapshot_managed_scene_atlas(tmp_path: Path) ->
         render_metadata = json.loads(rendered[0].text)
         assert render_metadata["asset"]["metadata"]["source_page"] == 1
         assert rendered[1].mimeType == "image/png"
+
+        opened = await _call(
+            server,
+            "exposure_open",
+            {"campaign_id": campaign["id"], "principal_id": "system:local"},
+        )
+        await _call(
+            server,
+            "exposure_load",
+            {"exposure_id": opened["exposure_id"], "group_id": "lobby.modules"},
+        )
+        fallback = await server.call_tool(
+            "exposure_call",
+            {
+                "exposure_id": opened["exposure_id"],
+                "tool_id": "module_page_render",
+                "arguments": {
+                    "campaign_id": campaign["id"],
+                    "module_id": module_id,
+                    "page_number": 1,
+                },
+            },
+        )
+        assert isinstance(fallback, CallToolResult)
+        assert isinstance(fallback.content[0], TextContent)
+        assert isinstance(fallback.content[1], ImageContent)
+        fallback_envelope = json.loads(fallback.content[0].text)
+        assert fallback_envelope["tool_id"] == "module_page_render"
+        assert fallback_envelope["result"]["asset"]["metadata"]["source_page"] == 1
+        assert fallback.structuredContent == fallback_envelope
+        assert fallback.content[1].mimeType == "image/png"
 
         index = await _call(
             server,

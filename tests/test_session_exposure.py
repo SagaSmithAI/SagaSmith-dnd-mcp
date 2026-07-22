@@ -10,11 +10,51 @@ from pathlib import Path
 import pytest
 from mcp import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
+from mcp.types import ImageContent
+from pypdf import PdfWriter
+from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 
 from sagasmith_dnd_mcp.config import McpConfig
 from sagasmith_dnd_mcp.exposure import ExposureError, ExposureRegistry
 from sagasmith_dnd_mcp.server import create_server
 from sagasmith_dnd_mcp.tool_profiles import CORE_TOOLS, GROUP_BY_ID
+
+
+def _write_exposure_module_pdf(path: Path) -> None:
+    writer = PdfWriter()
+    page = writer.add_blank_page(width=300, height=300)
+    font = DictionaryObject(
+        {
+            NameObject("/Type"): NameObject("/Font"),
+            NameObject("/Subtype"): NameObject("/Type1"),
+            NameObject("/BaseFont"): NameObject("/Helvetica"),
+        }
+    )
+    page[NameObject("/Resources")] = DictionaryObject(
+        {
+            NameObject("/Font"): DictionaryObject(
+                {NameObject("/F1"): writer._add_object(font)}
+            )
+        }
+    )
+    lines = [
+        "Chapter 1: Dungeon",
+        "D1. Entry",
+        "A stone corridor descends into darkness.",
+        "D2. Guard Room",
+        "Two doors connect this room to the dungeon.",
+    ]
+    operators = [b"BT /F1 12 Tf 30 250 Td 16 TL"]
+    for index, line in enumerate(lines):
+        if index:
+            operators.append(b"T*")
+        operators.append(f"({line}) Tj".encode("ascii"))
+    operators.append(b"ET")
+    stream = DecodedStreamObject()
+    stream.set_data(b"\n".join(operators))
+    page[NameObject("/Contents")] = writer._add_object(stream)
+    with path.open("wb") as output:
+        writer.write(output)
 
 
 def test_exposures_are_session_scoped_and_phase_safe() -> None:
@@ -305,5 +345,156 @@ def test_stdio_session_uses_native_refresh_and_exposure_call_fallback(tmp_path) 
                 )
                 assert cross_campaign.isError
                 assert "bound to" in cross_campaign.content[0].text
+
+    asyncio.run(exercise())
+
+
+def test_stdio_exposure_fallback_preserves_rendered_image_content(tmp_path: Path) -> None:
+    module_root = tmp_path / "modules"
+    module_root.mkdir()
+    source = module_root / "exposure-module.pdf"
+    _write_exposure_module_pdf(source)
+
+    config = McpConfig(
+        home=tmp_path / "home",
+        database_url=None,
+        chroma_url=None,
+        chroma_path_override=None,
+        dnd_skills_dir=tmp_path / "dnd",
+        modulegen_skills_dir=tmp_path / "modulegen",
+        auto_seed_rules=False,
+        module_import_roots=(module_root,),
+        rule_ocr_enabled=False,
+    )
+
+    async def seed() -> tuple[str, str]:
+        server = create_server(config)
+
+        async def direct(name: str, arguments: dict):
+            called = await server.call_tool(name, arguments)
+            if isinstance(called, tuple):
+                _, structured = called
+                return structured.get("result", structured)
+            return called
+
+        campaign = await direct(
+            "campaign_create",
+            {
+                "name": "Image fallback",
+                "edition": "2014",
+                "idempotency_key": "image-fallback-campaign",
+            },
+        )
+        staged = await direct(
+            "module_import",
+            {
+                "campaign_id": campaign["id"],
+                "action": "stage",
+                "payload": {
+                    "source_path": str(source),
+                    "source_key": "image-fallback",
+                    "title": "Image Fallback",
+                },
+                "idempotency_key": "image-fallback-stage",
+            },
+        )
+        job_id = staged["job"]["id"]
+        imported: dict = {}
+        for action in ("inspect", "validate", "ingest"):
+            imported = await direct(
+                "module_import",
+                {
+                    "campaign_id": campaign["id"],
+                    "action": action,
+                    "payload": {"job_id": job_id},
+                    "idempotency_key": f"image-fallback-{action}",
+                },
+            )
+        current = await direct(
+            "campaign_query",
+            {"view": "get", "payload": {"campaign_id": campaign["id"]}},
+        )
+        await direct(
+            "module_import",
+            {
+                "campaign_id": campaign["id"],
+                "action": "activate",
+                "payload": {"job_id": job_id},
+                "expected_revision": current["revision"],
+                "idempotency_key": "image-fallback-activate",
+            },
+        )
+        return campaign["id"], imported["module_id"]
+
+    campaign_id, module_id = asyncio.run(seed())
+
+    async def exercise() -> None:
+        env = dict(os.environ)
+        env.update(
+            {
+                "SAGASMITH_DND_MCP_HOME": str(tmp_path / "home"),
+                "SAGASMITH_DND_MCP_AUTO_SEED": "0",
+                "SAGASMITH_DND_MCP_MODULE_IMPORT_ROOTS": str(module_root),
+                "SAGASMITH_DND_MCP_RULE_OCR": "0",
+            }
+        )
+        params = StdioServerParameters(
+            command=sys.executable,
+            args=["-m", "sagasmith_dnd_mcp.server"],
+            cwd=Path(__file__).parents[1],
+            env=env,
+        )
+
+        def decoded(result) -> dict:
+            assert not result.isError
+            return json.loads(result.content[0].text)
+
+        async def rpc(name: str, arguments: dict, *, timeout_seconds: int = 20):
+            try:
+                return await session.call_tool(
+                    name,
+                    arguments,
+                    read_timeout_seconds=timedelta(seconds=timeout_seconds),
+                )
+            except Exception as exc:
+                raise AssertionError(f"stdio MCP call {name!r} did not complete") from exc
+
+        async with stdio_client(params) as (read, write):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                principal_id = "system:local"
+                opened = decoded(
+                    await rpc(
+                        "exposure_open",
+                        {"campaign_id": campaign_id, "principal_id": principal_id},
+                    )
+                )
+                exposure_id = opened["exposure_id"]
+                await rpc(
+                    "exposure_load",
+                    {"exposure_id": exposure_id, "group_id": "lobby.modules"},
+                )
+                rendered = await rpc(
+                    "exposure_call",
+                    {
+                        "exposure_id": exposure_id,
+                        "tool_id": "module_page_render",
+                        "arguments": {
+                            "campaign_id": campaign_id,
+                            "module_id": module_id,
+                            "page_number": 1,
+                            "scale": 0.5,
+                        },
+                    },
+                    timeout_seconds=90,
+                )
+                envelope = decoded(rendered)
+                assert envelope["tool_id"] == "module_page_render"
+                assert envelope["result"]["asset"]["metadata"]["source_page"] == 1
+                assert len(rendered.content[0].text) < 10_000
+                images = [item for item in rendered.content if isinstance(item, ImageContent)]
+                assert len(images) == 1
+                assert images[0].mimeType == "image/png"
+                assert rendered.structuredContent == envelope
 
     asyncio.run(exercise())
