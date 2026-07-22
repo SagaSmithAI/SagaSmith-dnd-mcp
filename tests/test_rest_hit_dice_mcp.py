@@ -45,6 +45,33 @@ def _resting_sheet() -> dict:
     return sheet
 
 
+def _wizard_resting_sheet() -> dict:
+    sheet = default_character_sheet()
+    sheet["progression"] = {
+        "level": 2,
+        "classes": [{"name": "Wizard", "level": 2, "hit_die": 6}],
+    }
+    sheet["combat"]["hp"] = {"value": 7, "max": 12, "temp": 0}
+    sheet["spellcasting"]["spell_slots"] = {
+        "1": {
+            "label": "Level 1 spell slots",
+            "value": 0,
+            "max": 3,
+            "recovers_on": "long_rest",
+            "source_key": "Wizard",
+            "slot_level": 1,
+        }
+    }
+    sheet["content"]["features"] = [
+        {
+            "id": "dnd5e.content.srd2014.feature.wizard-arcane-recovery",
+            "name": "Arcane Recovery",
+            "source_key": "Wizard",
+        }
+    ]
+    return sheet
+
+
 def test_short_rest_rolls_requested_hit_dice_inside_the_mcp(tmp_path: Path) -> None:
     async def exercise() -> None:
         server = create_server(_config(tmp_path))
@@ -89,6 +116,56 @@ def test_short_rest_rolls_requested_hit_dice_inside_the_mcp(tmp_path: Path) -> N
         assert rested["character"]["sheet"]["combat"]["hit_dice"]["fighter:d10"][
             "value"
         ] == 1
+
+    asyncio.run(exercise())
+
+
+def test_short_rest_atomically_applies_arcane_recovery_choice(tmp_path: Path) -> None:
+    async def exercise() -> None:
+        server = create_server(_config(tmp_path))
+        campaign = await _call(
+            server,
+            "campaign_create",
+            {"name": "Arcane rest", "edition": "2014", "idempotency_key": "campaign"},
+        )
+        actor = await _call(
+            server,
+            "character_create_from",
+            {
+                "mode": "direct",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "name": "Resting Wizard",
+                    "sheet": _wizard_resting_sheet(),
+                },
+                "idempotency_key": "actor",
+            },
+        )
+        arguments = {
+            "character_id": actor["id"],
+            "action": "rest",
+            "payload": {
+                "rest_type": "short_rest",
+                "arcane_recovery": {"1": 1},
+            },
+            "expected_revision": actor["revision"],
+            "idempotency_key": "arcane-rest",
+        }
+
+        rested = await _call(server, "character_state_change", arguments)
+        replay = await _call(server, "character_state_change", arguments)
+
+        assert replay == rested
+        assert rested["result"]["arcane_recovery"]["recovered"] == {"1": 1}
+        sheet = rested["character"]["sheet"]
+        assert sheet["spellcasting"]["spell_slots"]["1"]["value"] == 1
+        feature = next(
+            item
+            for item in sheet["content"]["features"]
+            if item["name"] == "Arcane Recovery"
+        )
+        assert feature["uses"]["value"] == 0
+        assert feature["uses"]["max"] == 1
 
     asyncio.run(exercise())
 

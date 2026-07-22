@@ -7125,6 +7125,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         prepared_spell_ids: list[str] | None = None,
         hit_dice_spends: list[dict[str, Any]] | None = None,
         hit_dice_recovery: dict[str, int] | None = None,
+        arcane_recovery: dict[str, int] | None = None,
         food_and_drink: bool = False,
         principal_id: str = "system:local",
         expected_revision: int | None = None,
@@ -7153,6 +7154,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "prepared_spell_ids": prepared_spell_ids,
             "hit_dice_spends": hit_dice_spends or [],
             "hit_dice_recovery": hit_dice_recovery or {},
+            "arcane_recovery": arcane_recovery or {},
             "food_and_drink": food_and_drink,
         }
         branch_id = require_current_branch(current.campaign_id, None)
@@ -7175,6 +7177,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             rest_type=normalized_rest_type,
             hit_dice_spends=hit_dice_spends,
             hit_dice_recovery=hit_dice_recovery,
+            arcane_recovery=arcane_recovery,
             food_and_drink=food_and_drink,
             rules=rest_rules,
         )
@@ -12803,6 +12806,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 data.get("prepared_spell_ids"),
                 data.get("hit_dice_spends"),
                 data.get("hit_dice_recovery"),
+                data.get("arcane_recovery"),
                 data.get("food_and_drink", False),
                 principal_id,
                 expected_revision,
