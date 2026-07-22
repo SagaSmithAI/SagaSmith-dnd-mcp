@@ -43,6 +43,11 @@ def _arguments() -> argparse.Namespace:
         default="Structured regression actor",
         help="Canonical actor name for prepare-statblock",
     )
+    parser.add_argument(
+        "--isolate-branch",
+        action="store_true",
+        help="Create the reviewed actor on a disposable branch and restore the source branch",
+    )
     parser.add_argument("--caster-id", help="Source-bound spellcaster for structured-combat")
     parser.add_argument(
         "--target-id",
@@ -217,6 +222,11 @@ def _review_summary(review: dict[str, Any]) -> dict[str, Any]:
 
 
 def _spell_card_summary(card: dict[str, Any]) -> dict[str, Any]:
+    definition = dict(card.get("definition") or {})
+    resolution = dict(card.get("resolution") or {})
+    attack = dict(resolution.get("attack") or {})
+    settlement_range = attack.get("range_ft_override")
+    display_range = dict(definition.get("range") or {}).get("normal_ft")
     return {
         "id": card.get("id"),
         "name": card.get("name"),
@@ -226,7 +236,17 @@ def _spell_card_summary(card: dict[str, Any]) -> dict[str, Any]:
         "pack_version": card.get("pack_version"),
         "rule_refs": card.get("rule_refs"),
         "mechanic_refs": card.get("mechanic_refs"),
-        "resolution": card.get("resolution"),
+        "definition": {
+            "casting_time": definition.get("casting_time"),
+            "range": definition.get("range"),
+            "components": definition.get("components"),
+            "effect_preview": str(definition.get("effect") or "")[:500],
+        },
+        "notes": card.get("notes"),
+        "resolution": resolution or None,
+        "display_settlement_range_consistent": (
+            settlement_range is None or display_range == settlement_range
+        ),
     }
 
 
@@ -611,7 +631,7 @@ async def _relock_core(args: argparse.Namespace) -> dict[str, Any]:
 
 
 async def _prepare_statblock(args: argparse.Namespace) -> dict[str, Any]:
-    """Create a fresh source-bound actor in lobby, then checkpoint back in play."""
+    """Create a fresh source-bound actor in lobby, optionally on a disposable branch."""
 
     if not args.review_id:
         raise ValueError("--review-id is required for prepare-statblock")
@@ -636,6 +656,9 @@ async def _prepare_statblock(args: argparse.Namespace) -> dict[str, Any]:
             current_branch = next((item for item in branches if item.get("is_current")), None)
             if current_branch is None:
                 raise RuntimeError("campaign has no current branch")
+            source_branch = current_branch
+            source_checkpoint: dict[str, Any] | None = None
+            isolation: dict[str, Any] | None = None
 
             phase_changes: list[dict[str, Any]] = []
             if initial_phase != "lobby":
@@ -661,6 +684,44 @@ async def _prepare_statblock(args: argparse.Namespace) -> dict[str, Any]:
                 phase_changes.append(changed)
             await client.open()
             await client.load("lobby.campaign", "lobby.rules", "lobby.modules", "lobby.characters")
+            if args.isolate_branch:
+                campaign_lobby = _facade_value(
+                    await client.core(
+                        "campaign_query",
+                        {"view": "get", "payload": {"campaign_id": args.campaign_id}},
+                    )
+                )
+                source_checkpoint = await client.domain(
+                    "snapshot_create",
+                    {
+                        "campaign_id": args.campaign_id,
+                        "label": "Before isolated reviewed-statblock regression",
+                        "expected_revision": campaign_lobby["revision"],
+                        "expected_head_snapshot_id": source_branch.get("head_snapshot_id") or "",
+                        "idempotency_key": f"{token}-source-checkpoint",
+                    },
+                )
+                current_branch = _facade_value(
+                    await client.domain(
+                        "branch_change",
+                        {
+                            "campaign_id": args.campaign_id,
+                            "action": "create",
+                            "payload": {
+                                "name": f"reviewed-statblock-{token}",
+                                "from_snapshot_id": source_checkpoint["id"],
+                                "checkout": True,
+                            },
+                            "expected_revision": campaign_lobby["revision"],
+                            "expected_branch_id": source_branch["id"],
+                            "idempotency_key": f"{token}-branch-create",
+                        },
+                    )
+                )
+                await client.open()
+                await client.load(
+                    "lobby.campaign", "lobby.rules", "lobby.modules", "lobby.characters"
+                )
             rules = _facade_value(
                 await client.domain(
                     "campaign_rules",
@@ -703,6 +764,14 @@ async def _prepare_statblock(args: argparse.Namespace) -> dict[str, Any]:
                     {"view": "get", "payload": {"character_id": actor_id}},
                 )
             )
+            spell_cards = [
+                _spell_card_summary(card)
+                for card in (actor.get("sheet", {}).get("content", {}).get("spells") or [])
+            ]
+            if not all(
+                item["display_settlement_range_consistent"] for item in spell_cards
+            ):
+                raise RuntimeError("source-bound spell display and settlement ranges disagree")
 
             campaign_in_lobby = _facade_value(
                 await client.core(
@@ -758,6 +827,127 @@ async def _prepare_statblock(args: argparse.Namespace) -> dict[str, Any]:
                     },
                 )
             )
+            if args.isolate_branch:
+                campaign_working_play = _facade_value(
+                    await client.core(
+                        "campaign_query",
+                        {"view": "get", "payload": {"campaign_id": args.campaign_id}},
+                    )
+                )
+                entered_lobby = _facade_value(
+                    await client.core(
+                        "game_phase",
+                        {
+                            "campaign_id": args.campaign_id,
+                            "action": "set",
+                            "tool_profile": "lobby",
+                            "expected_revision": campaign_working_play["revision"],
+                            "branch_id": current_branch["id"],
+                            "idempotency_key": f"{token}-close-enter-lobby",
+                        },
+                    )
+                )
+                phase_changes.append(entered_lobby)
+                await client.open()
+                await client.load("lobby.campaign", "lobby.characters")
+                campaign_working_lobby = _facade_value(
+                    await client.core(
+                        "campaign_query",
+                        {"view": "get", "payload": {"campaign_id": args.campaign_id}},
+                    )
+                )
+                branch_snapshot = await client.domain(
+                    "snapshot_create",
+                    {
+                        "campaign_id": args.campaign_id,
+                        "label": f"Closed isolated reviewed actor: {args.actor_name}",
+                        "expected_revision": campaign_working_lobby["revision"],
+                        "expected_head_snapshot_id": snapshot["id"],
+                        "idempotency_key": f"{token}-closed-branch-snapshot",
+                    },
+                )
+                checkout = _facade_value(
+                    await client.domain(
+                        "branch_change",
+                        {
+                            "campaign_id": args.campaign_id,
+                            "action": "checkout",
+                            "payload": {"branch_id": source_branch["id"]},
+                            "expected_revision": campaign_working_lobby["revision"],
+                            "expected_branch_id": current_branch["id"],
+                            "idempotency_key": f"{token}-return-source",
+                        },
+                    )
+                )
+                campaign_source_lobby = _facade_value(
+                    await client.core(
+                        "campaign_query",
+                        {"view": "get", "payload": {"campaign_id": args.campaign_id}},
+                    )
+                )
+                source_play = _facade_value(
+                    await client.core(
+                        "game_phase",
+                        {
+                            "campaign_id": args.campaign_id,
+                            "action": "set",
+                            "tool_profile": "play",
+                            "expected_revision": campaign_source_lobby["revision"],
+                            "branch_id": source_branch["id"],
+                            "idempotency_key": f"{token}-source-return-play",
+                        },
+                    )
+                )
+                phase_changes.append(source_play)
+                await client.open()
+                await client.load("play.scene", "play.scene_control", "play.characters")
+                source_characters = _facade_value(
+                    await client.domain(
+                        "character_query",
+                        {"view": "list", "payload": {"campaign_id": args.campaign_id}},
+                    )
+                )
+                actor_absent = actor_id not in {
+                    str(item.get("id")) for item in source_characters or []
+                }
+                if not actor_absent:
+                    raise RuntimeError("isolated reviewed actor leaked into the source branch")
+                source_campaign = _facade_value(
+                    await client.core(
+                        "campaign_query",
+                        {"view": "get", "payload": {"campaign_id": args.campaign_id}},
+                    )
+                )
+                source_snapshot = await client.domain(
+                    "snapshot_create",
+                    {
+                        "campaign_id": args.campaign_id,
+                        "label": "Returned after isolated reviewed-statblock regression",
+                        "expected_revision": source_campaign["revision"],
+                        "expected_head_snapshot_id": source_checkpoint["id"],
+                        "idempotency_key": f"{token}-source-final-snapshot",
+                    },
+                )
+                source_verified = _facade_value(
+                    await client.domain(
+                        "snapshot_query",
+                        {
+                            "campaign_id": args.campaign_id,
+                            "view": "verify",
+                            "payload": {"slot": source_snapshot["slot"]},
+                        },
+                    )
+                )
+                isolation = {
+                    "source_branch_id": source_branch["id"],
+                    "regression_branch_id": current_branch["id"],
+                    "source_checkpoint": source_checkpoint,
+                    "branch_snapshot": branch_snapshot,
+                    "checkout": checkout,
+                    "actor_absent_from_source": actor_absent,
+                    "source_snapshot": source_snapshot,
+                    "source_snapshot_verification": source_verified,
+                }
             return {
                 "action": "prepare-statblock",
                 "transport": "stdio",
@@ -770,13 +960,12 @@ async def _prepare_statblock(args: argparse.Namespace) -> dict[str, Any]:
                     "statblock": created.get("statblock"),
                     "spell_warnings": created.get("spell_warnings"),
                     "character": _character_summary(actor),
-                    "spell_cards": [
-                        _spell_card_summary(card)
-                        for card in (actor.get("sheet", {}).get("content", {}).get("spells") or [])
-                    ],
+                    "spell_display_consistent": True,
+                    "spell_cards": spell_cards,
                 },
                 "snapshot": snapshot,
                 "snapshot_verification": verified,
+                "isolation": isolation,
             }
 
 
