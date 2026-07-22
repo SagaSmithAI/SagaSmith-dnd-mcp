@@ -95,6 +95,7 @@ from sagasmith_dnd.combat_engine import (
     resolve_readied_action_window,
     resolve_readied_spell_window,
     resolve_second_wind_to_sheet,
+    resolve_turn_undead_to_sheets,
     roll_attack_action,
     settle_core_activity_effect,
     spend_movement,
@@ -1121,6 +1122,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         for combatant in encounter.get("combatants", []):
             if combatant.get("actor_id") == actor_id:
                 combatant["conditions"] = list(sheet.get("conditions") or [])
+                if "turned" not in {
+                    str(item).casefold() for item in combatant["conditions"]
+                }:
+                    combatant.pop("turned", None)
                 return
 
     def add_concentration_window(
@@ -3112,6 +3117,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 sheet = ended.sheet
                 rule_receipts.extend(ended.receipts)
             expired_effects.update(expired)
+            sync_combatant_conditions(next_state["combat"], target_id, sheet)
             combat_updates.append(
                 CharacterStateUpdate(
                     character_id=target_id,
@@ -4093,6 +4099,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             movement_boundary_ids.append("dnd5e.core.movement.prone_crawl_stand")
         if "grappled" in moving_conditions:
             movement_boundary_ids.append("dnd5e.core.movement.grapple_source")
+        if "turned" in moving_conditions:
+            movement_boundary_ids.append("dnd5e.core.activity.turn_undead")
         if destination is not None:
             movement_boundary_ids.append("dnd5e.core.movement.occupied_destination")
         if any(
@@ -4211,7 +4219,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         branch_id: str | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
-        """Settle Dash, Disengage, Dodge, Help, Hide, Search, or Ready action payment."""
+        """Settle a common action payment, including a turned creature's escape attempt."""
         access.require_actor(campaign_id, actor_id, principal_id, control=True)
         require_write_contract(expected_revision, idempotency_key)
         resolved_branch_id = require_current_branch(campaign_id, branch_id)
@@ -4247,14 +4255,22 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             payload=payload,
         )
         normalized_action = str(action).strip().lower().replace("-", "_")
-        action_receipts = (
-            core_receipts(
-                effective_rule_context(campaign_id),
-                ["dnd5e.core.ready.action"],
-                "action.ready",
-            )
-            if normalized_action == "ready"
-            else []
+        boundary_ids: list[str] = []
+        if normalized_action == "ready":
+            boundary_ids.append("dnd5e.core.ready.action")
+        acting_combatant = next(
+            item
+            for item in encounter.get("combatants", [])
+            if item.get("actor_id") == actor_id
+        )
+        if "turned" in {
+            str(item).casefold() for item in acting_combatant.get("conditions", [])
+        }:
+            boundary_ids.append("dnd5e.core.activity.turn_undead")
+        action_receipts = core_receipts(
+            effective_rule_context(campaign_id),
+            boundary_ids,
+            f"action.{normalized_action}",
         )
         next_state = {**dict(campaign.state or {}), "combat": next_encounter}
         revisions_result = StateMutationService(storage.database).replace(
@@ -5375,7 +5391,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         branch_id: str | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
-        """Pay one structured activity's resource and activation timing, never its prose outcome."""
+        """Pay an activity and settle supported Core outcomes; return rulings for the rest."""
         access.require_actor(campaign_id, actor_id, principal_id, control=True)
         require_write_contract(expected_revision, idempotency_key)
         resolved_branch_id = require_current_branch(campaign_id, branch_id)
@@ -5402,6 +5418,111 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             facts={"actor_id": actor_id, "activity_id": activity_id},
             branch_id=resolved_branch_id,
         )
+        turn_undead = (
+            activity_id == "dnd5e.content.srd2014.feature.cleric-channel-divinity"
+            and str(dict(declaration or {}).get("option") or "")
+            .strip()
+            .casefold()
+            .replace(" ", "_")
+            == "turn_undead"
+        )
+        turn_targets: dict[str, Any] = {}
+        turn_target_records: dict[str, Any] = {}
+        if turn_undead:
+            if not is_dm(campaign_id, principal_id):
+                raise PermissionError("Turn Undead multi-actor settlement requires the DM")
+            declared = dict(declaration or {})
+            if set(declared) != {"option", "perception"}:
+                raise CombatEngineError(
+                    "Turn Undead declaration requires only option and perception"
+                )
+            perceptions = declared.get("perception")
+            if not isinstance(perceptions, list):
+                raise CombatEngineError("Turn Undead perception must be a list")
+            source_combatant = next(
+                (
+                    item
+                    for item in encounter.get("combatants", [])
+                    if item.get("actor_id") == actor_id
+                ),
+                None,
+            )
+            source_position = dict((source_combatant or {}).get("position") or {})
+            if set(source_position) != {"x", "y"}:
+                raise NeedsRulingError(
+                    "Turn Undead requires the cleric's battle-map position",
+                    missing=("turn_undead_source_position",),
+                )
+            eligible: dict[str, Any] = {}
+            for combatant in encounter.get("combatants", []):
+                target_id = str(combatant.get("actor_id") or "")
+                if target_id == actor_id or "dead" in {
+                    str(item).casefold() for item in combatant.get("conditions", [])
+                }:
+                    continue
+                target = characters.get(target_id)
+                creature_type = str(
+                    target.sheet.get("progression", {}).get("species") or ""
+                ).casefold()
+                if "undead" not in creature_type:
+                    continue
+                target_position = dict(combatant.get("position") or {})
+                if set(target_position) != {"x", "y"}:
+                    raise NeedsRulingError(
+                        "Turn Undead requires each undead target's battle-map position",
+                        missing=(f"turn_undead_target_position:{target_id}",),
+                    )
+                distance = max(
+                    abs(int(source_position["x"]) - int(target_position["x"])),
+                    abs(int(source_position["y"]) - int(target_position["y"])),
+                ) * 5
+                if distance <= 30:
+                    eligible[target_id] = {"record": target, "distance_ft": distance}
+            normalized_perception: dict[str, dict[str, Any]] = {}
+            for item in perceptions:
+                if not isinstance(item, dict) or set(item) - {
+                    "target_id",
+                    "can_see_or_hear",
+                    "reason",
+                }:
+                    raise CombatEngineError(
+                        "each Turn Undead perception entry requires target_id, "
+                        "can_see_or_hear, and optional reason"
+                    )
+                target_id = str(item.get("target_id") or "")
+                if target_id in normalized_perception or target_id not in eligible:
+                    raise CombatEngineError(
+                        "Turn Undead perception targets must be unique eligible undead"
+                    )
+                can_perceive = item.get("can_see_or_hear")
+                if not isinstance(can_perceive, bool):
+                    raise CombatEngineError("can_see_or_hear must be boolean")
+                reason = str(item.get("reason") or "").strip()
+                if not can_perceive and not reason:
+                    raise CombatEngineError(
+                        "an excluded Turn Undead target requires a sensory reason"
+                    )
+                normalized_perception[target_id] = {
+                    "target_id": target_id,
+                    "can_see_or_hear": can_perceive,
+                    "reason": reason,
+                    "distance_ft": eligible[target_id]["distance_ft"],
+                }
+            if set(normalized_perception) != set(eligible):
+                raise CombatEngineError(
+                    "Turn Undead must adjudicate every living undead within 30 feet"
+                )
+            for target_id, perception in normalized_perception.items():
+                if not perception["can_see_or_hear"]:
+                    continue
+                target = eligible[target_id]["record"]
+                access.require_actor(campaign_id, target_id, principal_id, control=True)
+                turn_target_records[target_id] = target
+                turn_targets[target_id] = combat_actor_snapshot(target_id)
+            if not turn_targets:
+                raise CombatEngineError(
+                    "Turn Undead has no undead within 30 feet that can see or hear the cleric"
+                )
         try:
             applied = consume_activity(
                 current.sheet,
@@ -5460,6 +5581,48 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             activity_id=activity_id,
             declaration=declaration,
         )
+        additional_updates: list[CharacterStateUpdate] = []
+        if turn_undead:
+            source_actor = combat_actor_snapshot(actor_id)
+            source_actor["sheet"] = applied["sheet"]
+            source_actor["derived"] = derive_character_sheet(applied["sheet"])
+            settled_turn = resolve_turn_undead_to_sheets(
+                source_actor,
+                turn_targets,
+                rules=rule_context,
+            )
+            for target_result in settled_turn["targets"]:
+                target_id = str(target_result["target_id"])
+                if not target_result["turned"]:
+                    continue
+                target_sheet = validate_character_sheet(settled_turn["sheets"][target_id])
+                sync_combatant_conditions(next_encounter, target_id, target_sheet)
+                target_combatant = next(
+                    item
+                    for item in next_encounter["combatants"]
+                    if item.get("actor_id") == target_id
+                )
+                target_combatant["turned"] = {
+                    "source_actor_id": actor_id,
+                    "effect_id": target_result["effect_id"],
+                }
+                target_combatant.setdefault("turn_budget", {})["reaction"] = 0
+                target = turn_target_records[target_id]
+                additional_updates.append(
+                    CharacterStateUpdate(
+                        character_id=target_id,
+                        sheet=target_sheet,
+                        notes=validate_character_notes(target.notes),
+                        expected_revision=target.revision,
+                    )
+                )
+            core_effect = {
+                "kind": "turn_undead",
+                "save_dc": settled_turn["save_dc"],
+                "duration": settled_turn["duration"],
+                "targets": settled_turn["targets"],
+                "requires_ruling": False,
+            }
         if activity_id == "dnd5e.content.srd2014.feature.fighter-second-wind":
             second_wind = resolve_second_wind_to_sheet(applied["sheet"])
             applied["sheet"] = second_wind.pop("sheet")
@@ -5471,6 +5634,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "action_surge": "dnd5e.core.activity.action_surge",
                 "cunning_action": "dnd5e.core.activity.cunning_action",
                 "second_wind": "dnd5e.core.activity.second_wind",
+                "turn_undead": "dnd5e.core.activity.turn_undead",
             }[str(core_effect["kind"])]
             applied["rule_receipts"] = [
                 *list(applied.get("rule_receipts") or []),
@@ -5508,7 +5672,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     sheet=validate_character_sheet(applied["sheet"]),
                     notes=validate_character_notes(current.notes),
                     expected_revision=current.revision,
-                )
+                ),
+                *additional_updates,
             ],
             expected_campaign_revision=campaign.revision,
             operation="combat.activity.use",

@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 from mcp.server.fastmcp.exceptions import ToolError
+from sagasmith_dnd.character_schema import default_character_sheet
 
 import sagasmith_dnd_mcp.server as server_module
 from sagasmith_dnd_mcp.config import McpConfig
@@ -1318,12 +1319,15 @@ def test_positioned_movement_opens_and_resolves_an_owned_reaction(tmp_path: Path
             "campaign_create",
             {"name": "Grid", "idempotency_key": "create-grid"},
         )
+        mover_sheet = default_character_sheet()
+        mover_sheet["combat"]["hp"] = {"value": 20, "max": 20, "temp": 0}
         mover = await call(
             server,
             "character_create",
             {
                 "name": "Mover",
                 "campaign_id": campaign["id"],
+                "sheet": mover_sheet,
                 "idempotency_key": "create-mover",
             },
         )
