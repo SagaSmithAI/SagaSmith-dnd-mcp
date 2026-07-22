@@ -2149,6 +2149,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "stable_campaign_fact_identity": True,
                 "atomic_continuity_commit": True,
                 "skill_manifest_checksums": True,
+                "validated_module_runtime_manifest": True,
             },
             "rulebook_import": {
                 "stages": [
@@ -2207,6 +2208,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "page_extraction_cache": "content-addressed",
                 "text_extractor": "pypdfium2",
                 "ocr_provider": "rapidocr" if config.module_ocr_enabled else None,
+                "runtime_manifest_schema": 1,
             },
             "write_requirements": ["principal_id", "expected_revision", "idempotency_key"],
             "tool_exposure": {

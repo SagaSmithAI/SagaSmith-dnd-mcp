@@ -64,6 +64,9 @@ def test_skill_catalog_reads_both_repositories(tmp_path: Path) -> None:
     modulegen.mkdir()
     (dnd / "full" / "skills" / "dnd-dm" / "SKILL.md").write_text("# D&D DM\n", encoding="utf-8")
     (modulegen / "SKILL.md").write_text("# Module Generator\n", encoding="utf-8")
+    shadow = modulegen / ".agents" / "skills" / "modulegen"
+    shadow.mkdir(parents=True)
+    (shadow / "SKILL.md").write_text("# Stale Shadow\n", encoding="utf-8")
     catalog = SkillCatalog(dnd_root=dnd, modulegen_root=modulegen)
 
     assert [item.id for item in catalog.list()] == ["dnd.full.skills.dnd-dm", "modulegen.root"]
@@ -238,6 +241,8 @@ def test_server_capabilities_publish_the_rulebook_import_contract(tmp_path: Path
         assert capabilities["features"]["stable_campaign_fact_identity"] is True
         assert capabilities["features"]["atomic_continuity_commit"] is True
         assert capabilities["features"]["skill_manifest_checksums"] is True
+        assert capabilities["features"]["validated_module_runtime_manifest"] is True
+        assert capabilities["module_import"]["runtime_manifest_schema"] == 1
         assert capabilities["rulebook_import"]["settlement_tools"] == {
             "play": "character_check",
             "combat": "combat_check",

@@ -35,6 +35,8 @@ class SkillCatalog:
             if not root.is_dir():
                 continue
             for path in sorted(root.rglob("SKILL.md")):
+                if self._is_install_shadow(path, root):
+                    continue
                 relative = path.relative_to(root).parent
                 suffix = "root" if relative == Path(".") else ".".join(relative.parts)
                 documents.append(
@@ -76,7 +78,9 @@ class SkillCatalog:
             if not root.is_dir():
                 continue
             paths = (
-                item for item in root.rglob("*") if item.is_file() and ".git" not in item.parts
+                item
+                for item in root.rglob("*")
+                if item.is_file() and not self._is_install_shadow(item, root)
             )
             for path in sorted(paths):
                 relative = path.relative_to(root).as_posix()
@@ -127,6 +131,11 @@ class SkillCatalog:
     @staticmethod
     def _checksum(path: Path) -> str:
         return hashlib.sha256(path.read_bytes()).hexdigest()
+
+    @staticmethod
+    def _is_install_shadow(path: Path, root: Path) -> bool:
+        """Ignore hidden package-manager mirrors such as nested .agents installs."""
+        return any(part.startswith(".") for part in path.relative_to(root).parts)
 
     @staticmethod
     def _title(path: Path, fallback: str) -> str:

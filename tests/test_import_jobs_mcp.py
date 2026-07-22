@@ -466,7 +466,12 @@ def test_module_import_facade_stages_only_allowlisted_documents(tmp_path: Path) 
     import_root.mkdir()
     source = import_root / "adventure.md"
     source.write_text(
-        "# Chapter One\n\n## Arrival\n\n#### A1. Courtyard\n30 by 20 feet\n",
+        "<!-- sagasmith-runtime-manifest\n"
+        '{"schema_version":1,"module_key":"managed-adventure",'
+        '"entities":[{"id":"npc:keeper"}],'
+        '"clues":[{"id":"clue:seal","trigger":"inspect the seal"}]}\n'
+        "-->\n# Chapter One\n\n## Arrival\n\n"
+        "#### A1. Courtyard\n30 by 20 feet\n",
         encoding="utf-8",
     )
     outside = tmp_path / "outside.md"
@@ -533,6 +538,9 @@ def test_module_import_facade_stages_only_allowlisted_documents(tmp_path: Path) 
         )
         assert inspected["preview"]["valid"] is True
         assert inspected["preview"]["metadata"]["normalization_cache_hit"] is True
+        assert inspected["preview"]["profile_metadata"]["runtime_manifest"][
+            "module_key"
+        ] == "managed-adventure"
         validated = await call(
             server,
             "module_import",
@@ -567,6 +575,12 @@ def test_module_import_facade_stages_only_allowlisted_documents(tmp_path: Path) 
             },
         )
         assert activated["activation"]["module_id"] == ingested["module_id"]
+        listed = await call(
+            server,
+            "module_query",
+            {"campaign_id": campaign["id"], "view": "list"},
+        )
+        assert listed[0]["runtime_manifest"]["module_key"] == "managed-adventure"
 
     asyncio.run(exercise())
 
