@@ -1,6 +1,8 @@
 import asyncio
 from pathlib import Path
 
+import pytest
+
 from sagasmith_dnd_mcp.config import McpConfig
 from sagasmith_dnd_mcp.server import create_server
 
@@ -344,6 +346,42 @@ def test_statblock_spellcasting_binds_slots_and_active_content(tmp_path: Path) -
             "source": "rule-source:module/master-of-souls",
             "component_details": "not_repeated_in_statblock",
         }
+        ray_id = spells["Ray of Sickness"]["id"]
+        with pytest.raises(Exception, match="source_components_confirmed"):
+            await _call(
+                server,
+                "character_cast_spell",
+                {
+                    "character_id": actor["id"],
+                    "spell_id": ray_id,
+                    "expected_revision": actor["revision"],
+                    "idempotency_key": "cast-without-component-ruling",
+                },
+            )
+        cast = await _call(
+            server,
+            "character_cast_spell",
+            {
+                "character_id": actor["id"],
+                "spell_id": ray_id,
+                "component_ruling": {"source_components_confirmed": True},
+                "expected_revision": actor["revision"],
+                "idempotency_key": "cast-with-component-ruling",
+            },
+        )
+        assert cast["status"] == "committed"
+        assert cast["payment"] == {
+            "economy": "slots",
+            "level": 1,
+            "ritual": False,
+        }
+        assert "source_components" in cast["ruling_required"]
+        updated_actor = await _call(
+            server,
+            "character_query",
+            {"view": "get", "payload": {"character_id": actor["id"]}},
+        )
+        assert updated_actor["sheet"]["spellcasting"]["spell_slots"]["1"]["value"] == 3
         assert [
             item["item_id"] for item in actor["derived"]["inventory"]["weapon_attacks"]
         ] == ["silvered-skull-flail"]
