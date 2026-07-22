@@ -108,7 +108,8 @@ TOOL_GROUPS = (
         "lobby.characters",
         PROFILE_LOBBY,
         "Character building",
-        "Create characters and apply structured sheets, content, inventory and prepared spells.",
+        "Inspect source documents, create characters, and apply structured sheets, content, "
+        "inventory and prepared spells.",
         "write",
         "character_create_from",
         "character_query",

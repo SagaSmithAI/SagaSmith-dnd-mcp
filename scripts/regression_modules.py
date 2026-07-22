@@ -249,7 +249,12 @@ async def _import_document(
     )
     campaign_id = str(campaign["id"])
     await client.open(campaign_id)
-    await client.load("lobby.campaign", "lobby.rules", "lobby.modules")
+    await client.load(
+        "lobby.campaign",
+        "lobby.rules",
+        "lobby.modules",
+        "lobby.characters",
+    )
 
     profile = await client.domain(
         "campaign_rules", {"campaign_id": campaign_id, "action": "get_profile"}
@@ -257,6 +262,33 @@ async def _import_document(
     explained = await client.domain(
         "campaign_rules", {"campaign_id": campaign_id, "action": "explain"}
     )
+    document_inspection = await client.domain(
+        "character_query",
+        {
+            "view": "document",
+            "payload": {
+                "campaign_id": campaign_id,
+                "source_path": str(path),
+            },
+        },
+    )
+    if document_inspection.get("document_kind") != "unknown":
+        return {
+            "relative_path": relative,
+            "document_role": document_inspection["document_kind"],
+            "campaign_id": campaign_id,
+            "checksum": (document_inspection.get("source") or {}).get("checksum"),
+            "page_count": (document_inspection.get("source") or {}).get("page_count"),
+            "character_document": document_inspection,
+            "core_profile": {
+                "edition": ((profile.get("profile") or {}).get("edition")),
+                "campaign_revision": profile.get("campaign_revision"),
+                "effective_fingerprint": (profile.get("effective") or {}).get("fingerprint"),
+                "core_pack": (profile.get("effective") or {}).get("core_pack"),
+                "explain_core_pack": ((explained.get("effective") or {}).get("core_pack")),
+            },
+            "seconds": round(perf_counter() - started, 3),
+        }
     stage_started = perf_counter()
     staged = await client.domain(
         "module_import",
@@ -364,6 +396,7 @@ async def _import_document(
 
     return {
         "relative_path": relative,
+        "document_role": "module",
         "campaign_id": campaign_id,
         "module_id": module_id,
         "job_id": job_id,

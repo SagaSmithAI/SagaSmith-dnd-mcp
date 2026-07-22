@@ -7,6 +7,7 @@ import json
 import re
 from copy import deepcopy
 from dataclasses import asdict
+from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
 from weakref import WeakValueDictionary
@@ -35,6 +36,7 @@ from sagasmith_core import (
     SnapshotService,
     StateMutationService,
     default_local_principal,
+    normalize_document,
     render_pdf_page,
 )
 from sagasmith_core.idempotency import request_hash
@@ -48,6 +50,7 @@ from sagasmith_dnd.ability_generation import (
     roll_ability_scores,
 )
 from sagasmith_dnd.activities import ActivityError, consume_activity
+from sagasmith_dnd.character_import import inspect_character_document
 from sagasmith_dnd.character_schema import (
     add_effect,
     add_inventory_item,
@@ -10830,10 +10833,24 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         replay = replay_idempotent(scope, idempotency_key, payload)
         if replay is not None:
             return replay
+        document = normalize_document(
+            path,
+            ocr_provider=storage.module_ocr_provider(),
+            cache_dir=config.normalized_modules_dir,
+        )
+        document_inspection = inspect_character_document(
+            document,
+            source_name=path.name,
+        )
+        if document_inspection["document_kind"] != "unknown":
+            raise ValueError(
+                "character sheets and ability-score option documents are not modules; "
+                "use character_query(view='document')"
+            )
         preview = modules.preview_path(
             path,
             parser=MarkdownModuleParser(profile=DndModuleProfile()),
-            **module_document_options(),
+            **module_document_options(document.checksum),
         )
         job = import_jobs.create(
             campaign_id=campaign_id,
@@ -14162,16 +14179,51 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
 
     @mcp.tool()
     def character_query(
-        view: Literal["get", "list", "library"] = "list",
+        view: Literal["get", "list", "library", "document"] = "list",
         payload: dict[str, Any] | None = None,
         principal_id: str = "system:local",
     ) -> dict[str, Any]:
-        """Read a character, campaign roster, or reusable character library."""
+        """Read characters or inspect an allowlisted character document without inventing data."""
         data = facade_payload(payload)
         if view == "get":
             result = character_get(required(data, "character_id"), principal_id)
         elif view == "library":
             result = character_library_list(data.get("character_type"), principal_id)
+        elif view == "document":
+            campaign_id = str(required(data, "campaign_id"))
+            access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+            staged = storage.stage_module(str(required(data, "source_path")))
+            expected_checksum = str(data.get("expected_checksum") or "").strip()
+            if expected_checksum and expected_checksum != staged["checksum"]:
+                raise ValueError("character document checksum does not match expected_checksum")
+            document = normalize_document(
+                staged["path"],
+                ocr_provider=storage.module_ocr_provider(),
+                cache_dir=config.normalized_modules_dir,
+                expected_checksum=str(staged["checksum"]),
+            )
+            inspection = inspect_character_document(
+                document,
+                source_name=Path(str(data["source_path"])).name,
+            )
+            result = {
+                **inspection,
+                "artifact": {
+                    key: value
+                    for key, value in staged.items()
+                    if key not in {"path", "staged"}
+                },
+                "workflow": {
+                    "next": (
+                        "complete_missing_fields_then_character_create_from"
+                        if not inspection["ready_to_create"]
+                        else "character_create_from"
+                    ),
+                    "creation_tool": "character_create_from(mode='build')",
+                    "content_tool": "character_content_apply",
+                    "module_import_allowed": False,
+                },
+            }
         else:
             result = character_list(data.get("campaign_id"), principal_id)
         return facade_result(view, result)
