@@ -7137,7 +7137,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             raise CombatEngineError("rest is not allowed while combat is active")
         if expected_revision is None or not idempotency_key:
             raise ValueError("expected_revision and idempotency_key are required for rest")
-        if prepared_spell_ids is not None and str(rest_type).replace("-", "_") != "long_rest":
+        normalized_rest_type = str(rest_type).strip().lower().replace("-", "_")
+        if normalized_rest_type not in {"short_rest", "long_rest"}:
+            raise CombatEngineError("rest_type must be short_rest or long_rest")
+        if prepared_spell_ids is not None and normalized_rest_type != "long_rest":
             raise CombatEngineError("prepared spells can be changed only as part of a long rest")
         payload = {
             "character_id": character_id,
@@ -7152,24 +7155,42 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         replay = replay_idempotent(scope, idempotency_key, payload)
         if replay is not None:
             return replay
+        if current.revision != expected_revision:
+            raise ValueError(f"character revision conflict: {character_id}")
+        hp = int(dict(current.sheet.get("combat", {}).get("hp") or {}).get("value", 0) or 0)
+        conditions = {str(item).casefold() for item in current.sheet.get("conditions", [])}
+        if hp <= 0 or "dead" in conditions:
+            raise CombatEngineError("a creature at 0 hit points or dead cannot benefit from a rest")
         rest_rules = effective_rule_context(
             current.campaign_id,
-            facts={"actor_id": character_id, "rest_type": rest_type},
+            facts={"actor_id": character_id, "rest_type": normalized_rest_type},
         )
         applied = apply_rest(
             current.sheet,
-            rest_type=rest_type,
+            rest_type=normalized_rest_type,
             hit_dice_spends=hit_dice_spends,
             hit_dice_recovery=hit_dice_recovery,
             food_and_drink=food_and_drink,
             rules=rest_rules,
         )
         if applied.get("status") in {"pending_choice", "pending_ruling"}:
-            return {
+            response = {
                 "status": applied["status"],
-                "result": {key: value for key, value in applied.items() if key != "sheet"},
+                "result": {
+                    key: value
+                    for key, value in applied.items()
+                    if key not in {"sheet", "hit_dice_rolls"}
+                },
+                "hit_dice_rolls": list(applied.get("hit_dice_rolls") or []),
                 "character": character_view(current),
             }
+            return remember_idempotent(
+                scope,
+                idempotency_key,
+                payload,
+                response,
+                campaign_id=current.campaign_id,
+            )
         preparation_result = None
         if prepared_spell_ids is not None:
             preparation_result = replace_prepared_spells(
@@ -7186,7 +7207,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     expected_revision=expected_revision,
                 )
             ],
-            operation=f"character.rest.{rest_type}",
+            operation=f"character.rest.{normalized_rest_type}",
             actor=principal_id,
             branch_id=branch_id,
             idempotency_key=idempotency_key,
@@ -7205,7 +7226,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         response = {
             "status": applied["status"],
-            "result": {key: value for key, value in applied.items() if key != "sheet"},
+            "result": {
+                key: value
+                for key, value in applied.items()
+                if key not in {"sheet", "hit_dice_rolls"}
+            },
+            "hit_dice_rolls": list(applied.get("hit_dice_rolls") or []),
             "preparation": (
                 {key: value for key, value in preparation_result.items() if key != "sheet"}
                 if preparation_result is not None
