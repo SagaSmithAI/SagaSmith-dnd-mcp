@@ -68,6 +68,11 @@ def test_skill_catalog_reads_both_repositories(tmp_path: Path) -> None:
 
     assert [item.id for item in catalog.list()] == ["dnd.full.skills.dnd-dm", "modulegen.root"]
     assert catalog.read("modulegen.root") == "# Module Generator\n"
+    assert all(len(item.checksum) == 64 for item in catalog.list())
+    assert catalog.manifest() == [
+        {"id": item.id, "source": item.source, "checksum": item.checksum}
+        for item in catalog.list()
+    ]
 
 
 def test_skill_catalog_exposes_references_and_templates_as_assets(tmp_path: Path) -> None:
@@ -87,6 +92,7 @@ def test_skill_catalog_exposes_references_and_templates_as_assets(tmp_path: Path
         "modulegen:template.md",
     ]
     assert catalog.read_asset("dnd:full/references/workflow.md") == "workflow"
+    assert all(len(item.checksum) == 64 for item in catalog.assets())
     resource_id = catalog.resource_id("dnd:full/references/workflow.md")
     assert catalog.read_resource_asset(resource_id) == "workflow"
 
@@ -229,6 +235,9 @@ def test_server_capabilities_publish_the_rulebook_import_contract(tmp_path: Path
         )
         assert capabilities["features"]["player_safe_scene_scopes"] is True
         assert capabilities["features"]["player_safe_combat_maps"] is True
+        assert capabilities["features"]["stable_campaign_fact_identity"] is True
+        assert capabilities["features"]["atomic_continuity_commit"] is True
+        assert capabilities["features"]["skill_manifest_checksums"] is True
         assert capabilities["rulebook_import"]["settlement_tools"] == {
             "play": "character_check",
             "combat": "combat_check",
