@@ -207,6 +207,10 @@ def test_source_cited_check_persists_result_and_explicit_knowledge() -> None:
                     item["proposition"] == "The trail shows twelve goblins and two captives."
                     for item in arguments["payload"]["actor_knowledge"]
                 )
+                assert all(
+                    ".ability.survival.actor-" in item["knowledge_key"]
+                    for item in arguments["payload"]["actor_knowledge"]
+                )
                 assert arguments["payload"]["event"]["payload"]["source_ref"] == source_ref
                 self.revision += 1
                 return {"event": {"id": "event-1"}, "snapshot": {"slot": 3}}

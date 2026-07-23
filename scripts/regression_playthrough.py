@@ -537,7 +537,7 @@ async def _resolve_check(
             "current_location_key": location_key,
             "expected_state_version": int((progress_before or {}).get("state_version", 0) or 0),
             "idempotency_key": _mutation_key(
-                run_id, "scene-progress", f"{scene_id}:{kind}:{actor_id}"
+                run_id, "scene-progress", f"{scene_id}:{kind}:{ability}:{actor_id}"
             ),
         },
     )
@@ -561,7 +561,7 @@ async def _resolve_check(
             "branch_id": str(branch["id"]),
             "expected_revision": campaign["revision"],
             "idempotency_key": _mutation_key(
-                run_id, "character-check", f"{scene_id}:{kind}:{actor_id}"
+                run_id, "character-check", f"{scene_id}:{kind}:{ability}:{actor_id}"
             ),
         },
     )
@@ -602,7 +602,8 @@ async def _resolve_check(
                     {
                         "actor_id": recipient,
                         "knowledge_key": (
-                            f"playthrough.{_token(run_id)}.{_token(scene_id)}.{_token(kind)}"
+                            f"playthrough.{_token(run_id)}.{_token(scene_id)}."
+                            f"{_token(kind)}.{_token(ability)}.{_token(actor_id)}"
                         ),
                         "proposition": proposition,
                         "disclosure_scope": "owner",
@@ -613,7 +614,9 @@ async def _resolve_check(
                 "branch_id": str(branch["id"]),
             },
             "expected_revision": campaign["revision"],
-            "idempotency_key": _mutation_key(run_id, "continuity", f"{scene_id}:{kind}:{actor_id}"),
+            "idempotency_key": _mutation_key(
+                run_id, "continuity", f"{scene_id}:{kind}:{ability}:{actor_id}"
+            ),
         },
     )
     synced = await _manifest_mutation(
@@ -621,7 +624,7 @@ async def _resolve_check(
         campaign_id=campaign_id,
         action="sync",
         run_id=run_id,
-        identity=f"resolve-check-sync:{scene_id}:{kind}:{actor_id}",
+        identity=f"resolve-check-sync:{scene_id}:{kind}:{ability}:{actor_id}",
     )
     return {
         "scene": {
