@@ -25,6 +25,7 @@ from scripts.regression_playthrough import (
     _recover_committed_check,
     _resolve_check,
     _scene_progress_percent,
+    _stand_after_source_event,
     _start_play,
 )
 
@@ -465,6 +466,75 @@ def test_source_damage_rolls_then_damages_and_knocks_prone_through_public_tools(
     assert result["damage"]["result"]["after_hp"] == 6
     assert result["prone"]["status"] == "knocked_prone"
     assert result["character"]["sheet"]["conditions"] == ["prone"]
+    assert result["knowledge_actor_ids"] == ["actor-1", "actor-2"]
+
+
+def test_source_event_stand_uses_validated_public_character_action() -> None:
+    source_ref = {
+        "module_id": "module-1",
+        "scene_id": "scene-1",
+        "chunk_id": "chunk-1",
+        "page_start": 8,
+        "page_end": 9,
+        "heading_path": ["3. KENNEL"],
+        "content_sha256": "abc",
+    }
+
+    class Client:
+        revision = 20
+
+        async def core(self, tool_id: str, arguments: dict):
+            assert tool_id == "campaign_query"
+            return {"result": {"id": "campaign-1", "revision": self.revision}}
+
+        async def domain(self, tool_id: str, arguments: dict):
+            if tool_id == "module_query":
+                return {
+                    "module_id": "module-1",
+                    "scene_id": "scene-1",
+                    "content": "The character lands prone at the base of the shaft.",
+                    "locations": [{"key": "3-kennel"}],
+                }
+            if tool_id == "character_query":
+                return {
+                    "id": "actor-1",
+                    "name": "Scout",
+                    "campaign_id": "campaign-1",
+                    "revision": 4,
+                }
+            if tool_id == "character_state_change":
+                assert arguments["action"] == "stand"
+                assert arguments["expected_revision"] == 4
+                self.revision += 1
+                return {"status": "stood", "character": {"revision": 5}}
+            if tool_id == "branch_query":
+                return [{"id": "branch-1", "is_current": True}]
+            if tool_id == "continuity_commit":
+                assert arguments["payload"]["event"]["payload"]["source_ref"] == source_ref
+                self.revision += 1
+                return {"event": {"id": "event-1"}, "snapshot": {"slot": 3}}
+            if tool_id == "playthrough_manifest":
+                return {
+                    "manifest": {"status": "in_progress"},
+                    "campaign_revision": self.revision,
+                }
+            raise AssertionError((tool_id, arguments))
+
+    result = asyncio.run(
+        _stand_after_source_event(
+            Client(),
+            campaign_id="campaign-1",
+            run_id="run-1",
+            scene_id="scene-1",
+            location_key="3-kennel",
+            source_excerpt="The character lands prone at the base of the shaft.",
+            source_ref=source_ref,
+            actor_id="actor-1",
+            knowledge_actor_ids=["actor-2"],
+        )
+    )
+
+    assert result["stand"]["status"] == "stood"
     assert result["knowledge_actor_ids"] == ["actor-1", "actor-2"]
 
 

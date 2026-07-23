@@ -38,6 +38,7 @@ def _arguments() -> argparse.Namespace:
             "record-event",
             "resolve-check",
             "apply-damage",
+            "stand-up",
             "award-xp",
             "configure-advancement",
             "refresh-module",
@@ -80,6 +81,7 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--damage-type", default="")
     parser.add_argument("--damage-reason", default="")
     parser.add_argument("--damage-knock-prone", action="store_true")
+    parser.add_argument("--stand-actor-id", default="")
     parser.add_argument("--event-type", default="")
     parser.add_argument("--event-summary", default="")
     parser.add_argument("--event-knowledge", default="")
@@ -1151,6 +1153,126 @@ async def _apply_source_damage(
     }
 
 
+async def _stand_after_source_event(
+    client: ExposureClient,
+    *,
+    campaign_id: str,
+    run_id: str,
+    scene_id: str,
+    location_key: str,
+    source_excerpt: str,
+    source_ref: dict[str, Any] | None,
+    actor_id: str,
+    knowledge_actor_ids: list[str],
+) -> dict[str, Any]:
+    if not all((scene_id, location_key, source_excerpt, actor_id)):
+        raise ValueError("stand-up requires scene, location, excerpt, and actor")
+    scene = await client.domain(
+        "module_query",
+        {
+            "campaign_id": campaign_id,
+            "view": "scene",
+            "payload": {"scene_id": scene_id},
+        },
+    )
+    exact_ref = _validate_source_ref(scene, source_ref, excerpt=source_excerpt)
+    if location_key not in {
+        str(item.get("key") or "") for item in _scene_locations(scene)
+    }:
+        raise ValueError("stand-up location is not present in the scene atlas")
+    actor = await client.domain(
+        "character_query",
+        {"view": "get", "payload": {"character_id": actor_id}},
+    )
+    if actor.get("campaign_id") != campaign_id:
+        raise ValueError("stand-up actor does not belong to the campaign")
+    stood = await client.domain(
+        "character_state_change",
+        {
+            "character_id": actor_id,
+            "action": "stand",
+            "expected_revision": actor["revision"],
+            "idempotency_key": _mutation_key(
+                run_id, "source-event-stand", f"{scene_id}:{actor_id}"
+            ),
+        },
+    )
+    branches = await client.domain(
+        "branch_query",
+        {"campaign_id": campaign_id, "view": "list"},
+    )
+    branch = next((item for item in branches if item.get("is_current")), None)
+    if branch is None:
+        raise RuntimeError("campaign has no current branch")
+    recipients = list(dict.fromkeys([actor_id, *knowledge_actor_ids]))
+    campaign = await _campaign(client, campaign_id)
+    committed = await client.domain(
+        "continuity_commit",
+        {
+            "campaign_id": campaign_id,
+            "payload": {
+                "event": {
+                    "summary": (
+                        f"{actor['name']} stood after the source-cited Prone result "
+                        f"at {location_key}."
+                    ),
+                    "event_type": "stand",
+                    "audience_scope": "party",
+                    "payload": {
+                        "scene_id": scene_id,
+                        "location_key": location_key,
+                        "actor_id": actor_id,
+                        "source_excerpt": source_excerpt,
+                        "source_ref": exact_ref,
+                    },
+                },
+                "actor_knowledge": [
+                    {
+                        "actor_id": recipient,
+                        "knowledge_key": (
+                            f"playthrough.{_token(run_id)}.{_token(scene_id)}."
+                            f"{_token(actor_id)}.stand"
+                        ),
+                        "proposition": (
+                            f"{actor['name']} recovered from the fall and stood at "
+                            f"the chimney base."
+                        ),
+                        "disclosure_scope": "owner",
+                    }
+                    for recipient in recipients
+                ],
+                "snapshot": {
+                    "label": f"Full playthrough stand: {actor['name']} at {location_key}"
+                },
+                "branch_id": str(branch["id"]),
+            },
+            "expected_revision": campaign["revision"],
+            "idempotency_key": _mutation_key(
+                run_id, "source-event-stand-continuity", f"{scene_id}:{actor_id}"
+            ),
+        },
+    )
+    synced = await _manifest_mutation(
+        client,
+        campaign_id=campaign_id,
+        action="sync",
+        run_id=run_id,
+        identity=f"source-event-stand-sync:{scene_id}:{actor_id}",
+    )
+    return {
+        "scene": {
+            "scene_id": scene_id,
+            "location_key": location_key,
+            "source_ref": exact_ref,
+        },
+        "actor": {"id": actor_id, "name": actor["name"]},
+        "stand": stood,
+        "knowledge_actor_ids": recipients,
+        "continuity": committed,
+        "sync": synced,
+    }
+
+
 async def _award_experience(
     client: ExposureClient,
     *,
@@ -1713,6 +1835,21 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     damage_type=args.damage_type,
                     reason=args.damage_reason,
                     knock_prone=args.damage_knock_prone,
+                    knowledge_actor_ids=args.knowledge_actor_id,
+                )
+            elif args.action == "stand-up":
+                if phase != "play":
+                    raise RuntimeError("stand-up requires the play phase")
+                await client.load("play.characters")
+                report["result"] = await _stand_after_source_event(
+                    client,
+                    campaign_id=args.campaign_id,
+                    run_id=args.run_id,
+                    scene_id=str(args.scene_id or ""),
+                    location_key=args.location_key,
+                    source_excerpt=args.source_excerpt,
+                    source_ref=args.source_ref_json,
+                    actor_id=args.stand_actor_id,
                     knowledge_actor_ids=args.knowledge_actor_id,
                 )
             elif args.action == "award-xp":
