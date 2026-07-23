@@ -19,6 +19,7 @@ from scripts.regression_playthrough import (
     _party_member,
     _party_selections,
     _phase_groups,
+    _record_event,
     _recover_committed_check,
     _resolve_check,
     _start_play,
@@ -371,6 +372,71 @@ def test_xp_award_uses_source_ref_and_all_exact_recipients() -> None:
     )
 
     assert [item["new_xp"] for item in result["award"]["awards"]] == [75, 75]
+
+
+def test_source_cited_automatic_event_does_not_roll() -> None:
+    source_ref = {
+        "module_id": "module-1",
+        "scene_id": "scene-1",
+        "chunk_id": "chunk-1",
+        "page_start": 7,
+        "page_end": 7,
+        "heading_path": ["Goblin Trail"],
+        "content_sha256": "abc",
+    }
+
+    class Client:
+        def __init__(self) -> None:
+            self.tools: list[str] = []
+
+        async def core(self, tool_id: str, arguments: dict):
+            self.tools.append(tool_id)
+            assert tool_id == "campaign_query"
+            return {"result": {"id": "campaign-1", "revision": 4}}
+
+        async def domain(self, tool_id: str, arguments: dict):
+            self.tools.append(tool_id)
+            if tool_id == "module_query" and arguments["view"] == "scene":
+                return {
+                    "module_id": "module-1",
+                    "scene_id": "scene-1",
+                    "content": "The lead character spots the snare automatically.",
+                    "locations": [{"key": "ambush"}],
+                }
+            if tool_id == "module_query" and arguments["view"] == "progress":
+                return []
+            if tool_id == "module_set_progress":
+                return {"state_version": 1}
+            if tool_id == "branch_query":
+                return [{"id": "branch-1", "is_current": True}]
+            if tool_id == "continuity_commit":
+                assert len(arguments["payload"]["actor_knowledge"]) == 2
+                return {"event": {"id": "event-1"}, "snapshot": {"slot": 4}}
+            if tool_id == "playthrough_manifest":
+                return {"manifest": {"status": "in_progress"}, "campaign_revision": 5}
+            raise AssertionError((tool_id, arguments))
+
+    client = Client()
+    result = asyncio.run(
+        _record_event(
+            client,
+            campaign_id="campaign-1",
+            run_id="run-1",
+            scene_id="scene-1",
+            location_key="ambush",
+            source_excerpt="The lead character spots the snare automatically.",
+            source_ref=source_ref,
+            event_type="trap_detected",
+            summary="Dorn automatically spotted the snare.",
+            knowledge="The party knows the snare's location.",
+            knowledge_actor_ids=["actor-1", "actor-2"],
+            progress_percent=65,
+        )
+    )
+
+    assert result["knowledge_actor_ids"] == ["actor-1", "actor-2"]
+    assert "character_check" not in client.tools
+    assert "dnd_dice_roll" not in client.tools
 
 
 def test_start_play_uses_public_quality_gate_phase_and_scene_tools() -> None:

@@ -35,6 +35,7 @@ def _arguments() -> argparse.Namespace:
             "sync",
             "checkpoint",
             "advance-scene",
+            "record-event",
             "resolve-check",
             "award-xp",
             "configure-advancement",
@@ -69,6 +70,11 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--knowledge-actor-id", action="append", default=[])
     parser.add_argument("--success-knowledge", default="")
     parser.add_argument("--failure-knowledge", default="")
+    parser.add_argument("--event-type", default="")
+    parser.add_argument("--event-summary", default="")
+    parser.add_argument("--event-knowledge", default="")
+    parser.add_argument("--event-knowledge-actor-id", action="append", default=[])
+    parser.add_argument("--progress-percent", type=int)
     parser.add_argument("--xp-actor-id", action="append", default=[])
     parser.add_argument("--xp-amount", type=int)
     parser.add_argument("--xp-reason", default="")
@@ -747,6 +753,141 @@ async def _resolve_check(
     }
 
 
+async def _record_event(
+    client: ExposureClient,
+    *,
+    campaign_id: str,
+    run_id: str,
+    scene_id: str,
+    location_key: str,
+    source_excerpt: str,
+    source_ref: dict[str, Any] | None,
+    event_type: str,
+    summary: str,
+    knowledge: str,
+    knowledge_actor_ids: list[str],
+    progress_percent: int | None,
+) -> dict[str, Any]:
+    if not all((scene_id, location_key, source_excerpt, event_type, summary)):
+        raise ValueError("record-event requires scene, location, excerpt, event type, and summary")
+    if bool(knowledge.strip()) != bool(knowledge_actor_ids):
+        raise ValueError(
+            "record-event knowledge text and knowledge actor ids must be provided together"
+        )
+    if progress_percent is not None and not 0 <= progress_percent <= 100:
+        raise ValueError("record-event progress percent must be between 0 and 100")
+    scene = await client.domain(
+        "module_query",
+        {
+            "campaign_id": campaign_id,
+            "view": "scene",
+            "payload": {"scene_id": scene_id},
+        },
+    )
+    exact_ref = _validate_source_ref(scene, source_ref, excerpt=source_excerpt)
+    location_keys = {str(item.get("key") or "") for item in _scene_locations(scene)}
+    if location_key not in location_keys:
+        raise ValueError("record-event location is not present in the scene atlas")
+    progress_rows = await client.domain(
+        "module_query",
+        {"campaign_id": campaign_id, "view": "progress"},
+    )
+    progress_before = next(
+        (item for item in progress_rows if item.get("scene_id") == scene_id),
+        None,
+    )
+    state = deepcopy(dict((progress_before or {}).get("state") or {}))
+    events = deepcopy(dict(state.get("full_playthrough_events") or {}))
+    event_key = _token(run_id, length=24)
+    events[event_key] = {
+        "event_type": event_type,
+        "summary": summary.strip(),
+        "source_ref": exact_ref,
+    }
+    state["full_playthrough_events"] = events
+    progress = await client.domain(
+        "module_set_progress",
+        {
+            "campaign_id": campaign_id,
+            "scene_id": scene_id,
+            "status": "completed" if progress_percent == 100 else "active",
+            "progress": (
+                progress_percent
+                if progress_percent is not None
+                else int((progress_before or {}).get("progress", 0) or 0)
+            ),
+            "state": state,
+            "current_location_key": location_key,
+            "expected_state_version": int((progress_before or {}).get("state_version", 0) or 0),
+            "idempotency_key": _mutation_key(
+                run_id, "scene-event-progress", f"{scene_id}:{event_type}"
+            ),
+        },
+    )
+    branches = await client.domain(
+        "branch_query",
+        {"campaign_id": campaign_id, "view": "list"},
+    )
+    branch = next((item for item in branches if item.get("is_current")), None)
+    if branch is None:
+        raise RuntimeError("campaign has no current branch")
+    campaign = await _campaign(client, campaign_id)
+    committed = await client.domain(
+        "continuity_commit",
+        {
+            "campaign_id": campaign_id,
+            "payload": {
+                "event": {
+                    "summary": summary.strip(),
+                    "event_type": event_type,
+                    "audience_scope": "party",
+                    "payload": {
+                        "scene_id": scene_id,
+                        "location_key": location_key,
+                        "source_excerpt": source_excerpt,
+                        "source_ref": exact_ref,
+                    },
+                },
+                "actor_knowledge": [
+                    {
+                        "actor_id": actor_id,
+                        "knowledge_key": (
+                            f"playthrough.{_token(run_id)}.{_token(scene_id)}.{_token(event_type)}"
+                        ),
+                        "proposition": knowledge.strip(),
+                        "disclosure_scope": "owner",
+                    }
+                    for actor_id in list(dict.fromkeys(knowledge_actor_ids))
+                ],
+                "snapshot": {"label": f"Full playthrough event: {summary.strip()}"},
+                "branch_id": str(branch["id"]),
+            },
+            "expected_revision": campaign["revision"],
+            "idempotency_key": _mutation_key(
+                run_id, "continuity-event", f"{scene_id}:{event_type}"
+            ),
+        },
+    )
+    synced = await _manifest_mutation(
+        client,
+        campaign_id=campaign_id,
+        action="sync",
+        run_id=run_id,
+        identity=f"record-event-sync:{scene_id}:{event_type}",
+    )
+    return {
+        "scene": {
+            "scene_id": scene_id,
+            "location_key": location_key,
+            "source_ref": exact_ref,
+        },
+        "progress": progress,
+        "continuity": committed,
+        "knowledge_actor_ids": list(dict.fromkeys(knowledge_actor_ids)),
+        "sync": synced,
+    }
+
+
 async def _award_experience(
     client: ExposureClient,
     *,
@@ -1065,6 +1206,23 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     knowledge_actor_ids=args.knowledge_actor_id,
                     success_knowledge=args.success_knowledge,
                     failure_knowledge=args.failure_knowledge,
+                )
+            elif args.action == "record-event":
+                if phase != "play":
+                    raise RuntimeError("record-event requires the play phase")
+                report["result"] = await _record_event(
+                    client,
+                    campaign_id=args.campaign_id,
+                    run_id=args.run_id,
+                    scene_id=str(args.scene_id or ""),
+                    location_key=args.location_key,
+                    source_excerpt=args.source_excerpt,
+                    source_ref=args.source_ref_json,
+                    event_type=args.event_type,
+                    summary=args.event_summary,
+                    knowledge=args.event_knowledge,
+                    knowledge_actor_ids=args.event_knowledge_actor_id,
+                    progress_percent=args.progress_percent,
                 )
             elif args.action == "award-xp":
                 if phase != "play":
