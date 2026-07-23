@@ -488,10 +488,11 @@ def _choose_party_spell(
     party_ids: list[str],
     actors: dict[str, dict[str, Any]],
     living_targets: list[str],
+    leveled_spell_available: bool = True,
 ) -> tuple[str, str] | None:
     """Choose a supported level-1 spell with an explicit auditable target."""
 
-    if actor_id not in party_ids:
+    if actor_id not in party_ids or not leveled_spell_available:
         return None
     actor = actors[actor_id]
     spells = {
@@ -1036,6 +1037,9 @@ async def _auto_run(
             party_ids=party_ids,
             actors=actors,
             living_targets=living_targets,
+            leveled_spell_available=not bool(
+                dict(combatants[actor_id].get("turn_flags") or {}).get("cast_declared")
+            ),
         )
         if spell_choice is not None:
             spell_id, spell_target_id = spell_choice

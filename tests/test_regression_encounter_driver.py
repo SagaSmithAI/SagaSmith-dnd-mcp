@@ -56,6 +56,16 @@ def test_party_spell_tactics_prioritize_recovery_then_supported_offense() -> Non
         actors=actors,
         living_targets=["goblin"],
     ) == (MAGIC_MISSILE_ID, "goblin")
+    assert (
+        _choose_party_spell(
+            "cleric",
+            party_ids=["cleric", "wizard", "ally"],
+            actors=actors,
+            living_targets=["goblin"],
+            leveled_spell_available=False,
+        )
+        is None
+    )
 
 
 def test_all_source_hostiles_defeated_is_victory_without_flee_rule() -> None:
