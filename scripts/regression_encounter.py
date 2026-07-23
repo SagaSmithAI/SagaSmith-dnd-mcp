@@ -44,6 +44,9 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--hostile-label", default="Source-defined hostiles")
     parser.add_argument("--surprise-check-report", type=Path)
     parser.add_argument("--flee-after-defeated", type=int, default=0)
+    parser.add_argument("--flee-actor-id", default="")
+    parser.add_argument("--flee-trigger-defeated-actor-id", default="")
+    parser.add_argument("--flee-source-excerpt", default="")
     parser.add_argument("--max-turns", type=int, default=200)
     parser.add_argument("--checkpoint-label", default="Encounter complete")
     return parser.parse_args()
@@ -503,6 +506,7 @@ def _current_actor_id(combat: dict[str, Any]) -> str:
 def _source_outcome(
     *,
     defeated_hostiles: int,
+    fled_hostiles: int = 0,
     hostile_count: int,
     flee_after_defeated: int,
     unresolved_party: bool,
@@ -510,7 +514,13 @@ def _source_outcome(
 ) -> tuple[str, str] | None:
     if unresolved_party:
         return None
-    if hostile_count > 0 and defeated_hostiles >= hostile_count:
+    if hostile_count > 0 and defeated_hostiles + fled_hostiles >= hostile_count:
+        if fled_hostiles:
+            return (
+                "victory",
+                f"{defeated_hostiles} source-defined hostiles were defeated and "
+                f"{fled_hostiles} followed a source instruction to flee.",
+            )
         return (
             "victory",
             f"All {hostile_count} source-defined hostiles were defeated.",
@@ -665,6 +675,24 @@ async def _auto_run(
     if str(dict(campaign.get("state") or {}).get("game_phase") or "") != "combat":
         raise RuntimeError("auto-run requires an active combat")
     branch = await _current_branch(client, args.campaign_id)
+    source_flee_ids = {
+        str(args.flee_actor_id or ""),
+        str(args.flee_trigger_defeated_actor_id or ""),
+    } - {""}
+    if bool(args.flee_actor_id) != bool(args.flee_trigger_defeated_actor_id):
+        raise ValueError(
+            "source-specific flee requires both --flee-actor-id and "
+            "--flee-trigger-defeated-actor-id"
+        )
+    if source_flee_ids and (
+        not source_flee_ids <= set(hostile_ids)
+        or args.flee_actor_id == args.flee_trigger_defeated_actor_id
+        or not str(args.flee_source_excerpt or "").strip()
+    ):
+        raise ValueError(
+            "source-specific flee actors must be distinct encounter hostiles and "
+            "require --flee-source-excerpt"
+        )
     initial_combat = await client.domain(
         "combat_query",
         {"campaign_id": args.campaign_id, "view": "status"},
@@ -705,6 +733,7 @@ async def _auto_run(
             },
         )
     turns: list[dict[str, Any]] = []
+    fled_hostile_ids: set[str] = set()
     outcome_status = ""
     outcome_summary = ""
     for sequence in range(1, args.max_turns + 1):
@@ -730,6 +759,7 @@ async def _auto_run(
         party_down = all(_hit_points(actors[actor_id]) <= 0 for actor_id in party_ids)
         outcome = _source_outcome(
             defeated_hostiles=len(defeated_hostiles),
+            fled_hostiles=len(fled_hostile_ids),
             hostile_count=len(hostile_ids),
             flee_after_defeated=args.flee_after_defeated,
             unresolved_party=bool(unresolved_party),
@@ -760,6 +790,55 @@ async def _auto_run(
         actor_id = _current_actor_id(combat)
         actor = actors[actor_id]
         actor_conditions = _conditions(actor)
+        if (
+            actor_id == args.flee_actor_id
+            and args.flee_trigger_defeated_actor_id in defeated_hostiles
+            and _hit_points(actor) > 0
+            and actor_id not in fled_hostile_ids
+        ):
+            campaign = await _campaign(client, args.campaign_id)
+            escaped = await client.domain(
+                "combat_map_patch",
+                {
+                    "campaign_id": args.campaign_id,
+                    "patches": [
+                        {
+                            "key": "combatant_visibility",
+                            "value": {
+                                "actor_id": actor_id,
+                                "hidden": True,
+                                "reason": str(args.flee_source_excerpt).strip(),
+                            },
+                        }
+                    ],
+                    "branch_id": branch["id"],
+                    "expected_revision": campaign["revision"],
+                    "idempotency_key": (
+                        f"encounter-source-flee-"
+                        f"{_token(f'{args.run_id}:{actor_id}', length=24)}"
+                    ),
+                },
+            )
+            fled_hostile_ids.add(actor_id)
+            ended_turn = await _end_turn(
+                client,
+                args,
+                str(branch["id"]),
+                actor_id,
+                sequence,
+            )
+            turns.append(
+                {
+                    "sequence": sequence,
+                    "kind": "source_flee",
+                    "actor_id": actor_id,
+                    "trigger_actor_id": args.flee_trigger_defeated_actor_id,
+                    "source_excerpt": str(args.flee_source_excerpt).strip(),
+                    "map_patch": escaped,
+                    "end_turn": ended_turn,
+                }
+            )
+            continue
         if _hit_points(actor) == 0 and actor_id in party_ids and not actor_conditions & {
             "dead",
             "stable",
@@ -815,7 +894,15 @@ async def _auto_run(
                 }
             )
             continue
-        opponents = hostile_ids if actor_id in party_ids else party_ids
+        opponents = (
+            [
+                hostile_id
+                for hostile_id in hostile_ids
+                if hostile_id not in fled_hostile_ids
+            ]
+            if actor_id in party_ids
+            else party_ids
+        )
         living_targets = [
             target_id for target_id in opponents if _hit_points(actors[target_id]) > 0
         ]
@@ -985,6 +1072,7 @@ async def _auto_run(
         "combat_exposure": opened_combat,
         "visibility_patch": visibility_patch,
         "turns": turns,
+        "fled_hostile_ids": sorted(fled_hostile_ids),
         "outcome": ended,
         "play_exposure": opened_play,
         "checkpoint": checkpoint,

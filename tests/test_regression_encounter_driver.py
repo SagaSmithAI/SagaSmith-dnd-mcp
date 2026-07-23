@@ -22,6 +22,31 @@ def test_all_source_hostiles_defeated_is_victory_without_flee_rule() -> None:
     ) == ("victory", "All 2 source-defined hostiles were defeated.")
 
 
+def test_specific_source_flee_counts_only_that_hostile_as_resolved() -> None:
+    assert _source_outcome(
+        defeated_hostiles=3,
+        fled_hostiles=1,
+        hostile_count=4,
+        flee_after_defeated=0,
+        unresolved_party=False,
+        party_down=False,
+    ) == (
+        "victory",
+        "3 source-defined hostiles were defeated and 1 followed a source instruction to flee.",
+    )
+    assert (
+        _source_outcome(
+            defeated_hostiles=2,
+            fled_hostiles=1,
+            hostile_count=4,
+            flee_after_defeated=0,
+            unresolved_party=False,
+            party_down=False,
+        )
+        is None
+    )
+
+
 def test_encounter_manifest_preserves_exact_source_count_without_scaling() -> None:
     hostile_ids = ["goblin-1", "goblin-2", "goblin-3", "goblin-4"]
     manifest = _participant_manifest(
