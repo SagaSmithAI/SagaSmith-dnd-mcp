@@ -31,6 +31,7 @@ from scripts.regression_playthrough import (
     _party_member,
     _party_selections,
     _phase_groups,
+    _prepare_narrative_npc,
     _query_source,
     _record_event,
     _record_outcome,
@@ -164,6 +165,153 @@ def test_failed_module_refresh_restores_its_entry_phase() -> None:
     assert result == {"tool_profile": "play", "campaign_revision": 13}
     assert client.phase == "play"
     assert client.loaded[-1] == ("play.scene_control", "play.scene")
+
+
+def test_narrative_npc_driver_round_trips_lobby_and_registers_manifest() -> None:
+    source_ref = {
+        "module_id": "module-1",
+        "scene_id": "scene-1",
+        "chunk_id": "chunk-1",
+        "page_start": 18,
+        "page_end": 18,
+        "heading_path": ["Part 2", "Alderleaf Farm"],
+        "content_sha256": "b" * 64,
+    }
+
+    class Client:
+        def __init__(self) -> None:
+            self.phase = "play"
+            self.revision = 20
+            self.loaded: list[tuple[str, ...]] = []
+            self.manifest = new_playthrough_manifest(
+                run_id="run-1",
+                campaign_line_id="line-1",
+                module_ids=["module-1"],
+                recommended_party_minimum=None,
+                recommended_party_maximum=None,
+                selected_party_size=None,
+                source_refs=[_manifest_source_ref()],
+            )
+            self.actor = {
+                "id": "npc-1",
+                "campaign_id": "campaign-1",
+                "character_type": "npc",
+                "name": "Qelline Alderleaf",
+                "sheet": {
+                    "adventure_state": {
+                        "status_tags": ["narrative_only", "source_bound"]
+                    }
+                },
+            }
+
+        async def open(self, campaign_id: str) -> None:
+            assert campaign_id == "campaign-1"
+
+        async def load(self, *groups: str) -> None:
+            self.loaded.append(groups)
+
+        async def core(self, tool_id: str, arguments: dict):
+            if tool_id == "campaign_query":
+                return {
+                    "result": {
+                        "id": "campaign-1",
+                        "revision": self.revision,
+                        "state": {"game_phase": self.phase},
+                    }
+                }
+            assert tool_id == "game_phase"
+            assert arguments["tool_profile"] in {"lobby", "play"}
+            self.phase = arguments["tool_profile"]
+            self.revision += 1
+            return {
+                "result": {
+                    "tool_profile": self.phase,
+                    "campaign_revision": self.revision,
+                }
+            }
+
+        async def domain(self, tool_id: str, arguments: dict):
+            if tool_id == "module_query":
+                return {
+                    "module_id": "module-1",
+                    "scene_id": "scene-1",
+                    "content": (
+                        "Qelline Alderleaf is a pragmatic farmer and can introduce Carp."
+                    ),
+                    "spatial": {"locations": [{"key": "alderleaf-farm"}]},
+                }
+            if tool_id == "branch_query":
+                return [
+                    {
+                        "id": "branch-1",
+                        "is_current": True,
+                        "head_snapshot_id": "snapshot-old",
+                    }
+                ]
+            if tool_id == "character_create_from":
+                assert self.phase == "lobby"
+                assert arguments["mode"] == "narrative_npc"
+                assert arguments["payload"]["source_ref"] == source_ref
+                return {
+                    "character": deepcopy(self.actor),
+                    "narrative_npc": {
+                        "combat_eligible": False,
+                        "combat_statblock": "not_imported",
+                        "source_ref": deepcopy(source_ref),
+                    },
+                }
+            if tool_id == "character_query":
+                assert self.phase == "play"
+                return deepcopy(self.actor)
+            if tool_id == "playthrough_manifest":
+                action = arguments["action"]
+                if action == "get":
+                    return {
+                        "manifest": deepcopy(self.manifest),
+                        "campaign_revision": self.revision,
+                    }
+                if action == "replace":
+                    self.manifest = deepcopy(arguments["payload"]["manifest"])
+                self.revision += 1
+                return {
+                    "manifest": deepcopy(self.manifest),
+                    "campaign_revision": self.revision,
+                }
+            if tool_id == "snapshot_create":
+                assert arguments["label"] == "Narrative NPC prepared: Qelline Alderleaf"
+                self.revision += 1
+                return {"id": "snapshot-new", "slot": 7}
+            if tool_id == "snapshot_query":
+                return {"valid": True, "slot": 7}
+            raise AssertionError((tool_id, arguments))
+
+    client = Client()
+    result = asyncio.run(
+        _prepare_narrative_npc(
+            client,
+            campaign_id="campaign-1",
+            run_id="run-1",
+            initial_phase="play",
+            scene_id="scene-1",
+            location_key="alderleaf-farm",
+            source_excerpt=(
+                "Qelline Alderleaf is a pragmatic farmer and can introduce Carp."
+            ),
+            source_ref=source_ref,
+            name="Qelline Alderleaf",
+            role="Pragmatic farmer and local guide.",
+            summary="Qelline hosts the party and can introduce her son Carp.",
+            faction="Phandalin",
+            relationship="helpful host",
+        )
+    )
+
+    assert client.phase == "play"
+    assert result["actor"]["id"] == "npc-1"
+    assert result["narrative_npc"]["combat_eligible"] is False
+    assert client.manifest["npcs"][0]["actor_id"] == "npc-1"
+    assert "combat_statblock=not_imported" in client.manifest["npcs"][0]["notes"]
+    assert result["checkpoint"]["verification"]["valid"] is True
 
 
 def test_shared_consumable_driver_keeps_roll_item_and_healing_in_one_transition() -> None:

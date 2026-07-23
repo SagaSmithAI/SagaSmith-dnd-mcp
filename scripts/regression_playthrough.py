@@ -58,6 +58,7 @@ def _arguments() -> argparse.Namespace:
             "query-source",
             "register-party",
             "register-replacement",
+            "prepare-narrative-npc",
             "start-play",
             "verify-ending",
         ),
@@ -166,6 +167,11 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--replacement-predecessor-id", default="")
     parser.add_argument("--replacement-actor-id", default="")
     parser.add_argument("--replacement-knowledge", action="append", default=[])
+    parser.add_argument("--narrative-npc-name", default="")
+    parser.add_argument("--narrative-npc-role", default="")
+    parser.add_argument("--narrative-npc-summary", default="")
+    parser.add_argument("--narrative-npc-faction", default="")
+    parser.add_argument("--narrative-npc-relationship", default="")
     parser.add_argument("--outcome-id", default="")
     parser.add_argument("--fact-json", action="append", type=json.loads, default=[])
     parser.add_argument("--npc-state-json", action="append", type=json.loads, default=[])
@@ -1590,6 +1596,204 @@ def _upsert_manifest_rows(
             index[identity] = len(rows)
             rows.append(item)
     return rows
+
+
+async def _prepare_narrative_npc(
+    client: ExposureClient,
+    *,
+    campaign_id: str,
+    run_id: str,
+    initial_phase: str,
+    scene_id: str,
+    location_key: str,
+    source_excerpt: str,
+    source_ref: dict[str, Any] | None,
+    name: str,
+    role: str,
+    summary: str,
+    faction: str,
+    relationship: str,
+) -> dict[str, Any]:
+    normalized_name = name.strip()
+    normalized_role = role.strip()
+    normalized_summary = summary.strip()
+    if initial_phase != "play":
+        raise RuntimeError("prepare-narrative-npc requires the play phase")
+    if not all(
+        (
+            scene_id,
+            location_key,
+            source_excerpt,
+            normalized_name,
+            normalized_role,
+            normalized_summary,
+        )
+    ):
+        raise ValueError(
+            "prepare-narrative-npc requires scene, location, excerpt, name, role, and summary"
+        )
+
+    await client.load("play.scene", "play.scene_control", "play.characters")
+    scene = await client.domain(
+        "module_query",
+        {
+            "campaign_id": campaign_id,
+            "view": "scene",
+            "payload": {"scene_id": scene_id},
+        },
+    )
+    exact_ref = _validate_source_ref(scene, source_ref, excerpt=source_excerpt)
+    if location_key not in {str(item.get("key") or "") for item in _scene_locations(scene)}:
+        raise ValueError("narrative NPC location is not present in the scene atlas")
+    branches = await client.domain(
+        "branch_query",
+        {"campaign_id": campaign_id, "view": "list"},
+    )
+    branch = next((item for item in branches if item.get("is_current")), None)
+    if branch is None:
+        raise RuntimeError("campaign has no current branch")
+    branch_id = str(branch["id"])
+
+    campaign = await _campaign(client, campaign_id)
+    entered_lobby = _facade_value(
+        await client.core(
+            "game_phase",
+            {
+                "campaign_id": campaign_id,
+                "action": "set",
+                "tool_profile": "lobby",
+                "expected_revision": campaign["revision"],
+                "branch_id": branch_id,
+                "idempotency_key": _mutation_key(
+                    run_id,
+                    "phase",
+                    f"narrative-npc-{normalized_name}-enter-lobby-r{campaign['revision']}",
+                ),
+            },
+        )
+    )
+    await client.open(campaign_id)
+    await client.load("lobby.campaign", "lobby.characters")
+    created = _facade_value(
+        await client.domain(
+            "character_create_from",
+            {
+                "mode": "narrative_npc",
+                "payload": {
+                    "campaign_id": campaign_id,
+                    "name": normalized_name,
+                    "role": normalized_role,
+                    "summary": normalized_summary,
+                    "source_ref": exact_ref,
+                    "source_excerpt": source_excerpt,
+                },
+                "idempotency_key": _mutation_key(
+                    run_id,
+                    "narrative-npc",
+                    (
+                        f"{normalized_name}:{exact_ref['module_id']}:"
+                        f"{exact_ref['chunk_id']}"
+                    ),
+                ),
+            },
+        )
+    )
+    actor = dict(created.get("character") or {})
+    provenance = dict(created.get("narrative_npc") or {})
+    if (
+        actor.get("campaign_id") != campaign_id
+        or actor.get("character_type") != "npc"
+        or actor.get("name") != normalized_name
+        or provenance.get("combat_eligible") is not False
+        or provenance.get("combat_statblock") != "not_imported"
+        or dict(provenance.get("source_ref") or {}) != exact_ref
+    ):
+        raise RuntimeError("source-bound narrative NPC creation verification failed")
+    status_tags = set(
+        dict(dict(actor.get("sheet") or {}).get("adventure_state") or {}).get(
+            "status_tags"
+        )
+        or []
+    )
+    if not {"narrative_only", "source_bound"}.issubset(status_tags):
+        raise RuntimeError("narrative NPC actor is missing its noncombat provenance tags")
+
+    campaign = await _campaign(client, campaign_id)
+    returned_play = _facade_value(
+        await client.core(
+            "game_phase",
+            {
+                "campaign_id": campaign_id,
+                "action": "set",
+                "tool_profile": "play",
+                "expected_revision": campaign["revision"],
+                "branch_id": branch_id,
+                "idempotency_key": _mutation_key(
+                    run_id,
+                    "phase",
+                    f"narrative-npc-{actor['id']}-return-play-r{campaign['revision']}",
+                ),
+            },
+        )
+    )
+    await client.open(campaign_id)
+    await client.load("play.scene", "play.scene_control", "play.characters")
+    verified_actor = await client.domain(
+        "character_query",
+        {"view": "get", "payload": {"character_id": str(actor["id"])}},
+    )
+    if verified_actor.get("campaign_id") != campaign_id:
+        raise RuntimeError("narrative NPC disappeared after returning to play")
+
+    current_manifest = await _manifest_get(client, campaign_id)
+    manifest = deepcopy(dict(current_manifest["manifest"]))
+    source_note = (
+        "Narrative-only source-bound actor; combat_statblock=not_imported; "
+        f"module={exact_ref['module_id']}; scene={exact_ref['scene_id']}; "
+        f"chunk={exact_ref['chunk_id']}; pages={exact_ref['page_start']}-"
+        f"{exact_ref['page_end']}; sha256={exact_ref['content_sha256']}."
+    )
+    manifest["npcs"] = _upsert_manifest_rows(
+        list(manifest.get("npcs") or []),
+        [
+            {
+                "actor_id": str(actor["id"]),
+                "name": normalized_name,
+                "status": "active",
+                "faction": faction.strip(),
+                "relationship": relationship.strip(),
+                "notes": source_note,
+            }
+        ],
+        key="actor_id",
+    )
+    manifest = validate_playthrough_manifest(manifest)
+    replaced = await _manifest_mutation(
+        client,
+        campaign_id=campaign_id,
+        action="replace",
+        run_id=run_id,
+        identity=f"narrative-npc-register:{actor['id']}",
+        payload={"manifest": manifest},
+    )
+    checkpoint = await _checkpoint(
+        client,
+        campaign_id=campaign_id,
+        run_id=run_id,
+        label=f"Narrative NPC prepared: {normalized_name}",
+    )
+    return {
+        "actor": verified_actor,
+        "narrative_npc": provenance,
+        "scene": {
+            "scene_id": scene_id,
+            "location_key": location_key,
+            "source_ref": exact_ref,
+        },
+        "phase_changes": [entered_lobby, returned_play],
+        "manifest_replace": replaced,
+        "checkpoint": checkpoint,
+    }
 
 
 async def _record_outcome(
@@ -4459,6 +4663,24 @@ async def _restore_phase_after_failed_refresh(
     original_phase: str,
 ) -> dict[str, Any] | None:
     """Restore the entry exposure when a refresh fails after entering Lobby."""
+    return await _restore_phase_after_failed_lobby_action(
+        client,
+        campaign_id=campaign_id,
+        run_id=run_id,
+        original_phase=original_phase,
+        identity="refresh",
+    )
+
+
+async def _restore_phase_after_failed_lobby_action(
+    client: ExposureClient,
+    *,
+    campaign_id: str,
+    run_id: str,
+    original_phase: str,
+    identity: str,
+) -> dict[str, Any] | None:
+    """Restore the entry exposure after a resumable Lobby-only action fails."""
     if original_phase not in {"lobby", "play"}:
         return None
     campaign = await _campaign(client, campaign_id)
@@ -4488,7 +4710,10 @@ async def _restore_phase_after_failed_refresh(
                 "idempotency_key": _mutation_key(
                     run_id,
                     "phase",
-                    f"refresh-failure-restore-{original_phase}-r{campaign['revision']}",
+                    (
+                        f"{_token(identity)}-failure-restore-{original_phase}-"
+                        f"r{campaign['revision']}"
+                    ),
                 ),
             },
         )
@@ -4543,6 +4768,32 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     handoff_knowledge=args.replacement_knowledge,
                     witness_actor_ids=args.knowledge_actor_id,
                 )
+            elif args.action == "prepare-narrative-npc":
+                try:
+                    report["result"] = await _prepare_narrative_npc(
+                        client,
+                        campaign_id=args.campaign_id,
+                        run_id=args.run_id,
+                        initial_phase=phase,
+                        scene_id=str(args.scene_id or ""),
+                        location_key=args.location_key,
+                        source_excerpt=args.source_excerpt,
+                        source_ref=args.source_ref_json,
+                        name=args.narrative_npc_name,
+                        role=args.narrative_npc_role,
+                        summary=args.narrative_npc_summary,
+                        faction=args.narrative_npc_faction,
+                        relationship=args.narrative_npc_relationship,
+                    )
+                except Exception:
+                    await _restore_phase_after_failed_lobby_action(
+                        client,
+                        campaign_id=args.campaign_id,
+                        run_id=args.run_id,
+                        original_phase=phase,
+                        identity=f"narrative-npc-{args.narrative_npc_name}",
+                    )
+                    raise
             elif args.action == "configure-advancement":
                 if phase == "combat":
                     raise RuntimeError("configure-advancement cannot run during active combat")

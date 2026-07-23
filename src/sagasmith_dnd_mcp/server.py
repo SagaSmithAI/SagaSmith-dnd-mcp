@@ -902,6 +902,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             raise ValueError("actor does not belong to the campaign")
         return character
 
+    def narrative_only_actor(character: Any) -> bool:
+        tags = {
+            str(item).strip().casefold()
+            for item in dict(character.sheet.get("adventure_state") or {}).get(
+                "status_tags", []
+            )
+        }
+        return "narrative_only" in tags
+
     def combat_card_readiness(character: Any) -> dict[str, Any]:
         """Summarize whether a card can enter structured combat without hidden gaps."""
         view = character_view(character)
@@ -915,6 +924,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         hit_points = int(dict(derived.get("hit_points") or {}).get("value", 0) or 0)
         conditions = {str(item).strip().casefold() for item in sheet.get("conditions", [])}
         blockers = list(unresolved)
+        if narrative_only_actor(character):
+            blockers.append("narrative_only_noncombat")
         if hit_points <= 0:
             blockers.append("zero_hit_points")
         if "dead" in conditions:
@@ -2318,6 +2329,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "bundled_rule_seed": True,
                 "module_visibility_filter": True,
                 "module_revision_safe_snapshots": True,
+                "source_bound_narrative_npcs": True,
                 "scene_spatial_evidence": True,
                 "module_page_visual_evidence": True,
                 "snapshot_managed_spatial_review": True,
@@ -3840,6 +3852,16 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         participants = [characters.get(item) for item in participant_ids]
         if any(char.campaign_id != campaign_id for char in participants):
             raise ValueError("all participants must belong to the campaign")
+        narrative_only_ids = [
+            str(character.id)
+            for character in participants
+            if narrative_only_actor(character)
+        ]
+        if narrative_only_ids:
+            raise CombatEngineError(
+                "narrative-only actors cannot enter combat without an exact statblock: "
+                + ", ".join(narrative_only_ids)
+            )
         actors = []
         for character_id in participant_ids:
             actor = combat_actor_snapshot(character_id)
@@ -3938,7 +3960,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "campaign revision conflict: "
                 f"expected {expected_revision}, found {campaign.revision}"
             )
-        require_campaign_actor(campaign_id, actor_id)
+        joining_actor = require_campaign_actor(campaign_id, actor_id)
+        if narrative_only_actor(joining_actor):
+            raise CombatEngineError(
+                "narrative-only actors cannot enter combat without an exact statblock"
+            )
         visible_to = config_value.get("visible_to_actor_ids")
         encounter_actor_ids = {
             str(item.get("actor_id") or "") for item in encounter.get("combatants", [])
@@ -7581,7 +7607,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     ) -> dict[str, Any]:
         """Resolve and audit a non-combat check using the branch's exact rule-pack lock."""
         access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
-        require_campaign_actor(campaign_id, actor_id)
+        actor = require_campaign_actor(campaign_id, actor_id)
+        if narrative_only_actor(actor):
+            raise CombatEngineError(
+                "narrative-only actors cannot make checks without an exact statblock"
+            )
         require_write_contract(expected_revision, idempotency_key)
         resolved_branch_id = require_current_branch(campaign_id, branch_id)
         settlement_facts = checked_rule_facts(rule_facts)
@@ -15931,12 +15961,19 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
 
     @mcp.tool()
     def character_create_from(
-        mode: Literal["direct", "build", "template", "statblock", "module_statblock"],
+        mode: Literal[
+            "direct",
+            "build",
+            "template",
+            "statblock",
+            "module_statblock",
+            "narrative_npc",
+        ],
         payload: dict[str, Any],
         principal_id: str = "system:local",
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
-        """Create directly, by D&D build/template, or from an imported rule statblock."""
+        """Create directly, by build/template, or from source-bound module evidence."""
         data = facade_payload(payload)
         if mode == "direct":
             result = character_create(
@@ -15950,6 +15987,171 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 principal_id,
                 idempotency_key,
             )
+        elif mode == "narrative_npc":
+            campaign_id = str(required(data, "campaign_id"))
+            name = str(required(data, "name")).strip()
+            role = str(required(data, "role")).strip()
+            summary = str(required(data, "summary")).strip()
+            source_ref = data.get("source_ref")
+            source_excerpt = " ".join(
+                str(required(data, "source_excerpt")).split()
+            ).strip()
+            if not name or len(name) > 200:
+                raise ValueError("narrative NPC name must contain 1 to 200 characters")
+            if not role or len(role) > 500:
+                raise ValueError("narrative NPC role must contain 1 to 500 characters")
+            if not summary or len(summary) > 2000:
+                raise ValueError("narrative NPC summary must contain 1 to 2000 characters")
+            if len(source_excerpt) < 8 or len(source_excerpt) > 2000:
+                raise ValueError(
+                    "narrative NPC source_excerpt must contain 8 to 2000 characters"
+                )
+            if not isinstance(source_ref, dict):
+                raise ValueError("narrative NPC source_ref must be an object")
+            required_source_fields = {
+                "module_id",
+                "scene_id",
+                "chunk_id",
+                "page_start",
+                "page_end",
+                "heading_path",
+                "content_sha256",
+            }
+            missing_source_fields = sorted(required_source_fields - set(source_ref))
+            if missing_source_fields:
+                raise ValueError(
+                    "narrative NPC source_ref is missing required fields: "
+                    + ", ".join(missing_source_fields)
+                )
+            if not all(
+                str(source_ref.get(field) or "").strip()
+                for field in ("module_id", "scene_id", "chunk_id", "content_sha256")
+            ):
+                raise ValueError(
+                    "narrative NPC source_ref identifiers and content_sha256 "
+                    "must not be empty"
+                )
+            heading_path = source_ref.get("heading_path")
+            if (
+                not isinstance(heading_path, list)
+                or not heading_path
+                or any(not str(item).strip() for item in heading_path)
+            ):
+                raise ValueError(
+                    "narrative NPC source_ref heading_path must be a non-empty string list"
+                )
+            page_start = source_ref.get("page_start")
+            page_end = source_ref.get("page_end")
+            if (
+                isinstance(page_start, bool)
+                or not isinstance(page_start, int)
+                or page_start < 1
+                or isinstance(page_end, bool)
+                or not isinstance(page_end, int)
+                or page_end < page_start
+            ):
+                raise ValueError("narrative NPC source_ref page range is invalid")
+
+            access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+            campaign = campaigns.get(campaign_id)
+            if dict(campaign.state or {}).get("game_phase", PROFILE_LOBBY) != PROFILE_LOBBY:
+                raise CombatEngineError("narrative NPCs can be created only in lobby")
+            active_modules = dict(
+                dict(dict(campaign.state or {}).get("module_imports") or {}).get("active")
+                or {}
+            )
+            active_module_ids = {
+                str(dict(item).get("module_id") or "")
+                for item in active_modules.values()
+                if isinstance(item, dict)
+            }
+            if str(source_ref["module_id"]) not in active_module_ids:
+                raise ValueError("narrative NPC source_ref module is not active")
+
+            expanded = modules.expand(str(source_ref["chunk_id"]))
+            if str(expanded.get("campaign_id")) != campaign_id:
+                raise ValueError("narrative NPC source_ref chunk does not belong to the campaign")
+            if str(dict(expanded.get("module") or {}).get("id")) != str(
+                source_ref["module_id"]
+            ):
+                raise ValueError("narrative NPC source_ref module_id does not match its chunk")
+            expanded_scene = dict(expanded.get("scene") or {})
+            if str(expanded_scene.get("id")) != str(source_ref["scene_id"]):
+                raise ValueError("narrative NPC source_ref scene_id does not match its chunk")
+            chunk_content = str(expanded.get("content") or "")
+            chunk_content_sha256 = hashlib.sha256(
+                chunk_content.encode("utf-8")
+            ).hexdigest()
+            if str(source_ref["content_sha256"]).casefold() != chunk_content_sha256:
+                raise ValueError(
+                    "narrative NPC source_ref content_sha256 does not match its chunk"
+                )
+            expanded_page_start = int(expanded.get("page_start") or 1)
+            expanded_page_end = int(expanded.get("page_end") or expanded_page_start)
+            if expanded_page_start != page_start or expanded_page_end != page_end:
+                raise ValueError("narrative NPC source_ref page range does not match its chunk")
+            if [str(item) for item in list(expanded.get("heading_path") or [])] != [
+                str(item) for item in heading_path
+            ]:
+                raise ValueError(
+                    "narrative NPC source_ref heading_path does not match its chunk"
+                )
+            normalized_content = _normalize_source_evidence_text(chunk_content)
+            if _normalize_source_evidence_text(source_excerpt) not in normalized_content:
+                raise ValueError("narrative NPC source_excerpt is not present in its chunk")
+            if _normalize_source_evidence_text(name) not in normalized_content:
+                raise ValueError("narrative NPC name is not present in its source chunk")
+
+            normalized_source_ref = {
+                "module_id": str(source_ref["module_id"]),
+                "scene_id": str(source_ref["scene_id"]),
+                "chunk_id": str(source_ref["chunk_id"]),
+                "page_start": page_start,
+                "page_end": page_end,
+                "heading_path": [str(item) for item in heading_path],
+                "content_sha256": chunk_content_sha256,
+            }
+            evidence = {
+                "kind": "source_bound_narrative_npc",
+                "role": role,
+                "combat_statblock": "not_imported",
+                "source_ref": normalized_source_ref,
+                "source_excerpt": source_excerpt,
+            }
+            sheet = default_character_sheet()
+            sheet["adventure_state"]["status_tags"] = [
+                "narrative_only",
+                "source_bound",
+            ]
+            notes = default_character_notes()
+            notes["profile"]["summary"] = role
+            notes["profile"]["dm_notes"] = (
+                "sagasmith:narrative-npc-source:"
+                + json.dumps(
+                    evidence,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            )
+            character = character_create(
+                name,
+                campaign_id,
+                "npc",
+                None,
+                summary,
+                sheet,
+                notes,
+                principal_id,
+                idempotency_key,
+            )
+            result = {
+                "character": character,
+                "narrative_npc": {
+                    **evidence,
+                    "combat_eligible": False,
+                },
+            }
         elif mode == "build":
             result = character_build(
                 required(data, "campaign_id"),
