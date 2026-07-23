@@ -13,6 +13,7 @@ from scripts.regression_playthrough import (
     _campaign_phase,
     _check_knowledge_key,
     _checkpoint,
+    _committed_check_result,
     _configure_advancement,
     _mutation_key,
     _party_member,
@@ -270,6 +271,15 @@ def test_source_cited_check_rejects_unsupported_kind_before_tools() -> None:
                 failure_knowledge="",
             )
         )
+
+
+def test_character_check_accepts_full_and_compact_exposure_shapes() -> None:
+    result = {"success": False, "total": 7, "natural": 4}
+
+    assert _committed_check_result({"status": "committed", "result": result}) == result
+    assert _committed_check_result(result) == result
+    with pytest.raises(RuntimeError, match="did not commit"):
+        _committed_check_result({"status": "pending_ruling"})
 
 
 def test_xp_award_uses_source_ref_and_all_exact_recipients() -> None:

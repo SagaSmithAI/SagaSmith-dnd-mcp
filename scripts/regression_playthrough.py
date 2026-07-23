@@ -255,6 +255,16 @@ def _check_knowledge_key(
     )
 
 
+def _committed_check_result(settled: dict[str, Any]) -> dict[str, Any]:
+    """Accept full tool responses and compact dynamic-exposure facades."""
+
+    if settled.get("status") == "committed" and isinstance(settled.get("result"), dict):
+        return dict(settled["result"])
+    if "success" in settled and ("total" in settled or settled.get("automatic_failure")):
+        return dict(settled)
+    raise RuntimeError("source-cited character check did not commit")
+
+
 async def _manifest_mutation(
     client: ExposureClient,
     *,
@@ -578,9 +588,7 @@ async def _resolve_check(
             ),
         },
     )
-    if settled.get("status") != "committed":
-        raise RuntimeError("source-cited character check did not commit")
-    check_result = dict(settled.get("result") or {})
+    check_result = _committed_check_result(settled)
     success = bool(check_result.get("success"))
     proposition = (success_knowledge.strip() if success else failure_knowledge.strip()) or (
         f"{actor['name']} {'succeeded' if success else 'failed'} on the "
