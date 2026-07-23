@@ -445,6 +445,36 @@ def _current_actor_id(combat: dict[str, Any]) -> str:
     return str(combatants[int(combat.get("turn_index", 0)) % len(combatants)]["actor_id"])
 
 
+def _source_outcome(
+    *,
+    defeated_hostiles: int,
+    hostile_count: int,
+    flee_after_defeated: int,
+    unresolved_party: bool,
+    party_down: bool,
+) -> tuple[str, str] | None:
+    if unresolved_party:
+        return None
+    if hostile_count > 0 and defeated_hostiles >= hostile_count:
+        return (
+            "victory",
+            f"All {hostile_count} source-defined hostiles were defeated.",
+        )
+    if flee_after_defeated and defeated_hostiles >= flee_after_defeated:
+        return (
+            "victory",
+            f"{defeated_hostiles} source-defined hostiles were defeated; "
+            "the last surviving hostile followed the source instruction and fled.",
+        )
+    if party_down:
+        return (
+            "defeat",
+            "The party was defeated; surviving hostiles stopped attacking as required "
+            "by the source development and left resolved unconscious or dead characters.",
+        )
+    return None
+
+
 async def _resolve_pending(
     client: ExposureClient,
     args: argparse.Namespace,
@@ -643,24 +673,20 @@ async def _auto_run(
             and not _conditions(actors[actor_id]) & {"dead", "stable"}
         ]
         party_down = all(_hit_points(actors[actor_id]) <= 0 for actor_id in party_ids)
+        outcome = _source_outcome(
+            defeated_hostiles=len(defeated_hostiles),
+            hostile_count=len(hostile_ids),
+            flee_after_defeated=args.flee_after_defeated,
+            unresolved_party=bool(unresolved_party),
+            party_down=party_down,
+        )
+        if outcome is not None:
+            outcome_status, outcome_summary = outcome
+            break
         flee_triggered = bool(
             args.flee_after_defeated
             and len(defeated_hostiles) >= args.flee_after_defeated
         )
-        if flee_triggered and not unresolved_party:
-            outcome_status = "victory"
-            outcome_summary = (
-                f"{len(defeated_hostiles)} source-defined hostiles were defeated; "
-                "the last surviving hostile followed the source instruction and fled."
-            )
-            break
-        if party_down and not unresolved_party:
-            outcome_status = "defeat"
-            outcome_summary = (
-                "The party was defeated; surviving hostiles stopped attacking as required "
-                "by the source development and left resolved unconscious or dead characters."
-            )
-            break
         pending_result = await _resolve_pending(
             client,
             args,

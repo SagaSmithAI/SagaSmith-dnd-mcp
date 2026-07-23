@@ -5,8 +5,19 @@ from scripts.regression_encounter import (
     _participant_config,
     _participant_manifest,
     _roll_total,
+    _source_outcome,
     _surprise_from_check_report,
 )
+
+
+def test_all_source_hostiles_defeated_is_victory_without_flee_rule() -> None:
+    assert _source_outcome(
+        defeated_hostiles=2,
+        hostile_count=2,
+        flee_after_defeated=0,
+        unresolved_party=False,
+        party_down=False,
+    ) == ("victory", "All 2 source-defined hostiles were defeated.")
 
 
 def test_encounter_manifest_preserves_exact_source_count_without_scaling() -> None:
