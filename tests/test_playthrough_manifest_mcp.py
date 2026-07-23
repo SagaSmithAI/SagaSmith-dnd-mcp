@@ -170,6 +170,73 @@ def test_manifest_syncs_canonical_state_and_verifies_source_defined_ending(
         )
         assert replay == initialized
 
+        revision_staged = await _call(
+            server,
+            "module_import",
+            {
+                "campaign_id": campaign_id,
+                "action": "stage",
+                "payload": {
+                    "name": "Campaign-v2.md",
+                    "content": (
+                        "# Chapter One\n\n## Opening\n\nThe party begins.\n"
+                        "#### 1. Revised Room\n\nThe indexed room is explicit.\n"
+                    ),
+                    "source_key": "campaign",
+                    "title": "Campaign",
+                },
+                "idempotency_key": "revision-stage",
+            },
+        )
+        revision_job_id = revision_staged["job"]["id"]
+        for action in ("inspect", "validate", "ingest"):
+            await _call(
+                server,
+                "module_import",
+                {
+                    "campaign_id": campaign_id,
+                    "action": action,
+                    "payload": {"job_id": revision_job_id},
+                    "idempotency_key": f"revision-{action}",
+                },
+            )
+        before_revision_activate = await _call(
+            server,
+            "campaign_query",
+            {"view": "get", "payload": {"campaign_id": campaign_id}},
+        )
+        revision_activated = await _call(
+            server,
+            "module_import",
+            {
+                "campaign_id": campaign_id,
+                "action": "activate",
+                "payload": {"job_id": revision_job_id},
+                "expected_revision": before_revision_activate["revision"],
+                "idempotency_key": "revision-activate",
+            },
+        )
+        revision_module_id = revision_activated["activation"]["module_id"]
+        extended_manifest = deepcopy(initialized["manifest"])
+        extended_manifest["module_ids"].append(revision_module_id)
+        before_extend = await _call(
+            server,
+            "campaign_query",
+            {"view": "get", "payload": {"campaign_id": campaign_id}},
+        )
+        initialized = await _call(
+            server,
+            "playthrough_manifest",
+            {
+                "campaign_id": campaign_id,
+                "action": "extend_modules",
+                "payload": {"manifest": extended_manifest},
+                "expected_revision": before_extend["revision"],
+                "idempotency_key": "manifest-extend-modules",
+            },
+        )
+        assert initialized["manifest"]["module_ids"] == [module_id, revision_module_id]
+
         actor_sheet = default_character_sheet()
         actor_sheet["resources"]["second_wind"] = {
             "label": "Second Wind",

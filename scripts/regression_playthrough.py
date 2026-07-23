@@ -39,6 +39,7 @@ def _arguments() -> argparse.Namespace:
             "resolve-check",
             "award-xp",
             "configure-advancement",
+            "refresh-module",
             "register-party",
             "start-play",
             "verify-ending",
@@ -48,6 +49,9 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--run-id", default="full-playthrough-v1")
     parser.add_argument("--advancement-mode", choices=("xp", "milestone"))
     parser.add_argument("--module-root", type=Path)
+    parser.add_argument("--module-source-path", type=Path)
+    parser.add_argument("--module-source-key", default="")
+    parser.add_argument("--module-title", default="")
     parser.add_argument("--checkpoint-label", default="")
     parser.add_argument("--scene-id")
     parser.add_argument("--location-key", default="")
@@ -182,6 +186,54 @@ def _scene_progress_percent(progress: dict[str, Any] | None) -> int:
         return 0
     value = progress.get("progress", progress.get("percent", 0))
     return int(value or 0)
+
+
+def _extend_manifest_for_module_revision(
+    manifest: dict[str, Any],
+    *,
+    old_module_id: str,
+    new_module_id: str,
+    old_index: list[dict[str, Any]],
+    new_index: list[dict[str, Any]],
+) -> dict[str, Any]:
+    value = deepcopy(manifest)
+    if old_module_id not in value["module_ids"]:
+        raise ValueError("current module revision is not registered in the playthrough manifest")
+    old_by_id = {str(item["scene_id"]): item for item in old_index}
+    new_by_key = {
+        str(item.get("stable_key") or ""): item
+        for item in new_index
+        if str(item.get("stable_key") or "")
+    }
+    scene_map: dict[str, dict[str, Any]] = {}
+    for scene_id, scene in old_by_id.items():
+        stable_key = str(scene.get("stable_key") or "")
+        replacement = new_by_key.get(stable_key)
+        if replacement is not None:
+            scene_map[scene_id] = replacement
+    current_scene_id = str(value["current"].get("scene_id") or "")
+    replacement = scene_map.get(current_scene_id)
+    if replacement is None:
+        raise ValueError("current scene has no stable-key match in the new module revision")
+    value["module_ids"].append(new_module_id)
+    value["current"].update(
+        {
+            "module_id": new_module_id,
+            "chapter_id": str(replacement.get("chapter_id") or ""),
+            "chapter_title": str(replacement.get("chapter") or ""),
+            "scene_id": str(replacement["scene_id"]),
+            "scene_title": str(replacement.get("title") or ""),
+        }
+    )
+    traversal = value["traversal"]
+    for field in ("reachable_scene_ids", "visited_scene_ids"):
+        scene_ids = list(traversal[field])
+        for scene_id in list(scene_ids):
+            mapped = scene_map.get(str(scene_id))
+            if mapped is not None and str(mapped["scene_id"]) not in scene_ids:
+                scene_ids.append(str(mapped["scene_id"]))
+        traversal[field] = scene_ids
+    return value
 
 
 def _normalized_source_text(value: Any) -> str:
@@ -1130,6 +1182,205 @@ async def _configure_advancement(
     return {"configured": configured, "phase_changes": phase_changes}
 
 
+async def _refresh_module(
+    client: ExposureClient,
+    *,
+    campaign_id: str,
+    run_id: str,
+    initial_phase: str,
+    source_path: Path | None,
+    source_key: str,
+    title: str,
+) -> dict[str, Any]:
+    if initial_phase != "play":
+        raise RuntimeError("refresh-module requires the play phase")
+    if source_path is None:
+        raise ValueError("refresh-module requires --module-source-path")
+    manifest_result = await _manifest_get(client, campaign_id)
+    manifest = manifest_result["manifest"]
+    old_module_id = str(manifest["current"].get("module_id") or "")
+    if not old_module_id:
+        raise ValueError("refresh-module requires a current manifest module")
+    old_index = await client.domain(
+        "module_query",
+        {
+            "campaign_id": campaign_id,
+            "view": "index",
+            "payload": {"module_id": old_module_id},
+        },
+    )
+    campaign = await _campaign(client, campaign_id)
+    active_modules = dict(
+        dict(dict(campaign.get("state") or {}).get("module_imports") or {}).get("active") or {}
+    )
+    if not source_key:
+        source_key = next(
+            (
+                key
+                for key, item in active_modules.items()
+                if str(dict(item or {}).get("module_id") or "") == old_module_id
+            ),
+            "",
+        )
+    if not source_key:
+        raise ValueError("refresh-module could not identify the logical module source key")
+    branches = await client.domain(
+        "branch_query",
+        {"campaign_id": campaign_id, "view": "list"},
+    )
+    branch = next((item for item in branches if item.get("is_current")), None)
+    if branch is None:
+        raise RuntimeError("campaign has no current branch")
+    phase_changes = [
+        _facade_value(
+            await client.core(
+                "game_phase",
+                {
+                    "campaign_id": campaign_id,
+                    "action": "set",
+                    "tool_profile": "lobby",
+                    "expected_revision": campaign["revision"],
+                    "branch_id": branch["id"],
+                    "idempotency_key": _mutation_key(
+                        run_id, "phase", f"refresh-enter-lobby-r{campaign['revision']}"
+                    ),
+                },
+            )
+        )
+    ]
+    await client.open(campaign_id)
+    await client.load("lobby.campaign", "lobby.modules")
+    staged = await client.domain(
+        "module_import",
+        {
+            "campaign_id": campaign_id,
+            "action": "stage",
+            "payload": {
+                "source_path": str(source_path.expanduser().resolve()),
+                "source_key": source_key,
+                "title": title.strip() or Path(source_path).stem,
+            },
+            "idempotency_key": _mutation_key(run_id, "module-refresh-stage", source_key),
+        },
+    )
+    job_id = str(staged["job"]["id"])
+    inspected = await client.domain(
+        "module_import",
+        {
+            "campaign_id": campaign_id,
+            "action": "inspect",
+            "payload": {"job_id": job_id},
+            "idempotency_key": _mutation_key(run_id, "module-refresh-inspect", job_id),
+        },
+    )
+    preview = dict(inspected["preview"])
+    if not preview.get("valid"):
+        raise RuntimeError("; ".join(preview.get("errors") or ["module preview is invalid"]))
+    validated = await client.domain(
+        "module_import",
+        {
+            "campaign_id": campaign_id,
+            "action": "validate",
+            "payload": {"job_id": job_id},
+            "idempotency_key": _mutation_key(run_id, "module-refresh-validate", job_id),
+        },
+    )
+    if not validated["validation"]["valid"]:
+        raise RuntimeError("module revision validation failed")
+    ingested = await client.domain(
+        "module_import",
+        {
+            "campaign_id": campaign_id,
+            "action": "ingest",
+            "payload": {"job_id": job_id},
+            "idempotency_key": _mutation_key(run_id, "module-refresh-ingest", job_id),
+        },
+    )
+    campaign = await _campaign(client, campaign_id)
+    activated = await client.domain(
+        "module_import",
+        {
+            "campaign_id": campaign_id,
+            "action": "activate",
+            "payload": {"job_id": job_id},
+            "expected_revision": campaign["revision"],
+            "idempotency_key": _mutation_key(run_id, "module-refresh-activate", job_id),
+        },
+    )
+    new_module_id = str(activated["activation"]["module_id"])
+    new_index = await client.domain(
+        "module_query",
+        {
+            "campaign_id": campaign_id,
+            "view": "index",
+            "payload": {"module_id": new_module_id},
+        },
+    )
+    refreshed_manifest = _extend_manifest_for_module_revision(
+        manifest,
+        old_module_id=old_module_id,
+        new_module_id=new_module_id,
+        old_index=old_index,
+        new_index=new_index,
+    )
+    extended = await _manifest_mutation(
+        client,
+        campaign_id=campaign_id,
+        action="extend_modules",
+        run_id=run_id,
+        identity=f"refresh-module-manifest:{old_module_id}:{new_module_id}",
+        payload={"manifest": refreshed_manifest},
+    )
+    campaign = await _campaign(client, campaign_id)
+    phase_changes.append(
+        _facade_value(
+            await client.core(
+                "game_phase",
+                {
+                    "campaign_id": campaign_id,
+                    "action": "set",
+                    "tool_profile": "play",
+                    "expected_revision": campaign["revision"],
+                    "branch_id": branch["id"],
+                    "idempotency_key": _mutation_key(
+                        run_id, "phase", f"refresh-return-play-r{campaign['revision']}"
+                    ),
+                },
+            )
+        )
+    )
+    await client.open(campaign_id)
+    await client.load("play.scene", "play.scene_control")
+    synced = await _manifest_mutation(
+        client,
+        campaign_id=campaign_id,
+        action="sync",
+        run_id=run_id,
+        identity=f"refresh-module-sync:{new_module_id}",
+    )
+    return {
+        "old_module_id": old_module_id,
+        "new_module_id": new_module_id,
+        "source_key": source_key,
+        "job_id": job_id,
+        "inspection": {
+            "parser_profile": preview.get("parser_profile"),
+            "parser_version": preview.get("parser_version"),
+            "scene_count": preview.get("scene_count"),
+            "warnings": list(preview.get("warnings") or []),
+        },
+        "ingested": {
+            "module_id": ingested.get("module_id"),
+            "chapter_count": ingested.get("chapter_count"),
+            "scene_count": ingested.get("scene_count"),
+        },
+        "activation": activated["activation"],
+        "manifest": extended["manifest"],
+        "phase_changes": phase_changes,
+        "sync": synced,
+    }
+
+
 async def _run(args: argparse.Namespace) -> dict[str, Any]:
     server = _server_parameters(args)
     report: dict[str, Any] = {
@@ -1178,6 +1429,16 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     scene_id=str(args.scene_id or ""),
                     objective=args.objective,
                     reachable_scene_ids=args.reachable_scene_id,
+                )
+            elif args.action == "refresh-module":
+                report["result"] = await _refresh_module(
+                    client,
+                    campaign_id=args.campaign_id,
+                    run_id=args.run_id,
+                    initial_phase=phase,
+                    source_path=args.module_source_path,
+                    source_key=args.module_source_key,
+                    title=args.module_title,
                 )
             elif args.action == "advance-scene":
                 if phase != "play":

@@ -16122,7 +16122,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     @mcp.tool()
     def playthrough_manifest(
         campaign_id: str,
-        action: Literal["get", "initialize", "replace", "sync", "verify_ending"],
+        action: Literal[
+            "get",
+            "initialize",
+            "replace",
+            "extend_modules",
+            "sync",
+            "verify_ending",
+        ],
         payload: dict[str, Any] | None = None,
         principal_id: str = "system:local",
         expected_revision: int | None = None,
@@ -16183,6 +16190,29 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 if any(next_manifest[key] != current_manifest[key] for key in immutable):
                     raise ValueError(
                         "replace cannot change run_id, campaign_line_id, or module_ids"
+                    )
+            elif action == "extend_modules":
+                next_manifest = validate_playthrough_manifest(required(data, "manifest"))
+                immutable = ("run_id", "campaign_line_id")
+                if any(next_manifest[key] != current_manifest[key] for key in immutable):
+                    raise ValueError(
+                        "extend_modules cannot change run_id or campaign_line_id"
+                    )
+                current_module_ids = set(current_manifest["module_ids"])
+                next_module_ids = set(next_manifest["module_ids"])
+                if not current_module_ids < next_module_ids:
+                    raise ValueError(
+                        "extend_modules must retain every module and add at least one module"
+                    )
+                known_module_ids = {
+                    str(item["id"])
+                    for item in modules.list(campaign_id, include_retired=True)
+                }
+                missing = sorted(next_module_ids - known_module_ids)
+                if missing:
+                    raise ValueError(
+                        "playthrough manifest references modules outside the campaign: "
+                        + ", ".join(missing)
                     )
             elif action == "sync":
                 next_manifest = sync_playthrough_manifest(campaign_id, current_manifest)

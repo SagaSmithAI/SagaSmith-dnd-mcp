@@ -15,6 +15,7 @@ from scripts.regression_playthrough import (
     _checkpoint,
     _committed_check_result,
     _configure_advancement,
+    _extend_manifest_for_module_revision,
     _mutation_key,
     _party_member,
     _party_selections,
@@ -25,6 +26,59 @@ from scripts.regression_playthrough import (
     _scene_progress_percent,
     _start_play,
 )
+
+
+def test_module_revision_extension_remaps_current_and_traversed_scenes() -> None:
+    manifest = {
+        "module_ids": ["module-v1"],
+        "current": {
+            "module_id": "module-v1",
+            "chapter_id": "chapter-v1",
+            "chapter_title": "Chapter",
+            "scene_id": "scene-v1",
+            "scene_title": "Cave",
+        },
+        "traversal": {
+            "reachable_scene_ids": ["opening-v1", "scene-v1"],
+            "visited_scene_ids": ["opening-v1", "scene-v1"],
+        },
+    }
+    updated = _extend_manifest_for_module_revision(
+        manifest,
+        old_module_id="module-v1",
+        new_module_id="module-v2",
+        old_index=[
+            {"scene_id": "opening-v1", "stable_key": "opening"},
+            {"scene_id": "scene-v1", "stable_key": "cave"},
+        ],
+        new_index=[
+            {
+                "scene_id": "opening-v2",
+                "stable_key": "opening",
+                "chapter_id": "chapter-v2",
+                "chapter": "Chapter",
+                "title": "Opening",
+            },
+            {
+                "scene_id": "scene-v2",
+                "stable_key": "cave",
+                "chapter_id": "chapter-v2",
+                "chapter": "Chapter",
+                "title": "Cave",
+            },
+        ],
+    )
+
+    assert updated["module_ids"] == ["module-v1", "module-v2"]
+    assert updated["current"]["module_id"] == "module-v2"
+    assert updated["current"]["scene_id"] == "scene-v2"
+    assert updated["traversal"]["visited_scene_ids"] == [
+        "opening-v1",
+        "scene-v1",
+        "opening-v2",
+        "scene-v2",
+    ]
+    assert manifest["module_ids"] == ["module-v1"]
 
 
 def test_scene_progress_percent_accepts_query_and_mutation_shapes() -> None:
