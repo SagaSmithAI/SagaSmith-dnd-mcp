@@ -15,7 +15,19 @@ from scripts.regression_full_campaigns import (
     _load_and_verify_manifest,
     _selected_lines,
 )
-from scripts.regression_modules import _create_baseline_snapshot
+from scripts.regression_modules import _create_baseline_snapshot, _facade_value
+
+
+def test_exposure_facade_unwrap_preserves_structured_domain_status() -> None:
+    facade = {"status": "ok", "action": "get", "result": {"id": "campaign"}}
+    structured = {
+        "status": "committed",
+        "result": {"kind": "healing", "amount": 9},
+        "campaign_revision": 12,
+    }
+
+    assert _facade_value(facade) == {"id": "campaign"}
+    assert _facade_value(structured) == structured
 
 
 def test_campaign_baseline_reuses_existing_public_snapshot() -> None:

@@ -96,7 +96,7 @@ def _decode(result: Any) -> Any:
 
 
 def _facade_value(payload: Any) -> Any:
-    if isinstance(payload, dict) and "result" in payload:
+    if isinstance(payload, dict) and "action" in payload and "result" in payload:
         return payload["result"]
     return payload
 
