@@ -3,11 +3,13 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import sys
 from pathlib import Path
 
 import pytest
 
 from scripts.regression_campaign import (
+    _arguments,
     _configure_utf8_streams,
     _expanded_source_ref,
     _load_json_object,
@@ -54,6 +56,28 @@ def test_statblock_variant_file_requires_a_json_object(tmp_path: Path) -> None:
     path.write_text("[]", encoding="utf-8")
     with pytest.raises(ValueError, match="must contain a JSON object"):
         _load_json_object(path, "statblock variant")
+
+
+def test_prepare_statblock_accepts_an_npc_actor_type(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "regression_campaign.py",
+            "--home",
+            str(tmp_path),
+            "--campaign-id",
+            "campaign",
+            "--output",
+            str(tmp_path / "report.json"),
+            "--actor-type",
+            "npc",
+        ],
+    )
+
+    assert _arguments().actor_type == "npc"
 
 
 def test_expanded_source_ref_keeps_exact_module_scene_and_content_identity() -> None:

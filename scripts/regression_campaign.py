@@ -99,6 +99,12 @@ def _arguments() -> argparse.Namespace:
         help="Canonical actor name for actor preparation actions",
     )
     parser.add_argument(
+        "--actor-type",
+        choices=("npc", "monster"),
+        default="monster",
+        help="Actor type for prepare-statblock (default: monster)",
+    )
+    parser.add_argument(
         "--actor-count",
         type=int,
         default=1,
@@ -1957,7 +1963,7 @@ async def _prepare_statblock(args: argparse.Namespace) -> dict[str, Any]:
                             "campaign_id": args.campaign_id,
                             "review_id": review["id"],
                             "name": args.actor_name,
-                            "character_type": "monster",
+                            "character_type": args.actor_type,
                             "variant": variant,
                         },
                         "idempotency_key": f"{token}-create-statblock",
