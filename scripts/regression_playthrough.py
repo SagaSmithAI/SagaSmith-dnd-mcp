@@ -35,6 +35,8 @@ def _arguments() -> argparse.Namespace:
             "sync",
             "checkpoint",
             "advance-scene",
+            "resolve-check",
+            "award-xp",
             "configure-advancement",
             "register-party",
             "start-play",
@@ -47,6 +49,24 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--module-root", type=Path)
     parser.add_argument("--checkpoint-label", default="")
     parser.add_argument("--scene-id")
+    parser.add_argument("--location-key", default="")
+    parser.add_argument("--source-excerpt", default="")
+    parser.add_argument(
+        "--source-ref-json",
+        type=json.loads,
+        help="Exact module source reference for the playthrough action",
+    )
+    parser.add_argument("--check-actor-id", default="")
+    parser.add_argument("--check-kind", default="")
+    parser.add_argument("--check-ability", default="")
+    parser.add_argument("--check-dc", type=int)
+    parser.add_argument("--check-proficient", action="store_true")
+    parser.add_argument("--knowledge-actor-id", action="append", default=[])
+    parser.add_argument("--success-knowledge", default="")
+    parser.add_argument("--failure-knowledge", default="")
+    parser.add_argument("--xp-actor-id", action="append", default=[])
+    parser.add_argument("--xp-amount", type=int)
+    parser.add_argument("--xp-reason", default="")
     parser.add_argument("--objective", default="")
     parser.add_argument("--mark-visited", action="store_true")
     parser.add_argument("--reachable-scene-id", action="append", default=[])
@@ -101,9 +121,7 @@ def _server_parameters(args: argparse.Namespace) -> StdioServerParameters:
         }
     )
     if args.module_root:
-        env["SAGASMITH_DND_MCP_MODULE_IMPORT_ROOTS"] = str(
-            args.module_root.expanduser().resolve()
-        )
+        env["SAGASMITH_DND_MCP_MODULE_IMPORT_ROOTS"] = str(args.module_root.expanduser().resolve())
     return StdioServerParameters(
         command=sys.executable,
         args=["-m", "sagasmith_dnd_mcp.server"],
@@ -140,6 +158,49 @@ def _scene_groups(phase: str) -> tuple[str, ...]:
     if phase == "play":
         return ("play.scene",)
     raise RuntimeError("scene progression cannot advance during active combat")
+
+
+def _scene_locations(scene: dict[str, Any]) -> list[dict[str, Any]]:
+    spatial = scene.get("spatial") if isinstance(scene.get("spatial"), dict) else {}
+    values = spatial.get("locations") or scene.get("locations") or []
+    return [item for item in values if isinstance(item, dict)]
+
+
+def _normalized_source_text(value: Any) -> str:
+    return " ".join(str(value or "").split())
+
+
+def _validate_source_ref(
+    scene: dict[str, Any],
+    source_ref: dict[str, Any] | None,
+    *,
+    excerpt: str = "",
+) -> dict[str, Any]:
+    if not isinstance(source_ref, dict):
+        raise ValueError("playthrough action requires --source-ref-json")
+    required = {
+        "module_id",
+        "scene_id",
+        "chunk_id",
+        "page_start",
+        "page_end",
+        "heading_path",
+        "content_sha256",
+    }
+    missing = sorted(required - set(source_ref))
+    if missing:
+        raise ValueError(f"source_ref is missing required fields: {', '.join(missing)}")
+    if str(source_ref["module_id"]) != str(scene.get("module_id")):
+        raise ValueError("source_ref module_id does not match the cited scene")
+    if str(source_ref["scene_id"]) != str(scene.get("scene_id")):
+        raise ValueError("source_ref scene_id does not match the cited scene")
+    if not str(source_ref["chunk_id"]).strip() or not str(source_ref["content_sha256"]).strip():
+        raise ValueError("source_ref chunk_id and content_sha256 must not be empty")
+    if excerpt and _normalized_source_text(excerpt) not in _normalized_source_text(
+        scene.get("content")
+    ):
+        raise ValueError("source excerpt is not contained in the cited scene")
+    return deepcopy(source_ref)
 
 
 def _campaign_phase(campaign: dict[str, Any]) -> str:
@@ -378,9 +439,7 @@ async def _advance_scene(
         traversal["visited_scene_ids"] = list(
             dict.fromkeys([*traversal["visited_scene_ids"], scene_id])
         )
-    exclusions = {
-        str(item["scene_id"]): item for item in traversal["excluded_scenes"]
-    }
+    exclusions = {str(item["scene_id"]): item for item in traversal["excluded_scenes"]}
     for item in excluded_scenes:
         excluded_id = str(item.get("scene_id") or "")
         if not excluded_id or not str(item.get("reason") or ""):
@@ -400,6 +459,248 @@ async def _advance_scene(
         identity=f"advance-scene:{scene_id}:{mark_visited}",
         payload={"manifest": manifest},
     )
+
+
+async def _resolve_check(
+    client: ExposureClient,
+    *,
+    campaign_id: str,
+    run_id: str,
+    scene_id: str,
+    location_key: str,
+    source_excerpt: str,
+    source_ref: dict[str, Any] | None,
+    actor_id: str,
+    kind: str,
+    ability: str,
+    dc: int | None,
+    proficient: bool,
+    knowledge_actor_ids: list[str],
+    success_knowledge: str,
+    failure_knowledge: str,
+) -> dict[str, Any]:
+    if not all((scene_id, location_key, source_excerpt, actor_id, kind, ability)):
+        raise ValueError(
+            "resolve-check requires scene, location, excerpt, actor, kind, and ability"
+        )
+    if dc is None or dc < 0:
+        raise ValueError("resolve-check requires a non-negative --check-dc")
+    scene = await client.domain(
+        "module_query",
+        {
+            "campaign_id": campaign_id,
+            "view": "scene",
+            "payload": {"scene_id": scene_id},
+        },
+    )
+    exact_ref = _validate_source_ref(scene, source_ref, excerpt=source_excerpt)
+    location_keys = {str(item.get("key") or "") for item in _scene_locations(scene)}
+    if location_key not in location_keys:
+        raise ValueError("resolve-check location is not present in the scene atlas")
+    actor = await client.domain(
+        "character_query",
+        {"view": "get", "payload": {"character_id": actor_id}},
+    )
+    if actor.get("campaign_id") != campaign_id:
+        raise ValueError("resolve-check actor does not belong to the campaign")
+    progress_rows = await client.domain(
+        "module_query",
+        {"campaign_id": campaign_id, "view": "progress"},
+    )
+    progress_before = next(
+        (item for item in progress_rows if item.get("scene_id") == scene_id),
+        None,
+    )
+    progress = await client.domain(
+        "module_set_progress",
+        {
+            "campaign_id": campaign_id,
+            "scene_id": scene_id,
+            "status": "active",
+            "progress": max(int((progress_before or {}).get("progress", 0) or 0), 50),
+            "state": {
+                **deepcopy(dict((progress_before or {}).get("state") or {})),
+                "full_playthrough_check": {
+                    "kind": kind,
+                    "ability": ability,
+                    "dc": dc,
+                    "source_ref": exact_ref,
+                },
+            },
+            "current_location_key": location_key,
+            "expected_state_version": int((progress_before or {}).get("state_version", 0) or 0),
+            "idempotency_key": _mutation_key(
+                run_id, "scene-progress", f"{scene_id}:{kind}:{actor_id}"
+            ),
+        },
+    )
+    branches = await client.domain(
+        "branch_query",
+        {"campaign_id": campaign_id, "view": "list"},
+    )
+    branch = next((item for item in branches if item.get("is_current")), None)
+    if branch is None:
+        raise RuntimeError("campaign has no current branch")
+    campaign = await _campaign(client, campaign_id)
+    settled = await client.domain(
+        "character_check",
+        {
+            "campaign_id": campaign_id,
+            "actor_id": actor_id,
+            "kind": kind,
+            "ability": ability,
+            "dc": dc,
+            "proficient": proficient,
+            "branch_id": str(branch["id"]),
+            "expected_revision": campaign["revision"],
+            "idempotency_key": _mutation_key(
+                run_id, "character-check", f"{scene_id}:{kind}:{actor_id}"
+            ),
+        },
+    )
+    if settled.get("status") != "committed":
+        raise RuntimeError("source-cited character check did not commit")
+    check_result = dict(settled.get("result") or {})
+    success = bool(check_result.get("success"))
+    proposition = (success_knowledge.strip() if success else failure_knowledge.strip()) or (
+        f"{actor['name']} {'succeeded' if success else 'failed'} on the "
+        f"DC {dc} {ability.title()} ({kind.title()}) check."
+    )
+    recipients = list(dict.fromkeys([actor_id, *knowledge_actor_ids]))
+    campaign = await _campaign(client, campaign_id)
+    committed = await client.domain(
+        "continuity_commit",
+        {
+            "campaign_id": campaign_id,
+            "payload": {
+                "event": {
+                    "summary": (
+                        f"{actor['name']} {'succeeded' if success else 'failed'} on "
+                        f"the source-cited {kind} check at {location_key}."
+                    ),
+                    "event_type": "ability_check",
+                    "audience_scope": "party",
+                    "payload": {
+                        "scene_id": scene_id,
+                        "location_key": location_key,
+                        "kind": kind,
+                        "ability": ability,
+                        "dc": dc,
+                        "success": success,
+                        "source_excerpt": source_excerpt,
+                        "source_ref": exact_ref,
+                    },
+                },
+                "actor_knowledge": [
+                    {
+                        "actor_id": recipient,
+                        "knowledge_key": (
+                            f"playthrough.{_token(run_id)}.{_token(scene_id)}.{_token(kind)}"
+                        ),
+                        "proposition": proposition,
+                        "disclosure_scope": "owner",
+                    }
+                    for recipient in recipients
+                ],
+                "snapshot": {"label": (f"Full playthrough check: {kind} at {location_key}")},
+                "branch_id": str(branch["id"]),
+            },
+            "expected_revision": campaign["revision"],
+            "idempotency_key": _mutation_key(run_id, "continuity", f"{scene_id}:{kind}:{actor_id}"),
+        },
+    )
+    synced = await _manifest_mutation(
+        client,
+        campaign_id=campaign_id,
+        action="sync",
+        run_id=run_id,
+        identity=f"resolve-check-sync:{scene_id}:{kind}:{actor_id}",
+    )
+    return {
+        "scene": {
+            "scene_id": scene_id,
+            "location_key": location_key,
+            "source_ref": exact_ref,
+        },
+        "actor": {"id": actor_id, "name": actor["name"]},
+        "progress": progress,
+        "check": check_result,
+        "knowledge_actor_ids": recipients,
+        "continuity": committed,
+        "sync": synced,
+    }
+
+
+async def _award_experience(
+    client: ExposureClient,
+    *,
+    campaign_id: str,
+    run_id: str,
+    scene_id: str,
+    source_ref: dict[str, Any] | None,
+    actor_ids: list[str],
+    amount: int | None,
+    reason: str,
+) -> dict[str, Any]:
+    if not scene_id or not actor_ids or amount is None or amount <= 0 or not reason.strip():
+        raise ValueError("award-xp requires scene, one or more actors, positive amount, and reason")
+    if len(actor_ids) != len(set(actor_ids)):
+        raise ValueError("award-xp actor ids must be unique")
+    scene = await client.domain(
+        "module_query",
+        {
+            "campaign_id": campaign_id,
+            "view": "scene",
+            "payload": {"scene_id": scene_id},
+        },
+    )
+    exact_ref = _validate_source_ref(scene, source_ref)
+    actors = []
+    for actor_id in actor_ids:
+        actor = await client.domain(
+            "character_query",
+            {"view": "get", "payload": {"character_id": actor_id}},
+        )
+        if actor.get("campaign_id") != campaign_id:
+            raise ValueError("award-xp actor does not belong to the campaign")
+        actors.append(actor)
+    campaign = await _campaign(client, campaign_id)
+    awarded = await client.domain(
+        "campaign_change",
+        {
+            "campaign_id": campaign_id,
+            "action": "experience_award",
+            "payload": {
+                "awards": [
+                    {
+                        "character_id": actor["id"],
+                        "amount": amount,
+                        "expected_revision": actor["revision"],
+                    }
+                    for actor in actors
+                ],
+                "reason": reason.strip(),
+                "source_ref": json.dumps(
+                    exact_ref, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+                ),
+            },
+            "expected_revision": campaign["revision"],
+            "idempotency_key": _mutation_key(run_id, "experience-award", f"{scene_id}:{amount}"),
+        },
+    )
+    synced = await _manifest_mutation(
+        client,
+        campaign_id=campaign_id,
+        action="sync",
+        run_id=run_id,
+        identity=f"award-xp-sync:{scene_id}:{amount}",
+    )
+    return {
+        "scene_id": scene_id,
+        "source_ref": exact_ref,
+        "award": awarded,
+        "sync": synced,
+    }
 
 
 async def _start_play(
@@ -594,9 +895,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                 )
             elif args.action == "configure-advancement":
                 if phase == "combat":
-                    raise RuntimeError(
-                        "configure-advancement cannot run during active combat"
-                    )
+                    raise RuntimeError("configure-advancement cannot run during active combat")
                 if phase == "play":
                     await client.load("play.scene_control")
                 report["result"] = await _configure_advancement(
@@ -630,6 +929,41 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     reachable_scene_ids=args.reachable_scene_id,
                     excluded_scenes=args.excluded_scene_json,
                 )
+            elif args.action == "resolve-check":
+                if phase != "play":
+                    raise RuntimeError("resolve-check requires the play phase")
+                await client.load("play.characters", "play.resolution")
+                report["result"] = await _resolve_check(
+                    client,
+                    campaign_id=args.campaign_id,
+                    run_id=args.run_id,
+                    scene_id=str(args.scene_id or ""),
+                    location_key=args.location_key,
+                    source_excerpt=args.source_excerpt,
+                    source_ref=args.source_ref_json,
+                    actor_id=args.check_actor_id,
+                    kind=args.check_kind,
+                    ability=args.check_ability,
+                    dc=args.check_dc,
+                    proficient=args.check_proficient,
+                    knowledge_actor_ids=args.knowledge_actor_id,
+                    success_knowledge=args.success_knowledge,
+                    failure_knowledge=args.failure_knowledge,
+                )
+            elif args.action == "award-xp":
+                if phase != "play":
+                    raise RuntimeError("award-xp requires the play phase")
+                await client.load("play.characters")
+                report["result"] = await _award_experience(
+                    client,
+                    campaign_id=args.campaign_id,
+                    run_id=args.run_id,
+                    scene_id=str(args.scene_id or ""),
+                    source_ref=args.source_ref_json,
+                    actor_ids=args.xp_actor_id,
+                    amount=args.xp_amount,
+                    reason=args.xp_reason,
+                )
             elif args.action == "checkpoint":
                 label = args.checkpoint_label or f"Full playthrough checkpoint: {args.run_id}"
                 report["result"] = await _checkpoint(
@@ -658,8 +992,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                         campaign_id=args.campaign_id,
                         run_id=args.run_id,
                         label=(
-                            args.checkpoint_label
-                            or f"Formal campaign ending: {args.condition_id}"
+                            args.checkpoint_label or f"Formal campaign ending: {args.condition_id}"
                         ),
                     )
                 report["result"] = {"ending": ended, "checkpoint": checkpoint}
@@ -686,14 +1019,11 @@ def main() -> int:
     try:
         report = asyncio.run(_run(args))
     except Exception as error:
+
         def leaf_messages(item: BaseException) -> list[str]:
             nested = getattr(item, "exceptions", ())
             if nested:
-                return [
-                    message
-                    for child in nested
-                    for message in leaf_messages(child)
-                ]
+                return [message for child in nested for message in leaf_messages(child)]
             return [f"{type(item).__name__}: {item}"]
 
         report = {

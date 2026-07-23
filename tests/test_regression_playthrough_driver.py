@@ -8,6 +8,7 @@ from copy import deepcopy
 from sagasmith_dnd.character_schema import default_character_sheet
 
 from scripts.regression_playthrough import (
+    _award_experience,
     _campaign_phase,
     _checkpoint,
     _configure_advancement,
@@ -15,6 +16,7 @@ from scripts.regression_playthrough import (
     _party_member,
     _party_selections,
     _phase_groups,
+    _resolve_check,
     _start_play,
 )
 
@@ -148,6 +150,150 @@ def test_checkpoint_uses_only_public_manifest_branch_and_snapshot_tools() -> Non
         "snapshot_query",
         "playthrough_manifest",
     ]
+
+
+def test_source_cited_check_persists_result_and_explicit_knowledge() -> None:
+    source_ref = {
+        "module_id": "module-1",
+        "scene_id": "scene-1",
+        "chunk_id": "chunk-1",
+        "page_start": 7,
+        "page_end": 7,
+        "heading_path": ["Goblin Trail"],
+        "content_sha256": "abc",
+    }
+
+    class Client:
+        def __init__(self) -> None:
+            self.revision = 4
+
+        async def core(self, tool_id: str, arguments: dict):
+            assert tool_id == "campaign_query"
+            return {"result": {"id": "campaign-1", "revision": self.revision}}
+
+        async def domain(self, tool_id: str, arguments: dict):
+            if tool_id == "module_query" and arguments["view"] == "scene":
+                return {
+                    "module_id": "module-1",
+                    "scene_id": "scene-1",
+                    "content": "A DC 10 Wisdom (Survival) check reveals the trail.",
+                    "locations": [{"key": "ambush"}],
+                }
+            if tool_id == "module_query" and arguments["view"] == "progress":
+                return []
+            if tool_id == "module_set_progress":
+                return {"state_version": 1}
+            if tool_id == "character_query":
+                return {
+                    "id": arguments["payload"]["character_id"],
+                    "name": "Scout",
+                    "campaign_id": "campaign-1",
+                    "revision": 2,
+                }
+            if tool_id == "branch_query":
+                return [{"id": "branch-1", "is_current": True}]
+            if tool_id == "character_check":
+                self.revision += 1
+                return {"status": "committed", "result": {"success": True, "total": 14}}
+            if tool_id == "continuity_commit":
+                assert [item["actor_id"] for item in arguments["payload"]["actor_knowledge"]] == [
+                    "actor-1",
+                    "actor-2",
+                ]
+                assert all(
+                    item["proposition"] == "The trail shows twelve goblins and two captives."
+                    for item in arguments["payload"]["actor_knowledge"]
+                )
+                assert arguments["payload"]["event"]["payload"]["source_ref"] == source_ref
+                self.revision += 1
+                return {"event": {"id": "event-1"}, "snapshot": {"slot": 3}}
+            if tool_id == "playthrough_manifest":
+                assert arguments["action"] == "sync"
+                return {"manifest": {"status": "in_progress"}, "campaign_revision": 7}
+            raise AssertionError((tool_id, arguments))
+
+    result = asyncio.run(
+        _resolve_check(
+            Client(),
+            campaign_id="campaign-1",
+            run_id="run-1",
+            scene_id="scene-1",
+            location_key="ambush",
+            source_excerpt="A DC 10 Wisdom (Survival) check reveals the trail.",
+            source_ref=source_ref,
+            actor_id="actor-1",
+            kind="survival",
+            ability="wisdom",
+            dc=10,
+            proficient=True,
+            knowledge_actor_ids=["actor-2"],
+            success_knowledge="The trail shows twelve goblins and two captives.",
+            failure_knowledge="The trail's traffic remains unclear.",
+        )
+    )
+
+    assert result["check"] == {"success": True, "total": 14}
+    assert result["knowledge_actor_ids"] == ["actor-1", "actor-2"]
+    assert result["sync"]["campaign_revision"] == 7
+
+
+def test_xp_award_uses_source_ref_and_all_exact_recipients() -> None:
+    source_ref = {
+        "module_id": "module-1",
+        "scene_id": "scene-1",
+        "chunk_id": "chunk-1",
+        "page_start": 7,
+        "page_end": 7,
+        "heading_path": ["Awarding Experience Points"],
+        "content_sha256": "abc",
+    }
+
+    class Client:
+        async def core(self, tool_id: str, arguments: dict):
+            assert tool_id == "campaign_query"
+            return {"result": {"id": "campaign-1", "revision": 4}}
+
+        async def domain(self, tool_id: str, arguments: dict):
+            if tool_id == "module_query":
+                return {
+                    "module_id": "module-1",
+                    "scene_id": "scene-1",
+                    "content": "Award each character 75 XP.",
+                }
+            if tool_id == "character_query":
+                actor_id = arguments["payload"]["character_id"]
+                return {
+                    "id": actor_id,
+                    "campaign_id": "campaign-1",
+                    "revision": 2,
+                }
+            if tool_id == "campaign_change":
+                assert arguments["action"] == "experience_award"
+                assert [item["character_id"] for item in arguments["payload"]["awards"]] == [
+                    "actor-1",
+                    "actor-2",
+                ]
+                assert all(item["amount"] == 75 for item in arguments["payload"]["awards"])
+                assert json.loads(arguments["payload"]["source_ref"]) == source_ref
+                return {"awards": [{"new_xp": 75}, {"new_xp": 75}]}
+            if tool_id == "playthrough_manifest":
+                return {"manifest": {"status": "in_progress"}, "campaign_revision": 5}
+            raise AssertionError((tool_id, arguments))
+
+    result = asyncio.run(
+        _award_experience(
+            Client(),
+            campaign_id="campaign-1",
+            run_id="run-1",
+            scene_id="scene-1",
+            source_ref=source_ref,
+            actor_ids=["actor-1", "actor-2"],
+            amount=75,
+            reason="Reached the hideout",
+        )
+    )
+
+    assert [item["new_xp"] for item in result["award"]["awards"]] == [75, 75]
 
 
 def test_start_play_uses_public_quality_gate_phase_and_scene_tools() -> None:
