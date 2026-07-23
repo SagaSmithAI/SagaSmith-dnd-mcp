@@ -10,6 +10,7 @@ import pytest
 from scripts.regression_campaign import (
     _configure_utf8_streams,
     _expanded_source_ref,
+    _load_json_object,
     _load_review_override,
     _validate_noncombat_scene,
 )
@@ -29,6 +30,30 @@ def test_blocked_candidate_override_requires_nonempty_visual_evidence(tmp_path: 
     assert resolved == path.resolve()
     with pytest.raises(ValueError, match="visual evidence"):
         _load_review_override(path, "")
+
+
+def test_statblock_variant_file_requires_a_json_object(tmp_path: Path) -> None:
+    path = tmp_path / "sildar-variant.json"
+    path.write_text(
+        json.dumps(
+            {
+                "source_ref": "module-chunk:area-6",
+                "current_hit_points": 1,
+                "armor_class": 10,
+                "remove_actions": ["Longsword", "Heavy Crossbow"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    variant, resolved = _load_json_object(path, "statblock variant")
+
+    assert variant["current_hit_points"] == 1
+    assert variant["remove_actions"] == ["Longsword", "Heavy Crossbow"]
+    assert resolved == path.resolve()
+    path.write_text("[]", encoding="utf-8")
+    with pytest.raises(ValueError, match="must contain a JSON object"):
+        _load_json_object(path, "statblock variant")
 
 
 def test_expanded_source_ref_keeps_exact_module_scene_and_content_identity() -> None:

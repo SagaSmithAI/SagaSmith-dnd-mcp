@@ -34,6 +34,14 @@ def _load_review_override(path: Path, observation: str) -> tuple[str, str, Path]
     return content, evidence, resolved
 
 
+def _load_json_object(path: Path, label: str) -> tuple[dict[str, Any], Path]:
+    resolved = path.expanduser().resolve()
+    value = json.loads(resolved.read_text(encoding="utf-8"))
+    if not isinstance(value, dict):
+        raise ValueError(f"{label} must contain a JSON object")
+    return value, resolved
+
+
 def _arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--home", type=Path, required=True, help="Existing D&D MCP home")
@@ -76,6 +84,14 @@ def _arguments() -> argparse.Namespace:
         "--review-observation",
         default="",
         help="Visual review evidence for --review-override",
+    )
+    parser.add_argument(
+        "--statblock-variant",
+        type=Path,
+        help=(
+            "Source-cited JSON variant for prepare-statblock, passed to the public "
+            "character_create_from tool"
+        ),
     )
     parser.add_argument(
         "--actor-name",
@@ -1713,6 +1729,13 @@ async def _prepare_statblock(args: argparse.Namespace) -> dict[str, Any]:
 
     if bool(args.review_id) == bool(args.candidate_id):
         raise ValueError("prepare-statblock requires exactly one of --review-id or --candidate-id")
+    variant = None
+    variant_path = None
+    if args.statblock_variant is not None:
+        variant, variant_path = _load_json_object(
+            args.statblock_variant,
+            "statblock variant",
+        )
     token = _idempotency_token(args.run_id)
     async with stdio_client(_server_parameters(args)) as (read, write):
         async with ClientSession(read, write) as session:
@@ -1935,6 +1958,7 @@ async def _prepare_statblock(args: argparse.Namespace) -> dict[str, Any]:
                             "review_id": review["id"],
                             "name": args.actor_name,
                             "character_type": "monster",
+                            "variant": variant,
                         },
                         "idempotency_key": f"{token}-create-statblock",
                     },
@@ -2185,6 +2209,9 @@ async def _prepare_statblock(args: argparse.Namespace) -> dict[str, Any]:
                     "character": _character_summary(actor),
                     "spell_display_consistent": True,
                     "spell_cards": spell_cards,
+                    "variant": created.get("variant"),
+                    "variant_evidence": created.get("variant_evidence"),
+                    "variant_path": str(variant_path) if variant_path is not None else None,
                 },
                 "snapshot": snapshot,
                 "snapshot_verification": verified,
