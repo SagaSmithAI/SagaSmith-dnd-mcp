@@ -11,6 +11,7 @@ from sagasmith_dnd.playthrough import new_playthrough_manifest
 
 from scripts.regression_playthrough import (
     _acquire_source_loot,
+    _advance_level,
     _apply_source_damage,
     _award_experience,
     _branch_from_snapshot,
@@ -495,6 +496,237 @@ def test_advancement_configuration_uses_public_campaign_change() -> None:
 
     assert result["configured"]["advancement"]["mode"] == "xp"
     assert result["phase_changes"] == []
+
+
+def test_level_advancement_exhausts_public_follow_up_and_restores_play() -> None:
+    source_ref = {
+        "module_id": "module-1",
+        "scene_id": "scene-1",
+        "chunk_id": "chunk-xp",
+        "page_start": 12,
+        "page_end": 13,
+        "heading_path": ["Experience Points"],
+        "content_sha256": "abc123",
+    }
+    sheet = default_character_sheet()
+    sheet["progression"].update(
+        {
+            "level": 1,
+            "classes": [
+                {
+                    "name": "Bard",
+                    "level": 1,
+                    "subclass": "",
+                    "hit_die": 8,
+                }
+            ],
+        }
+    )
+
+    class Client:
+        def __init__(self) -> None:
+            self.phase = "play"
+            self.campaign_revision = 10
+            self.actor = {
+                "id": "bard-1",
+                "name": "Song",
+                "campaign_id": "campaign-1",
+                "revision": 3,
+                "sheet": deepcopy(sheet),
+            }
+            self.calls: list[str] = []
+
+        async def open(self, campaign_id: str):
+            assert campaign_id == "campaign-1"
+            return {"exposure_id": "exposure"}
+
+        async def load(self, *_group_ids: str):
+            return None
+
+        async def core(self, tool_id: str, arguments: dict):
+            self.calls.append(tool_id)
+            if tool_id == "campaign_query":
+                return {
+                    "result": {
+                        "id": "campaign-1",
+                        "revision": self.campaign_revision,
+                        "state": {"game_phase": self.phase},
+                    }
+                }
+            if tool_id == "game_phase":
+                self.phase = arguments["tool_profile"]
+                self.campaign_revision += 1
+                return {"result": {"tool_profile": self.phase}}
+            raise AssertionError((tool_id, arguments))
+
+        async def domain(self, tool_id: str, arguments: dict):
+            self.calls.append(tool_id)
+            if tool_id == "module_query":
+                return {
+                    "module_id": "module-1",
+                    "scene_id": "scene-1",
+                    "content": "The characters divide XP evenly.",
+                }
+            if tool_id == "character_query":
+                return deepcopy(self.actor)
+            if tool_id == "branch_query":
+                return [
+                    {
+                        "id": "branch-1",
+                        "is_current": True,
+                        "head_snapshot_id": "snapshot-1",
+                    }
+                ]
+            if tool_id == "character_state_change":
+                assert self.phase == "lobby"
+                assert arguments["action"] == "level_advance"
+                assert arguments["payload"]["source_ref"].endswith("sha256:abc123")
+                self.actor["sheet"]["progression"]["level"] = 2
+                self.actor["sheet"]["progression"]["classes"][0]["level"] = 2
+                self.actor["revision"] += 1
+                return {
+                    "status": "committed",
+                    "character": deepcopy(self.actor),
+                    "advancement": {
+                        "follow_up": {
+                            "feature_artifacts": [
+                                {
+                                    "artifact_id": "feature-jack",
+                                    "name": "Jack of All Trades",
+                                    "selection_requirements": {},
+                                }
+                            ],
+                            "subclass_options": [],
+                            "spell_choices": {
+                                "cantrips_to_add": 0,
+                                "leveled_spells_to_add": 1,
+                            },
+                            "prepared_spell_event": None,
+                        }
+                    },
+                }
+            if tool_id == "rule_pack_query":
+                kind = arguments["payload"]["kind"]
+                if kind == "feature":
+                    return [
+                        {
+                            "id": "feature-jack",
+                            "name": "Jack of All Trades",
+                            "selection_requirements": {
+                                "class_name": "Bard",
+                                "subclass_name": "",
+                                "minimum_level": 2,
+                            },
+                        }
+                    ]
+                return [
+                    {
+                        "id": "spell-heroism",
+                        "name": "Heroism",
+                        "selection_requirements": {
+                            "level": 1,
+                            "eligible_classes": ["Bard"],
+                        },
+                    }
+                ]
+            if tool_id == "character_content_apply":
+                artifact_id = arguments["artifact_id"]
+                if artifact_id == "feature-jack":
+                    self.actor["sheet"]["content"]["features"].append({"id": artifact_id})
+                else:
+                    assert arguments["selection"] == {
+                        "source_class": "Bard",
+                        "method": "known",
+                    }
+                    self.actor["sheet"]["content"]["spells"].append({"id": artifact_id})
+                self.actor["revision"] += 1
+                return deepcopy(self.actor)
+            if tool_id == "playthrough_manifest" and arguments["action"] == "sync":
+                self.campaign_revision += 1
+                return {
+                    "campaign_revision": self.campaign_revision,
+                    "manifest": {"status": "in_progress"},
+                }
+            if tool_id == "snapshot_create":
+                return {"id": "snapshot-2", "slot": 2}
+            if tool_id == "snapshot_query":
+                return {"valid": True}
+            if tool_id == "playthrough_manifest" and arguments["action"] == "get":
+                return {"manifest": {"status": "in_progress"}}
+            raise AssertionError((tool_id, arguments))
+
+    client = Client()
+    result = asyncio.run(
+        _advance_level(
+            client,
+            campaign_id="campaign-1",
+            run_id="run-1",
+            initial_phase="play",
+            return_phase="play",
+            scene_id="scene-1",
+            source_ref=source_ref,
+            actor_id="bard-1",
+            target_level=2,
+            class_name="Bard",
+            hp_method="fixed",
+            reason="earned the module's opening XP threshold",
+            subclass_artifact_id="",
+            feature_selection_values=[],
+            spell_selection_values=[
+                {
+                    "artifact_id": "spell-heroism",
+                    "source_class": "Bard",
+                    "method": "known",
+                }
+            ],
+            prepared_spell_ids=[],
+            checkpoint_label="Bard reaches level 2",
+        )
+    )
+
+    assert client.phase == "play"
+    assert result["actor"]["sheet"]["progression"]["level"] == 2
+    assert result["applied_features"] == [{"artifact_id": "feature-jack", "selection": {}}]
+    assert result["applied_spells"] == ["spell-heroism"]
+    assert result["checkpoint"]["verification"] == {"valid": True}
+    assert client.calls.count("game_phase") == 2
+    assert "character_state_change" in client.calls
+    assert "character_content_apply" in client.calls
+
+
+def test_level_advancement_rejects_malformed_choices_before_public_mutation() -> None:
+    class Client:
+        async def load(self, *_group_ids: str):
+            raise AssertionError("malformed choices must fail before loading tools")
+
+    with pytest.raises(ValueError, match="only artifact_id and selection"):
+        asyncio.run(
+            _advance_level(
+                Client(),
+                campaign_id="campaign-1",
+                run_id="run-1",
+                initial_phase="play",
+                return_phase="play",
+                scene_id="scene-1",
+                source_ref=_manifest_source_ref(),
+                actor_id="actor-1",
+                target_level=2,
+                class_name="Fighter",
+                hp_method="fixed",
+                reason="earned enough XP",
+                subclass_artifact_id="",
+                feature_selection_values=[
+                    {
+                        "artifact_id": "feature-1",
+                        "selection": {},
+                        "unexpected": True,
+                    }
+                ],
+                spell_selection_values=[],
+                prepared_spell_ids=[],
+                checkpoint_label="",
+            )
+        )
 
 
 def test_checkpoint_uses_only_public_manifest_branch_and_snapshot_tools() -> None:

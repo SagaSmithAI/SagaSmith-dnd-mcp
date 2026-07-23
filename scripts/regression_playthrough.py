@@ -49,6 +49,7 @@ def _arguments() -> argparse.Namespace:
             "acquire-loot",
             "use-consumable",
             "award-xp",
+            "advance-level",
             "configure-advancement",
             "relock-core",
             "refresh-module",
@@ -147,6 +148,32 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--xp-actor-id", action="append", default=[])
     parser.add_argument("--xp-amount", type=int)
     parser.add_argument("--xp-reason", default="")
+    parser.add_argument("--level-actor-id", default="")
+    parser.add_argument("--level-target", type=int)
+    parser.add_argument("--level-class-name", default="")
+    parser.add_argument("--level-hp-method", choices=("fixed", "rolled"))
+    parser.add_argument("--level-reason", default="")
+    parser.add_argument(
+        "--level-return-phase",
+        choices=("lobby", "play"),
+        help="Explicit phase to restore after the lobby-only level transaction",
+    )
+    parser.add_argument("--level-subclass-artifact-id", default="")
+    parser.add_argument(
+        "--level-feature-selection-json",
+        action="append",
+        type=json.loads,
+        default=[],
+        help="JSON object with artifact_id and a selection object",
+    )
+    parser.add_argument(
+        "--level-spell-json",
+        action="append",
+        type=json.loads,
+        default=[],
+        help="JSON object with artifact_id, source_class, and method",
+    )
+    parser.add_argument("--level-prepared-spell-id", action="append", default=[])
     parser.add_argument("--objective", default="")
     parser.add_argument("--mark-visited", action="store_true")
     parser.add_argument("--reachable-scene-id", action="append", default=[])
@@ -2939,6 +2966,508 @@ async def _configure_advancement(
     return {"configured": configured, "phase_changes": phase_changes}
 
 
+def _level_audit_source(source_ref: dict[str, Any]) -> str:
+    return (
+        f"module:{source_ref['module_id']}:scene:{source_ref['scene_id']}:"
+        f"chunk:{source_ref['chunk_id']}:pages:{source_ref['page_start']}-"
+        f"{source_ref['page_end']}:sha256:{source_ref['content_sha256']}"
+    )
+
+
+def _level_feature_selections(
+    values: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    result: dict[str, dict[str, Any]] = {}
+    for item in values:
+        if not isinstance(item, dict) or set(item) != {"artifact_id", "selection"}:
+            raise ValueError(
+                "every level feature selection must contain only artifact_id and selection"
+            )
+        artifact_id = str(item.get("artifact_id") or "").strip()
+        selection = item.get("selection")
+        if not artifact_id or not isinstance(selection, dict):
+            raise ValueError("level feature artifact_id and selection object are required")
+        if artifact_id in result:
+            raise ValueError("level feature selection artifact ids must be unique")
+        result[artifact_id] = deepcopy(selection)
+    return result
+
+
+def _level_spell_selections(values: list[dict[str, Any]]) -> list[dict[str, str]]:
+    result: list[dict[str, str]] = []
+    artifact_ids: set[str] = set()
+    allowed_methods = {"known", "spellbook", "class_prepared"}
+    for item in values:
+        if not isinstance(item, dict) or set(item) != {
+            "artifact_id",
+            "source_class",
+            "method",
+        }:
+            raise ValueError(
+                "every level spell selection must contain only artifact_id, "
+                "source_class, and method"
+            )
+        selection = {key: str(item.get(key) or "").strip() for key in item}
+        artifact_id = selection["artifact_id"]
+        if not artifact_id or not selection["source_class"]:
+            raise ValueError("level spell artifact_id and source_class are required")
+        if selection["method"] not in allowed_methods:
+            raise ValueError("level spell method must be known, spellbook, or class_prepared")
+        if artifact_id in artifact_ids:
+            raise ValueError("level spell artifact ids must be unique")
+        artifact_ids.add(artifact_id)
+        result.append(selection)
+    return result
+
+
+async def _advance_level(
+    client: ExposureClient,
+    *,
+    campaign_id: str,
+    run_id: str,
+    initial_phase: str,
+    return_phase: str,
+    scene_id: str,
+    source_ref: dict[str, Any] | None,
+    actor_id: str,
+    target_level: int | None,
+    class_name: str,
+    hp_method: str,
+    reason: str,
+    subclass_artifact_id: str,
+    feature_selection_values: list[dict[str, Any]],
+    spell_selection_values: list[dict[str, Any]],
+    prepared_spell_ids: list[str],
+    checkpoint_label: str,
+) -> dict[str, Any]:
+    normalized_class = class_name.strip()
+    normalized_reason = reason.strip()
+    if (
+        not actor_id
+        or target_level is None
+        or not normalized_class
+        or hp_method not in {"fixed", "rolled"}
+        or not normalized_reason
+        or return_phase not in {"lobby", "play"}
+        or not scene_id
+    ):
+        raise ValueError(
+            "advance-level requires actor, target level, class, HP method, reason, "
+            "return phase, scene, and exact source reference"
+        )
+    if target_level < 2 or target_level > 20:
+        raise ValueError("level target must be between 2 and 20")
+    if initial_phase == "combat":
+        raise RuntimeError("advance-level cannot run during active combat")
+    if len(prepared_spell_ids) != len(set(prepared_spell_ids)):
+        raise ValueError("prepared spell ids must be unique")
+    feature_selections = _level_feature_selections(feature_selection_values)
+    spell_selections = _level_spell_selections(spell_selection_values)
+    if any(
+        item["source_class"].casefold() != normalized_class.casefold() for item in spell_selections
+    ):
+        raise ValueError("every level spell source_class must match the advanced class")
+
+    await client.load(*_scene_groups(initial_phase), _character_group(initial_phase))
+    scene = await client.domain(
+        "module_query",
+        {
+            "campaign_id": campaign_id,
+            "view": "scene",
+            "payload": {"scene_id": scene_id},
+        },
+    )
+    exact_ref = _validate_source_ref(scene, source_ref)
+    audit_source = _level_audit_source(exact_ref)
+    if len(audit_source) + len(normalized_reason) + 2 > 300:
+        raise ValueError("level source reference and reason exceed the audited 300-character limit")
+    actor = await client.domain(
+        "character_query",
+        {"view": "get", "payload": {"character_id": actor_id}},
+    )
+    if actor.get("campaign_id") != campaign_id:
+        raise ValueError("advance-level actor does not belong to the campaign")
+    progression = dict(dict(actor.get("sheet") or {}).get("progression") or {})
+    current_level = int(progression.get("level", 0) or 0)
+    classes = list(progression.get("classes") or [])
+    if len(classes) != 1 or str(classes[0].get("name") or "").casefold() != (
+        normalized_class.casefold()
+    ):
+        raise ValueError("advance-level currently requires the actor's single existing class")
+    if current_level not in {target_level - 1, target_level}:
+        raise ValueError("advance-level can apply or resume exactly one target level at a time")
+
+    branches = await client.domain(
+        "branch_query",
+        {"campaign_id": campaign_id, "view": "list"},
+    )
+    branch = next((item for item in branches if item.get("is_current")), None)
+    if branch is None:
+        raise RuntimeError("campaign has no current branch")
+    branch_id = str(branch["id"])
+    phase_changes: list[dict[str, Any]] = []
+    if initial_phase == "play":
+        campaign = await _campaign(client, campaign_id)
+        phase_changes.append(
+            _facade_value(
+                await client.core(
+                    "game_phase",
+                    {
+                        "campaign_id": campaign_id,
+                        "action": "set",
+                        "tool_profile": "lobby",
+                        "expected_revision": campaign["revision"],
+                        "branch_id": branch_id,
+                        "idempotency_key": _mutation_key(
+                            run_id,
+                            "phase",
+                            (
+                                f"level-{actor_id}-{target_level}-enter-lobby-"
+                                f"r{campaign['revision']}"
+                            ),
+                        ),
+                    },
+                )
+            )
+        )
+    await client.open(campaign_id)
+    await client.load("lobby.campaign", "lobby.characters", "lobby.rules")
+    actor = await client.domain(
+        "character_query",
+        {"view": "get", "payload": {"character_id": actor_id}},
+    )
+    advanced = _facade_value(
+        await client.domain(
+            "character_state_change",
+            {
+                "character_id": actor_id,
+                "action": "level_advance",
+                "payload": {
+                    "class_name": normalized_class,
+                    "hp_method": hp_method,
+                    "reason": normalized_reason,
+                    "source_ref": audit_source,
+                },
+                "expected_revision": actor["revision"],
+                "idempotency_key": _mutation_key(
+                    run_id, "level-advance", f"{actor_id}:level-{target_level}"
+                ),
+            },
+        )
+    )
+    if advanced.get("status") != "committed":
+        raise RuntimeError("character level advancement did not commit")
+    actor = dict(advanced["character"])
+    follow_up = dict(dict(advanced["advancement"]).get("follow_up") or {})
+
+    subclass_options = list(follow_up.get("subclass_options") or [])
+    selected_subclass: dict[str, Any] | None = None
+    if subclass_options:
+        if not subclass_artifact_id:
+            raise ValueError("level advancement requires an explicit subclass artifact")
+        selected_subclass = next(
+            (
+                item
+                for item in subclass_options
+                if str(item.get("artifact_id") or "") == subclass_artifact_id
+            ),
+            None,
+        )
+        if selected_subclass is None:
+            raise ValueError("selected subclass is not offered by this level advancement")
+        applied = _facade_value(
+            await client.domain(
+                "character_content_apply",
+                {
+                    "character_id": actor_id,
+                    "artifact_id": subclass_artifact_id,
+                    "selection": {"target_class_name": normalized_class},
+                    "expected_revision": actor["revision"],
+                    "idempotency_key": _mutation_key(
+                        run_id,
+                        "level-subclass",
+                        f"{actor_id}:level-{target_level}:{subclass_artifact_id}",
+                    ),
+                },
+            )
+        )
+        if applied.get("status") == "pending_ruling":
+            raise RuntimeError(f"subclass selection needs DM review: {applied['reason']}")
+        actor = dict(applied.get("character") or applied)
+    elif subclass_artifact_id:
+        raise ValueError("this level advancement does not offer a subclass selection")
+
+    feature_catalog = list(
+        _facade_value(
+            await client.domain(
+                "rule_pack_query",
+                {
+                    "view": "content_catalog",
+                    "payload": {"campaign_id": campaign_id, "kind": "feature"},
+                },
+            )
+        )
+    )
+    existing_feature_ids = {
+        str(item.get("id") or "")
+        for item in dict(actor["sheet"].get("content") or {}).get("features", [])
+    }
+    actor_class = next(
+        item
+        for item in actor["sheet"]["progression"]["classes"]
+        if str(item.get("name") or "").casefold() == normalized_class.casefold()
+    )
+    actor_subclass = str(actor_class.get("subclass") or "")
+    required_features: dict[str, dict[str, Any]] = {
+        str(item["artifact_id"]): dict(item) for item in follow_up.get("feature_artifacts") or []
+    }
+    for item in feature_catalog:
+        requirements = dict(item.get("selection_requirements") or {})
+        artifact_id = str(item.get("id") or "")
+        if (
+            artifact_id
+            and artifact_id not in existing_feature_ids
+            and str(requirements.get("class_name") or "").casefold() == normalized_class.casefold()
+            and int(requirements.get("minimum_level", 1) or 1) <= target_level
+            and (
+                not str(requirements.get("subclass_name") or "")
+                or str(requirements.get("subclass_name") or "").casefold()
+                == actor_subclass.casefold()
+            )
+        ):
+            required_features.setdefault(
+                artifact_id,
+                {
+                    "artifact_id": artifact_id,
+                    "name": str(item.get("name") or artifact_id),
+                    "selection_requirements": requirements,
+                },
+            )
+    unknown_feature_selections = set(feature_selections) - set(required_features)
+    if unknown_feature_selections:
+        raise ValueError(
+            "feature selections were supplied for artifacts not required at this level: "
+            + ", ".join(sorted(unknown_feature_selections))
+        )
+    applied_features: list[dict[str, Any]] = []
+    for artifact_id, feature in sorted(required_features.items()):
+        requirements = dict(feature.get("selection_requirements") or {})
+        selection = feature_selections.get(artifact_id, {})
+        choice_field = str(requirements.get("field") or "")
+        if choice_field and choice_field not in selection:
+            raise ValueError(
+                f"level feature {artifact_id} requires an explicit {choice_field} choice"
+            )
+        applied = _facade_value(
+            await client.domain(
+                "character_content_apply",
+                {
+                    "character_id": actor_id,
+                    "artifact_id": artifact_id,
+                    "selection": selection,
+                    "expected_revision": actor["revision"],
+                    "idempotency_key": _mutation_key(
+                        run_id,
+                        "level-feature",
+                        f"{actor_id}:level-{target_level}:{artifact_id}",
+                    ),
+                },
+            )
+        )
+        if applied.get("status") == "pending_ruling":
+            raise RuntimeError(f"level feature needs DM review: {artifact_id}: {applied['reason']}")
+        actor = dict(applied.get("character") or applied)
+        applied_features.append({"artifact_id": artifact_id, "selection": deepcopy(selection)})
+
+    spell_catalog = list(
+        _facade_value(
+            await client.domain(
+                "rule_pack_query",
+                {
+                    "view": "content_catalog",
+                    "payload": {"campaign_id": campaign_id, "kind": "spell"},
+                },
+            )
+        )
+    )
+    spell_by_id = {str(item["id"]): item for item in spell_catalog}
+    spell_choices = dict(follow_up.get("spell_choices") or {})
+    required_cantrips = int(spell_choices.get("cantrips_to_add", 0) or 0)
+    required_leveled = int(spell_choices.get("leveled_spells_to_add", 0) or 0)
+    selected_cantrips = 0
+    selected_leveled = 0
+    for selection in spell_selections:
+        artifact = spell_by_id.get(selection["artifact_id"])
+        if artifact is None:
+            raise ValueError(
+                f"selected level spell is not in the active catalog: {selection['artifact_id']}"
+            )
+        requirements = dict(artifact.get("selection_requirements") or {})
+        eligible_classes = {
+            str(item).casefold() for item in requirements.get("eligible_classes") or []
+        }
+        if normalized_class.casefold() not in eligible_classes:
+            raise ValueError("selected level spell is not eligible for the advanced class")
+        spell_level = int(requirements.get("level", 0) or 0)
+        if spell_level == 0:
+            selected_cantrips += 1
+            if selection["method"] != "known":
+                raise ValueError("selected cantrips must use the known method")
+        else:
+            selected_leveled += 1
+    if (selected_cantrips, selected_leveled) != (
+        required_cantrips,
+        required_leveled,
+    ):
+        raise ValueError(
+            "level spell selections do not satisfy the reported cantrip and leveled-spell "
+            f"choices: expected {required_cantrips}/{required_leveled}, got "
+            f"{selected_cantrips}/{selected_leveled}"
+        )
+    applied_spells: list[str] = []
+    for selection in spell_selections:
+        artifact_id = selection["artifact_id"]
+        applied = _facade_value(
+            await client.domain(
+                "character_content_apply",
+                {
+                    "character_id": actor_id,
+                    "artifact_id": artifact_id,
+                    "selection": {
+                        "source_class": selection["source_class"],
+                        "method": selection["method"],
+                    },
+                    "expected_revision": actor["revision"],
+                    "idempotency_key": _mutation_key(
+                        run_id,
+                        "level-spell",
+                        f"{actor_id}:level-{target_level}:{artifact_id}",
+                    ),
+                },
+            )
+        )
+        if applied.get("status") == "pending_ruling":
+            raise RuntimeError(f"level spell needs DM review: {artifact_id}: {applied['reason']}")
+        actor = dict(applied.get("character") or applied)
+        applied_spells.append(artifact_id)
+
+    prepared_event = str(follow_up.get("prepared_spell_event") or "")
+    prepared = None
+    if prepared_event:
+        if not prepared_spell_ids:
+            raise ValueError(
+                "prepared or spellbook advancement requires an explicit complete "
+                "prepared-spell list"
+            )
+        prepared = _facade_value(
+            await client.domain(
+                "character_spell_prepare",
+                {
+                    "character_id": actor_id,
+                    "mode": "replace_all",
+                    "payload": {
+                        "spell_ids": prepared_spell_ids,
+                        "event": prepared_event,
+                    },
+                    "expected_revision": actor["revision"],
+                    "idempotency_key": _mutation_key(
+                        run_id,
+                        "level-prepare",
+                        f"{actor_id}:level-{target_level}",
+                    ),
+                },
+            )
+        )
+        actor = dict(prepared.get("character") or prepared)
+    elif prepared_spell_ids:
+        raise ValueError("this level advancement does not allow a prepared-spell event")
+
+    verified_actor = await client.domain(
+        "character_query",
+        {"view": "get", "payload": {"character_id": actor_id}},
+    )
+    verified_sheet = dict(verified_actor["sheet"])
+    if int(dict(verified_sheet["progression"]).get("level", 0) or 0) != target_level:
+        raise RuntimeError("level advancement verification found the wrong actor level")
+    verified_features = {
+        str(item.get("id") or "")
+        for item in dict(verified_sheet.get("content") or {}).get("features", [])
+    }
+    if not set(required_features).issubset(verified_features):
+        raise RuntimeError("level advancement verification found missing feature artifacts")
+    verified_spells = {
+        str(item.get("id") or "")
+        for item in dict(verified_sheet.get("content") or {}).get("spells", [])
+    }
+    if not set(applied_spells).issubset(verified_spells):
+        raise RuntimeError("level advancement verification found missing spell artifacts")
+    if prepared_event:
+        actual_prepared = set(
+            dict(verified_sheet["spellcasting"]["preparation"]).get("selected_spell_ids", [])
+        )
+        if actual_prepared != set(prepared_spell_ids):
+            raise RuntimeError("level advancement verification found the wrong prepared spells")
+    if selected_subclass is not None:
+        verified_class = next(
+            item
+            for item in verified_sheet["progression"]["classes"]
+            if str(item.get("name") or "").casefold() == normalized_class.casefold()
+        )
+        if str(verified_class.get("subclass") or "") != str(selected_subclass["name"]):
+            raise RuntimeError("level advancement verification found the wrong subclass")
+
+    if return_phase == "play":
+        campaign = await _campaign(client, campaign_id)
+        if _campaign_phase(campaign) != "play":
+            phase_changes.append(
+                _facade_value(
+                    await client.core(
+                        "game_phase",
+                        {
+                            "campaign_id": campaign_id,
+                            "action": "set",
+                            "tool_profile": "play",
+                            "expected_revision": campaign["revision"],
+                            "branch_id": branch_id,
+                            "idempotency_key": _mutation_key(
+                                run_id,
+                                "phase",
+                                (
+                                    f"level-{actor_id}-{target_level}-return-play-"
+                                    f"r{campaign['revision']}"
+                                ),
+                            ),
+                        },
+                    )
+                )
+            )
+            await client.open(campaign_id)
+            await client.load("play.scene", "play.scene_control")
+    label = checkpoint_label.strip() or (
+        f"Level {target_level} advancement: {verified_actor['name']}"
+    )
+    checkpoint = await _checkpoint(
+        client,
+        campaign_id=campaign_id,
+        run_id=run_id,
+        label=label,
+    )
+    return {
+        "actor": verified_actor,
+        "target_level": target_level,
+        "source_ref": exact_ref,
+        "audit_source": audit_source,
+        "advancement": advanced["advancement"],
+        "selected_subclass": selected_subclass,
+        "applied_features": applied_features,
+        "applied_spells": applied_spells,
+        "prepared": prepared,
+        "phase_changes": phase_changes,
+        "return_phase": return_phase,
+        "checkpoint": checkpoint,
+    }
+
+
 async def _relock_core(
     client: ExposureClient,
     *,
@@ -3500,6 +4029,26 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     actor_ids=args.xp_actor_id,
                     amount=args.xp_amount,
                     reason=args.xp_reason,
+                )
+            elif args.action == "advance-level":
+                report["result"] = await _advance_level(
+                    client,
+                    campaign_id=args.campaign_id,
+                    run_id=args.run_id,
+                    initial_phase=phase,
+                    return_phase=str(args.level_return_phase or ""),
+                    scene_id=str(args.scene_id or ""),
+                    source_ref=args.source_ref_json,
+                    actor_id=args.level_actor_id,
+                    target_level=args.level_target,
+                    class_name=args.level_class_name,
+                    hp_method=str(args.level_hp_method or ""),
+                    reason=args.level_reason,
+                    subclass_artifact_id=args.level_subclass_artifact_id,
+                    feature_selection_values=args.level_feature_selection_json,
+                    spell_selection_values=args.level_spell_json,
+                    prepared_spell_ids=args.level_prepared_spell_id,
+                    checkpoint_label=args.checkpoint_label,
                 )
             elif args.action == "checkpoint":
                 label = args.checkpoint_label or f"Full playthrough checkpoint: {args.run_id}"
