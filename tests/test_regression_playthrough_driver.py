@@ -183,7 +183,7 @@ def test_shared_consumable_driver_keeps_roll_item_and_healing_in_one_transition(
 def test_source_loot_driver_uses_one_public_atomic_campaign_transition() -> None:
     source_ref = {
         "module_id": "module-1",
-        "scene_id": "scene-1",
+        "scene_id": "source-scene-1",
         "chunk_id": "chunk-1",
         "page_start": 1,
         "page_end": 1,
@@ -209,10 +209,16 @@ def test_source_loot_driver_uses_one_public_atomic_campaign_transition() -> None
         async def domain(self, tool_id: str, arguments: dict):
             self.tools.append(tool_id)
             if tool_id == "module_query":
+                if arguments["payload"]["scene_id"] == "source-scene-1":
+                    return {
+                        "module_id": "module-1",
+                        "scene_id": "source-scene-1",
+                        "content": "The patron promises a payment of 60 cp and a jade frog.",
+                    }
+                assert arguments["payload"]["scene_id"] == "scene-1"
                 return {
                     "module_id": "module-1",
                     "scene_id": "scene-1",
-                    "content": "The chest contains 60 cp and a jade frog.",
                     "spatial": {"locations": [{"key": "treasure-room", "title": "Treasure Room"}]},
                 }
             if tool_id == "campaign_change":
@@ -242,7 +248,7 @@ def test_source_loot_driver_uses_one_public_atomic_campaign_transition() -> None
             run_id="run-1",
             scene_id="scene-1",
             location_key="treasure-room",
-            source_excerpt="contains 60 cp and a jade frog",
+            source_excerpt="payment of 60 cp and a jade frog",
             source_ref=source_ref,
             acquisition_id="chapter-one-chest",
             coins={"cp": 60},
@@ -256,12 +262,14 @@ def test_source_loot_driver_uses_one_public_atomic_campaign_transition() -> None
             ],
             reason="The party recovered the treasure.",
             knowledge_actor_ids=["actor-1", "actor-2"],
+            source_scene_id="source-scene-1",
         )
     )
 
     assert result["acquisition"]["status"] == "committed"
     assert client.tools.count("campaign_change") == 1
     assert result["knowledge_actor_ids"] == ["actor-1", "actor-2"]
+    assert result["scene"]["source_scene_id"] == "source-scene-1"
 
 
 def test_query_source_searches_and_expands_only_public_mcp_results() -> None:

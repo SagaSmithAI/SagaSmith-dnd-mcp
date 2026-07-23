@@ -77,6 +77,14 @@ def _arguments() -> argparse.Namespace:
     )
     parser.add_argument("--checkpoint-label", default="")
     parser.add_argument("--scene-id")
+    parser.add_argument(
+        "--source-scene-id",
+        default="",
+        help=(
+            "Scene containing the cited source when it differs from the scene where "
+            "the action occurs"
+        ),
+    )
     parser.add_argument("--location-key", default="")
     parser.add_argument("--source-excerpt", default="")
     parser.add_argument(
@@ -2579,9 +2587,11 @@ async def _acquire_source_loot(
     items: list[dict[str, Any]],
     reason: str,
     knowledge_actor_ids: list[str],
+    source_scene_id: str = "",
 ) -> dict[str, Any]:
     normalized_acquisition_id = acquisition_id.strip()
     normalized_reason = reason.strip()
+    cited_scene_id = source_scene_id.strip() or scene_id
     recipients = list(dict.fromkeys(knowledge_actor_ids))
     if not all(
         (
@@ -2602,17 +2612,31 @@ async def _acquire_source_loot(
     if not recipients or len(recipients) != len(knowledge_actor_ids):
         raise ValueError("acquire-loot requires unique actor knowledge recipients")
 
-    scene = await client.domain(
+    source_scene = await client.domain(
         "module_query",
         {
             "campaign_id": campaign_id,
             "view": "scene",
-            "payload": {"scene_id": scene_id},
+            "payload": {"scene_id": cited_scene_id},
         },
     )
-    exact_ref = _validate_source_ref(scene, source_ref, excerpt=source_excerpt)
-    if location_key not in {str(item.get("key") or "") for item in _scene_locations(scene)}:
-        raise ValueError("acquire-loot location is not present in the scene atlas")
+    exact_ref = _validate_source_ref(source_scene, source_ref, excerpt=source_excerpt)
+    occurrence_scene = (
+        source_scene
+        if cited_scene_id == scene_id
+        else await client.domain(
+            "module_query",
+            {
+                "campaign_id": campaign_id,
+                "view": "scene",
+                "payload": {"scene_id": scene_id},
+            },
+        )
+    )
+    if location_key not in {
+        str(item.get("key") or "") for item in _scene_locations(occurrence_scene)
+    }:
+        raise ValueError("acquire-loot location is not present in the occurrence scene atlas")
     serialized_source_ref = json.dumps(
         exact_ref,
         ensure_ascii=False,
@@ -2726,6 +2750,7 @@ async def _acquire_source_loot(
         "scene": {
             "scene_id": scene_id,
             "location_key": location_key,
+            "source_scene_id": cited_scene_id,
             "source_ref": exact_ref,
         },
         "acquisition": acquired,
@@ -4183,6 +4208,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     items=args.loot_item_json,
                     reason=args.loot_reason,
                     knowledge_actor_ids=args.knowledge_actor_id,
+                    source_scene_id=args.source_scene_id,
                 )
             elif args.action == "use-consumable":
                 if phase != "play":
