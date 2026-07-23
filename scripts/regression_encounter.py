@@ -28,6 +28,15 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--run-id", default="full-playthrough-encounter-v1")
     parser.add_argument("--party-report", type=Path, required=True)
     parser.add_argument("--hostile-report", type=Path, action="append", default=[])
+    parser.add_argument(
+        "--required-hostile-weapon-id",
+        action="append",
+        default=[],
+        help=(
+            "Require every source hostile to expose this reviewed weapon id. "
+            "Repeat for statblocks that must provide multiple attacks."
+        ),
+    )
     parser.add_argument("--scene-id")
     parser.add_argument("--location-key")
     parser.add_argument("--source-excerpt")
@@ -247,6 +256,57 @@ def _character_summary(actor: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _validate_hostile_attacks(
+    actor_id: str,
+    attacks: list[dict[str, Any]],
+    *,
+    required_weapon_ids: list[str],
+) -> None:
+    attack_ids = {str(item.get("item_id") or "") for item in attacks}
+    if not attack_ids - {""}:
+        raise RuntimeError(f"source hostile {actor_id} has no executable weapon attack")
+    missing = set(required_weapon_ids) - attack_ids
+    if missing:
+        raise RuntimeError(
+            f"source hostile {actor_id} lacks required reviewed attacks: "
+            f"{', '.join(sorted(missing))}"
+        )
+    if "shortbow" in required_weapon_ids:
+        shortbow = next(item for item in attacks if item.get("item_id") == "shortbow")
+        if dict(shortbow.get("range_ft") or {}) != {"normal": 80, "long": 320}:
+            raise RuntimeError(f"source hostile {actor_id} has an invalid Shortbow range")
+        if str(shortbow.get("on_hit_effect") or ""):
+            raise RuntimeError(
+                f"source hostile {actor_id} has unresolved trailing action prose"
+            )
+
+
+def _preferred_hostile_weapon_id(
+    actor: dict[str, Any],
+    *,
+    hostile_index: int,
+) -> str:
+    weapons = list(
+        dict(dict(actor.get("derived") or {}).get("inventory") or {}).get(
+            "weapon_attacks", []
+        )
+    )
+    attack_ids = {str(item.get("item_id") or "") for item in weapons}
+    if hostile_index >= 2 and "shortbow" in attack_ids:
+        return "shortbow"
+    if "scimitar" in attack_ids:
+        return "scimitar"
+    melee = next(
+        (
+            str(item.get("item_id") or "")
+            for item in weapons
+            if item.get("attack_type") == "melee"
+        ),
+        "",
+    )
+    return melee or (str(weapons[0].get("item_id") or "") if weapons else "")
+
+
 async def _start(
     client: ExposureClient,
     args: argparse.Namespace,
@@ -277,16 +337,11 @@ async def _start(
                 "weapon_attacks", []
             )
         )
-        attack_ids = {str(item.get("item_id") or "") for item in attacks}
-        if not {"scimitar", "shortbow"} <= attack_ids:
-            raise RuntimeError(
-                f"source hostile {actor_id} lacks the reviewed melee/ranged attack pair"
-            )
-        shortbow = next(item for item in attacks if item.get("item_id") == "shortbow")
-        if dict(shortbow.get("range_ft") or {}) != {"normal": 80, "long": 320}:
-            raise RuntimeError(f"source hostile {actor_id} has an invalid Shortbow range")
-        if str(shortbow.get("on_hit_effect") or ""):
-            raise RuntimeError(f"source hostile {actor_id} has unresolved trailing action prose")
+        _validate_hostile_attacks(
+            actor_id,
+            attacks,
+            required_weapon_ids=args.required_hostile_weapon_id,
+        )
     passive_perception: dict[str, int] = {}
     if args.surprise_check_report is not None:
         surprise, surprise_basis = _surprise_from_check_report(
@@ -816,12 +871,12 @@ async def _auto_run(
             )
             await _end_turn(client, args, str(branch["id"]), actor_id, sequence)
             continue
-        hostile_index = hostile_ids.index(actor_id) if actor_id in hostile_ids else -1
         preferred_weapon_id = (
-            "scimitar"
-            if 0 <= hostile_index < 2
-            else "shortbow"
-            if hostile_index >= 2
+            _preferred_hostile_weapon_id(
+                actor,
+                hostile_index=hostile_ids.index(actor_id),
+            )
+            if actor_id in hostile_ids
             else ""
         )
         plan = await _preflight_attack(

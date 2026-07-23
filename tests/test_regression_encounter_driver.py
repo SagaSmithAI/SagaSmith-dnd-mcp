@@ -4,9 +4,11 @@ from scripts.regression_encounter import (
     _choose_destination,
     _participant_config,
     _participant_manifest,
+    _preferred_hostile_weapon_id,
     _roll_total,
     _source_outcome,
     _surprise_from_check_report,
+    _validate_hostile_attacks,
 )
 
 
@@ -126,3 +128,64 @@ def test_movement_destination_stops_next_to_target_without_sharing_space() -> No
 def test_roll_total_accepts_public_facade_and_raw_shapes() -> None:
     assert _roll_total({"total": 8, "rolls": [2]}) == 8
     assert _roll_total({"result": {"total": 14}}) == 14
+
+
+def test_mixed_source_hostiles_accept_their_own_reviewed_attacks() -> None:
+    _validate_hostile_attacks(
+        "wolf",
+        [
+            {
+                "item_id": "bite",
+                "attack_type": "melee",
+                "on_hit_effect": "DC 11 Strength save or knocked prone.",
+            }
+        ],
+        required_weapon_ids=[],
+    )
+    _validate_hostile_attacks(
+        "bugbear",
+        [
+            {"item_id": "morningstar", "attack_type": "melee"},
+            {"item_id": "javelin", "attack_type": "ranged"},
+        ],
+        required_weapon_ids=["morningstar", "javelin"],
+    )
+
+
+def test_required_hostile_attack_still_rejects_incomplete_statblock() -> None:
+    try:
+        _validate_hostile_attacks(
+            "goblin",
+            [{"item_id": "scimitar", "attack_type": "melee"}],
+            required_weapon_ids=["scimitar", "shortbow"],
+        )
+    except RuntimeError as error:
+        assert "shortbow" in str(error)
+    else:
+        raise AssertionError("incomplete reviewed statblock was accepted")
+
+
+def test_hostile_weapon_preference_is_capability_based() -> None:
+    wolf = {
+        "derived": {
+            "inventory": {
+                "weapon_attacks": [
+                    {"item_id": "bite", "attack_type": "melee"},
+                ]
+            }
+        }
+    }
+    goblin = {
+        "derived": {
+            "inventory": {
+                "weapon_attacks": [
+                    {"item_id": "scimitar", "attack_type": "melee"},
+                    {"item_id": "shortbow", "attack_type": "ranged"},
+                ]
+            }
+        }
+    }
+
+    assert _preferred_hostile_weapon_id(wolf, hostile_index=1) == "bite"
+    assert _preferred_hostile_weapon_id(goblin, hostile_index=0) == "scimitar"
+    assert _preferred_hostile_weapon_id(goblin, hostile_index=2) == "shortbow"
