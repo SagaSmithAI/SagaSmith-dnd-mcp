@@ -242,6 +242,19 @@ def _mutation_key(run_id: str, action: str, identity: str) -> str:
     return f"full-playthrough-{action}-{_token(f'{run_id}:{identity}', length=24)}"
 
 
+def _check_knowledge_key(
+    run_id: str,
+    scene_id: str,
+    kind: str,
+    ability: str,
+    actor_id: str,
+) -> str:
+    return (
+        f"playthrough.{_token(run_id)}.{_token(scene_id)}."
+        f"{_token(kind)}.{_token(ability)}.{_token(actor_id)}"
+    )
+
+
 async def _manifest_mutation(
     client: ExposureClient,
     *,
@@ -601,9 +614,12 @@ async def _resolve_check(
                 "actor_knowledge": [
                     {
                         "actor_id": recipient,
-                        "knowledge_key": (
-                            f"playthrough.{_token(run_id)}.{_token(scene_id)}."
-                            f"{_token(kind)}.{_token(ability)}.{_token(actor_id)}"
+                        "knowledge_key": _check_knowledge_key(
+                            run_id,
+                            scene_id,
+                            kind,
+                            ability,
+                            actor_id,
                         ),
                         "proposition": proposition,
                         "disclosure_scope": "owner",

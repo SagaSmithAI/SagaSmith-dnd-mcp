@@ -11,6 +11,7 @@ from sagasmith_dnd.character_schema import default_character_sheet
 from scripts.regression_playthrough import (
     _award_experience,
     _campaign_phase,
+    _check_knowledge_key,
     _checkpoint,
     _configure_advancement,
     _mutation_key,
@@ -208,7 +209,8 @@ def test_source_cited_check_persists_result_and_explicit_knowledge() -> None:
                     for item in arguments["payload"]["actor_knowledge"]
                 )
                 assert all(
-                    ".ability.survival.actor-" in item["knowledge_key"]
+                    item["knowledge_key"]
+                    == _check_knowledge_key("run-1", "scene-1", "ability", "survival", "actor-1")
                     for item in arguments["payload"]["actor_knowledge"]
                 )
                 assert arguments["payload"]["event"]["payload"]["source_ref"] == source_ref
@@ -242,6 +244,9 @@ def test_source_cited_check_persists_result_and_explicit_knowledge() -> None:
     assert result["check"] == {"success": True, "total": 14}
     assert result["knowledge_actor_ids"] == ["actor-1", "actor-2"]
     assert result["sync"]["campaign_revision"] == 7
+    assert _check_knowledge_key(
+        "run-1", "scene-1", "ability", "survival", "actor-1"
+    ) != _check_knowledge_key("run-1", "scene-1", "ability", "perception", "actor-1")
 
 
 def test_source_cited_check_rejects_unsupported_kind_before_tools() -> None:
