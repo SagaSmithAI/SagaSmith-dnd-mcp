@@ -102,6 +102,7 @@ TOOL_GROUPS = (
         "snapshot_restore",
         "state_revision",
         "campaign_rules",
+        "playthrough_manifest",
         roles=("owner", "dm"),
     ),
     _group(
@@ -226,6 +227,7 @@ TOOL_GROUPS = (
         "snapshot_query",
         "campaign_rules",
         "campaign_core_relock",
+        "playthrough_manifest",
         roles=("owner", "dm"),
     ),
     _group(
@@ -327,6 +329,7 @@ TOOL_GROUPS = (
         "write",
         "snapshot_create",
         "snapshot_query",
+        "playthrough_manifest",
         roles=("owner", "dm"),
     ),
     _group(

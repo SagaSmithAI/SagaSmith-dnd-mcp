@@ -134,6 +134,7 @@ from sagasmith_dnd.lifecycle import (
     stand_outside_combat,
 )
 from sagasmith_dnd.module_profile import DndModuleProfile
+from sagasmith_dnd.playthrough import validate_playthrough_manifest
 from sagasmith_dnd.progression import (
     advance_single_class_level,
     apply_per_level_hit_point_bonus,
@@ -15871,6 +15872,343 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 idempotency_key,
             )
         return facade_result(action, result)
+
+    def playthrough_runtime_projection(
+        campaign_id: str,
+        manifest: dict[str, Any],
+    ) -> dict[str, Any]:
+        campaign = campaigns.get(campaign_id)
+        active_branch = branches.current(campaign_id)
+        snapshot_nodes = [
+            {
+                "id": item.id,
+                "parent_id": item.parent_id or "",
+                "branch_id": item.branch_id or active_branch.id,
+                "slot": item.slot,
+                "label": item.label,
+                "checksum": item.checksum,
+                "is_head": item.is_head,
+            }
+            for item in snapshots.list(campaign_id)
+        ]
+        stream = dict(campaign.state.get("random_stream") or {})
+
+        def actor_projection(member: dict[str, Any]) -> dict[str, Any]:
+            actor = characters.get(str(member["actor_id"]))
+            if actor.campaign_id != campaign_id:
+                raise ValueError(
+                    f"playthrough actor {actor.id!r} does not belong to this campaign"
+                )
+            sheet = validate_character_sheet(actor.sheet)
+            progression = dict(sheet["progression"])
+            hp = dict(sheet["combat"]["hp"])
+            conditions = {str(item) for item in sheet.get("conditions") or []}
+            status = "dead" if "dead" in conditions else str(member["status"])
+            if status == "dead" and "dead" not in conditions:
+                status = str(member["status"])
+            resources = {
+                str(key): {
+                    "value": int(item.get("value", 0) or 0),
+                    "max": int(item.get("max", 0) or 0),
+                    "recovers_on": str(item.get("recovers_on") or ""),
+                }
+                for key, item in dict(sheet.get("resources") or {}).items()
+            }
+            return {
+                **deepcopy(member),
+                "name": actor.name,
+                "status": status,
+                "level": int(progression["level"]),
+                "xp": int(progression["xp"]),
+                "hit_points": {
+                    "current": int(hp["value"]),
+                    "maximum": int(hp["max"]),
+                    "temporary": int(hp["temp"]),
+                    "conditions": sorted(conditions),
+                },
+                "resources": resources,
+                "equipment": sorted(
+                    str(item["id"]) for item in sheet["inventory"]["items"]
+                ),
+                "knowledge_scope_actor_id": actor.id,
+            }
+
+        members = [actor_projection(item) for item in manifest["party"]["members"]]
+        tracked_npcs = []
+        for item in manifest["npcs"]:
+            actor = characters.get(str(item["actor_id"]))
+            if actor.campaign_id != campaign_id:
+                raise ValueError(
+                    f"playthrough NPC {actor.id!r} does not belong to this campaign"
+                )
+            conditions = {str(value) for value in actor.sheet.get("conditions") or []}
+            tracked_npcs.append(
+                {
+                    **deepcopy(item),
+                    "name": actor.name,
+                    "status": "dead" if "dead" in conditions else item["status"],
+                }
+            )
+        return {
+            "party_members": members,
+            "npcs": tracked_npcs,
+            "snapshot_dag": {
+                "active_branch_id": active_branch.id,
+                "head_snapshot_id": active_branch.head_snapshot_id or "",
+                "nodes": snapshot_nodes,
+            },
+            "random_stream": {
+                "algorithm": str(stream.get("algorithm") or ""),
+                "seed_fingerprint": str(stream.get("seed") or "")[:16],
+                "position": int(stream.get("position", 0) or 0),
+            },
+            "world_state": {
+                "game_phase": str(campaign.state.get("game_phase") or PROFILE_LOBBY),
+                "world_time": deepcopy(dict(campaign.state.get("world_time") or {})),
+                "world_effects": deepcopy(list(campaign.state.get("world_effects") or [])),
+                "combat_active": bool(campaign.state.get("combat")),
+            },
+        }
+
+    def sync_playthrough_manifest(
+        campaign_id: str,
+        manifest: dict[str, Any],
+    ) -> dict[str, Any]:
+        updated = deepcopy(manifest)
+        runtime = playthrough_runtime_projection(campaign_id, updated)
+        updated["party"]["members"] = runtime["party_members"]
+        updated["npcs"] = runtime["npcs"]
+        updated["snapshot_dag"] = runtime["snapshot_dag"]
+        updated["random_stream"] = runtime["random_stream"]
+        world_state = deepcopy(updated["world_state"])
+        world_state["_canonical"] = runtime["world_state"]
+        updated["world_state"] = world_state
+        active_members = [
+            item for item in updated["party"]["members"] if item["status"] == "active"
+        ]
+        if (
+            updated["status"] == "lobby"
+            and not updated["review_blocks"]
+            and updated["party"]["selected_size"] is not None
+            and len(active_members) == updated["party"]["selected_size"]
+        ):
+            updated["status"] = "ready"
+        return validate_playthrough_manifest(updated)
+
+    def playthrough_path_value(document: Any, path: str) -> Any:
+        value = document
+        normalized = str(path).strip().strip("/").replace("/", ".")
+        for token in (item for item in normalized.split(".") if item):
+            if isinstance(value, dict):
+                if token not in value:
+                    raise LookupError(f"manifest verification path not found: {path}")
+                value = value[token]
+            elif isinstance(value, list) and token.isdigit():
+                value = value[int(token)]
+            else:
+                raise LookupError(f"manifest verification path not found: {path}")
+        return deepcopy(value)
+
+    def compare_playthrough_value(actual: Any, operator: str, expected: Any) -> bool:
+        if operator == "equals":
+            return actual == expected
+        if operator == "not_equals":
+            return actual != expected
+        if operator == "in":
+            return isinstance(expected, list) and actual in expected
+        if operator == "at_least":
+            return actual >= expected
+        if operator == "at_most":
+            return actual <= expected
+        if operator == "truthy":
+            return bool(actual)
+        raise ValueError(f"unsupported playthrough ending operator: {operator}")
+
+    def verify_playthrough_ending(
+        campaign_id: str,
+        manifest: dict[str, Any],
+        condition_id: str,
+        branch_id: str,
+    ) -> list[dict[str, Any]]:
+        condition = next(
+            (
+                item
+                for item in manifest["ending"]["conditions"]
+                if item["id"] == condition_id
+            ),
+            None,
+        )
+        if condition is None:
+            raise LookupError(f"unknown ending condition: {condition_id}")
+        campaign = campaigns.get(campaign_id)
+        actor_cards = {
+            item.id: asdict(item) for item in characters.list(campaign_id=campaign_id)
+        }
+        facts = {
+            item.fact_key: asdict(item)
+            for item in memories.list(
+                campaign_id,
+                branch_id=branch_id,
+                include_inactive=True,
+            )
+        }
+        results: list[dict[str, Any]] = []
+        for check in condition["all_of"]:
+            kind = str(check["kind"])
+            if kind == "manifest_value":
+                actual = playthrough_path_value(manifest, check["path"])
+            elif kind == "campaign_state_value":
+                actual = playthrough_path_value(campaign.state, check["path"])
+            elif kind == "actor_value":
+                actor = actor_cards.get(str(check["actor_id"]))
+                if actor is None:
+                    raise LookupError(f"ending actor not found: {check['actor_id']}")
+                actual = playthrough_path_value(actor, check["path"])
+            else:
+                fact = facts.get(str(check["fact_key"]))
+                if fact is None:
+                    actual = None
+                elif check["path"]:
+                    actual = playthrough_path_value(fact, check["path"])
+                else:
+                    actual = fact["content"]
+            passed = compare_playthrough_value(
+                actual,
+                str(check["operator"]),
+                check.get("value"),
+            )
+            results.append(
+                {
+                    "kind": kind,
+                    "path": str(check.get("path") or ""),
+                    "actor_id": str(check.get("actor_id") or ""),
+                    "fact_key": str(check.get("fact_key") or ""),
+                    "operator": str(check["operator"]),
+                    "expected": deepcopy(check.get("value")),
+                    "actual": actual,
+                    "passed": passed,
+                }
+            )
+        results.append(
+            {
+                "kind": "runtime",
+                "path": "combat",
+                "operator": "not_active",
+                "expected": False,
+                "actual": bool(campaign.state.get("combat")),
+                "passed": not bool(campaign.state.get("combat")),
+            }
+        )
+        return results
+
+    @mcp.tool()
+    def playthrough_manifest(
+        campaign_id: str,
+        action: Literal["get", "initialize", "replace", "sync", "verify_ending"],
+        payload: dict[str, Any] | None = None,
+        principal_id: str = "system:local",
+        expected_revision: int | None = None,
+        branch_id: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Read or atomically maintain the snapshot-managed full-playthrough manifest."""
+        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        campaign = campaigns.get(campaign_id)
+        current_manifest = dict(campaign.state.get("playthrough_manifest") or {})
+        if action == "get":
+            if not current_manifest:
+                raise LookupError("campaign has no full-playthrough manifest")
+            validated = validate_playthrough_manifest(current_manifest)
+            return {
+                "manifest": validated,
+                "runtime": playthrough_runtime_projection(campaign_id, validated),
+                "campaign_revision": campaign.revision,
+            }
+        if expected_revision is None or not idempotency_key:
+            raise ValueError(
+                "expected_revision and idempotency_key are required for manifest mutations"
+            )
+        resolved_branch_id = require_current_branch(campaign_id, branch_id)
+        request_payload = {
+            "action": action,
+            "payload": deepcopy(payload or {}),
+        }
+        scope = f"playthrough-manifest:{campaign_id}:{resolved_branch_id}:{principal_id}"
+        replay = replay_idempotent(scope, idempotency_key, request_payload)
+        if replay is not None:
+            return replay
+        if campaign.revision != expected_revision:
+            raise ValueError(
+                f"campaign revision conflict: expected {expected_revision}, "
+                f"found {campaign.revision}"
+            )
+        data = facade_payload(payload)
+        if action == "initialize":
+            if current_manifest:
+                raise ValueError("campaign already has a full-playthrough manifest")
+            next_manifest = validate_playthrough_manifest(required(data, "manifest"))
+            known_module_ids = {str(item["id"]) for item in modules.list(campaign_id)}
+            missing = sorted(set(next_manifest["module_ids"]) - known_module_ids)
+            if missing:
+                raise ValueError(
+                    "playthrough manifest references modules outside the campaign: "
+                    + ", ".join(missing)
+                )
+            next_manifest = sync_playthrough_manifest(campaign_id, next_manifest)
+        else:
+            if not current_manifest:
+                raise LookupError("campaign has no full-playthrough manifest")
+            current_manifest = validate_playthrough_manifest(current_manifest)
+            if action == "replace":
+                next_manifest = validate_playthrough_manifest(required(data, "manifest"))
+                immutable = ("run_id", "campaign_line_id", "module_ids")
+                if any(next_manifest[key] != current_manifest[key] for key in immutable):
+                    raise ValueError(
+                        "replace cannot change run_id, campaign_line_id, or module_ids"
+                    )
+            elif action == "sync":
+                next_manifest = sync_playthrough_manifest(campaign_id, current_manifest)
+            else:
+                condition_id = str(required(data, "condition_id"))
+                next_manifest = sync_playthrough_manifest(campaign_id, current_manifest)
+                verification = verify_playthrough_ending(
+                    campaign_id,
+                    next_manifest,
+                    condition_id,
+                    resolved_branch_id,
+                )
+                next_manifest["ending"]["verification"] = verification
+                if all(item["passed"] for item in verification):
+                    next_manifest["ending"]["status"] = "completed"
+                    next_manifest["ending"]["achieved_condition_id"] = condition_id
+                    next_manifest["status"] = "completed"
+                else:
+                    next_manifest["ending"]["status"] = "pending"
+                next_manifest = validate_playthrough_manifest(next_manifest)
+        next_state = validate_party_state(
+            {**deepcopy(campaign.state), "playthrough_manifest": next_manifest}
+        )
+        StateMutationService(storage.database).replace(
+            campaign_id,
+            campaign_state=next_state,
+            expected_campaign_revision=expected_revision,
+            operation=f"playthrough.manifest.{action}",
+            actor=principal_id,
+            branch_id=resolved_branch_id,
+            idempotency_key=idempotency_key,
+        )
+        response = {
+            "manifest": next_manifest,
+            "runtime": playthrough_runtime_projection(campaign_id, next_manifest),
+            "campaign_revision": campaigns.get(campaign_id).revision,
+        }
+        return remember_idempotent(
+            scope,
+            idempotency_key,
+            request_payload,
+            response,
+            campaign_id=campaign_id,
+        )
 
     @mcp.tool()
     def access_grant(

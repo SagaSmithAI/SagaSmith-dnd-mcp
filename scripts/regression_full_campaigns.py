@@ -13,6 +13,7 @@ import asyncio
 import hashlib
 import json
 import sys
+from copy import deepcopy
 from pathlib import Path
 from time import perf_counter
 from typing import Any
@@ -252,6 +253,108 @@ def _line_review_blocks(
     return blocks
 
 
+def _build_playthrough_manifest(
+    *,
+    line: dict[str, Any],
+    module_ids: list[str],
+    run_id: str,
+    review_blocks: list[dict[str, Any]],
+) -> dict[str, Any]:
+    requirements = dict(line["play_requirements"])
+    party_size = dict(requirements["recommended_party_size"])
+    return {
+        "schema_version": 1,
+        "run_id": run_id,
+        "campaign_line_id": str(line["id"]),
+        "module_ids": list(module_ids),
+        "status": "lobby",
+        "source_refs": deepcopy(list(requirements.get("source_refs") or [])),
+        "current": {
+            "module_id": module_ids[0],
+            "chapter_id": "",
+            "chapter_title": "",
+            "scene_id": "",
+            "scene_title": "",
+            "objective": "Complete the lobby quality gate and establish the legal party.",
+        },
+        "traversal": {
+            "reachable_scene_ids": [],
+            "visited_scene_ids": [],
+            "excluded_scenes": [],
+            "branch_decisions": [],
+        },
+        "party": {
+            "recommended_minimum": party_size.get("minimum"),
+            "recommended_maximum": party_size.get("maximum"),
+            "selected_size": party_size.get("selected"),
+            "use_pregenerated_first": True,
+            "members": [],
+            "replacements": [],
+        },
+        "npcs": [],
+        "quests": [],
+        "clues": [],
+        "world_state": {
+            "continuation": deepcopy(dict(requirements.get("continuity") or {})),
+        },
+        "snapshot_dag": {
+            "active_branch_id": "",
+            "head_snapshot_id": "",
+            "nodes": [],
+        },
+        "random_stream": {
+            "algorithm": "",
+            "seed_fingerprint": "",
+            "position": 0,
+        },
+        "ending": {
+            "status": "pending",
+            "conditions": [],
+            "achieved_condition_id": "",
+            "verification": [],
+        },
+        "review_blocks": deepcopy(review_blocks),
+    }
+
+
+async def _initialize_playthrough_manifest(
+    client: ExposureClient,
+    *,
+    line: dict[str, Any],
+    module_ids: list[str],
+    campaign_id: str,
+    run_id: str,
+    review_blocks: list[dict[str, Any]],
+) -> dict[str, Any]:
+    campaign = await client.core(
+        "campaign_query",
+        {
+            "view": "get",
+            "payload": {"campaign_id": campaign_id},
+            "principal_id": PRINCIPAL_ID,
+        },
+    )
+    if isinstance(campaign, dict) and "result" in campaign:
+        campaign = campaign["result"]
+    manifest = _build_playthrough_manifest(
+        line=line,
+        module_ids=module_ids,
+        run_id=run_id,
+        review_blocks=review_blocks,
+    )
+    identity = _token(f"{run_id}\0{line['id']}\0playthrough-manifest")
+    return await client.domain(
+        "playthrough_manifest",
+        {
+            "campaign_id": campaign_id,
+            "action": "initialize",
+            "payload": {"manifest": manifest},
+            "expected_revision": campaign["revision"],
+            "idempotency_key": f"full-campaign-manifest-{identity}",
+        },
+    )
+
+
 async def _run(args: argparse.Namespace) -> dict[str, Any]:
     root = args.root.expanduser().resolve()
     home = args.home.expanduser().resolve()
@@ -382,16 +485,29 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                                 scene=scene,
                             )
                         )
+                    line_report["review_blocks"] = _line_review_blocks(
+                        line, player_documents
+                    )
+                    report["review_blocks"].extend(line_report["review_blocks"])
+                    line_report[
+                        "playthrough_manifest"
+                    ] = await _initialize_playthrough_manifest(
+                        client,
+                        line=line,
+                        module_ids=[
+                            str(modules_by_sequence[index]["module_id"])
+                            for index in sorted(modules_by_sequence)
+                        ],
+                        campaign_id=campaign_id,
+                        run_id=args.run_id,
+                        review_blocks=line_report["review_blocks"],
+                    )
                     line_report["baseline"] = await _create_baseline_snapshot(
                         client,
                         campaign_key=str(line["id"]),
                         campaign_id=campaign_id,
                         run_id=args.run_id,
                     )
-                    line_report["review_blocks"] = _line_review_blocks(
-                        line, player_documents
-                    )
-                    report["review_blocks"].extend(line_report["review_blocks"])
                     line_report["ready_for_party_build"] = not line_report["review_blocks"]
                     line_report["seconds"] = round(perf_counter() - line_started, 3)
                 except Exception as error:

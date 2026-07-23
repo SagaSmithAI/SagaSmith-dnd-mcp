@@ -14,6 +14,7 @@ import json
 import os
 import re
 import sys
+from copy import deepcopy
 from pathlib import Path
 from time import perf_counter
 from typing import Any
@@ -449,7 +450,7 @@ async def _create_baseline_snapshot(
     campaign_id: str,
     run_id: str,
 ) -> dict[str, Any]:
-    baseline_identity = _token(f"{run_id}\0{campaign_key}")
+    baseline_identity = _token(f"{run_id}\0{campaign_key}\0playthrough-manifest-v1")
     await client.open(campaign_id)
     await client.load("lobby.campaign")
     campaign = await client.core(
@@ -467,7 +468,12 @@ async def _create_baseline_snapshot(
     current_branch = next((item for item in branches if item.get("is_current")), None)
     if current_branch is None:
         raise RuntimeError(f"campaign has no current branch: {campaign_key}")
-    label = f"Imported campaign baseline: {campaign_key}"
+    baseline_context = {
+        "branch_id": current_branch["id"],
+        "campaign_revision": campaign["revision"],
+        "random_stream": deepcopy(dict(campaign.get("state") or {}).get("random_stream") or {}),
+    }
+    label = f"Imported campaign baseline v2: {campaign_key}"
     snapshots = await client.domain(
         "snapshot_query", {"campaign_id": campaign_id, "view": "list"}
     )
@@ -488,7 +494,12 @@ async def _create_baseline_snapshot(
                 "payload": {"slot": existing["slot"]},
             },
         )
-        return {"snapshot": existing, "verification": verification, "reused": True}
+        return {
+            "snapshot": existing,
+            "verification": verification,
+            "reused": True,
+            **baseline_context,
+        }
     snapshot = await client.domain(
         "snapshot_create",
         {
@@ -507,7 +518,7 @@ async def _create_baseline_snapshot(
             "payload": {"slot": snapshot["slot"]},
         },
     )
-    return {"snapshot": snapshot, "verification": verification}
+    return {"snapshot": snapshot, "verification": verification, **baseline_context}
 
 
 async def _run(args: argparse.Namespace) -> dict[str, Any]:

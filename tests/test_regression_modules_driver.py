@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from scripts.regression_full_campaigns import (
+    _build_playthrough_manifest,
     _line_review_blocks,
     _load_and_verify_manifest,
     _selected_lines,
@@ -28,7 +29,18 @@ def test_campaign_baseline_reuses_existing_public_snapshot() -> None:
 
         async def core(self, tool_id: str, arguments: dict):
             assert tool_id == "campaign_query"
-            return {"id": "campaign-1", "revision": 4}
+            return {
+                "id": "campaign-1",
+                "revision": 4,
+                "state": {
+                    "random_stream": {
+                        "algorithm": "sha256-counter-v1",
+                        "seed": "a" * 64,
+                        "position": 0,
+                        "last_receipt": None,
+                    }
+                },
+            }
 
         async def domain(self, tool_id: str, arguments: dict):
             if tool_id == "branch_query":
@@ -39,7 +51,7 @@ def test_campaign_baseline_reuses_existing_public_snapshot() -> None:
                         "id": "snap-1",
                         "branch_id": "branch-1",
                         "slot": 1,
-                        "label": "Imported campaign baseline: line-1",
+                        "label": "Imported campaign baseline v2: line-1",
                     }
                 ]
             if tool_id == "snapshot_query" and arguments["view"] == "verify":
@@ -60,6 +72,8 @@ def test_campaign_baseline_reuses_existing_public_snapshot() -> None:
 
     assert result["reused"] is True
     assert result["verification"] == {"valid": True}
+    assert result["branch_id"] == "branch-1"
+    assert result["random_stream"]["position"] == 0
     assert client.created is False
 
 
@@ -140,3 +154,39 @@ def test_full_campaign_review_blocks_missing_party_count_and_incomplete_preset()
             "missing_fields": ["level"],
         },
     ]
+
+
+def test_playthrough_manifest_builder_preserves_unknown_party_size_review() -> None:
+    line = {
+        "id": "line-1",
+        "play_requirements": {
+            "recommended_party_size": {
+                "status": "dm_review_required",
+                "minimum": None,
+                "maximum": None,
+                "selected": None,
+            },
+            "source_refs": [
+                {
+                    "purpose": "level_span",
+                    "asset_path": "Campaign.pdf",
+                    "asset_sha256": "a" * 64,
+                    "page_start": 1,
+                    "page_end": 1,
+                    "heading_path": ["Introduction"],
+                    "chunk_content_sha256": "b" * 64,
+                }
+            ],
+        },
+    }
+    review = [{"kind": "recommended_party_size", "reason": "DM review required"}]
+    manifest = _build_playthrough_manifest(
+        line=line,
+        module_ids=["module-1"],
+        run_id="run-1",
+        review_blocks=review,
+    )
+
+    assert manifest["party"]["selected_size"] is None
+    assert manifest["party"]["use_pregenerated_first"] is True
+    assert manifest["review_blocks"] == review
