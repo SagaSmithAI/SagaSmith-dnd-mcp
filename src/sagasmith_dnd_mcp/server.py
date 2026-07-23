@@ -9066,6 +9066,221 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             campaign_id=current.campaign_id,
         )
 
+    def campaign_stable_recovery(
+        campaign_id: str,
+        members: list[dict[str, Any]],
+        principal_id: str = "system:local",
+        expected_revision: int | None = None,
+        branch_id: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Recover simultaneously Stable creatures without summing their wait times."""
+        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        require_write_contract(expected_revision, idempotency_key)
+        resolved_branch_id = require_current_branch(campaign_id, branch_id)
+        if not isinstance(members, list) or not members:
+            raise ValueError("stable recovery requires at least one member")
+        normalized_members: list[dict[str, Any]] = []
+        for index, member in enumerate(members):
+            if not isinstance(member, dict):
+                raise ValueError(f"members[{index}] must be an object")
+            unknown = sorted(set(member) - {"character_id", "expected_revision"})
+            character_id = str(member.get("character_id") or "").strip()
+            character_revision = member.get("expected_revision")
+            if unknown:
+                raise ValueError(f"members[{index}] has unsupported fields: {unknown}")
+            if not character_id:
+                raise ValueError(f"members[{index}].character_id is required")
+            if isinstance(character_revision, bool) or not isinstance(
+                character_revision, int
+            ):
+                raise ValueError(f"members[{index}].expected_revision is required")
+            normalized_members.append(
+                {
+                    "character_id": character_id,
+                    "expected_revision": character_revision,
+                }
+            )
+        member_ids = [item["character_id"] for item in normalized_members]
+        if len(member_ids) != len(set(member_ids)):
+            raise ValueError("stable recovery member ids must be unique")
+        request_payload = {
+            "operation": "campaign.party.stable_recovery",
+            "members": normalized_members,
+            "branch_id": resolved_branch_id,
+        }
+        scope = (
+            f"campaign-stable-recovery:{campaign_id}:{resolved_branch_id}:{principal_id}"
+        )
+        replay = replay_idempotent(scope, idempotency_key, request_payload)
+        if replay is not None:
+            return replay
+        campaign = campaigns.get(campaign_id)
+        if campaign.revision != expected_revision:
+            raise ValueError(
+                "campaign revision conflict: "
+                f"expected {expected_revision}, found {campaign.revision}"
+            )
+        next_state = validate_party_state(deepcopy(campaign.state or {}))
+        if bool(dict(next_state.get("combat") or {}).get("active")):
+            raise CombatEngineError("stable recovery is not allowed while combat is active")
+        current_clock = dict(next_state.get("world_time") or {})
+        if not current_clock:
+            raise ValueError("set the campaign clock before resolving stable recovery")
+        all_characters = {item.id: item for item in characters.list(campaign_id=campaign_id)}
+        member_by_id = {item["character_id"]: item for item in normalized_members}
+        for member in normalized_members:
+            current = all_characters.get(member["character_id"])
+            if current is None:
+                raise ValueError(
+                    f"stable recovery actor is not in this campaign: {member['character_id']}"
+                )
+            require_character_control(current, principal_id)
+            if current.revision != member["expected_revision"]:
+                raise ValueError(f"character revision conflict: {current.id}")
+            recover_stable_creature(current.sheet, recovery_hours=1)
+
+        recovery_rolls = {
+            character_id: asdict(roll("1d4")) for character_id in member_ids
+        }
+        recovery_hours = {
+            character_id: int(recovery_rolls[character_id]["total"])
+            for character_id in member_ids
+        }
+        elapsed_hours = max(recovery_hours.values())
+        elapsed = int(current_clock.get("elapsed_minutes", 0) or 0) + elapsed_hours * 60
+        next_world_time = {
+            "schema_version": 1,
+            "day": elapsed // 1440 + 1,
+            "hour": (elapsed % 1440) // 60,
+            "minute": elapsed % 60,
+            "elapsed_minutes": elapsed,
+            "label": str(current_clock.get("label") or ""),
+        }
+        next_state["world_time"] = next_world_time
+        world_advanced: list[str] = []
+        world_expired: list[str] = []
+        for effect_period, amount in (
+            ("minute", elapsed_hours * 60),
+            ("hour", elapsed_hours),
+        ):
+            world_result = advance_world_effect_durations(
+                next_state, period=effect_period, amount=amount
+            )
+            next_state = world_result["state"]
+            world_advanced.extend(world_result["advanced"])
+            world_expired.extend(world_result["expired"])
+
+        rules = effective_rule_context(campaign_id)
+        receipts: list[dict[str, Any]] = []
+        updates: list[CharacterStateUpdate] = []
+        advanced: dict[str, list[str]] = {}
+        expired: dict[str, list[str]] = {}
+        recoveries: dict[str, dict[str, Any]] = {}
+        for current in all_characters.values():
+            sheet = current.sheet
+            character_advanced: list[str] = []
+            character_expired: list[str] = []
+            for effect_period, amount in (
+                ("minute", elapsed_hours * 60),
+                ("hour", elapsed_hours),
+            ):
+                duration_result = advance_effect_durations(
+                    sheet, period=effect_period, amount=amount
+                )
+                extension = apply_rule_event(
+                    duration_result["sheet"],
+                    "duration.advance",
+                    context_with_facts(
+                        rules,
+                        actor_id=current.id,
+                        period=effect_period,
+                        amount=amount,
+                    ),
+                )
+                receipts.extend(extension.receipts)
+                sheet = extension.sheet
+                character_advanced.extend(duration_result["advanced"])
+                character_expired.extend(duration_result["expired"])
+            member = member_by_id.get(current.id)
+            if member is not None:
+                applied = recover_stable_creature(
+                    sheet, recovery_hours=recovery_hours[current.id]
+                )
+                sheet = applied["sheet"]
+                recoveries[current.id] = {
+                    "status": applied["status"],
+                    "recovery_roll": recovery_rolls[current.id],
+                    "recovery_hours": applied["recovery_hours"],
+                    "before_hp": applied["before_hp"],
+                    "after_hp": applied["after_hp"],
+                }
+                receipts.extend(
+                    core_receipts(
+                        effective_rule_context(
+                            campaign_id,
+                            facts={
+                                "actor_id": current.id,
+                                "recovery_hours": recovery_hours[current.id],
+                            },
+                        ),
+                        ["dnd5e.core.damage.stable_recovery"],
+                        "character.stable_recovery",
+                    )
+                )
+            if sheet != current.sheet:
+                updates.append(
+                    CharacterStateUpdate(
+                        character_id=current.id,
+                        sheet=validate_character_sheet(sheet),
+                        notes=validate_character_notes(current.notes),
+                        expected_revision=(
+                            member["expected_revision"]
+                            if member is not None
+                            else current.revision
+                        ),
+                    )
+                )
+            if character_advanced:
+                advanced[current.id] = list(dict.fromkeys(character_advanced))
+            if character_expired:
+                expired[current.id] = list(dict.fromkeys(character_expired))
+        StateMutationService(storage.database).replace(
+            campaign_id,
+            campaign_state=next_state,
+            character_updates=updates,
+            expected_campaign_revision=campaign.revision,
+            operation="campaign.party.stable_recovery",
+            actor=principal_id,
+            branch_id=resolved_branch_id,
+            idempotency_key=idempotency_key,
+            rule_receipts=receipts,
+        )
+        response = {
+            "status": "recovered",
+            "member_ids": member_ids,
+            "elapsed_hours": elapsed_hours,
+            "recoveries": recoveries,
+            "characters": {
+                character_id: character_view(characters.get(character_id))
+                for character_id in member_ids
+            },
+            "world_time": next_world_time,
+            "advanced": advanced,
+            "expired": expired,
+            "world_advanced": list(dict.fromkeys(world_advanced)),
+            "world_expired": list(dict.fromkeys(world_expired)),
+            "rule_receipts": receipts,
+            "campaign_revision": mutation_revision(campaign_id),
+        }
+        return remember_idempotent(
+            scope,
+            idempotency_key,
+            request_payload,
+            response,
+            campaign_id=campaign_id,
+        )
+
     def character_stand(
         character_id: str,
         principal_id: str = "system:local",
@@ -15971,6 +16186,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "clock_set",
             "clock_advance",
             "party_rest",
+            "stable_recovery",
             "effect_add",
             "effect_remove",
             "advancement_configure",
@@ -16010,6 +16226,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 campaign_id,
                 required(data, "members"),
                 data.get("duration_minutes", 480),
+                principal_id,
+                expected_revision,
+                branch_id,
+                idempotency_key,
+            )
+        elif action == "stable_recovery":
+            result = campaign_stable_recovery(
+                campaign_id,
+                required(data, "members"),
                 principal_id,
                 expected_revision,
                 branch_id,

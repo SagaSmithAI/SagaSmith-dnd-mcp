@@ -124,6 +124,118 @@ def test_stable_recovery_is_rolled_atomic_idempotent_and_audited(
     asyncio.run(exercise())
 
 
+def test_party_stable_recovery_uses_longest_concurrent_wait(
+    tmp_path: Path, monkeypatch
+) -> None:
+    original_roll = server_module.roll
+    totals = iter((1, 4))
+
+    class FixedRandom:
+        def __init__(self, total: int) -> None:
+            self.total = total
+
+        def randint(self, minimum: int, maximum: int) -> int:
+            assert minimum == 1
+            assert self.total <= maximum
+            return self.total
+
+    def deterministic_roll(expression: str):
+        assert expression == "1d4"
+        total = next(totals)
+        return original_roll(expression, rng=FixedRandom(total))
+
+    monkeypatch.setattr(server_module, "roll", deterministic_roll)
+    config = McpConfig(
+        home=tmp_path / "home",
+        database_url=None,
+        chroma_url=None,
+        chroma_path_override=None,
+        dnd_skills_dir=tmp_path / "dnd",
+        modulegen_skills_dir=tmp_path / "modulegen",
+        auto_seed_rules=False,
+    )
+
+    async def exercise() -> None:
+        server = create_server(config)
+        campaign = await _call(
+            server,
+            "campaign_create",
+            {
+                "name": "Concurrent Stable Recovery",
+                "edition": "2014",
+                "idempotency_key": "c",
+            },
+        )
+        await _call(
+            server,
+            "campaign_change",
+            {
+                "campaign_id": campaign["id"],
+                "action": "clock_set",
+                "payload": {"day": 1},
+                "expected_revision": campaign["revision"],
+                "idempotency_key": "clock",
+            },
+        )
+        actors = []
+        for index in range(2):
+            sheet = default_character_sheet()
+            sheet["combat"]["hp"] = {"value": 0, "max": 12, "temp": 0}
+            sheet["conditions"] = ["prone", "stable", "unconscious"]
+            actors.append(
+                await _call(
+                    server,
+                    "character_create_from",
+                    {
+                        "mode": "direct",
+                        "payload": {
+                            "campaign_id": campaign["id"],
+                            "name": f"Stable Actor {index + 1}",
+                            "sheet": sheet,
+                        },
+                        "idempotency_key": f"actor-{index}",
+                    },
+                )
+            )
+        current_campaign = await _call(
+            server,
+            "campaign_query",
+            {"view": "get", "payload": {"campaign_id": campaign["id"]}},
+        )
+        arguments = {
+            "campaign_id": campaign["id"],
+            "action": "stable_recovery",
+            "payload": {
+                "members": [
+                    {
+                        "character_id": actor["id"],
+                        "expected_revision": actor["revision"],
+                    }
+                    for actor in actors
+                ]
+            },
+            "expected_revision": current_campaign["revision"],
+            "idempotency_key": "recover-party",
+        }
+
+        recovered = await _call(server, "campaign_change", arguments)
+        replay = await _call(server, "campaign_change", arguments)
+
+        assert recovered["status"] == "recovered"
+        assert recovered["elapsed_hours"] == 4
+        assert recovered["world_time"]["hour"] == 4
+        assert sorted(
+            item["recovery_hours"] for item in recovered["recoveries"].values()
+        ) == [1, 4]
+        assert {
+            item["sheet"]["combat"]["hp"]["value"]
+            for item in recovered["characters"].values()
+        } == {1}
+        assert replay == recovered
+
+    asyncio.run(exercise())
+
+
 def test_stable_recovery_rejects_a_healthy_actor(tmp_path: Path) -> None:
     config = McpConfig(
         home=tmp_path / "home",
