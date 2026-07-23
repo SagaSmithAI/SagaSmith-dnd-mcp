@@ -18,6 +18,7 @@ from scripts.regression_playthrough import (
     _committed_check_result,
     _configure_advancement,
     _extend_manifest_for_module_revision,
+    _long_rest,
     _matching_check_progress,
     _mutation_key,
     _party_member,
@@ -804,6 +805,99 @@ def test_short_rest_advances_clock_and_applies_only_explicit_resource_choices() 
     assert result["member_ids"] == ["fighter", "wizard"]
     assert result["clock_advanced"]["world_time"]["hour"] == 15
     assert len(result["rests"]) == 2
+
+
+def test_long_rest_uses_atomic_party_rest_and_records_checkpoint() -> None:
+    class Client:
+        def __init__(self) -> None:
+            self.revision = 5
+            self.world_time = {
+                "day": 1,
+                "hour": 16,
+                "minute": 0,
+                "elapsed_minutes": 960,
+                "label": "Cragmaw Hideout",
+            }
+
+        async def core(self, tool_id: str, arguments: dict):
+            assert tool_id == "campaign_query"
+            return {
+                "result": {
+                    "id": "campaign-1",
+                    "revision": self.revision,
+                    "state": {"game_phase": "play", "world_time": self.world_time},
+                }
+            }
+
+        async def domain(self, tool_id: str, arguments: dict):
+            if tool_id == "character_query":
+                actor_id = arguments["payload"]["character_id"]
+                return {
+                    "id": actor_id,
+                    "campaign_id": "campaign-1",
+                    "revision": 2,
+                }
+            if tool_id == "branch_query":
+                return [{"id": "branch-1", "is_current": True}]
+            if tool_id == "campaign_change":
+                assert arguments["action"] == "party_rest"
+                assert arguments["payload"]["duration_minutes"] == 480
+                assert arguments["payload"]["members"] == [
+                    {
+                        "character_id": "fighter",
+                        "expected_revision": 2,
+                        "food_and_drink": True,
+                    },
+                    {
+                        "character_id": "cleric",
+                        "expected_revision": 2,
+                        "food_and_drink": False,
+                        "prepared_spell_ids": ["cure-wounds"],
+                    },
+                ]
+                self.world_time = {
+                    **self.world_time,
+                    "day": 2,
+                    "hour": 0,
+                    "elapsed_minutes": 1440,
+                }
+                self.revision += 1
+                return {
+                    "status": "committed",
+                    "world_time": self.world_time,
+                    "member_ids": ["fighter", "cleric"],
+                }
+            if tool_id == "continuity_commit":
+                event = arguments["payload"]["event"]
+                assert event["event_type"] == "long_rest"
+                assert event["payload"]["duration_minutes"] == 480
+                self.revision += 1
+                return {"event": {"id": "event-1"}, "snapshot": {"slot": 5}}
+            if tool_id == "playthrough_manifest":
+                return {
+                    "manifest": {"status": "in_progress"},
+                    "campaign_revision": self.revision,
+                }
+            raise AssertionError((tool_id, arguments))
+
+    result = asyncio.run(
+        _long_rest(
+            Client(),
+            campaign_id="campaign-1",
+            run_id="run-1",
+            members=[
+                {"actor_id": "fighter", "food_and_drink": True},
+                {"actor_id": "cleric", "prepared_spell_ids": ["cure-wounds"]},
+            ],
+            start_clock=None,
+            duration_minutes=480,
+            reason="The party withdrew and completed an uninterrupted long rest.",
+        )
+    )
+
+    assert result["member_ids"] == ["fighter", "cleric"]
+    assert result["rest"]["world_time"]["day"] == 2
+    assert result["continuity"]["snapshot"]["slot"] == 5
 
 
 def test_partially_committed_check_is_recovered_without_reroll() -> None:

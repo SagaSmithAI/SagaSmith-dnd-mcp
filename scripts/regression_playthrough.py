@@ -41,6 +41,7 @@ def _arguments() -> argparse.Namespace:
             "stand-up",
             "branch-from-snapshot",
             "short-rest",
+            "long-rest",
             "award-xp",
             "configure-advancement",
             "refresh-module",
@@ -91,6 +92,7 @@ def _arguments() -> argparse.Namespace:
     )
     parser.add_argument("--damage-knock-prone", action="store_true")
     parser.add_argument("--stand-actor-id", default="")
+    parser.add_argument("--stand-reason", default="")
     parser.add_argument("--snapshot-slot", type=int)
     parser.add_argument("--branch-name", default="")
     parser.add_argument("--rest-member-json", action="append", type=json.loads, default=[])
@@ -1325,9 +1327,10 @@ async def _stand_after_source_event(
     source_ref: dict[str, Any] | None,
     actor_id: str,
     knowledge_actor_ids: list[str],
+    reason: str = "",
 ) -> dict[str, Any]:
-    if not all((scene_id, location_key, source_excerpt, actor_id)):
-        raise ValueError("stand-up requires scene, location, excerpt, and actor")
+    if not all((scene_id, location_key, actor_id)):
+        raise ValueError("stand-up requires scene, location, and actor")
     scene = await client.domain(
         "module_query",
         {
@@ -1336,7 +1339,13 @@ async def _stand_after_source_event(
             "payload": {"scene_id": scene_id},
         },
     )
-    exact_ref = _validate_source_ref(scene, source_ref, excerpt=source_excerpt)
+    if bool(source_excerpt) != bool(source_ref):
+        raise ValueError("stand-up source excerpt and source ref must be supplied together")
+    exact_ref = (
+        _validate_source_ref(scene, source_ref, excerpt=source_excerpt)
+        if source_ref is not None
+        else None
+    )
     if location_key not in {
         str(item.get("key") or "") for item in _scene_locations(scene)
     }:
@@ -1366,6 +1375,17 @@ async def _stand_after_source_event(
     if branch is None:
         raise RuntimeError("campaign has no current branch")
     recipients = list(dict.fromkeys([actor_id, *knowledge_actor_ids]))
+    event_summary = reason.strip() or (
+        f"{actor['name']} stood after the source-cited Prone result at {location_key}."
+        if exact_ref is not None
+        else f"{actor['name']} stood from Prone at {location_key}."
+    )
+    knowledge = reason.strip() or (
+        f"{actor['name']} recovered from the source-cited fall and stood at "
+        f"{location_key}."
+        if exact_ref is not None
+        else f"{actor['name']} recovered from Prone and stood at {location_key}."
+    )
     campaign = await _campaign(client, campaign_id)
     committed = await client.domain(
         "continuity_commit",
@@ -1373,18 +1393,21 @@ async def _stand_after_source_event(
             "campaign_id": campaign_id,
             "payload": {
                 "event": {
-                    "summary": (
-                        f"{actor['name']} stood after the source-cited Prone result "
-                        f"at {location_key}."
-                    ),
+                    "summary": event_summary,
                     "event_type": "stand",
                     "audience_scope": "party",
                     "payload": {
                         "scene_id": scene_id,
                         "location_key": location_key,
                         "actor_id": actor_id,
-                        "source_excerpt": source_excerpt,
-                        "source_ref": exact_ref,
+                        **(
+                            {
+                                "source_excerpt": source_excerpt,
+                                "source_ref": exact_ref,
+                            }
+                            if exact_ref is not None
+                            else {}
+                        ),
                     },
                 },
                 "actor_knowledge": [
@@ -1394,10 +1417,7 @@ async def _stand_after_source_event(
                             f"playthrough.{_token(run_id)}.{_token(scene_id)}."
                             f"{_token(actor_id)}.stand"
                         ),
-                        "proposition": (
-                            f"{actor['name']} recovered from the fall and stood at "
-                            f"the chimney base."
-                        ),
+                        "proposition": knowledge,
                         "disclosure_scope": "owner",
                     }
                     for recipient in recipients
@@ -1617,6 +1637,183 @@ async def _short_rest(
         "clock_set": clock_set,
         "clock_advanced": clock_advanced,
         "rests": rested,
+        "continuity": committed,
+        "sync": synced,
+    }
+
+
+async def _long_rest(
+    client: ExposureClient,
+    *,
+    campaign_id: str,
+    run_id: str,
+    members: list[dict[str, Any]],
+    start_clock: dict[str, Any] | None,
+    duration_minutes: int,
+    reason: str,
+) -> dict[str, Any]:
+    if duration_minutes < 480:
+        raise ValueError("long-rest requires at least 480 minutes")
+    if not members or not reason.strip():
+        raise ValueError("long-rest requires members and --rest-reason")
+    allowed_fields = {
+        "actor_id",
+        "prepared_spell_ids",
+        "hit_dice_recovery",
+        "food_and_drink",
+    }
+    normalized: list[dict[str, Any]] = []
+    actors: list[dict[str, Any]] = []
+    for index, member in enumerate(members):
+        if not isinstance(member, dict):
+            raise ValueError(f"rest-member-json[{index}] must be an object")
+        unexpected = set(member) - allowed_fields
+        actor_id = str(member.get("actor_id") or "")
+        prepared_ids = member.get("prepared_spell_ids")
+        hit_dice_recovery = member.get("hit_dice_recovery")
+        food_and_drink = member.get("food_and_drink", False)
+        if (
+            unexpected
+            or not actor_id
+            or (prepared_ids is not None and not isinstance(prepared_ids, list))
+            or (
+                hit_dice_recovery is not None
+                and not isinstance(hit_dice_recovery, dict)
+            )
+            or not isinstance(food_and_drink, bool)
+        ):
+            raise ValueError(
+                "long-rest members accept actor_id, optional prepared_spell_ids, "
+                "optional hit_dice_recovery, and optional food_and_drink only"
+            )
+        actor = await client.domain(
+            "character_query",
+            {"view": "get", "payload": {"character_id": actor_id}},
+        )
+        if actor.get("campaign_id") != campaign_id:
+            raise ValueError("every long-rest actor must belong to the campaign")
+        actors.append(actor)
+        normalized.append(
+            {
+                "actor_id": actor_id,
+                "prepared_spell_ids": (
+                    list(prepared_ids) if prepared_ids is not None else None
+                ),
+                "hit_dice_recovery": deepcopy(hit_dice_recovery),
+                "food_and_drink": food_and_drink,
+            }
+        )
+    actor_ids = [item["actor_id"] for item in normalized]
+    if len(actor_ids) != len(set(actor_ids)):
+        raise ValueError("long-rest member actor ids must be unique")
+    branches = await client.domain(
+        "branch_query",
+        {"campaign_id": campaign_id, "view": "list"},
+    )
+    branch = next((item for item in branches if item.get("is_current")), None)
+    if branch is None:
+        raise RuntimeError("campaign has no current branch")
+    campaign = await _campaign(client, campaign_id)
+    clock_set = None
+    if not dict(dict(campaign.get("state") or {}).get("world_time") or {}):
+        if not isinstance(start_clock, dict):
+            raise ValueError(
+                "long-rest requires --rest-start-clock-json when the campaign clock is unset"
+            )
+        clock_set = await client.domain(
+            "campaign_change",
+            {
+                "campaign_id": campaign_id,
+                "action": "clock_set",
+                "payload": {
+                    "day": start_clock.get("day"),
+                    "hour": start_clock.get("hour", 0),
+                    "minute": start_clock.get("minute", 0),
+                    "label": str(start_clock.get("label") or ""),
+                },
+                "branch_id": str(branch["id"]),
+                "expected_revision": campaign["revision"],
+                "idempotency_key": _mutation_key(run_id, "long-rest-clock-set", reason),
+            },
+        )
+    elif start_clock is not None:
+        raise ValueError("long-rest start clock must be omitted after the clock is set")
+    campaign = await _campaign(client, campaign_id)
+    party_members = []
+    actor_by_id = {str(actor["id"]): actor for actor in actors}
+    for member in normalized:
+        party_member: dict[str, Any] = {
+            "character_id": member["actor_id"],
+            "expected_revision": actor_by_id[member["actor_id"]]["revision"],
+            "food_and_drink": member["food_and_drink"],
+        }
+        if member["prepared_spell_ids"] is not None:
+            party_member["prepared_spell_ids"] = member["prepared_spell_ids"]
+        if member["hit_dice_recovery"] is not None:
+            party_member["hit_dice_recovery"] = member["hit_dice_recovery"]
+        party_members.append(party_member)
+    rested = await client.domain(
+        "campaign_change",
+        {
+            "campaign_id": campaign_id,
+            "action": "party_rest",
+            "payload": {
+                "members": party_members,
+                "duration_minutes": duration_minutes,
+            },
+            "branch_id": str(branch["id"]),
+            "expected_revision": campaign["revision"],
+            "idempotency_key": _mutation_key(run_id, "long-rest-party", reason),
+        },
+    )
+    if rested.get("status") != "committed":
+        raise RuntimeError("long rest did not commit")
+    campaign = await _campaign(client, campaign_id)
+    committed = await client.domain(
+        "continuity_commit",
+        {
+            "campaign_id": campaign_id,
+            "payload": {
+                "event": {
+                    "summary": reason.strip(),
+                    "event_type": "long_rest",
+                    "audience_scope": "party",
+                    "payload": {
+                        "member_ids": actor_ids,
+                        "member_choices": normalized,
+                        "duration_minutes": duration_minutes,
+                        "clock_set": clock_set is not None,
+                    },
+                },
+                "actor_knowledge": [
+                    {
+                        "actor_id": actor_id,
+                        "knowledge_key": (
+                            f"playthrough.{_token(run_id)}.{_token(actor_id)}.long_rest"
+                        ),
+                        "proposition": reason.strip(),
+                        "disclosure_scope": "owner",
+                    }
+                    for actor_id in actor_ids
+                ],
+                "snapshot": {"label": f"Full playthrough long rest: {reason.strip()}"},
+                "branch_id": str(branch["id"]),
+            },
+            "expected_revision": campaign["revision"],
+            "idempotency_key": _mutation_key(run_id, "long-rest-continuity", reason),
+        },
+    )
+    synced = await _manifest_mutation(
+        client,
+        campaign_id=campaign_id,
+        action="sync",
+        run_id=run_id,
+        identity="long-rest-sync",
+    )
+    return {
+        "member_ids": actor_ids,
+        "clock_set": clock_set,
+        "rest": rested,
         "continuity": committed,
         "sync": synced,
     }
@@ -2213,12 +2410,26 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     source_ref=args.source_ref_json,
                     actor_id=args.stand_actor_id,
                     knowledge_actor_ids=args.knowledge_actor_id,
+                    reason=args.stand_reason,
                 )
             elif args.action == "short-rest":
                 if phase != "play":
                     raise RuntimeError("short-rest requires the play phase")
                 await client.load("play.characters")
                 report["result"] = await _short_rest(
+                    client,
+                    campaign_id=args.campaign_id,
+                    run_id=args.run_id,
+                    members=args.rest_member_json,
+                    start_clock=args.rest_start_clock_json,
+                    duration_minutes=args.rest_duration_minutes,
+                    reason=args.rest_reason,
+                )
+            elif args.action == "long-rest":
+                if phase != "play":
+                    raise RuntimeError("long-rest requires the play phase")
+                await client.load("play.characters")
+                report["result"] = await _long_rest(
                     client,
                     campaign_id=args.campaign_id,
                     run_id=args.run_id,
