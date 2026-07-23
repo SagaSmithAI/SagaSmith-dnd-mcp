@@ -206,5 +206,63 @@ def test_source_bound_loot_is_atomic_idempotent_and_branch_audited(tmp_path: Pat
                     "idempotency_key": "duplicate-loot",
                 },
             )
+        spend_arguments = {
+            "campaign_id": campaign["id"],
+            "action": "currency_spend",
+            "payload": {
+                "spend_id": "chapter-one-lodging",
+                "coins": {"cp": 25},
+                "reason": "The party paid its source-bound lodging expense.",
+                "source_ref": source_ref,
+                "rule_ref": "srd2014.expenses.food-drink-lodging.modest-inn",
+            },
+            "expected_revision": acquired["campaign"]["revision"],
+            "idempotency_key": "spend",
+        }
+        with pytest.raises(Exception, match="wallet balance cannot be negative"):
+            await _call(
+                server,
+                "campaign_change",
+                {
+                    **spend_arguments,
+                    "payload": {
+                        **spend_arguments["payload"],
+                        "coins": {"cp": 25, "gp": 1},
+                    },
+                    "idempotency_key": "spend-insufficient",
+                },
+            )
+        unchanged = await _call(
+            server,
+            "campaign_query",
+            {"view": "party", "payload": {"campaign_id": campaign["id"]}},
+        )
+        assert unchanged["inventory"]["wallet"]["cp"] == 60
+        spent = await _call(server, "campaign_change", spend_arguments)
+        spend_replay = await _call(server, "campaign_change", spend_arguments)
+
+        assert spend_replay == spent
+        assert spent["status"] == "committed"
+        assert spent["coins"] == {"cp": 25}
+        assert spent["party"]["inventory"]["wallet"]["cp"] == 35
+        assert spent["campaign"]["state"]["currency_spends"] == [
+            {
+                "id": "chapter-one-lodging",
+                "reason": "The party paid its source-bound lodging expense.",
+                "source_ref": source_ref,
+                "rule_ref": "srd2014.expenses.food-drink-lodging.modest-inn",
+                "coins": {"cp": 25},
+            }
+        ]
+        with pytest.raises(Exception, match="spend_id already exists"):
+            await _call(
+                server,
+                "campaign_change",
+                {
+                    **spend_arguments,
+                    "expected_revision": spent["campaign"]["revision"],
+                    "idempotency_key": "duplicate-spend",
+                },
+            )
 
     asyncio.run(exercise())

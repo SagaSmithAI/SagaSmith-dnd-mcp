@@ -42,6 +42,7 @@ from scripts.regression_playthrough import (
     _restore_phase_after_failed_refresh,
     _scene_progress_percent,
     _short_rest,
+    _spend_source_currency,
     _stand_after_source_event,
     _start_play,
     _use_activity,
@@ -324,6 +325,85 @@ def test_source_loot_driver_uses_one_public_atomic_campaign_transition() -> None
     assert client.tools.count("campaign_change") == 1
     assert result["knowledge_actor_ids"] == ["actor-1", "actor-2"]
     assert result["scene"]["source_scene_id"] == "source-scene-1"
+
+
+def test_source_currency_spend_driver_uses_one_public_atomic_campaign_transition() -> None:
+    source_ref = {
+        "module_id": "module-1",
+        "scene_id": "scene-1",
+        "chunk_id": "chunk-1",
+        "page_start": 15,
+        "page_end": 15,
+        "heading_path": ["Town", "Inn"],
+        "content_sha256": "a" * 64,
+    }
+
+    class Client:
+        def __init__(self) -> None:
+            self.revision = 4
+            self.tools: list[str] = []
+
+        async def core(self, tool_id: str, arguments: dict):
+            assert tool_id == "campaign_query"
+            return {
+                "result": {
+                    "id": "campaign-1",
+                    "revision": self.revision,
+                    "state": {"game_phase": "play", "currency_spends": []},
+                }
+            }
+
+        async def domain(self, tool_id: str, arguments: dict):
+            self.tools.append(tool_id)
+            if tool_id == "module_query":
+                return {
+                    "module_id": "module-1",
+                    "scene_id": "scene-1",
+                    "content": "This modest inn has six rooms for rent.",
+                    "spatial": {"locations": [{"key": "inn", "title": "Inn"}]},
+                }
+            if tool_id == "campaign_change":
+                assert arguments["action"] == "currency_spend"
+                assert arguments["payload"]["coins"] == {"sp": 25}
+                self.revision += 1
+                return {
+                    "status": "committed",
+                    "spend_id": "lodging",
+                    "coins": {"sp": 25},
+                }
+            if tool_id == "branch_query":
+                return [{"id": "branch-1", "is_current": True}]
+            if tool_id == "continuity_commit":
+                assert len(arguments["payload"]["actor_knowledge"]) == 2
+                assert arguments["payload"]["event"]["event_type"] == "currency_spent"
+                self.revision += 1
+                return {"event": {"id": "event-1"}, "snapshot": {"slot": 7}}
+            if tool_id == "playthrough_manifest":
+                return {"manifest": {"status": "in_progress"}, "campaign_revision": 7}
+            raise AssertionError((tool_id, arguments))
+
+    client = Client()
+    result = asyncio.run(
+        _spend_source_currency(
+            client,
+            campaign_id="campaign-1",
+            run_id="run-1",
+            scene_id="scene-1",
+            location_key="inn",
+            source_excerpt="This modest inn has six rooms for rent.",
+            source_ref=source_ref,
+            spend_id="lodging",
+            coins={"sp": 25},
+            reason="The five PCs paid 5 sp each for one modest inn stay.",
+            rule_ref="srd2014.expenses.food-drink-lodging.modest-inn",
+            knowledge_actor_ids=["actor-1", "actor-2"],
+        )
+    )
+
+    assert result["spend"]["status"] == "committed"
+    assert client.tools.count("campaign_change") == 1
+    assert result["knowledge_actor_ids"] == ["actor-1", "actor-2"]
+    assert result["scene"]["location_key"] == "inn"
 
 
 def test_query_source_searches_and_expands_only_public_mcp_results() -> None:
