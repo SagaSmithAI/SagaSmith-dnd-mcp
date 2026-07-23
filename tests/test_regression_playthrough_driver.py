@@ -227,6 +227,7 @@ def test_failed_route_is_preserved_when_branching_from_verified_snapshot() -> No
             self.phase = "play"
             self.revision = 30
             self.current_branch = "failed-branch"
+            self.source_saved = False
             self.loads: list[tuple[str, ...]] = []
 
         async def open(self, campaign_id: str):
@@ -266,7 +267,7 @@ def test_failed_route_is_preserved_when_branching_from_verified_snapshot() -> No
                         "id": self.current_branch,
                         "is_current": True,
                         "head_snapshot_id": (
-                            "snapshot-59"
+                            ("snapshot-60" if self.source_saved else "snapshot-59")
                             if self.current_branch == "failed-branch"
                             else "snapshot-58"
                         ),
@@ -289,8 +290,12 @@ def test_failed_route_is_preserved_when_branching_from_verified_snapshot() -> No
             if tool_id == "playthrough_manifest" and arguments["action"] == "sync":
                 return {"manifest": {"status": "in_progress"}, "campaign_revision": 31}
             if tool_id == "snapshot_create":
+                if self.current_branch == "failed-branch":
+                    assert arguments["expected_head_snapshot_id"] == "snapshot-59"
+                    self.source_saved = True
+                    return {"id": "snapshot-60", "slot": 60}
                 assert arguments["expected_head_snapshot_id"] == "snapshot-58"
-                return {"id": "snapshot-60", "slot": 60}
+                return {"id": "snapshot-61", "slot": 61}
             if tool_id == "playthrough_manifest" and arguments["action"] == "get":
                 return {"manifest": {"status": "in_progress"}}
             raise AssertionError((tool_id, arguments))
@@ -309,8 +314,9 @@ def test_failed_route_is_preserved_when_branching_from_verified_snapshot() -> No
 
     assert result["source_branch"]["id"] == "failed-branch"
     assert result["source_head_snapshot_id"] == "snapshot-59"
+    assert result["source_checkpoint"]["snapshot"]["slot"] == 60
     assert result["created_branch"]["id"] == "recovery-branch"
-    assert result["checkpoint"]["snapshot"]["slot"] == 60
+    assert result["checkpoint"]["snapshot"]["slot"] == 61
 
 
 def test_source_cited_check_persists_result_and_explicit_knowledge() -> None:

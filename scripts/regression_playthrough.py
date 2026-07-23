@@ -686,6 +686,15 @@ async def _branch_from_snapshot(
         )
         await client.open(campaign_id)
         await client.load("lobby.campaign")
+    source_checkpoint = await _checkpoint(
+        client,
+        campaign_id=campaign_id,
+        run_id=f"{run_id}-source",
+        label=(
+            f"Preserve source branch before forking snapshot slot {snapshot_slot}: "
+            f"{branch_name.strip()}"
+        ),
+    )
     campaign = await _campaign(client, campaign_id)
     created = await client.domain(
         "branch_change",
@@ -722,6 +731,7 @@ async def _branch_from_snapshot(
     return {
         "source_branch": source_branch,
         "source_head_snapshot_id": source_branch.get("head_snapshot_id"),
+        "source_checkpoint": source_checkpoint,
         "target_snapshot": target,
         "target_verification": verification,
         "created_branch": created,
