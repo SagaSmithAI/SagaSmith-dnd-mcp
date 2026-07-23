@@ -32,6 +32,8 @@ def _arguments() -> argparse.Namespace:
         choices=(
             "audit",
             "discover-scenes",
+            "walk-scenes",
+            "restore-regression",
             "relock-core",
             "prepare-statblock",
             "prepare-core-wizard",
@@ -664,6 +666,726 @@ async def _discover_scenes(args: argparse.Namespace) -> dict[str, Any]:
                 "campaign_id": args.campaign_id,
                 "phase": phase,
                 "queries": results,
+            }
+
+
+def _progress_summary(item: dict[str, Any] | None) -> dict[str, Any]:
+    """Keep only snapshot-managed scene progress fields for isolation checks."""
+
+    value = item or {}
+    return {
+        key: value.get(key)
+        for key in (
+            "scene_id",
+            "scope_id",
+            "status",
+            "progress",
+            "percent",
+            "state",
+            "current_room",
+            "current_location_key",
+            "state_version",
+        )
+    }
+
+
+async def _walk_scenes(args: argparse.Namespace) -> dict[str, Any]:
+    """Read and advance every playable scene on an isolated snapshot branch."""
+
+    token = _idempotency_token(args.run_id)
+    marker_key = f"regression:{token}:all-scenes-traversed"
+    async with stdio_client(_server_parameters(args)) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            client = CampaignMcp(session, args.campaign_id)
+            phase_payload = await client.core(
+                "game_phase", {"campaign_id": args.campaign_id, "action": "get"}
+            )
+            initial_phase = str(_facade_value(phase_payload)["tool_profile"])
+            if initial_phase == "combat":
+                raise RuntimeError("walk-scenes cannot run during active combat")
+            await client.open()
+            await client.load(*_phase_groups(initial_phase))
+
+            branches = _facade_value(
+                await client.domain(
+                    "branch_query", {"campaign_id": args.campaign_id, "view": "list"}
+                )
+            )
+            source_branch = next((item for item in branches if item.get("is_current")), None)
+            if source_branch is None:
+                raise RuntimeError("campaign has no current branch")
+            if str(source_branch.get("name") or "").startswith("scene-walk-"):
+                raise RuntimeError(
+                    "campaign is already on a scene-walk regression branch; restore its source "
+                    "branch before retrying"
+                )
+
+            modules = _facade_value(
+                await client.domain(
+                    "module_query", {"campaign_id": args.campaign_id, "view": "list"}
+                )
+            )
+            selected_scenes: list[dict[str, Any]] = []
+            module_scene_counts: dict[str, int] = {}
+            for module in modules:
+                module_id = str(module["id"])
+                index = _facade_value(
+                    await client.domain(
+                        "module_query",
+                        {
+                            "campaign_id": args.campaign_id,
+                            "view": "index",
+                            "payload": {"module_id": module_id},
+                        },
+                    )
+                )
+                values = index.get("scenes", index) if isinstance(index, dict) else index
+                playable = [
+                    item
+                    for item in values or []
+                    if isinstance(item, dict)
+                    and str(item.get("scene_type") or "") not in {"reference", "overview"}
+                ]
+                selected_scenes.extend(playable)
+                module_scene_counts[module_id] = len(playable)
+            if not selected_scenes:
+                raise RuntimeError("campaign has no non-reference scenes")
+
+            source_current_before = _facade_value(
+                await client.domain(
+                    "module_query", {"campaign_id": args.campaign_id, "view": "current"}
+                )
+            )
+            source_progress_before_values = _facade_value(
+                await client.domain(
+                    "module_query", {"campaign_id": args.campaign_id, "view": "progress"}
+                )
+            )
+            source_progress_before = {
+                str(item["scene_id"]): _progress_summary(item)
+                for item in source_progress_before_values or []
+                if isinstance(item, dict) and item.get("scene_id")
+            }
+
+            if initial_phase != "lobby":
+                campaign = _facade_value(
+                    await client.core(
+                        "campaign_query",
+                        {"view": "get", "payload": {"campaign_id": args.campaign_id}},
+                    )
+                )
+                await client.core(
+                    "game_phase",
+                    {
+                        "campaign_id": args.campaign_id,
+                        "action": "set",
+                        "tool_profile": "lobby",
+                        "expected_revision": campaign["revision"],
+                        "branch_id": source_branch["id"],
+                        "idempotency_key": _phase_transition_key(
+                            token, "walk-enter-lobby", campaign
+                        ),
+                    },
+                )
+            await client.open()
+            await client.load("lobby.campaign", "lobby.modules", "lobby.memory_control")
+            campaign_lobby = _facade_value(
+                await client.core(
+                    "campaign_query",
+                    {"view": "get", "payload": {"campaign_id": args.campaign_id}},
+                )
+            )
+            source_checkpoint = await client.domain(
+                "snapshot_create",
+                {
+                    "campaign_id": args.campaign_id,
+                    "label": f"Before all-scene regression: {token}",
+                    "expected_revision": campaign_lobby["revision"],
+                    "expected_head_snapshot_id": source_branch.get("head_snapshot_id") or "",
+                    "idempotency_key": f"{token}-walk-source-checkpoint",
+                },
+            )
+            regression_branch = _facade_value(
+                await client.domain(
+                    "branch_change",
+                    {
+                        "campaign_id": args.campaign_id,
+                        "action": "create",
+                        "payload": {
+                            "name": f"scene-walk-{token}",
+                            "from_snapshot_id": source_checkpoint["id"],
+                            "checkout": True,
+                        },
+                        "expected_revision": campaign_lobby["revision"],
+                        "expected_branch_id": source_branch["id"],
+                        "idempotency_key": f"{token}-walk-branch-create",
+                    },
+                )
+            )
+            campaign_branch_lobby = _facade_value(
+                await client.core(
+                    "campaign_query",
+                    {"view": "get", "payload": {"campaign_id": args.campaign_id}},
+                )
+            )
+            await client.core(
+                "game_phase",
+                {
+                    "campaign_id": args.campaign_id,
+                    "action": "set",
+                    "tool_profile": "play",
+                    "expected_revision": campaign_branch_lobby["revision"],
+                    "branch_id": regression_branch["id"],
+                    "idempotency_key": _phase_transition_key(
+                        token, "walk-enter-play", campaign_branch_lobby
+                    ),
+                },
+            )
+            await client.open()
+            await client.load("play.scene", "play.scene_control")
+            branch_progress_values = _facade_value(
+                await client.domain(
+                    "module_query", {"campaign_id": args.campaign_id, "view": "progress"}
+                )
+            )
+            branch_progress = {
+                str(item["scene_id"]): item
+                for item in branch_progress_values or []
+                if isinstance(item, dict) and item.get("scene_id")
+            }
+
+            scene_reports: list[dict[str, Any]] = []
+            checkpoint_snapshots: list[dict[str, Any]] = []
+            total = len(selected_scenes)
+            for index, compact_scene in enumerate(selected_scenes, start=1):
+                scene_id = str(compact_scene["scene_id"])
+                scene = _facade_value(
+                    await client.domain(
+                        "module_query",
+                        {
+                            "campaign_id": args.campaign_id,
+                            "view": "scene",
+                            "payload": {"scene_id": scene_id},
+                        },
+                    )
+                )
+                if scene.get("redacted") or str(scene.get("scene_id")) != scene_id:
+                    raise RuntimeError(f"scene {scene_id} was redacted or mismatched")
+                content = str(scene.get("content") or "")
+                if not content.strip():
+                    raise RuntimeError(f"scene {scene_id} has no readable content")
+                locations = _scene_locations(scene)
+                location_key = str(locations[0]["key"]) if locations else None
+                progress_before = branch_progress.get(scene_id)
+                state_version = int((progress_before or {}).get("state_version", 0) or 0)
+                progress_after = _facade_value(
+                    await client.domain(
+                        "module_set_progress",
+                        {
+                            "campaign_id": args.campaign_id,
+                            "scene_id": scene_id,
+                            "status": "completed",
+                            "progress": 100,
+                            "state": {
+                                "regression_run_id": token,
+                                "traversal_index": index,
+                                "source_page_start": scene.get("page_start"),
+                                "source_page_end": scene.get("page_end"),
+                            },
+                            "current_location_key": location_key,
+                            "expected_state_version": state_version,
+                            "idempotency_key": f"{token}-walk-progress-{index}-{scene_id}",
+                        },
+                    )
+                )
+                branch_progress[scene_id] = progress_after
+                module_id = str(scene["module_id"])
+                next_module_id = str(selected_scenes[index]["module_id"]) if index < total else None
+                make_snapshot = index % 25 == 0 or next_module_id != module_id or index == total
+                campaign_before_commit = _facade_value(
+                    await client.core(
+                        "campaign_query",
+                        {"view": "get", "payload": {"campaign_id": args.campaign_id}},
+                    )
+                )
+                committed = _facade_value(
+                    await client.domain(
+                        "continuity_commit",
+                        {
+                            "campaign_id": args.campaign_id,
+                            "payload": {
+                                "event": {
+                                    "summary": (
+                                        f"Regression completed module scene {scene['title']}."
+                                    ),
+                                    "event_type": "scene_completed",
+                                    "audience_scope": "dm",
+                                    "payload": {
+                                        "module_id": module_id,
+                                        "scene_id": scene_id,
+                                        "page_start": scene.get("page_start"),
+                                        "page_end": scene.get("page_end"),
+                                        "location_key": location_key,
+                                        "regression_run_id": token,
+                                    },
+                                },
+                                "facts": (
+                                    [
+                                        {
+                                            "fact_key": marker_key,
+                                            "subject": "Campaign scene traversal",
+                                            "subject_ref": f"campaign:{args.campaign_id}",
+                                            "predicate": "regression-in-progress",
+                                            "content": (
+                                                "The disposable regression branch traversed every "
+                                                "playable imported scene."
+                                            ),
+                                            "importance": 1,
+                                            "disclosure_scope": "dm",
+                                        }
+                                    ]
+                                    if index == 1
+                                    else []
+                                ),
+                                "snapshot": (
+                                    {
+                                        "label": (
+                                            f"All-scene regression checkpoint {index}/{total}: "
+                                            f"{scene['title']}"
+                                        )
+                                    }
+                                    if make_snapshot
+                                    else None
+                                ),
+                                "branch_id": regression_branch["id"],
+                            },
+                            "expected_revision": campaign_before_commit["revision"],
+                            "idempotency_key": f"{token}-walk-continuity-{index}-{scene_id}",
+                        },
+                    )
+                )
+                if make_snapshot:
+                    snapshot = dict(committed.get("snapshot") or {})
+                    if not snapshot.get("slot"):
+                        raise RuntimeError(f"scene {scene_id} checkpoint snapshot was not created")
+                    verified = _facade_value(
+                        await client.domain(
+                            "snapshot_query",
+                            {
+                                "campaign_id": args.campaign_id,
+                                "view": "verify",
+                                "payload": {"slot": snapshot["slot"]},
+                            },
+                        )
+                    )
+                    if not verified.get("valid"):
+                        raise RuntimeError(f"scene {scene_id} checkpoint snapshot is invalid")
+                    checkpoint_snapshots.append(
+                        {
+                            "scene_index": index,
+                            "scene_id": scene_id,
+                            "snapshot": snapshot,
+                            "verification": verified,
+                        }
+                    )
+                scene_reports.append(
+                    {
+                        "index": index,
+                        "scene_id": scene_id,
+                        "module_id": module_id,
+                        "stable_key": scene.get("stable_key"),
+                        "title": scene.get("title"),
+                        "scene_type": scene.get("scene_type"),
+                        "page_start": scene.get("page_start"),
+                        "page_end": scene.get("page_end"),
+                        "content_characters": len(content),
+                        "location_key": location_key,
+                        "progress_state_version": progress_after.get("state_version"),
+                        "event_id": dict(committed.get("event") or {}).get("id"),
+                        "checkpoint": make_snapshot,
+                    }
+                )
+            final_progress_values = _facade_value(
+                await client.domain(
+                    "module_query", {"campaign_id": args.campaign_id, "view": "progress"}
+                )
+            )
+            final_progress = {
+                str(item["scene_id"]): item
+                for item in final_progress_values or []
+                if isinstance(item, dict) and item.get("scene_id")
+            }
+            incomplete = [
+                scene["scene_id"]
+                for scene in scene_reports
+                if final_progress.get(str(scene["scene_id"]), {}).get("status") != "completed"
+                or final_progress.get(str(scene["scene_id"]), {}).get("percent") != 100
+                or dict(final_progress.get(str(scene["scene_id"]), {}).get("state") or {}).get(
+                    "regression_run_id"
+                )
+                != token
+            ]
+            if incomplete:
+                raise RuntimeError(f"scene traversal did not persist for {len(incomplete)} scenes")
+            diagnostics = _facade_value(
+                await client.domain("continuity_diagnostics", {"campaign_id": args.campaign_id})
+            )
+
+            campaign_regression_play = _facade_value(
+                await client.core(
+                    "campaign_query",
+                    {"view": "get", "payload": {"campaign_id": args.campaign_id}},
+                )
+            )
+            await client.core(
+                "game_phase",
+                {
+                    "campaign_id": args.campaign_id,
+                    "action": "set",
+                    "tool_profile": "lobby",
+                    "expected_revision": campaign_regression_play["revision"],
+                    "branch_id": regression_branch["id"],
+                    "idempotency_key": _phase_transition_key(
+                        token, "walk-close-lobby", campaign_regression_play
+                    ),
+                },
+            )
+            await client.open()
+            await client.load("lobby.campaign", "lobby.modules", "lobby.memory_control")
+            campaign_regression_lobby = _facade_value(
+                await client.core(
+                    "campaign_query",
+                    {"view": "get", "payload": {"campaign_id": args.campaign_id}},
+                )
+            )
+            regression_branches = _facade_value(
+                await client.domain(
+                    "branch_query", {"campaign_id": args.campaign_id, "view": "list"}
+                )
+            )
+            regression_branch_lobby = next(
+                item for item in regression_branches if item.get("is_current")
+            )
+            regression_lobby_snapshot = await client.domain(
+                "snapshot_create",
+                {
+                    "campaign_id": args.campaign_id,
+                    "label": f"Closed all-scene regression: {token}",
+                    "expected_revision": campaign_regression_lobby["revision"],
+                    "expected_head_snapshot_id": (
+                        regression_branch_lobby.get("head_snapshot_id") or ""
+                    ),
+                    "idempotency_key": f"{token}-walk-lobby-checkpoint",
+                },
+            )
+            checkout = _facade_value(
+                await client.domain(
+                    "branch_change",
+                    {
+                        "campaign_id": args.campaign_id,
+                        "action": "checkout",
+                        "payload": {"branch_id": source_branch["id"]},
+                        "expected_revision": campaign_regression_lobby["revision"],
+                        "expected_branch_id": regression_branch["id"],
+                        "idempotency_key": f"{token}-walk-return-source",
+                    },
+                )
+            )
+            if initial_phase != "lobby":
+                campaign_source_lobby = _facade_value(
+                    await client.core(
+                        "campaign_query",
+                        {"view": "get", "payload": {"campaign_id": args.campaign_id}},
+                    )
+                )
+                await client.core(
+                    "game_phase",
+                    {
+                        "campaign_id": args.campaign_id,
+                        "action": "set",
+                        "tool_profile": initial_phase,
+                        "expected_revision": campaign_source_lobby["revision"],
+                        "branch_id": source_branch["id"],
+                        "idempotency_key": _phase_transition_key(
+                            token, "walk-restore-source-phase", campaign_source_lobby
+                        ),
+                    },
+                )
+            await client.open()
+            await client.load(*_phase_groups(initial_phase))
+            source_current_after = _facade_value(
+                await client.domain(
+                    "module_query", {"campaign_id": args.campaign_id, "view": "current"}
+                )
+            )
+            source_progress_after_values = _facade_value(
+                await client.domain(
+                    "module_query", {"campaign_id": args.campaign_id, "view": "progress"}
+                )
+            )
+            source_progress_after = {
+                str(item["scene_id"]): _progress_summary(item)
+                for item in source_progress_after_values or []
+                if isinstance(item, dict) and item.get("scene_id")
+            }
+            source_facts = _facade_value(
+                await client.domain(
+                    "memory_query",
+                    {
+                        "campaign_id": args.campaign_id,
+                        "view": "list",
+                        "payload": {"branch_id": source_branch["id"]},
+                    },
+                )
+            )
+            source_fact_keys = {str(item.get("fact_key")) for item in source_facts or []}
+            progress_restored = source_progress_after == source_progress_before
+            current_scene_restored = _current_scene_summary(source_current_after) == (
+                _current_scene_summary(source_current_before)
+            )
+            if (
+                not progress_restored
+                or not current_scene_restored
+                or marker_key in source_fact_keys
+            ):
+                raise RuntimeError("all-scene regression leaked into the source branch")
+            comparison = _facade_value(
+                await client.domain(
+                    "branch_query",
+                    {
+                        "campaign_id": args.campaign_id,
+                        "view": "compare",
+                        "payload": {
+                            "left_branch_id": source_branch["id"],
+                            "right_branch_id": regression_branch["id"],
+                        },
+                    },
+                )
+            )
+            campaign_source = _facade_value(
+                await client.core(
+                    "campaign_query",
+                    {"view": "get", "payload": {"campaign_id": args.campaign_id}},
+                )
+            )
+            final_branches = _facade_value(
+                await client.domain(
+                    "branch_query", {"campaign_id": args.campaign_id, "view": "list"}
+                )
+            )
+            final_source_branch = next(item for item in final_branches if item.get("is_current"))
+            final_snapshot = await client.domain(
+                "snapshot_create",
+                {
+                    "campaign_id": args.campaign_id,
+                    "label": f"Returned after all-scene regression: {token}",
+                    "expected_revision": campaign_source["revision"],
+                    "expected_head_snapshot_id": final_source_branch.get("head_snapshot_id") or "",
+                    "idempotency_key": f"{token}-walk-source-final",
+                },
+            )
+            final_verified = _facade_value(
+                await client.domain(
+                    "snapshot_query",
+                    {
+                        "campaign_id": args.campaign_id,
+                        "view": "verify",
+                        "payload": {"slot": final_snapshot["slot"]},
+                    },
+                )
+            )
+            return {
+                "action": "walk-scenes",
+                "transport": "stdio",
+                "campaign_id": args.campaign_id,
+                "initial_phase": initial_phase,
+                "source_branch_id": source_branch["id"],
+                "regression_branch_id": regression_branch["id"],
+                "source_checkpoint": source_checkpoint,
+                "modules": module_scene_counts,
+                "scene_count": total,
+                "scenes_read": len(scene_reports),
+                "scenes_completed": total - len(incomplete),
+                "scenes_with_atlas_location": sum(
+                    bool(item["location_key"]) for item in scene_reports
+                ),
+                "scene_reports": scene_reports,
+                "checkpoint_snapshots": checkpoint_snapshots,
+                "continuity_diagnostics": diagnostics,
+                "regression_lobby_snapshot": regression_lobby_snapshot,
+                "checkout": checkout,
+                "source_isolation": {
+                    "progress_restored": progress_restored,
+                    "current_scene_restored": current_scene_restored,
+                    "marker_fact_absent": marker_key not in source_fact_keys,
+                },
+                "branch_comparison": comparison,
+                "final_snapshot": final_snapshot,
+                "final_snapshot_verification": final_verified,
+            }
+
+
+async def _restore_regression(args: argparse.Namespace) -> dict[str, Any]:
+    """Checkpoint an interrupted disposable branch and return to its source."""
+
+    if not args.resume_source_branch_id:
+        raise ValueError("restore-regression requires --resume-source-branch-id")
+    token = _idempotency_token(args.run_id)
+    async with stdio_client(_server_parameters(args)) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            client = CampaignMcp(session, args.campaign_id)
+            phase_payload = await client.core(
+                "game_phase", {"campaign_id": args.campaign_id, "action": "get"}
+            )
+            initial_phase = str(_facade_value(phase_payload)["tool_profile"])
+            if initial_phase == "combat":
+                raise RuntimeError("end the active combat before restoring a regression branch")
+            await client.open()
+            await client.load(*_phase_groups(initial_phase))
+            branches = _facade_value(
+                await client.domain(
+                    "branch_query", {"campaign_id": args.campaign_id, "view": "list"}
+                )
+            )
+            interrupted = next((item for item in branches if item.get("is_current")), None)
+            source_branch = next(
+                (item for item in branches if item.get("id") == args.resume_source_branch_id),
+                None,
+            )
+            if interrupted is None or source_branch is None:
+                raise RuntimeError("current or requested source branch does not exist")
+            if interrupted["id"] == source_branch["id"]:
+                raise RuntimeError("campaign is already on the requested source branch")
+            allowed_prefixes = ("scene-walk-", "continuity-", "regression-")
+            if not str(interrupted.get("name") or "").startswith(allowed_prefixes):
+                raise RuntimeError(
+                    "refusing to leave a branch that is not a known regression branch"
+                )
+
+            if initial_phase != "lobby":
+                campaign = _facade_value(
+                    await client.core(
+                        "campaign_query",
+                        {"view": "get", "payload": {"campaign_id": args.campaign_id}},
+                    )
+                )
+                await client.core(
+                    "game_phase",
+                    {
+                        "campaign_id": args.campaign_id,
+                        "action": "set",
+                        "tool_profile": "lobby",
+                        "expected_revision": campaign["revision"],
+                        "branch_id": interrupted["id"],
+                        "idempotency_key": _phase_transition_key(
+                            token, "restore-enter-lobby", campaign
+                        ),
+                    },
+                )
+            await client.open()
+            await client.load("lobby.campaign", "lobby.memory_control")
+            campaign_lobby = _facade_value(
+                await client.core(
+                    "campaign_query",
+                    {"view": "get", "payload": {"campaign_id": args.campaign_id}},
+                )
+            )
+            branches_lobby = _facade_value(
+                await client.domain(
+                    "branch_query", {"campaign_id": args.campaign_id, "view": "list"}
+                )
+            )
+            interrupted_lobby = next(item for item in branches_lobby if item.get("is_current"))
+            recovery_snapshot = await client.domain(
+                "snapshot_create",
+                {
+                    "campaign_id": args.campaign_id,
+                    "label": f"Recovered interrupted regression branch: {token}",
+                    "expected_revision": campaign_lobby["revision"],
+                    "expected_head_snapshot_id": interrupted_lobby.get("head_snapshot_id") or "",
+                    "idempotency_key": f"{token}-restore-branch-checkpoint",
+                },
+            )
+            checkout = _facade_value(
+                await client.domain(
+                    "branch_change",
+                    {
+                        "campaign_id": args.campaign_id,
+                        "action": "checkout",
+                        "payload": {"branch_id": source_branch["id"]},
+                        "expected_revision": campaign_lobby["revision"],
+                        "expected_branch_id": interrupted["id"],
+                        "idempotency_key": f"{token}-restore-source-checkout",
+                    },
+                )
+            )
+            if initial_phase != "lobby":
+                campaign_source_lobby = _facade_value(
+                    await client.core(
+                        "campaign_query",
+                        {"view": "get", "payload": {"campaign_id": args.campaign_id}},
+                    )
+                )
+                await client.core(
+                    "game_phase",
+                    {
+                        "campaign_id": args.campaign_id,
+                        "action": "set",
+                        "tool_profile": initial_phase,
+                        "expected_revision": campaign_source_lobby["revision"],
+                        "branch_id": source_branch["id"],
+                        "idempotency_key": _phase_transition_key(
+                            token, "restore-source-phase", campaign_source_lobby
+                        ),
+                    },
+                )
+            await client.open()
+            await client.load(*_phase_groups(initial_phase))
+            campaign_source = _facade_value(
+                await client.core(
+                    "campaign_query",
+                    {"view": "get", "payload": {"campaign_id": args.campaign_id}},
+                )
+            )
+            final_branches = _facade_value(
+                await client.domain(
+                    "branch_query", {"campaign_id": args.campaign_id, "view": "list"}
+                )
+            )
+            current_source = next(item for item in final_branches if item.get("is_current"))
+            final_snapshot = await client.domain(
+                "snapshot_create",
+                {
+                    "campaign_id": args.campaign_id,
+                    "label": f"Returned after interrupted regression: {token}",
+                    "expected_revision": campaign_source["revision"],
+                    "expected_head_snapshot_id": current_source.get("head_snapshot_id") or "",
+                    "idempotency_key": f"{token}-restore-source-final",
+                },
+            )
+            verified = _facade_value(
+                await client.domain(
+                    "snapshot_query",
+                    {
+                        "campaign_id": args.campaign_id,
+                        "view": "verify",
+                        "payload": {"slot": final_snapshot["slot"]},
+                    },
+                )
+            )
+            return {
+                "action": "restore-regression",
+                "transport": "stdio",
+                "campaign_id": args.campaign_id,
+                "interrupted_branch_id": interrupted["id"],
+                "source_branch_id": source_branch["id"],
+                "recovery_snapshot": recovery_snapshot,
+                "checkout": checkout,
+                "restored_phase": initial_phase,
+                "final_snapshot": final_snapshot,
+                "final_snapshot_verification": verified,
             }
 
 
@@ -2928,6 +3650,8 @@ def main() -> int:
     operation = {
         "audit": _audit,
         "discover-scenes": _discover_scenes,
+        "walk-scenes": _walk_scenes,
+        "restore-regression": _restore_regression,
         "relock-core": _relock_core,
         "prepare-statblock": _prepare_statblock,
         "prepare-core-wizard": _prepare_core_wizard,
