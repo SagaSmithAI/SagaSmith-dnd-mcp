@@ -503,7 +503,11 @@ def test_check_recovery_identity_includes_actor_and_roll_mode() -> None:
     )
 
 
-def test_source_damage_rolls_then_damages_and_knocks_prone_through_public_tools() -> None:
+@pytest.mark.parametrize(("half_damage", "expected_amount"), [(False, 4), (True, 2)])
+def test_source_damage_rolls_then_damages_and_knocks_prone_through_public_tools(
+    half_damage: bool,
+    expected_amount: int,
+) -> None:
     source_ref = {
         "module_id": "module-1",
         "scene_id": "scene-1",
@@ -554,20 +558,24 @@ def test_source_damage_rolls_then_damages_and_knocks_prone_through_public_tools(
                 return {"status": "committed", "result": {"total": 4, "rolls": [4]}}
             if tool_id == "character_state_change" and arguments["action"] == "damage":
                 assert arguments["payload"] == {
-                    "parts": [{"amount": 4, "damage_type": "bludgeoning"}]
+                    "parts": [{"amount": expected_amount, "damage_type": "bludgeoning"}]
                 }
                 assert arguments["expected_revision"] == 3
                 self.campaign_revision += 1
                 self.character_revision += 1
                 sheet = default_character_sheet()
-                sheet["combat"]["hp"] = {"value": 6, "max": 10, "temp": 0}
+                sheet["combat"]["hp"] = {
+                    "value": 10 - expected_amount,
+                    "max": 10,
+                    "temp": 0,
+                }
                 return {
                     "character": {
                         "id": "actor-1",
                         "revision": self.character_revision,
                         "sheet": sheet,
                     },
-                    "result": {"after_hp": 6},
+                    "result": {"after_hp": 10 - expected_amount},
                 }
             if (
                 tool_id == "character_state_change"
@@ -577,7 +585,11 @@ def test_source_damage_rolls_then_damages_and_knocks_prone_through_public_tools(
                 self.campaign_revision += 1
                 self.character_revision += 1
                 sheet = default_character_sheet()
-                sheet["combat"]["hp"] = {"value": 6, "max": 10, "temp": 0}
+                sheet["combat"]["hp"] = {
+                    "value": 10 - expected_amount,
+                    "max": 10,
+                    "temp": 0,
+                }
                 sheet["conditions"] = ["prone"]
                 return {
                     "character": {
@@ -589,7 +601,9 @@ def test_source_damage_rolls_then_damages_and_knocks_prone_through_public_tools(
                 }
             if tool_id == "continuity_commit":
                 event = arguments["payload"]["event"]
-                assert event["payload"]["amount"] == 4
+                assert event["payload"]["amount"] == expected_amount
+                assert event["payload"]["damage_roll"]["total"] == 4
+                assert event["payload"]["half_damage"] is half_damage
                 assert event["payload"]["source_ref"] == source_ref
                 self.campaign_revision += 1
                 return {"event": {"id": "event-1"}, "snapshot": {"slot": 2}}
@@ -614,12 +628,13 @@ def test_source_damage_rolls_then_damages_and_knocks_prone_through_public_tools(
             expression="1d6",
             damage_type="bludgeoning",
             reason="falling 10 feet in the chimney",
+            half_damage=half_damage,
             knock_prone=True,
             knowledge_actor_ids=["actor-2"],
         )
     )
 
-    assert result["damage"]["result"]["after_hp"] == 6
+    assert result["damage"]["result"]["after_hp"] == 10 - expected_amount
     assert result["prone"]["status"] == "knocked_prone"
     assert result["character"]["sheet"]["conditions"] == ["prone"]
     assert result["knowledge_actor_ids"] == ["actor-1", "actor-2"]

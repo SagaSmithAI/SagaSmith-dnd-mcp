@@ -84,6 +84,11 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--damage-expression", default="")
     parser.add_argument("--damage-type", default="")
     parser.add_argument("--damage-reason", default="")
+    parser.add_argument(
+        "--damage-half",
+        action="store_true",
+        help="Apply half the rolled damage, rounded down, when the cited source requires it",
+    )
     parser.add_argument("--damage-knock-prone", action="store_true")
     parser.add_argument("--stand-actor-id", default="")
     parser.add_argument("--snapshot-slot", type=int)
@@ -1127,6 +1132,7 @@ async def _apply_source_damage(
     expression: str,
     damage_type: str,
     reason: str,
+    half_damage: bool,
     knock_prone: bool,
     knowledge_actor_ids: list[str],
 ) -> dict[str, Any]:
@@ -1184,7 +1190,8 @@ async def _apply_source_damage(
         },
     )
     roll_result = _dice_result(rolled)
-    amount = int(roll_result["total"])
+    rolled_amount = int(roll_result["total"])
+    amount = rolled_amount // 2 if half_damage else rolled_amount
     damaged = await client.domain(
         "character_state_change",
         {
@@ -1233,7 +1240,9 @@ async def _apply_source_damage(
             "payload": {
                 "event": {
                     "summary": (
-                        f"{actor['name']} took {amount} {damage_type} damage: {reason.strip()}"
+                            f"{actor['name']} took {amount} {damage_type} damage"
+                            f"{f' (half of {rolled_amount})' if half_damage else ''}: "
+                            f"{reason.strip()}"
                     ),
                     "event_type": "environmental_damage",
                     "audience_scope": "party",
@@ -1245,6 +1254,7 @@ async def _apply_source_damage(
                         "damage_roll": roll_result,
                         "damage_type": damage_type,
                         "amount": amount,
+                        "half_damage": half_damage,
                         "knock_prone": knock_prone,
                         "reason": reason.strip(),
                         "source_excerpt": source_excerpt,
@@ -2160,6 +2170,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     expression=args.damage_expression,
                     damage_type=args.damage_type,
                     reason=args.damage_reason,
+                    half_damage=args.damage_half,
                     knock_prone=args.damage_knock_prone,
                     knowledge_actor_ids=args.knowledge_actor_id,
                 )
