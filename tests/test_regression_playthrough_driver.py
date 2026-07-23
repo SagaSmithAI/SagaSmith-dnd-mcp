@@ -11,6 +11,7 @@ from sagasmith_dnd.character_schema import default_character_sheet
 from scripts.regression_playthrough import (
     _apply_source_damage,
     _award_experience,
+    _branch_from_snapshot,
     _campaign_phase,
     _check_knowledge_key,
     _checkpoint,
@@ -218,6 +219,98 @@ def test_checkpoint_uses_only_public_manifest_branch_and_snapshot_tools() -> Non
         "snapshot_query",
         "playthrough_manifest",
     ]
+
+
+def test_failed_route_is_preserved_when_branching_from_verified_snapshot() -> None:
+    class Client:
+        def __init__(self) -> None:
+            self.phase = "play"
+            self.revision = 30
+            self.current_branch = "failed-branch"
+            self.loads: list[tuple[str, ...]] = []
+
+        async def open(self, campaign_id: str):
+            assert campaign_id == "campaign-1"
+            return {"exposure_id": "exposure"}
+
+        async def load(self, *group_ids: str):
+            self.loads.append(group_ids)
+
+        async def core(self, tool_id: str, arguments: dict):
+            if tool_id == "campaign_query":
+                return {
+                    "result": {
+                        "id": "campaign-1",
+                        "revision": self.revision,
+                        "state": {"game_phase": self.phase},
+                    }
+                }
+            if tool_id == "game_phase":
+                assert arguments["tool_profile"] == "lobby"
+                assert arguments["branch_id"] == "failed-branch"
+                self.phase = "lobby"
+                self.revision += 1
+                return {"result": {"game_phase": "lobby"}}
+            raise AssertionError((tool_id, arguments))
+
+        async def domain(self, tool_id: str, arguments: dict):
+            if tool_id == "snapshot_query" and arguments["view"] == "list":
+                return [
+                    {"id": "snapshot-58", "slot": 58, "branch_id": "failed-branch"}
+                ]
+            if tool_id == "snapshot_query" and arguments["view"] == "verify":
+                return {"valid": True}
+            if tool_id == "branch_query":
+                return [
+                    {
+                        "id": self.current_branch,
+                        "is_current": True,
+                        "head_snapshot_id": (
+                            "snapshot-59"
+                            if self.current_branch == "failed-branch"
+                            else "snapshot-58"
+                        ),
+                    }
+                ]
+            if tool_id == "branch_change":
+                assert arguments["payload"] == {
+                    "name": "main-after-klarg-defeat",
+                    "from_snapshot_id": "snapshot-58",
+                    "checkout": True,
+                }
+                assert arguments["expected_branch_id"] == "failed-branch"
+                self.current_branch = "recovery-branch"
+                self.phase = "play"
+                return {
+                    "id": "recovery-branch",
+                    "head_snapshot_id": "snapshot-58",
+                    "snapshot": {"id": "snapshot-58", "slot": 58},
+                }
+            if tool_id == "playthrough_manifest" and arguments["action"] == "sync":
+                return {"manifest": {"status": "in_progress"}, "campaign_revision": 31}
+            if tool_id == "snapshot_create":
+                assert arguments["expected_head_snapshot_id"] == "snapshot-58"
+                return {"id": "snapshot-60", "slot": 60}
+            if tool_id == "playthrough_manifest" and arguments["action"] == "get":
+                return {"manifest": {"status": "in_progress"}}
+            raise AssertionError((tool_id, arguments))
+
+    result = asyncio.run(
+        _branch_from_snapshot(
+            Client(),
+            campaign_id="campaign-1",
+            run_id="run-1",
+            initial_phase="play",
+            snapshot_slot=58,
+            branch_name="main-after-klarg-defeat",
+            checkpoint_label="Continue from pre-combat state",
+        )
+    )
+
+    assert result["source_branch"]["id"] == "failed-branch"
+    assert result["source_head_snapshot_id"] == "snapshot-59"
+    assert result["created_branch"]["id"] == "recovery-branch"
+    assert result["checkpoint"]["snapshot"]["slot"] == 60
 
 
 def test_source_cited_check_persists_result_and_explicit_knowledge() -> None:

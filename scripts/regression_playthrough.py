@@ -39,6 +39,7 @@ def _arguments() -> argparse.Namespace:
             "resolve-check",
             "apply-damage",
             "stand-up",
+            "branch-from-snapshot",
             "award-xp",
             "configure-advancement",
             "refresh-module",
@@ -82,6 +83,8 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--damage-reason", default="")
     parser.add_argument("--damage-knock-prone", action="store_true")
     parser.add_argument("--stand-actor-id", default="")
+    parser.add_argument("--snapshot-slot", type=int)
+    parser.add_argument("--branch-name", default="")
     parser.add_argument("--event-type", default="")
     parser.add_argument("--event-summary", default="")
     parser.add_argument("--event-knowledge", default="")
@@ -614,6 +617,118 @@ async def _advance_scene(
         identity=f"advance-scene:{scene_id}:{mark_visited}",
         payload={"manifest": manifest},
     )
+
+
+async def _branch_from_snapshot(
+    client: ExposureClient,
+    *,
+    campaign_id: str,
+    run_id: str,
+    initial_phase: str,
+    snapshot_slot: int | None,
+    branch_name: str,
+    checkpoint_label: str,
+) -> dict[str, Any]:
+    if initial_phase == "combat":
+        raise RuntimeError("branch-from-snapshot cannot run during active combat")
+    if snapshot_slot is None or snapshot_slot < 1 or not branch_name.strip():
+        raise ValueError(
+            "branch-from-snapshot requires a positive --snapshot-slot and --branch-name"
+        )
+    snapshots = await client.domain(
+        "snapshot_query",
+        {"campaign_id": campaign_id, "view": "list"},
+    )
+    target = next(
+        (item for item in snapshots if int(item.get("slot", 0) or 0) == snapshot_slot),
+        None,
+    )
+    if target is None:
+        raise LookupError(f"snapshot slot {snapshot_slot} does not exist")
+    verification = await client.domain(
+        "snapshot_query",
+        {
+            "campaign_id": campaign_id,
+            "view": "verify",
+            "payload": {"slot": snapshot_slot},
+        },
+    )
+    if verification.get("valid") is not True:
+        raise RuntimeError(f"snapshot slot {snapshot_slot} failed verification")
+    branches = await client.domain(
+        "branch_query",
+        {"campaign_id": campaign_id, "view": "list"},
+    )
+    source_branch = next((item for item in branches if item.get("is_current")), None)
+    if source_branch is None:
+        raise RuntimeError("campaign has no current branch")
+    phase_changes = []
+    campaign = await _campaign(client, campaign_id)
+    if initial_phase != "lobby":
+        phase_changes.append(
+            _facade_value(
+                await client.core(
+                    "game_phase",
+                    {
+                        "campaign_id": campaign_id,
+                        "action": "set",
+                        "tool_profile": "lobby",
+                        "expected_revision": campaign["revision"],
+                        "branch_id": source_branch["id"],
+                        "idempotency_key": _mutation_key(
+                            run_id,
+                            "phase",
+                            f"branch-from-snapshot-enter-lobby:{snapshot_slot}",
+                        ),
+                    },
+                )
+            )
+        )
+        await client.open(campaign_id)
+        await client.load("lobby.campaign")
+    campaign = await _campaign(client, campaign_id)
+    created = await client.domain(
+        "branch_change",
+        {
+            "campaign_id": campaign_id,
+            "action": "create",
+            "payload": {
+                "name": branch_name.strip(),
+                "from_snapshot_id": str(target["id"]),
+                "checkout": True,
+            },
+            "expected_revision": campaign["revision"],
+            "expected_branch_id": str(source_branch["id"]),
+            "idempotency_key": _mutation_key(
+                run_id, "branch-from-snapshot", f"{snapshot_slot}:{branch_name.strip()}"
+            ),
+        },
+    )
+    restored_campaign = await _campaign(client, campaign_id)
+    restored_phase = _campaign_phase(restored_campaign)
+    if restored_phase == "combat":
+        raise RuntimeError("selected snapshot unexpectedly restored active combat")
+    await client.open(campaign_id)
+    await client.load(*_phase_groups(restored_phase))
+    checkpoint = await _checkpoint(
+        client,
+        campaign_id=campaign_id,
+        run_id=run_id,
+        label=(
+            checkpoint_label.strip()
+            or f"Branch {branch_name.strip()} restored from snapshot slot {snapshot_slot}"
+        ),
+    )
+    return {
+        "source_branch": source_branch,
+        "source_head_snapshot_id": source_branch.get("head_snapshot_id"),
+        "target_snapshot": target,
+        "target_verification": verification,
+        "created_branch": created,
+        "phase_changes": phase_changes,
+        "restored_phase": restored_phase,
+        "checkpoint": checkpoint,
+    }
 
 
 async def _resolve_check(
@@ -1779,6 +1894,16 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     mark_visited=args.mark_visited,
                     reachable_scene_ids=args.reachable_scene_id,
                     excluded_scenes=args.excluded_scene_json,
+                )
+            elif args.action == "branch-from-snapshot":
+                report["result"] = await _branch_from_snapshot(
+                    client,
+                    campaign_id=args.campaign_id,
+                    run_id=args.run_id,
+                    initial_phase=phase,
+                    snapshot_slot=args.snapshot_slot,
+                    branch_name=args.branch_name,
+                    checkpoint_label=args.checkpoint_label,
                 )
             elif args.action == "resolve-check":
                 if phase != "play":
