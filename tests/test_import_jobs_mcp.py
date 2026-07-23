@@ -662,3 +662,139 @@ def test_module_import_exact_stage_retries_survive_later_job_states(tmp_path: Pa
         assert await call(server, "module_import", activate_arguments) == activated
 
     asyncio.run(exercise())
+
+
+def test_module_import_attaches_allowlisted_map_to_exact_scene(tmp_path: Path) -> None:
+    import_root = tmp_path / "modules"
+    import_root.mkdir()
+    source = import_root / "adventure.md"
+    source.write_text(
+        "# Chapter One\n\n## Arrival\n\n#### A1. Courtyard\n30 by 20 feet\n",
+        encoding="utf-8",
+    )
+    map_path = import_root / "courtyard.png"
+    map_path.write_bytes(b"\x89PNG\r\n\x1a\ncampaign-map")
+    outside = tmp_path / "outside.png"
+    outside.write_bytes(b"\x89PNG\r\n\x1a\noutside")
+    config = McpConfig(
+        home=tmp_path / "home",
+        database_url=None,
+        chroma_url=None,
+        chroma_path_override=None,
+        dnd_skills_dir=tmp_path / "dnd",
+        modulegen_skills_dir=tmp_path / "modulegen",
+        module_import_roots=(import_root,),
+    )
+
+    async def call(server, name: str, arguments: dict):
+        _, result = await server.call_tool(name, arguments)
+        return result.get("result", result) if isinstance(result, dict) else result
+
+    async def exercise() -> None:
+        server = create_server(config)
+        campaign = await call(
+            server,
+            "campaign_create",
+            {"name": "Attached map", "idempotency_key": "campaign"},
+        )
+        staged = await call(
+            server,
+            "module_import",
+            {
+                "campaign_id": campaign["id"],
+                "action": "stage",
+                "payload": {
+                    "source_path": str(source),
+                    "source_key": "attached-map",
+                    "title": "Attached Map",
+                },
+                "idempotency_key": "stage",
+            },
+        )
+        job_id = staged["job"]["id"]
+        ingested = None
+        for action in ("inspect", "validate", "ingest"):
+            ingested = await call(
+                server,
+                "module_import",
+                {
+                    "campaign_id": campaign["id"],
+                    "action": action,
+                    "payload": {"job_id": job_id},
+                    "idempotency_key": action,
+                },
+            )
+        assert ingested is not None
+        campaign = await call(
+            server,
+            "campaign_query",
+            {"view": "get", "payload": {"campaign_id": campaign["id"]}},
+        )
+        activated = await call(
+            server,
+            "module_import",
+            {
+                "campaign_id": campaign["id"],
+                "action": "activate",
+                "payload": {"job_id": job_id},
+                "expected_revision": campaign["revision"],
+                "idempotency_key": "activate",
+            },
+        )
+        module_id = activated["activation"]["module_id"]
+        scenes = await call(
+            server,
+            "module_query",
+            {
+                "campaign_id": campaign["id"],
+                "view": "index",
+                "payload": {"module_id": module_id},
+            },
+        )
+        scene = next(item for item in scenes if item["title"] == "Arrival")
+        arguments = {
+            "campaign_id": campaign["id"],
+            "action": "attach_asset",
+            "payload": {
+                "module_id": module_id,
+                "source_path": str(map_path),
+                "asset_kind": "encounter_map",
+                "scene_id": scene["scene_id"],
+                "location_key": "a1-courtyard",
+                "title": "Courtyard",
+            },
+            "idempotency_key": "attach-map",
+        }
+        attached = await call(server, "module_import", arguments)
+        assert await call(server, "module_import", arguments) == attached
+        assert attached["asset"]["media_type"] == "image/png"
+        assert attached["asset"]["metadata"] == {
+            "kind": "encounter_map",
+            "source_name": "courtyard.png",
+            "title": "Courtyard",
+            "scene_id": scene["scene_id"],
+            "location_key": "a1-courtyard",
+        }
+        assert Path(attached["asset"]["source_path"]).parent.name == module_id
+        assets = await call(
+            server,
+            "module_query",
+            {
+                "campaign_id": campaign["id"],
+                "view": "assets",
+                "payload": {"module_id": module_id},
+            },
+        )
+        assert attached["asset"]["id"] in {item["id"] for item in assets}
+        with pytest.raises(Exception, match="outside configured import roots"):
+            await call(
+                server,
+                "module_import",
+                {
+                    **arguments,
+                    "payload": {**arguments["payload"], "source_path": str(outside)},
+                    "idempotency_key": "attach-outside",
+                },
+            )
+
+    asyncio.run(exercise())

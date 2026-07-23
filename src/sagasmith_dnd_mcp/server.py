@@ -2237,13 +2237,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "module_import(validate)",
                     "module_import(ingest)",
                     "module_import(activate)",
+                    "module_import(attach_asset)",
                     "module_query(assets)",
                     "module_page_render",
                     "module_content_review",
                     "module_set_progress(spatial_review)",
                 ],
-                "stage_inputs": ["source_path", "name+content"],
-                "managed_types": ["pdf", "markdown", "text"],
+                "stage_inputs": ["source_path", "name+content", "module-scoped asset"],
+                "managed_types": ["pdf", "markdown", "text", "image", "html", "svg"],
                 "normalizer": f"sagasmith-core/pdf-layout-v{DOCUMENT_NORMALIZER_VERSION}",
                 "normalization_cache": "content-addressed",
                 "page_extraction_cache": "content-addressed",
@@ -11595,6 +11596,83 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
         return modules.list_assets(campaign_id, module_id)
 
+    def module_asset_attach(
+        campaign_id: str,
+        module_id: str,
+        source_path: str,
+        *,
+        asset_kind: str,
+        scene_id: str | None = None,
+        location_key: str | None = None,
+        title: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        principal_id: str = "system:local",
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Attach an allowlisted image or support document to an imported module."""
+        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        if not idempotency_key:
+            raise ValueError("idempotency_key is required for module asset attachment")
+        kind = str(asset_kind).strip()
+        if not kind or len(kind) > 80:
+            raise ValueError("asset_kind must be a non-empty string of at most 80 characters")
+        if metadata is not None and not isinstance(metadata, dict):
+            raise ValueError("metadata must be an object")
+        metadata_value = dict(metadata or {})
+        modules.list_assets(campaign_id, module_id)
+        if scene_id:
+            scene = modules.read_scene(campaign_id, scene_id)
+            if scene["module_id"] != module_id:
+                raise ValueError("scene_id does not belong to module_id")
+        staged = storage.stage_module_asset(module_id, source_path)
+        payload = {
+            "module_id": module_id,
+            "source_checksum": staged["checksum"],
+            "asset_kind": kind,
+            "scene_id": scene_id,
+            "location_key": location_key,
+            "title": title,
+            "metadata": metadata_value,
+        }
+        scope = f"module-asset-attach:{campaign_id}:{principal_id}"
+        replay = replay_idempotent(scope, idempotency_key, payload)
+        if replay is not None:
+            return replay
+        asset_metadata = {
+            **metadata_value,
+            "kind": kind,
+            "source_name": Path(source_path).name,
+        }
+        if title:
+            asset_metadata["title"] = str(title)
+        if scene_id:
+            asset_metadata["scene_id"] = scene_id
+        if location_key:
+            asset_metadata["location_key"] = str(location_key)
+        asset = modules.register_asset(
+            campaign_id=campaign_id,
+            module_id=module_id,
+            source_path=staged["path"],
+            media_type=staged["media_type"],
+            checksum=staged["checksum"],
+            metadata=asset_metadata,
+        )
+        response = {
+            "campaign_id": campaign_id,
+            "module_id": module_id,
+            "asset": asset,
+            "artifact": {
+                key: value for key, value in staged.items() if key not in {"path", "staged"}
+            },
+        }
+        return remember_idempotent(
+            scope,
+            idempotency_key,
+            payload,
+            response,
+            campaign_id=campaign_id,
+        )
+
     @mcp.tool()
     def module_page_render(
         campaign_id: str,
@@ -14469,7 +14547,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     @mcp.tool()
     def module_import(
         campaign_id: str,
-        action: Literal["stage", "inspect", "validate", "ingest", "activate"],
+        action: Literal[
+            "stage",
+            "inspect",
+            "validate",
+            "ingest",
+            "activate",
+            "attach_asset",
+        ],
         payload: dict[str, Any] | None = None,
         principal_id: str = "system:local",
         expected_revision: int | None = None,
@@ -14500,6 +14585,22 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 idempotency_key,
             )
             return facade_result(action, {**staged, "artifact": artifact, **result})
+        if action == "attach_asset":
+            return facade_result(
+                action,
+                module_asset_attach(
+                    campaign_id,
+                    required(data, "module_id"),
+                    required(data, "source_path"),
+                    asset_kind=required(data, "asset_kind"),
+                    scene_id=data.get("scene_id"),
+                    location_key=data.get("location_key"),
+                    title=data.get("title"),
+                    metadata=data.get("metadata"),
+                    principal_id=principal_id,
+                    idempotency_key=idempotency_key,
+                ),
+            )
         job_id = required(data, "job_id")
         if action == "inspect":
             return facade_result(

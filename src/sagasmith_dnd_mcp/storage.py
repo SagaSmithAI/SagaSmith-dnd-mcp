@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import shutil
+from mimetypes import guess_type
 from pathlib import Path
 from typing import Any
 
@@ -239,6 +240,63 @@ class SagaSmithStorage:
         if not target.is_file():
             raise LookupError(name)
         return target
+
+    def stage_module_asset(self, module_id: str, source_path: str | Path) -> dict[str, Any]:
+        """Copy an allowlisted campaign asset into module-scoped managed storage."""
+        if not re.fullmatch(r"[0-9a-fA-F-]{36}", module_id):
+            raise ValueError("invalid module id for managed asset")
+        source = Path(source_path).expanduser().resolve()
+        if not source.is_file():
+            raise LookupError(str(source))
+        allowed = {
+            ".gif",
+            ".htm",
+            ".html",
+            ".jpeg",
+            ".jpg",
+            ".pdf",
+            ".png",
+            ".svg",
+            ".txt",
+            ".webp",
+        }
+        if source.suffix.casefold() not in allowed:
+            raise ValueError(
+                "module asset must be an image, PDF, HTML, SVG, or text document"
+            )
+        if not self.config.module_import_roots:
+            raise PermissionError("no module import roots are configured")
+        if not any(
+            source.is_relative_to(root.resolve()) for root in self.config.module_import_roots
+        ):
+            raise PermissionError("module asset source is outside configured import roots")
+        size = source.stat().st_size
+        if size > 100 * 1024 * 1024:
+            raise ValueError("module asset exceeds the 100 MiB safety limit")
+        checksum = file_sha256(source)
+        safe_name = re.sub(r"[^A-Za-z0-9._-]+", "-", source.name).strip("-.")
+        safe_name = safe_name or f"asset{source.suffix.casefold()}"
+        directory = (self.config.module_assets_dir / module_id).resolve()
+        if directory.parent != self.config.module_assets_dir.resolve():
+            raise ValueError("invalid managed module asset directory")
+        directory.mkdir(parents=True, exist_ok=True)
+        artifact = f"{checksum[:12]}-{safe_name}"
+        target = (directory / artifact).resolve()
+        if target.parent != directory:
+            raise ValueError("invalid managed module asset name")
+        if not target.exists():
+            shutil.copy2(source, target)
+        elif file_sha256(target) != checksum:
+            raise RuntimeError("managed module asset checksum mismatch")
+        media_type = guess_type(source.name)[0] or "application/octet-stream"
+        return {
+            "artifact": artifact,
+            "path": str(target),
+            "checksum": checksum,
+            "size": size,
+            "media_type": media_type,
+            "staged": True,
+        }
 
     def store_rendered_module_page(
         self,
