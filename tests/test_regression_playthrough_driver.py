@@ -44,7 +44,11 @@ def test_query_source_searches_and_expands_only_public_mcp_results() -> None:
         async def domain(self, tool_id: str, arguments: dict):
             self.calls.append((tool_id, arguments))
             if tool_id == "module_search":
-                return [{"chunk_id": "chunk-1", "content": "A captured character..."}]
+                return {
+                    "result": [
+                        {"chunk_id": "chunk-1", "content": "A captured character..."}
+                    ]
+                }
             if tool_id == "module_expand":
                 return {
                     "chunk_id": "chunk-1",

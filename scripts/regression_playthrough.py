@@ -181,7 +181,7 @@ async def _query_source(
         raise ValueError("query-source requires --source-query")
     if top_k < 1 or top_k > 50:
         raise ValueError("--source-top-k must be between 1 and 50")
-    hits = await client.domain(
+    search_result = await client.domain(
         "module_search",
         {
             "campaign_id": campaign_id,
@@ -189,6 +189,14 @@ async def _query_source(
             "top_k": top_k,
         },
     )
+    hits = (
+        search_result.get("result")
+        if isinstance(search_result, dict)
+        and isinstance(search_result.get("result"), list)
+        else search_result
+    )
+    if not isinstance(hits, list) or any(not isinstance(hit, dict) for hit in hits):
+        raise RuntimeError("module_search returned an invalid result collection")
     expanded = []
     if expand:
         for hit in hits:
