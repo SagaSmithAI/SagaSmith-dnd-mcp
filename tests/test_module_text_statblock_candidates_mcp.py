@@ -153,6 +153,12 @@ def test_text_module_statblock_candidate_can_create_a_source_bound_actor(
         assert created["character"]["name"] == "Cragmaw Goblin"
         assert created["character"]["derived"]["armor_class"] == 15
         assert created["character"]["derived"]["hit_points"]["max"] == 7
+        attacks = {
+            item["item_id"]: item
+            for item in created["character"]["derived"]["inventory"]["weapon_attacks"]
+        }
+        assert set(attacks) == {"scimitar", "shortbow"}
+        assert attacks["shortbow"]["range_ft"] == {"normal": 80, "long": 320}
         assert {
             item["source_key"] for item in created["character"]["sheet"]["inventory"]["items"]
         } == {f"module-review:{reviewed['review']['id']}"}
