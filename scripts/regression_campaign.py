@@ -96,6 +96,12 @@ def _arguments() -> argparse.Namespace:
         help="JSON object containing all six ability assignments",
     )
     parser.add_argument(
+        "--target-level",
+        type=int,
+        default=3,
+        help="Wizard level to build for prepare-core-wizard (minimum 3)",
+    )
+    parser.add_argument(
         "--isolate-branch",
         action="store_true",
         help="Create the reviewed actor on a disposable branch and restore the source branch",
@@ -2234,11 +2240,13 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
 
 
 async def _prepare_core_wizard(args: argparse.Namespace) -> dict[str, Any]:
-    """Build one complete level-3 Wizard through public lobby tools and Core content."""
+    """Build a complete Wizard through public lobby tools and active Core content."""
 
     assignments = args.ability_assignments
     if not isinstance(assignments, dict):
         raise ValueError("--ability-assignments must decode to a JSON object")
+    if args.target_level < 3 or args.target_level > 20:
+        raise ValueError("--target-level must be between 3 and 20")
     token = _idempotency_token(args.run_id)
     async with stdio_client(_server_parameters(args)) as (read, write):
         async with ClientSession(read, write) as session:
@@ -2452,7 +2460,7 @@ async def _prepare_core_wizard(args: argparse.Namespace) -> dict[str, Any]:
             advancements: list[dict[str, Any]] = []
             applied_features: list[str] = []
             selected_subclass: dict[str, Any] | None = None
-            for new_level in (2, 3):
+            for new_level in range(2, args.target_level + 1):
                 await client.domain(
                     "campaign_event",
                     {
@@ -2524,8 +2532,10 @@ async def _prepare_core_wizard(args: argparse.Namespace) -> dict[str, Any]:
                     str(value).casefold()
                     for value in item["selection_requirements"].get("eligible_classes", [])
                 }
-                and int(item["selection_requirements"].get("level", 0) or 0) <= 2
+                and int(item["selection_requirements"].get("level", 0) or 0)
+                <= min(9, (args.target_level + 1) // 2)
             ]
+            cantrip_count = 5 if args.target_level >= 10 else 4 if args.target_level >= 4 else 3
             cantrips = sorted(
                 (
                     item
@@ -2533,12 +2543,14 @@ async def _prepare_core_wizard(args: argparse.Namespace) -> dict[str, Any]:
                     if int(item["selection_requirements"].get("level", 0) or 0) == 0
                 ),
                 key=lambda item: (item["name"], item["id"]),
-            )[:3]
+            )[:cantrip_count]
             leveled = sorted(
                 (
                     item
                     for item in wizard_spells
-                    if int(item["selection_requirements"].get("level", 0) or 0) in {1, 2}
+                    if 1
+                    <= int(item["selection_requirements"].get("level", 0) or 0)
+                    <= min(9, (args.target_level + 1) // 2)
                 ),
                 key=lambda item: (
                     int(item["selection_requirements"].get("level", 0) or 0),
@@ -2551,13 +2563,15 @@ async def _prepare_core_wizard(args: argparse.Namespace) -> dict[str, Any]:
                 raise RuntimeError(
                     "the active Core catalog does not expose the requested Wizard spell"
                 )
+            spellbook_count = 2 * args.target_level + 4
             spellbook = [
                 scorching_ray,
-                *[item for item in leveled if item["id"] != args.spell_id][:9],
+                *[item for item in leveled if item["id"] != args.spell_id][: spellbook_count - 1],
             ]
-            if len(cantrips) != 3 or len(spellbook) != 10:
+            if len(cantrips) != cantrip_count or len(spellbook) != spellbook_count:
                 raise RuntimeError(
-                    "the active Core catalog cannot complete a level-3 Wizard spell loadout"
+                    f"the active Core catalog cannot complete a level-{args.target_level} "
+                    "Wizard spell loadout"
                 )
             applied_spells: list[str] = []
             for spell in [*cantrips, *spellbook]:
@@ -2730,6 +2744,7 @@ async def _prepare_core_wizard(args: argparse.Namespace) -> dict[str, Any]:
                     "assignments": assignments,
                     "status": ability.get("status"),
                 },
+                "target_level": args.target_level,
                 "species": human["id"],
                 "background": acolyte["id"],
                 "advancements": advancements,
