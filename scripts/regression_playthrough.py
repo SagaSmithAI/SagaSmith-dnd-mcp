@@ -43,6 +43,7 @@ def _arguments() -> argparse.Namespace:
             "stand-up",
             "use-activity",
             "branch-from-snapshot",
+            "advance-time",
             "short-rest",
             "long-rest",
             "recover-stable",
@@ -116,6 +117,10 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--activity-reason", default="")
     parser.add_argument("--snapshot-slot", type=int)
     parser.add_argument("--branch-name", default="")
+    parser.add_argument("--time-period", choices=("minute", "hour", "day"))
+    parser.add_argument("--time-count", type=int)
+    parser.add_argument("--time-reason", default="")
+    parser.add_argument("--time-start-clock-json", type=json.loads)
     parser.add_argument("--rest-member-json", action="append", type=json.loads, default=[])
     parser.add_argument("--rest-start-clock-json", type=json.loads)
     parser.add_argument("--rest-duration-minutes", type=int, default=60)
@@ -2293,6 +2298,168 @@ async def _long_rest(
     }
 
 
+async def _advance_time(
+    client: ExposureClient,
+    *,
+    campaign_id: str,
+    run_id: str,
+    scene_id: str,
+    source_excerpt: str,
+    source_ref: dict[str, Any] | None,
+    period: str,
+    count: int | None,
+    reason: str,
+    start_clock: dict[str, Any] | None,
+    knowledge_actor_ids: list[str],
+) -> dict[str, Any]:
+    normalized_reason = reason.strip()
+    if (
+        not scene_id
+        or period not in {"minute", "hour", "day"}
+        or count is None
+        or count <= 0
+        or not normalized_reason
+    ):
+        raise ValueError(
+            "advance-time requires scene, positive count, period, reason, and exact source"
+        )
+    if len(knowledge_actor_ids) != len(set(knowledge_actor_ids)):
+        raise ValueError("advance-time knowledge actor ids must be unique")
+    scene = await client.domain(
+        "module_query",
+        {
+            "campaign_id": campaign_id,
+            "view": "scene",
+            "payload": {"scene_id": scene_id},
+        },
+    )
+    exact_ref = _validate_source_ref(scene, source_ref, excerpt=source_excerpt)
+    actors = []
+    for actor_id in knowledge_actor_ids:
+        actor = await client.domain(
+            "character_query",
+            {"view": "get", "payload": {"character_id": actor_id}},
+        )
+        if actor.get("campaign_id") != campaign_id:
+            raise ValueError("advance-time witness does not belong to the campaign")
+        actors.append(actor)
+    branches = await client.domain(
+        "branch_query",
+        {"campaign_id": campaign_id, "view": "list"},
+    )
+    branch = next((item for item in branches if item.get("is_current")), None)
+    if branch is None:
+        raise RuntimeError("campaign has no current branch")
+    branch_id = str(branch["id"])
+    identity = f"{scene_id}:{period}:{count}:{normalized_reason}"
+    campaign = await _campaign(client, campaign_id)
+    before = deepcopy(dict(dict(campaign.get("state") or {}).get("world_time") or {}))
+    clock_set = None
+    if not before:
+        if not isinstance(start_clock, dict):
+            raise ValueError(
+                "advance-time requires --time-start-clock-json when the clock is unset"
+            )
+        clock_set = await client.domain(
+            "campaign_change",
+            {
+                "campaign_id": campaign_id,
+                "action": "clock_set",
+                "payload": {
+                    "day": start_clock.get("day"),
+                    "hour": start_clock.get("hour", 0),
+                    "minute": start_clock.get("minute", 0),
+                    "label": str(start_clock.get("label") or ""),
+                },
+                "branch_id": branch_id,
+                "expected_revision": campaign["revision"],
+                "idempotency_key": _mutation_key(run_id, "advance-time-clock-set", identity),
+            },
+        )
+        before = deepcopy(dict(clock_set.get("world_time") or {}))
+    elif start_clock is not None:
+        raise ValueError("advance-time start clock must be omitted after the clock is set")
+    campaign = await _campaign(client, campaign_id)
+    advanced = await client.domain(
+        "campaign_change",
+        {
+            "campaign_id": campaign_id,
+            "action": "clock_advance",
+            "payload": {"period": period, "count": count},
+            "branch_id": branch_id,
+            "expected_revision": campaign["revision"],
+            "idempotency_key": _mutation_key(run_id, "advance-time-clock", identity),
+        },
+    )
+    after = deepcopy(dict(advanced.get("world_time") or {}))
+    expected_minutes = count * {"minute": 1, "hour": 60, "day": 1440}[period]
+    if (
+        not before
+        or not after
+        or int(after.get("elapsed_minutes", 0) or 0) - int(before.get("elapsed_minutes", 0) or 0)
+        != expected_minutes
+    ):
+        raise RuntimeError("campaign clock did not advance by the requested duration")
+    campaign = await _campaign(client, campaign_id)
+    committed = await client.domain(
+        "continuity_commit",
+        {
+            "campaign_id": campaign_id,
+            "payload": {
+                "event": {
+                    "summary": normalized_reason,
+                    "event_type": "time_advanced",
+                    "audience_scope": "party",
+                    "payload": {
+                        "scene_id": scene_id,
+                        "period": period,
+                        "count": count,
+                        "elapsed_minutes": expected_minutes,
+                        "world_time_before": before,
+                        "world_time_after": after,
+                        "source_excerpt": source_excerpt,
+                        "source_ref": exact_ref,
+                    },
+                },
+                "actor_knowledge": [
+                    {
+                        "actor_id": str(actor["id"]),
+                        "knowledge_key": (
+                            f"playthrough.{_token(run_id)}.{_token(scene_id)}."
+                            f"time.{_token(identity)}"
+                        ),
+                        "proposition": normalized_reason,
+                        "disclosure_scope": "owner",
+                    }
+                    for actor in actors
+                ],
+                "snapshot": {"label": f"Full playthrough time advance: {normalized_reason}"},
+                "branch_id": branch_id,
+            },
+            "expected_revision": campaign["revision"],
+            "idempotency_key": _mutation_key(run_id, "advance-time-continuity", identity),
+        },
+    )
+    synced = await _manifest_mutation(
+        client,
+        campaign_id=campaign_id,
+        action="sync",
+        run_id=run_id,
+        identity=f"advance-time-sync:{identity}",
+    )
+    return {
+        "scene_id": scene_id,
+        "source_ref": exact_ref,
+        "clock_set": clock_set,
+        "before": before,
+        "advance": advanced,
+        "after": after,
+        "knowledge_actor_ids": [str(actor["id"]) for actor in actors],
+        "continuity": committed,
+        "sync": synced,
+    }
+
+
 async def _recover_stable_party(
     client: ExposureClient,
     *,
@@ -3826,6 +3993,23 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     snapshot_slot=args.snapshot_slot,
                     branch_name=args.branch_name,
                     checkpoint_label=args.checkpoint_label,
+                )
+            elif args.action == "advance-time":
+                if phase != "play":
+                    raise RuntimeError("advance-time requires the play phase")
+                await client.load("play.characters")
+                report["result"] = await _advance_time(
+                    client,
+                    campaign_id=args.campaign_id,
+                    run_id=args.run_id,
+                    scene_id=str(args.scene_id or ""),
+                    source_excerpt=args.source_excerpt,
+                    source_ref=args.source_ref_json,
+                    period=str(args.time_period or ""),
+                    count=args.time_count,
+                    reason=args.time_reason,
+                    start_clock=args.time_start_clock_json,
+                    knowledge_actor_ids=args.knowledge_actor_id,
                 )
             elif args.action == "resolve-check":
                 if phase != "play":

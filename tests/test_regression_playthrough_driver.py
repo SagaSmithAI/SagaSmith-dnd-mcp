@@ -12,6 +12,7 @@ from sagasmith_dnd.playthrough import new_playthrough_manifest
 from scripts.regression_playthrough import (
     _acquire_source_loot,
     _advance_level,
+    _advance_time,
     _apply_source_damage,
     _award_experience,
     _branch_from_snapshot,
@@ -1355,6 +1356,108 @@ def test_short_rest_advances_clock_and_applies_only_explicit_resource_choices() 
     assert result["member_ids"] == ["fighter", "wizard"]
     assert result["clock_advanced"]["world_time"]["hour"] == 15
     assert len(result["rests"]) == 2
+
+
+def test_source_bound_time_advance_commits_clock_knowledge_and_snapshot() -> None:
+    source_ref = {
+        "module_id": "module-1",
+        "scene_id": "scene-1",
+        "chunk_id": "chunk-1",
+        "page_start": 14,
+        "page_end": 14,
+        "heading_path": ["Part 2"],
+        "content_sha256": "abc",
+    }
+
+    class Client:
+        def __init__(self) -> None:
+            self.revision = 4
+            self.world_time = {
+                "day": 2,
+                "hour": 4,
+                "minute": 0,
+                "elapsed_minutes": 1680,
+                "label": "Trail",
+            }
+
+        async def core(self, tool_id: str, arguments: dict):
+            assert tool_id == "campaign_query"
+            return {
+                "result": {
+                    "id": "campaign-1",
+                    "revision": self.revision,
+                    "state": {
+                        "game_phase": "play",
+                        "world_time": deepcopy(self.world_time),
+                    },
+                }
+            }
+
+        async def domain(self, tool_id: str, arguments: dict):
+            if tool_id == "module_query":
+                return {
+                    "module_id": "module-1",
+                    "scene_id": "scene-1",
+                    "content": "The characters arrive late in the day.",
+                }
+            if tool_id == "character_query":
+                return {
+                    "id": arguments["payload"]["character_id"],
+                    "campaign_id": "campaign-1",
+                }
+            if tool_id == "branch_query":
+                return [{"id": "branch-1", "is_current": True}]
+            if tool_id == "campaign_change":
+                assert arguments["action"] == "clock_advance"
+                assert arguments["payload"] == {"period": "hour", "count": 13}
+                self.world_time = {
+                    "day": 2,
+                    "hour": 17,
+                    "minute": 0,
+                    "elapsed_minutes": 2460,
+                    "label": "Trail",
+                }
+                self.revision += 1
+                return {"world_time": deepcopy(self.world_time)}
+            if tool_id == "continuity_commit":
+                payload = arguments["payload"]
+                assert payload["event"]["payload"]["source_ref"] == source_ref
+                assert payload["event"]["payload"]["elapsed_minutes"] == 780
+                assert [item["actor_id"] for item in payload["actor_knowledge"]] == [
+                    "actor-1",
+                    "npc-1",
+                ]
+                assert payload["snapshot"]["label"].startswith("Full playthrough time advance:")
+                self.revision += 1
+                return {"event": {"id": "event-1"}, "snapshot": {"slot": 5}}
+            if tool_id == "playthrough_manifest":
+                assert arguments["action"] == "sync"
+                self.revision += 1
+                return {
+                    "manifest": {"status": "in_progress"},
+                    "campaign_revision": self.revision,
+                }
+            raise AssertionError((tool_id, arguments))
+
+    result = asyncio.run(
+        _advance_time(
+            Client(),
+            campaign_id="campaign-1",
+            run_id="run-1",
+            scene_id="scene-1",
+            source_excerpt="The characters arrive late in the day.",
+            source_ref=source_ref,
+            period="hour",
+            count=13,
+            reason="The party traveled with Sildar and arrived late in the day.",
+            start_clock=None,
+            knowledge_actor_ids=["actor-1", "npc-1"],
+        )
+    )
+
+    assert result["after"]["hour"] == 17
+    assert result["knowledge_actor_ids"] == ["actor-1", "npc-1"]
+    assert result["continuity"]["snapshot"]["slot"] == 5
 
 
 def test_play_activity_records_structured_effect_and_random_receipt() -> None:
