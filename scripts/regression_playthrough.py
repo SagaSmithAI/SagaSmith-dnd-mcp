@@ -118,11 +118,11 @@ def _facade_value(value: Any) -> Any:
     return value
 
 
-def _phase_group(phase: str) -> str:
+def _phase_groups(phase: str) -> tuple[str, ...]:
     return {
-        "lobby": "lobby.campaign",
-        "play": "play.scene_control",
-        "combat": "combat.save",
+        "lobby": ("lobby.campaign",),
+        "play": ("play.scene_control", "play.scene"),
+        "combat": ("combat.save", "combat.observe"),
     }[phase]
 
 
@@ -583,7 +583,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             campaign = await _campaign(client, args.campaign_id)
             phase = _campaign_phase(campaign)
             report["phase"] = phase
-            await client.load(_phase_group(phase))
+            await client.load(*_phase_groups(phase))
             if args.action == "register-party":
                 await client.load(_character_group(phase))
                 report["result"] = await _register_party(

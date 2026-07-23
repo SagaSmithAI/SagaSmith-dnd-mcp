@@ -14,6 +14,7 @@ from scripts.regression_playthrough import (
     _mutation_key,
     _party_member,
     _party_selections,
+    _phase_groups,
     _start_play,
 )
 
@@ -45,6 +46,9 @@ def test_party_projection_keeps_knowledge_bound_to_the_new_actor() -> None:
 def test_phase_and_idempotency_namespaces_are_stable() -> None:
     assert _campaign_phase({"state": {}}) == "lobby"
     assert _campaign_phase({"state": {"game_phase": "combat"}}) == "combat"
+    assert _phase_groups("lobby") == ("lobby.campaign",)
+    assert _phase_groups("play") == ("play.scene_control", "play.scene")
+    assert _phase_groups("combat") == ("combat.save", "combat.observe")
     assert _mutation_key("run", "snapshot", "scene-1") == _mutation_key(
         "run", "snapshot", "scene-1"
     )
