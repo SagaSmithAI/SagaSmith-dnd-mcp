@@ -7,10 +7,12 @@ from scripts.regression_encounter import (
     _choose_destination,
     _choose_party_spell,
     _has_blocking_pending,
+    _has_multiattack_followup,
     _observable_target_ids,
     _participant_config,
     _participant_manifest,
     _preferred_hostile_weapon_id,
+    _preferred_multiattack_option_id,
     _roll_total,
     _should_stand,
     _source_departure_patch,
@@ -504,3 +506,60 @@ def test_hostile_weapon_preference_is_capability_based() -> None:
     assert _preferred_hostile_weapon_id(wolf, hostile_index=1) == "bite"
     assert _preferred_hostile_weapon_id(goblin, hostile_index=0) == "scimitar"
     assert _preferred_hostile_weapon_id(goblin, hostile_index=2) == "shortbow"
+
+
+def test_hostile_multiattack_selection_follows_the_preferred_weapon() -> None:
+    actor = {
+        "derived": {
+            "multiattack_options": [
+                {
+                    "id": "melee",
+                    "attacks": [
+                        {"weapon_id": "shortsword", "attack_mode": "melee", "count": 2}
+                    ],
+                },
+                {
+                    "id": "ranged",
+                    "attacks": [
+                        {"weapon_id": "shortbow", "attack_mode": "ranged", "count": 2}
+                    ],
+                },
+            ]
+        }
+    }
+
+    assert (
+        _preferred_multiattack_option_id(actor, preferred_weapon_id="shortsword")
+        == "melee"
+    )
+    assert (
+        _preferred_multiattack_option_id(actor, preferred_weapon_id="shortbow")
+        == "ranged"
+    )
+
+
+def test_structured_multiattack_followup_prevents_early_end_turn() -> None:
+    active = {
+        "combatants": [
+            {
+                "actor_id": "ruffian",
+                "turn_budget": {"attack_budget": 1},
+                "turn_flags": {
+                    "multiattack": {
+                        "option_id": "melee",
+                        "remaining": [
+                            {
+                                "weapon_id": "shortsword",
+                                "attack_mode": "melee",
+                                "count": 1,
+                            }
+                        ],
+                    }
+                },
+            }
+        ]
+    }
+
+    assert _has_multiattack_followup(active, "ruffian")
+    active["combatants"][0]["turn_budget"]["attack_budget"] = 0
+    assert not _has_multiattack_followup(active, "ruffian")

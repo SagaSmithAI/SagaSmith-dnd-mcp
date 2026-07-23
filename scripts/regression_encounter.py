@@ -523,6 +523,51 @@ def _preferred_hostile_weapon_id(
     return melee or (str(weapons[0].get("item_id") or "") if weapons else "")
 
 
+def _preferred_multiattack_option_id(
+    actor: dict[str, Any],
+    *,
+    preferred_weapon_id: str,
+) -> str:
+    options = [
+        item
+        for item in dict(actor.get("derived") or {}).get("multiattack_options", [])
+        if isinstance(item, dict) and str(item.get("id") or "")
+    ]
+    if not options:
+        return ""
+    if preferred_weapon_id:
+        matching = [
+            option
+            for option in options
+            if any(
+                str(attack.get("weapon_id") or "") == preferred_weapon_id
+                for attack in option.get("attacks", [])
+                if isinstance(attack, dict)
+            )
+        ]
+        if matching:
+            return str(matching[0]["id"])
+    return str(options[0]["id"])
+
+
+def _has_multiattack_followup(combat: dict[str, Any], actor_id: str) -> bool:
+    combatant = next(
+        (
+            item
+            for item in combat.get("combatants", [])
+            if isinstance(item, dict) and str(item.get("actor_id") or "") == actor_id
+        ),
+        None,
+    )
+    if combatant is None:
+        return False
+    budget = dict(combatant.get("turn_budget") or {})
+    flags = dict(combatant.get("turn_flags") or {})
+    return int(budget.get("attack_budget", 0) or 0) > 0 and bool(
+        flags.get("multiattack")
+    )
+
+
 async def _start(
     client: ExposureClient,
     args: argparse.Namespace,
@@ -927,6 +972,7 @@ async def _preflight_attack(
     target_ids: list[str],
     *,
     preferred_weapon_id: str = "",
+    multiattack_option_id: str = "",
 ) -> tuple[str, dict[str, Any], dict[str, Any]] | None:
     weapons = list(
         dict(dict(actor.get("derived") or {}).get("inventory") or {}).get(
@@ -940,6 +986,8 @@ async def _preflight_attack(
                 "weapon_id": weapon.get("item_id"),
                 "attack_mode": weapon.get("attack_type") or "melee",
             }
+            if multiattack_option_id:
+                action["multiattack_option_id"] = multiattack_option_id
             try:
                 plan = await client.domain(
                     "combat_preflight_attack",
@@ -1456,12 +1504,24 @@ async def _auto_run(
             if actor_id in hostile_ids
             else ""
         )
+        active_multiattack = bool(
+            dict(combatants[actor_id].get("turn_flags") or {}).get("multiattack")
+        )
+        multiattack_option_id = (
+            _preferred_multiattack_option_id(
+                actor,
+                preferred_weapon_id=preferred_weapon_id,
+            )
+            if actor_id in hostile_ids and not active_multiattack
+            else ""
+        )
         plan = await _preflight_attack(
             client,
             args,
             actor,
             living_targets,
             preferred_weapon_id=preferred_weapon_id,
+            multiattack_option_id=multiattack_option_id,
         )
         if plan is None and living_targets:
             destination = _choose_destination(combat, actor_id, living_targets[0])
@@ -1500,6 +1560,7 @@ async def _auto_run(
                     actor,
                     living_targets,
                     preferred_weapon_id=preferred_weapon_id,
+                    multiattack_option_id=multiattack_option_id,
                 )
         if plan is not None:
             target_id, action, preflight = plan
@@ -1532,6 +1593,11 @@ async def _auto_run(
                     "result": resolved,
                 }
             )
+            if actor_id in hostile_ids and _has_multiattack_followup(
+                dict(resolved.get("combat") or {}),
+                actor_id,
+            ):
+                continue
         await _end_turn(client, args, str(branch["id"]), actor_id, sequence)
     else:
         raise RuntimeError(f"combat did not reach a source outcome in {args.max_turns} turns")
