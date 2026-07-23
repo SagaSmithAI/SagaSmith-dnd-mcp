@@ -19,6 +19,7 @@ from scripts.regression_playthrough import (
     _party_member,
     _party_selections,
     _phase_groups,
+    _recover_committed_check,
     _resolve_check,
     _start_play,
 )
@@ -280,6 +281,37 @@ def test_character_check_accepts_full_and_compact_exposure_shapes() -> None:
     assert _committed_check_result(result) == result
     with pytest.raises(RuntimeError, match="did not commit"):
         _committed_check_result({"status": "pending_ruling"})
+
+
+def test_partially_committed_check_is_recovered_without_reroll() -> None:
+    result = {"success": False, "total": 7, "dc": 10}
+    campaign = {
+        "state": {
+            "random_stream": {"last_receipt": {"operation": "character_check"}},
+            "resolution_log": [{"type": "ability", "actor_id": "actor-1", "result": result}],
+        }
+    }
+
+    assert (
+        _recover_committed_check(
+            campaign,
+            progress_matches=True,
+            actor_id="actor-1",
+            kind="ability",
+            dc=10,
+        )
+        == result
+    )
+    assert (
+        _recover_committed_check(
+            campaign,
+            progress_matches=False,
+            actor_id="actor-1",
+            kind="ability",
+            dc=10,
+        )
+        is None
+    )
 
 
 def test_xp_award_uses_source_ref_and_all_exact_recipients() -> None:

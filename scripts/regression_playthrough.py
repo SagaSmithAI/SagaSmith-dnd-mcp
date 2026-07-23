@@ -265,6 +265,60 @@ def _committed_check_result(settled: dict[str, Any]) -> dict[str, Any]:
     raise RuntimeError("source-cited character check did not commit")
 
 
+def _matching_check_progress(
+    progress: dict[str, Any] | None,
+    *,
+    location_key: str,
+    kind: str,
+    ability: str,
+    dc: int,
+    source_ref: dict[str, Any],
+) -> bool:
+    if not isinstance(progress, dict):
+        return False
+    state = dict(progress.get("state") or {})
+    check = dict(state.get("full_playthrough_check") or {})
+    return bool(
+        str(progress.get("current_location_key") or "") == location_key
+        and check.get("kind") == kind
+        and check.get("ability") == ability
+        and check.get("dc") == dc
+        and check.get("source_ref") == source_ref
+    )
+
+
+def _recover_committed_check(
+    campaign: dict[str, Any],
+    *,
+    progress_matches: bool,
+    actor_id: str,
+    kind: str,
+    dc: int,
+) -> dict[str, Any] | None:
+    """Recover a check committed before a driver-side response failure."""
+
+    if not progress_matches:
+        return None
+    state = dict(campaign.get("state") or {})
+    random_stream = dict(state.get("random_stream") or {})
+    last_receipt = dict(random_stream.get("last_receipt") or {})
+    if last_receipt.get("operation") != "character_check":
+        return None
+    resolution_log = list(state.get("resolution_log") or [])
+    if not resolution_log:
+        return None
+    latest = dict(resolution_log[-1])
+    result = dict(latest.get("result") or {})
+    if (
+        latest.get("type") != kind
+        or latest.get("actor_id") != actor_id
+        or result.get("dc") != dc
+        or "success" not in result
+    ):
+        return None
+    return result
+
+
 async def _manifest_mutation(
     client: ExposureClient,
     *,
@@ -541,29 +595,44 @@ async def _resolve_check(
         (item for item in progress_rows if item.get("scene_id") == scene_id),
         None,
     )
-    progress = await client.domain(
-        "module_set_progress",
-        {
-            "campaign_id": campaign_id,
-            "scene_id": scene_id,
-            "status": "active",
-            "progress": max(int((progress_before or {}).get("progress", 0) or 0), 50),
-            "state": {
-                **deepcopy(dict((progress_before or {}).get("state") or {})),
-                "full_playthrough_check": {
-                    "kind": kind,
-                    "ability": ability,
-                    "dc": dc,
-                    "source_ref": exact_ref,
-                },
-            },
-            "current_location_key": location_key,
-            "expected_state_version": int((progress_before or {}).get("state_version", 0) or 0),
-            "idempotency_key": _mutation_key(
-                run_id, "scene-progress", f"{scene_id}:{kind}:{ability}:{actor_id}"
-            ),
-        },
+    progress_matches = _matching_check_progress(
+        progress_before,
+        location_key=location_key,
+        kind=kind,
+        ability=ability,
+        dc=dc,
+        source_ref=exact_ref,
     )
+    if progress_matches:
+        progress = deepcopy(progress_before)
+    else:
+        progress = await client.domain(
+            "module_set_progress",
+            {
+                "campaign_id": campaign_id,
+                "scene_id": scene_id,
+                "status": "active",
+                "progress": max(int((progress_before or {}).get("progress", 0) or 0), 50),
+                "state": {
+                    **deepcopy(dict((progress_before or {}).get("state") or {})),
+                    "full_playthrough_check": {
+                        "run_id": run_id,
+                        "actor_id": actor_id,
+                        "kind": kind,
+                        "ability": ability,
+                        "dc": dc,
+                        "source_ref": exact_ref,
+                    },
+                },
+                "current_location_key": location_key,
+                "expected_state_version": int((progress_before or {}).get("state_version", 0) or 0),
+                "idempotency_key": _mutation_key(
+                    run_id,
+                    "scene-progress",
+                    f"{scene_id}:{kind}:{ability}:{actor_id}",
+                ),
+            },
+        )
     branches = await client.domain(
         "branch_query",
         {"campaign_id": campaign_id, "view": "list"},
@@ -572,23 +641,35 @@ async def _resolve_check(
     if branch is None:
         raise RuntimeError("campaign has no current branch")
     campaign = await _campaign(client, campaign_id)
-    settled = await client.domain(
-        "character_check",
-        {
-            "campaign_id": campaign_id,
-            "actor_id": actor_id,
-            "kind": kind,
-            "ability": ability,
-            "dc": dc,
-            "proficient": proficient,
-            "branch_id": str(branch["id"]),
-            "expected_revision": campaign["revision"],
-            "idempotency_key": _mutation_key(
-                run_id, "character-check", f"{scene_id}:{kind}:{ability}:{actor_id}"
-            ),
-        },
+    recovered = _recover_committed_check(
+        campaign,
+        progress_matches=progress_matches,
+        actor_id=actor_id,
+        kind=kind,
+        dc=dc,
     )
-    check_result = _committed_check_result(settled)
+    if recovered is None:
+        settled = await client.domain(
+            "character_check",
+            {
+                "campaign_id": campaign_id,
+                "actor_id": actor_id,
+                "kind": kind,
+                "ability": ability,
+                "dc": dc,
+                "proficient": proficient,
+                "branch_id": str(branch["id"]),
+                "expected_revision": campaign["revision"],
+                "idempotency_key": _mutation_key(
+                    run_id,
+                    "character-check",
+                    f"{scene_id}:{kind}:{ability}:{actor_id}",
+                ),
+            },
+        )
+        check_result = _committed_check_result(settled)
+    else:
+        check_result = recovered
     success = bool(check_result.get("success"))
     proposition = (success_knowledge.strip() if success else failure_knowledge.strip()) or (
         f"{actor['name']} {'succeeded' if success else 'failed'} on the "
@@ -659,6 +740,7 @@ async def _resolve_check(
         "actor": {"id": actor_id, "name": actor["name"]},
         "progress": progress,
         "check": check_result,
+        "check_recovered": recovered is not None,
         "knowledge_actor_ids": recipients,
         "continuity": committed,
         "sync": synced,
