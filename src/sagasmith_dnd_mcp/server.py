@@ -134,7 +134,12 @@ from sagasmith_dnd.lifecycle import (
     stand_outside_combat,
 )
 from sagasmith_dnd.module_profile import DndModuleProfile
-from sagasmith_dnd.progression import advance_single_class_level
+from sagasmith_dnd.progression import (
+    advance_single_class_level,
+    apply_per_level_hit_point_bonus,
+    award_experience,
+    experience_status,
+)
 from sagasmith_dnd.rule_engine import (
     RuleCompilationError,
     apply_rule_event,
@@ -741,6 +746,22 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
 
     def is_dm(campaign_id: str, principal_id: str) -> bool:
         return access.require_campaign(campaign_id, principal_id).role in {"owner", "dm"}
+
+    def normalized_advancement_mode(mode: Any) -> str:
+        value = str(mode or "").strip().casefold()
+        if value not in {"milestone", "xp"}:
+            raise ValueError("advancement mode must be milestone or xp")
+        return value
+
+    def campaign_advancement_mode(campaign: Any) -> str:
+        advancement = dict((campaign.settings or {}).get("advancement") or {})
+        try:
+            return normalized_advancement_mode(advancement.get("mode"))
+        except ValueError as error:
+            raise CombatEngineError(
+                "campaign advancement mode is not configured; "
+                "use campaign_change(action='advancement_configure') in lobby"
+            ) from error
 
     def require_character_control(character: Any, principal_id: str) -> None:
         if character.campaign_id is None:
@@ -2282,12 +2303,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         description: str = "",
         edition: str = "2024",
         locale: str = "en",
+        advancement_mode: Literal["milestone", "xp"] = "milestone",
         principal_id: str = "system:local",
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Create a D&D 5e campaign inside the MCP-owned SQLite database."""
         if not idempotency_key:
             raise ValueError("idempotency_key is required for campaign creation")
+        normalized_mode = normalized_advancement_mode(advancement_mode)
         # Reject before persistence so an unsupported edition cannot leave a
         # partially initialized campaign without its required Core lock.
         get_core_rule_pack(edition)
@@ -2297,7 +2320,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             principal_id=principal_id,
             idempotency_key=idempotency_key,
             description=description,
-            settings={"edition": edition, "locale": locale},
+            settings={
+                "edition": edition,
+                "locale": locale,
+                "advancement": {"mode": normalized_mode},
+            },
         )
         if rule_profiles.get(created.id) is None:
             rule_profiles.set(
@@ -2741,6 +2768,224 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             idempotency_key,
             payload,
             asdict(after),
+            campaign_id=campaign_id,
+        )
+
+    def campaign_advancement_configure(
+        campaign_id: str,
+        mode: str,
+        principal_id: str = "system:local",
+        expected_revision: int | None = None,
+        branch_id: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Select milestone or cumulative-XP advancement for one campaign."""
+        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        require_write_contract(expected_revision, idempotency_key)
+        normalized_mode = normalized_advancement_mode(mode)
+        resolved_branch_id = require_current_branch(campaign_id, branch_id)
+        before = campaigns.get(campaign_id)
+        state = dict(before.state or {})
+        if state.get("game_phase", PROFILE_LOBBY) != PROFILE_LOBBY:
+            raise CombatEngineError("switch to lobby before changing advancement mode")
+        if isinstance(state.get("combat"), dict) and state["combat"].get("active", False):
+            raise CombatEngineError("end active combat before changing advancement mode")
+        payload = {
+            "mode": normalized_mode,
+            "expected_revision": expected_revision,
+            "branch_id": resolved_branch_id,
+        }
+        scope = f"campaign-advancement:{campaign_id}:{resolved_branch_id}:{principal_id}"
+        replay = replay_idempotent(scope, idempotency_key, payload)
+        if replay is not None:
+            return replay
+        settings = deepcopy(dict(before.settings or {}))
+        settings["advancement"] = {"mode": normalized_mode}
+        after = campaigns.update_audited(
+            campaign_id,
+            settings=settings,
+            expected_revision=expected_revision,
+            operation="campaign.advancement.configure",
+            actor=principal_id,
+            branch_id=resolved_branch_id,
+            idempotency_key=idempotency_key,
+            request_hash=request_hash(payload),
+        )
+        response = {
+            "status": "committed",
+            "advancement": {"mode": normalized_mode},
+            "campaign": asdict(after),
+        }
+        return remember_idempotent(
+            scope,
+            idempotency_key,
+            payload,
+            response,
+            campaign_id=campaign_id,
+        )
+
+    def campaign_experience_award(
+        campaign_id: str,
+        awards: list[dict[str, Any]],
+        reason: str,
+        source_ref: str,
+        principal_id: str = "system:local",
+        expected_revision: int | None = None,
+        branch_id: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Atomically award source-bound cumulative XP to one or more PCs."""
+        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        require_write_contract(expected_revision, idempotency_key)
+        resolved_branch_id = require_current_branch(campaign_id, branch_id)
+        campaign = campaigns.get(campaign_id)
+        if campaign_advancement_mode(campaign) != "xp":
+            raise CombatEngineError("experience can be awarded only in xp advancement mode")
+        state = dict(campaign.state or {})
+        if isinstance(state.get("combat"), dict) and state["combat"].get("active", False):
+            raise CombatEngineError("end active combat before awarding experience")
+        normalized_reason = str(reason).strip()
+        normalized_source_ref = str(source_ref).strip()
+        if not normalized_reason or not normalized_source_ref:
+            raise ValueError("reason and source_ref are required for audited experience awards")
+        if len(f"{normalized_source_ref}: {normalized_reason}") > 300:
+            raise ValueError("combined source_ref and reason must not exceed 300 characters")
+        if not isinstance(awards, list) or not awards:
+            raise ValueError("awards must be a non-empty array")
+
+        normalized_awards: list[dict[str, Any]] = []
+        character_ids: set[str] = set()
+        for index, award in enumerate(awards):
+            if not isinstance(award, dict):
+                raise ValueError(f"awards[{index}] must be an object")
+            unexpected = set(award) - {"character_id", "amount", "expected_revision"}
+            if unexpected:
+                raise ValueError(f"awards[{index}] has unexpected fields: {sorted(unexpected)}")
+            character_id = str(required(award, "character_id")).strip()
+            if not character_id or character_id in character_ids:
+                raise ValueError("experience awards require unique non-empty character ids")
+            amount = required(award, "amount")
+            if isinstance(amount, bool) or not isinstance(amount, int) or amount <= 0:
+                raise ValueError("experience award amount must be a positive integer")
+            character_revision = required(award, "expected_revision")
+            if (
+                isinstance(character_revision, bool)
+                or not isinstance(character_revision, int)
+                or character_revision < 0
+            ):
+                raise ValueError(
+                    "experience award expected_revision must be a non-negative integer"
+                )
+            character_ids.add(character_id)
+            normalized_awards.append(
+                {
+                    "character_id": character_id,
+                    "amount": amount,
+                    "expected_revision": character_revision,
+                }
+            )
+
+        payload = {
+            "awards": normalized_awards,
+            "reason": normalized_reason,
+            "source_ref": normalized_source_ref,
+            "expected_revision": expected_revision,
+            "branch_id": resolved_branch_id,
+        }
+        scope = f"campaign-xp:{campaign_id}:{resolved_branch_id}:{principal_id}"
+        replay = replay_idempotent(scope, idempotency_key, payload)
+        if replay is not None:
+            return replay
+
+        updates: list[CharacterStateUpdate] = []
+        results: list[dict[str, Any]] = []
+        for award in normalized_awards:
+            current = characters.get(award["character_id"])
+            if current.campaign_id != campaign_id:
+                raise ValueError("every experience recipient must belong to the campaign")
+            if current.character_type != "pc":
+                raise ValueError("experience can be awarded only to player characters")
+            applied = award_experience(current.sheet, amount=award["amount"])
+            updates.append(
+                CharacterStateUpdate(
+                    character_id=current.id,
+                    sheet=validate_character_sheet(applied["sheet"]),
+                    notes=validate_character_notes(
+                        current.notes, character_type=current.character_type
+                    ),
+                    expected_revision=award["expected_revision"],
+                )
+            )
+            results.append(
+                {
+                    "character_id": current.id,
+                    "amount": applied["amount"],
+                    "old_xp": applied["old_xp"],
+                    "new_xp": applied["new_xp"],
+                    "advancement": applied["advancement"],
+                }
+            )
+
+        next_state = deepcopy(state)
+        advancement_state = dict(next_state.get("advancement") or {})
+        history = list(advancement_state.get("xp_awards") or [])
+        award_id = str(uuid4())
+        history.append(
+            {
+                "id": award_id,
+                "reason": normalized_reason,
+                "source_ref": normalized_source_ref,
+                "awards": deepcopy(results),
+            }
+        )
+        advancement_state["xp_awards"] = history
+        next_state["advancement"] = advancement_state
+        rules = effective_rule_context(
+            campaign_id,
+            facts={
+                "award_id": award_id,
+                "recipient_count": len(results),
+                "xp_total": sum(item["amount"] for item in results),
+                "source_ref": normalized_source_ref,
+            },
+        )
+        receipts = core_receipts(
+            rules,
+            ["dnd5e.core.progression.experience"],
+            "campaign.experience.award",
+        )
+        StateMutationService(storage.database).replace(
+            campaign_id,
+            campaign_state=validate_party_state(next_state),
+            character_updates=updates,
+            expected_campaign_revision=expected_revision,
+            operation="campaign.experience.award",
+            actor=principal_id,
+            branch_id=resolved_branch_id,
+            idempotency_key=idempotency_key,
+            rule_receipts=receipts,
+        )
+        response = {
+            "status": "committed",
+            "award_id": award_id,
+            "mode": "xp",
+            "reason": normalized_reason,
+            "source_ref": normalized_source_ref,
+            "awards": [
+                {
+                    **item,
+                    "character": character_view(characters.get(item["character_id"])),
+                }
+                for item in results
+            ],
+            "campaign": asdict(campaigns.get(campaign_id)),
+            "rule_receipts": receipts,
+        }
+        return remember_idempotent(
+            scope,
+            idempotency_key,
+            payload,
+            response,
             campaign_id=campaign_id,
         )
 
@@ -8689,6 +8934,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if not is_dm(current.campaign_id, principal_id):
             raise PermissionError("level advancement requires the campaign DM")
         campaign = campaigns.get(current.campaign_id)
+        advancement_mode = campaign_advancement_mode(campaign)
         state = dict(campaign.state or {})
         if state.get("game_phase", PROFILE_LOBBY) != PROFILE_LOBBY:
             raise CombatEngineError("switch to lobby before advancing a character level")
@@ -8725,6 +8971,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if current.revision != expected_revision:
             raise ValueError(f"character revision conflict: {character_id}")
         old_level = int(current.sheet.get("progression", {}).get("level", 0) or 0)
+        experience_before = experience_status(current.sheet)
+        if advancement_mode == "xp" and not experience_before["eligible"]:
+            raise CombatEngineError(
+                "character has not reached the XP threshold for the next level"
+            )
         context = level_advancement_content_context(
             current.campaign_id,
             current.sheet,
@@ -8740,6 +8991,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "old_level": old_level,
                 "new_level": old_level + 1,
                 "source_ref": normalized_source_ref,
+                "advancement_mode": advancement_mode,
+                "experience": experience_before["xp"],
             },
         )
         applied = advance_single_class_level(
@@ -8773,6 +9026,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             ),
         }
         result = {key: value for key, value in applied.items() if key != "sheet"}
+        result["mode"] = advancement_mode
+        result["experience_before"] = experience_before
+        result["experience_after"] = experience_status(applied["sheet"])
         result["hp_bonus_sources"] = context["hp_bonus_sources"]
         result["follow_up"] = follow_up
         return update_sheet(
@@ -13614,12 +13870,33 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         sheet["abilities"][ability]["score"]
                     ) + int(amount)
             if not hp_includes_grants:
-                hp_bonus = int(grants.get("hp_per_level", 0) or 0) * int(
-                    sheet["progression"].get("level", 1) or 1
-                )
-                if hp_bonus:
-                    sheet["combat"]["hp"]["max"] += hp_bonus
-                    sheet["combat"]["hp"]["value"] += hp_bonus
+                hp_per_level = int(grants.get("hp_per_level", 0) or 0)
+                if hp_per_level:
+                    features = [
+                        item
+                        for item in grants.get("features", [])
+                        if isinstance(item, dict)
+                    ]
+                    hp_feature = next(
+                        (
+                            item
+                            for item in features
+                            if "hit point" in str(item.get("description") or "").casefold()
+                            or "tough" in str(item.get("name") or "").casefold()
+                        ),
+                        None,
+                    )
+                    feature_name = str((hp_feature or {}).get("name") or "").strip()
+                    hp_source = (
+                        f"{selected_species}: {feature_name}"
+                        if feature_name
+                        else f"{selected_species}: per-level hit-point grant"
+                    )
+                    sheet = apply_per_level_hit_point_bonus(
+                        sheet,
+                        amount=hp_per_level,
+                        source=hp_source,
+                    )
             if grants.get("size"):
                 sheet["traits"]["size"] = str(grants["size"])
             if int(grants.get("walk_speed", 0) or 0):
@@ -15173,13 +15450,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "party_rest",
             "effect_add",
             "effect_remove",
+            "advancement_configure",
+            "experience_award",
         ] = "update",
         principal_id: str = "system:local",
         expected_revision: int | None = None,
         branch_id: str | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
-        """Update campaign metadata, its clock, or structured campaign-space effects."""
+        """Update campaign state, advancement, clock, or structured campaign-space effects."""
         data = facade_payload(payload)
         if action == "clock_set":
             result = campaign_clock_set_legacy(
@@ -15218,6 +15497,26 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 campaign_id,
                 action,
                 data,
+                principal_id,
+                expected_revision,
+                branch_id,
+                idempotency_key,
+            )
+        elif action == "advancement_configure":
+            result = campaign_advancement_configure(
+                campaign_id,
+                required(data, "mode"),
+                principal_id,
+                expected_revision,
+                branch_id,
+                idempotency_key,
+            )
+        elif action == "experience_award":
+            result = campaign_experience_award(
+                campaign_id,
+                required(data, "awards"),
+                required(data, "reason"),
+                required(data, "source_ref"),
                 principal_id,
                 expected_revision,
                 branch_id,

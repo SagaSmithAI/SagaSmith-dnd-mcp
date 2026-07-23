@@ -410,6 +410,9 @@ def test_core_srd_content_catalog_is_structured_and_selectable(tmp_path: Path) -
         ]
         dwarf_sheet = default_character_sheet()
         dwarf_sheet["progression"]["species"] = "Dwarf"
+        dwarf_sheet["combat"]["hp_progression"] = [
+            {"level": 1, "method": "manual", "value": 1, "source": "level 1"}
+        ]
         dwarf = await call(
             server,
             "character_create",
@@ -436,6 +439,14 @@ def test_core_srd_content_catalog_is_structured_and_selectable(tmp_path: Path) -
         assert dwarf["sheet"]["abilities"]["wisdom"]["score"] == 11
         assert dwarf["sheet"]["traits"]["resistances"] == ["poison"]
         assert dwarf["sheet"]["combat"]["hp"]["max"] == 2
+        assert dwarf["sheet"]["combat"]["hp_progression"] == [
+            {
+                "level": 1,
+                "method": "manual",
+                "value": 2,
+                "source": "level 1; Hill Dwarf: Dwarven Toughness",
+            }
+        ]
         assert any(
             item["name"] == "Dwarven Toughness"
             for item in dwarf["sheet"]["content"]["features"]

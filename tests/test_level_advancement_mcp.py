@@ -47,6 +47,14 @@ def _cleric_sheet() -> dict:
             "source_key": "Cleric",
         }
     }
+    sheet["combat"]["hp_progression"] = [
+        {
+            "level": 1,
+            "method": "manual",
+            "value": 12,
+            "source": "Cleric level 1; Hill Dwarf: Dwarven Toughness",
+        }
+    ]
     sheet["spellcasting"]["ability"] = "wisdom"
     sheet["spellcasting"]["spell_slots"] = {
         "1": {
@@ -146,6 +154,8 @@ def test_lobby_level_advance_is_source_bound_and_reports_catalog_follow_up(
         sheet = advanced["character"]["sheet"]
         assert sheet["progression"]["level"] == 2
         assert sheet["combat"]["hp"] == {"value": 7, "max": 21, "temp": 0}
+        assert [item["value"] for item in sheet["combat"]["hp_progression"]] == [12, 9]
+        assert sum(item["value"] for item in sheet["combat"]["hp_progression"]) == 21
         assert sheet["spellcasting"]["spell_slots"]["1"]["value"] == 1
         assert sheet["spellcasting"]["spell_slots"]["1"]["max"] == 3
         assert advanced["advancement"]["hp_bonus_sources"][0]["amount"] == 1
@@ -464,5 +474,137 @@ def test_level_advance_is_rejected_outside_lobby(tmp_path: Path) -> None:
                     "idempotency_key": "level",
                 },
             )
+
+    asyncio.run(exercise())
+
+
+def test_xp_mode_awards_atomically_and_enforces_level_threshold(tmp_path: Path) -> None:
+    workspace = Path(__file__).resolve().parents[2]
+    config = McpConfig(
+        home=tmp_path / "home",
+        database_url=None,
+        chroma_url=None,
+        chroma_path_override=None,
+        dnd_skills_dir=workspace / "SagaSmith-dnd-skills",
+        modulegen_skills_dir=workspace / "SagaSmith-module-gen-skills",
+        auto_seed_rules=True,
+    )
+
+    async def exercise() -> None:
+        server = create_server(config)
+        campaign = await _call(
+            server,
+            "campaign_create",
+            {
+                "name": "XP campaign",
+                "edition": "2014",
+                "advancement_mode": "xp",
+                "idempotency_key": "campaign",
+            },
+        )
+        assert campaign["settings"]["advancement"] == {"mode": "xp"}
+        actor = await _call(
+            server,
+            "character_create_from",
+            {
+                "mode": "direct",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "name": "Mara",
+                    "sheet": _cleric_sheet(),
+                },
+                "idempotency_key": "actor",
+            },
+        )
+
+        first_arguments = {
+            "campaign_id": campaign["id"],
+            "action": "experience_award",
+            "payload": {
+                "awards": [
+                    {
+                        "character_id": actor["id"],
+                        "amount": 299,
+                        "expected_revision": actor["revision"],
+                    }
+                ],
+                "reason": "resolved the first threat",
+                "source_ref": "module:test#encounter-1",
+            },
+            "expected_revision": campaign["revision"],
+            "idempotency_key": "xp-299",
+        }
+        first = await _call(server, "campaign_change", first_arguments)
+        assert first["awards"][0]["new_xp"] == 299
+        assert first["awards"][0]["advancement"]["eligible"] is False
+        assert first["awards"][0]["character"]["sheet"]["progression"]["level"] == 1
+        assert await _call(server, "campaign_change", first_arguments) == first
+
+        with pytest.raises(Exception, match="XP threshold"):
+            await _call(
+                server,
+                "character_state_change",
+                {
+                    "character_id": actor["id"],
+                    "action": "level_advance",
+                    "payload": {
+                        "class_name": "Cleric",
+                        "hp_method": "fixed",
+                        "reason": "premature",
+                        "source_ref": "module:test",
+                    },
+                    "expected_revision": first["awards"][0]["character"]["revision"],
+                    "idempotency_key": "premature-level",
+                },
+            )
+
+        second = await _call(
+            server,
+            "campaign_change",
+            {
+                "campaign_id": campaign["id"],
+                "action": "experience_award",
+                "payload": {
+                    "awards": [
+                        {
+                            "character_id": actor["id"],
+                            "amount": 1,
+                            "expected_revision": first["awards"][0]["character"]["revision"],
+                        }
+                    ],
+                    "reason": "completed the objective",
+                    "source_ref": "module:test#objective-1",
+                },
+                "expected_revision": first["campaign"]["revision"],
+                "idempotency_key": "xp-1",
+            },
+        )
+        recipient = second["awards"][0]
+        assert recipient["new_xp"] == 300
+        assert recipient["advancement"]["eligible"] is True
+        assert recipient["character"]["sheet"]["progression"]["level"] == 1
+
+        advanced = await _call(
+            server,
+            "character_state_change",
+            {
+                "character_id": actor["id"],
+                "action": "level_advance",
+                "payload": {
+                    "class_name": "Cleric",
+                    "hp_method": "fixed",
+                    "reason": "reached 300 XP",
+                    "source_ref": "module:test#objective-1",
+                },
+                "expected_revision": recipient["character"]["revision"],
+                "idempotency_key": "level-2",
+            },
+        )
+        assert advanced["character"]["sheet"]["progression"]["level"] == 2
+        assert advanced["character"]["sheet"]["progression"]["xp"] == 300
+        assert advanced["advancement"]["mode"] == "xp"
+        assert advanced["advancement"]["experience_before"]["eligible"] is True
+        assert advanced["advancement"]["experience_after"]["eligible"] is False
+        assert len(second["campaign"]["state"]["advancement"]["xp_awards"]) == 2
 
     asyncio.run(exercise())
