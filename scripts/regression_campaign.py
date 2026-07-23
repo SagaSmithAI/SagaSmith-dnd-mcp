@@ -114,6 +114,24 @@ def _arguments() -> argparse.Namespace:
         help="One target per spell attack; repeat for structured-combat",
     )
     parser.add_argument(
+        "--additional-hostile-id",
+        action="append",
+        default=[],
+        help=(
+            "Source-required initial hostile that is not targeted by the regression spell; "
+            "repeat for structured-combat"
+        ),
+    )
+    parser.add_argument(
+        "--required-hostile-count",
+        type=int,
+        help="Complete hostile group count established by source and branch-local DM facts",
+    )
+    parser.add_argument(
+        "--hostile-count-basis",
+        help="Brief source or DM-roll explanation for the complete hostile group count",
+    )
+    parser.add_argument(
         "--support-actor-id", help="Optional second source-grounded hostile combatant"
     )
     parser.add_argument("--scene-id", help="Encounter scene for structured-combat")
@@ -663,8 +681,8 @@ async def _audit(args: argparse.Namespace) -> dict[str, Any]:
 async def _discover_scenes(args: argparse.Namespace) -> dict[str, Any]:
     """Search and expand source scenes through the public phase exposure."""
 
-    if not args.query:
-        raise ValueError("discover-scenes requires at least one --query")
+    if not args.query and not args.scene_id:
+        raise ValueError("discover-scenes requires at least one --query or --scene-id")
     async with stdio_client(_server_parameters(args)) as (read, write):
         async with ClientSession(read, write) as session:
             await session.initialize()
@@ -677,6 +695,36 @@ async def _discover_scenes(args: argparse.Namespace) -> dict[str, Any]:
                 raise RuntimeError("discover-scenes cannot run during active combat")
             await client.open()
             await client.load(*_phase_groups(phase))
+            selected_scene: dict[str, Any] | None = None
+            if args.scene_id:
+                scene = _facade_value(
+                    await client.domain(
+                        "module_query",
+                        {
+                            "campaign_id": args.campaign_id,
+                            "view": "scene",
+                            "payload": {"scene_id": args.scene_id},
+                        },
+                    )
+                )
+                if str(scene.get("scene_id") or "") != args.scene_id or scene.get("redacted"):
+                    raise RuntimeError(
+                        "--scene-id was redacted or does not belong to this campaign"
+                    )
+                selected_scene = {
+                    key: scene.get(key)
+                    for key in (
+                        "module_id",
+                        "scene_id",
+                        "stable_key",
+                        "title",
+                        "scene_type",
+                        "page_start",
+                        "page_end",
+                    )
+                }
+                selected_scene["locations"] = _scene_locations(scene)
+                selected_scene["content"] = str(scene.get("content") or "")
             results: list[dict[str, Any]] = []
             for query in args.query:
                 hits = _facade_value(
@@ -717,6 +765,7 @@ async def _discover_scenes(args: argparse.Namespace) -> dict[str, Any]:
                 "transport": "stdio",
                 "campaign_id": args.campaign_id,
                 "phase": phase,
+                "selected_scene": selected_scene,
                 "queries": results,
             }
 
@@ -3750,6 +3799,20 @@ async def _structured_combat(args: argparse.Namespace) -> dict[str, Any]:
             "--caster-id, --scene-id, --location-key, --source-excerpt, and at least "
             "one --target-id are required"
         )
+    hostile_ids = [*args.target_id, *args.additional_hostile_id]
+    if args.support_actor_id:
+        hostile_ids.append(args.support_actor_id)
+    if len(hostile_ids) != len(set(hostile_ids)) or args.caster_id in hostile_ids:
+        raise ValueError("structured-combat actor ids must be non-empty and unique")
+    if args.required_hostile_count is None or args.required_hostile_count < 1:
+        raise ValueError("structured-combat requires a positive --required-hostile-count")
+    if args.required_hostile_count != len(hostile_ids):
+        raise ValueError(
+            "--required-hostile-count must equal the complete source-grounded hostile list"
+        )
+    count_basis = str(args.hostile_count_basis or "").strip()
+    if len(count_basis) < 8 or len(count_basis) > 500:
+        raise ValueError("structured-combat requires an 8 to 500 character --hostile-count-basis")
     token = _idempotency_token(args.run_id)
     async with stdio_client(_server_parameters(args)) as (read, write):
         async with ClientSession(read, write) as session:
@@ -3794,9 +3857,7 @@ async def _structured_combat(args: argparse.Namespace) -> dict[str, Any]:
                 }
             else:
                 source_branch = current_branch
-            source_actor_ids = [args.caster_id, *args.target_id]
-            if args.support_actor_id:
-                source_actor_ids.append(args.support_actor_id)
+            source_actor_ids = [args.caster_id, *hostile_ids]
             source_actors = {
                 actor_id: _facade_value(
                     await client.domain(
@@ -3895,9 +3956,6 @@ async def _structured_combat(args: argparse.Namespace) -> dict[str, Any]:
                 "play.combat_control",
             )
 
-            hostile_ids = list(args.target_id)
-            if args.support_actor_id:
-                hostile_ids.append(args.support_actor_id)
             manifest = {
                 "schema_version": 1,
                 "groups": [
@@ -3905,12 +3963,15 @@ async def _structured_combat(args: argparse.Namespace) -> dict[str, Any]:
                         "key": "source-grounded-hostiles",
                         "label": "Reviewed scene hostiles",
                         "role": "combatant",
-                        "required_count": len(hostile_ids),
+                        "required_count": args.required_hostile_count,
                         "actor_ids": hostile_ids,
                         "source_excerpt": args.source_excerpt,
                     }
                 ],
-                "notes": "Temporary branch regression; party actors are additional participants.",
+                "notes": (
+                    f"Hostile count basis: {count_basis} Temporary branch regression; "
+                    "party actors are additional participants."
+                ),
             }
             readiness = _facade_value(
                 await client.domain(
@@ -3928,9 +3989,7 @@ async def _structured_combat(args: argparse.Namespace) -> dict[str, Any]:
             if not readiness.get("ready"):
                 raise RuntimeError("source-grounded participant manifest is not combat-ready")
 
-            participant_ids = [args.caster_id, *args.target_id]
-            if args.support_actor_id:
-                participant_ids.append(args.support_actor_id)
+            participant_ids = [args.caster_id, *hostile_ids]
             participant_config = [
                 {
                     "actor_id": args.caster_id,
@@ -3942,24 +4001,17 @@ async def _structured_combat(args: argparse.Namespace) -> dict[str, Any]:
             ]
             participant_config.extend(
                 {
-                    "actor_id": target_id,
+                    "actor_id": hostile_id,
                     "initiative": 20 - index,
                     "tie_breaker": index,
-                    "position": {"x": 7, "y": 2 + index},
+                    "position": {
+                        "x": 6 + ((index - 1) // 8),
+                        "y": 1 + ((index - 1) % 8),
+                    },
                     "disposition": "hostile",
                 }
-                for index, target_id in enumerate(args.target_id, start=1)
+                for index, hostile_id in enumerate(hostile_ids, start=1)
             )
-            if args.support_actor_id:
-                participant_config.append(
-                    {
-                        "actor_id": args.support_actor_id,
-                        "initiative": 10,
-                        "tie_breaker": len(participant_config),
-                        "position": {"x": 3, "y": 2},
-                        "disposition": "hostile",
-                    }
-                )
             campaign_before_combat = _facade_value(
                 await client.core(
                     "campaign_query",
