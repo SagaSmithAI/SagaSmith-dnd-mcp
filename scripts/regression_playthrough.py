@@ -46,6 +46,7 @@ def _arguments() -> argparse.Namespace:
             "award-xp",
             "configure-advancement",
             "refresh-module",
+            "query-source",
             "register-party",
             "start-play",
             "verify-ending",
@@ -58,6 +59,13 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--module-source-path", type=Path)
     parser.add_argument("--module-source-key", default="")
     parser.add_argument("--module-title", default="")
+    parser.add_argument("--source-query", default="")
+    parser.add_argument("--source-top-k", type=int, default=8)
+    parser.add_argument(
+        "--source-expand",
+        action="store_true",
+        help="Expand every module-search hit into its complete indexed chunk",
+    )
     parser.add_argument("--checkpoint-label", default="")
     parser.add_argument("--scene-id")
     parser.add_argument("--location-key", default="")
@@ -158,6 +166,47 @@ def _party_selections(args: argparse.Namespace) -> list[dict[str, Any]]:
     if selections:
         raise ValueError("--party-report cannot be combined with --party-member-json")
     return [dict(item) for item in report_members]
+
+
+async def _query_source(
+    client: ExposureClient,
+    *,
+    campaign_id: str,
+    query: str,
+    top_k: int,
+    expand: bool,
+) -> dict[str, Any]:
+    normalized_query = query.strip()
+    if not normalized_query:
+        raise ValueError("query-source requires --source-query")
+    if top_k < 1 or top_k > 50:
+        raise ValueError("--source-top-k must be between 1 and 50")
+    hits = await client.domain(
+        "module_search",
+        {
+            "campaign_id": campaign_id,
+            "query": normalized_query,
+            "top_k": top_k,
+        },
+    )
+    expanded = []
+    if expand:
+        for hit in hits:
+            chunk_id = str(hit.get("chunk_id") or "")
+            if not chunk_id:
+                raise RuntimeError("module_search returned a hit without chunk_id")
+            expanded.append(
+                await client.domain(
+                    "module_expand",
+                    {"chunk_id": chunk_id},
+                )
+            )
+    return {
+        "query": normalized_query,
+        "top_k": top_k,
+        "hits": hits,
+        "expanded_chunks": expanded,
+    }
 
 
 def _server_parameters(args: argparse.Namespace) -> StdioServerParameters:
@@ -2456,6 +2505,14 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     source_path=args.module_source_path,
                     source_key=args.module_source_key,
                     title=args.module_title,
+                )
+            elif args.action == "query-source":
+                report["result"] = await _query_source(
+                    client,
+                    campaign_id=args.campaign_id,
+                    query=args.source_query,
+                    top_k=args.source_top_k,
+                    expand=args.source_expand,
                 )
             elif args.action == "advance-scene":
                 if phase != "play":

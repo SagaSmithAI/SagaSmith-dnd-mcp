@@ -24,6 +24,7 @@ from scripts.regression_playthrough import (
     _party_member,
     _party_selections,
     _phase_groups,
+    _query_source,
     _record_event,
     _recover_committed_check,
     _resolve_check,
@@ -33,6 +34,48 @@ from scripts.regression_playthrough import (
     _start_play,
     _use_activity,
 )
+
+
+def test_query_source_searches_and_expands_only_public_mcp_results() -> None:
+    class Client:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict]] = []
+
+        async def domain(self, tool_id: str, arguments: dict):
+            self.calls.append((tool_id, arguments))
+            if tool_id == "module_search":
+                return [{"chunk_id": "chunk-1", "content": "A captured character..."}]
+            if tool_id == "module_expand":
+                return {
+                    "chunk_id": "chunk-1",
+                    "content": "A captured character is taken to the eating cave.",
+                }
+            raise AssertionError((tool_id, arguments))
+
+    client = Client()
+    result = asyncio.run(
+        _query_source(
+            client,
+            campaign_id="campaign-1",
+            query="  captured defeated characters  ",
+            top_k=4,
+            expand=True,
+        )
+    )
+
+    assert result["query"] == "captured defeated characters"
+    assert result["expanded_chunks"][0]["chunk_id"] == "chunk-1"
+    assert client.calls == [
+        (
+            "module_search",
+            {
+                "campaign_id": "campaign-1",
+                "query": "captured defeated characters",
+                "top_k": 4,
+            },
+        ),
+        ("module_expand", {"chunk_id": "chunk-1"}),
+    ]
 
 
 def test_module_revision_extension_remaps_current_and_traversed_scenes() -> None:
