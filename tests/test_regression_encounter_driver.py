@@ -7,6 +7,7 @@ from scripts.regression_encounter import (
     _choose_destination,
     _choose_party_spell,
     _has_blocking_pending,
+    _observable_target_ids,
     _participant_config,
     _participant_manifest,
     _preferred_hostile_weapon_id,
@@ -16,6 +17,7 @@ from scripts.regression_encounter import (
     _source_truce_outcome,
     _surprise_from_check_report,
     _validate_hostile_attacks,
+    _wound_priority,
 )
 
 
@@ -68,6 +70,34 @@ def test_party_spell_tactics_prioritize_recovery_then_supported_offense() -> Non
         )
         is None
     )
+
+
+def test_party_tactics_do_not_target_unobserved_hidden_combatants() -> None:
+    combat = {
+        "combatants": [
+            {"actor_id": "pc", "hidden": False},
+            {"actor_id": "hidden", "hidden": True, "visible_to_actor_ids": None},
+            {
+                "actor_id": "spotted",
+                "hidden": True,
+                "visible_to_actor_ids": ["pc"],
+            },
+            {"actor_id": "revealed", "hidden": False},
+        ]
+    }
+
+    assert _observable_target_ids(
+        combat,
+        observer_id="pc",
+        target_ids=["hidden", "spotted", "revealed"],
+    ) == ["spotted", "revealed"]
+
+
+def test_party_tactics_focus_observably_wounded_targets() -> None:
+    healthy = {"sheet": {"combat": {"hp": {"value": 7, "max": 7}}}}
+    wounded = {"sheet": {"combat": {"hp": {"value": 22, "max": 27}}}}
+
+    assert _wound_priority(wounded) < _wound_priority(healthy)
 
 
 def test_movement_pending_reaction_blocks_followup_attack() -> None:

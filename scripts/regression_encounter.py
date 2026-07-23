@@ -586,6 +586,37 @@ def _distance(left: dict[str, Any], right: dict[str, Any]) -> int:
     return max(abs(int(left["x"]) - int(right["x"])), abs(int(left["y"]) - int(right["y"])))
 
 
+def _observable_target_ids(
+    combat: dict[str, Any],
+    *,
+    observer_id: str,
+    target_ids: list[str],
+) -> list[str]:
+    combatants = {
+        str(item.get("actor_id") or ""): item
+        for item in combat.get("combatants", [])
+        if isinstance(item, dict)
+    }
+    observable = []
+    for target_id in target_ids:
+        target = combatants.get(target_id)
+        if target is None:
+            continue
+        visible_to = target.get("visible_to_actor_ids")
+        if not target.get("hidden") or (
+            isinstance(visible_to, list) and observer_id in visible_to
+        ):
+            observable.append(target_id)
+    return observable
+
+
+def _wound_priority(actor: dict[str, Any]) -> tuple[bool, float]:
+    hp = dict(dict(actor.get("sheet") or {}).get("combat") or {}).get("hp", {})
+    current = max(0, int(dict(hp).get("value", 0) or 0))
+    maximum = max(1, int(dict(hp).get("max", current) or current or 1))
+    return current >= maximum, current / maximum
+
+
 def _choose_destination(
     combat: dict[str, Any],
     actor_id: str,
@@ -1136,10 +1167,19 @@ async def _auto_run(
             target_id for target_id in opponents if _hit_points(actors[target_id]) > 0
         ]
         combatants = {str(item["actor_id"]): item for item in combat["combatants"]}
+        if actor_id in party_ids:
+            living_targets = _observable_target_ids(
+                combat,
+                observer_id=actor_id,
+                target_ids=living_targets,
+            )
         living_targets.sort(
-            key=lambda item: _distance(
-                dict(combatants[actor_id].get("position") or {"x": 0, "y": 0}),
-                dict(combatants[item].get("position") or {"x": 0, "y": 0}),
+            key=lambda item: (
+                *(_wound_priority(actors[item]) if actor_id in party_ids else (False, 0.0)),
+                _distance(
+                    dict(combatants[actor_id].get("position") or {"x": 0, "y": 0}),
+                    dict(combatants[item].get("position") or {"x": 0, "y": 0}),
+                ),
             )
         )
         spell_choice = _choose_party_spell(
@@ -1220,6 +1260,32 @@ async def _auto_run(
             )
             if pending_reaction:
                 continue
+            await _end_turn(client, args, str(branch["id"]), actor_id, sequence)
+            continue
+        if actor_id in party_ids and not living_targets:
+            campaign = await _campaign(client, args.campaign_id)
+            dodged = await client.domain(
+                "combat_common_action",
+                {
+                    "campaign_id": args.campaign_id,
+                    "actor_id": actor_id,
+                    "action": "dodge",
+                    "branch_id": branch["id"],
+                    "expected_revision": campaign["revision"],
+                    "idempotency_key": (
+                        f"encounter-unseen-dodge-"
+                        f"{_token(f'{args.run_id}:{sequence}', length=24)}"
+                    ),
+                },
+            )
+            turns.append(
+                {
+                    "sequence": sequence,
+                    "kind": "dodge_unseen",
+                    "actor_id": actor_id,
+                    "result": dodged,
+                }
+            )
             await _end_turn(client, args, str(branch["id"]), actor_id, sequence)
             continue
         preferred_weapon_id = (
