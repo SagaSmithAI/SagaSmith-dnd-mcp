@@ -9,6 +9,7 @@ import pytest
 from sagasmith_dnd.character_schema import default_character_sheet
 
 from scripts.regression_playthrough import (
+    _apply_source_damage,
     _award_experience,
     _campaign_phase,
     _check_knowledge_key,
@@ -343,6 +344,128 @@ def test_character_check_accepts_full_and_compact_exposure_shapes() -> None:
     assert _committed_check_result(result) == result
     with pytest.raises(RuntimeError, match="did not commit"):
         _committed_check_result({"status": "pending_ruling"})
+
+
+def test_source_damage_rolls_then_damages_and_knocks_prone_through_public_tools() -> None:
+    source_ref = {
+        "module_id": "module-1",
+        "scene_id": "scene-1",
+        "chunk_id": "chunk-1",
+        "page_start": 8,
+        "page_end": 9,
+        "heading_path": ["3. KENNEL"],
+        "content_sha256": "abc",
+    }
+
+    class Client:
+        def __init__(self) -> None:
+            self.campaign_revision = 10
+            self.character_revision = 3
+            self.calls: list[str] = []
+
+        async def core(self, tool_id: str, arguments: dict):
+            assert tool_id == "campaign_query"
+            return {
+                "result": {
+                    "id": "campaign-1",
+                    "revision": self.campaign_revision,
+                }
+            }
+
+        async def domain(self, tool_id: str, arguments: dict):
+            self.calls.append(tool_id)
+            if tool_id == "module_query":
+                return {
+                    "module_id": "module-1",
+                    "scene_id": "scene-1",
+                    "content": "On a result of 5 or less, the character falls.",
+                    "locations": [{"key": "3-kennel"}],
+                }
+            if tool_id == "character_query":
+                return {
+                    "id": "actor-1",
+                    "name": "Scout",
+                    "campaign_id": "campaign-1",
+                    "revision": self.character_revision,
+                }
+            if tool_id == "branch_query":
+                return [{"id": "branch-1", "is_current": True}]
+            if tool_id == "dnd_dice_roll":
+                assert arguments["expression"] == "1d6"
+                assert arguments["expected_campaign_revision"] == 10
+                self.campaign_revision += 1
+                return {"status": "committed", "result": {"total": 4, "rolls": [4]}}
+            if tool_id == "character_state_change" and arguments["action"] == "damage":
+                assert arguments["payload"] == {
+                    "parts": [{"amount": 4, "damage_type": "bludgeoning"}]
+                }
+                assert arguments["expected_revision"] == 3
+                self.campaign_revision += 1
+                self.character_revision += 1
+                sheet = default_character_sheet()
+                sheet["combat"]["hp"] = {"value": 6, "max": 10, "temp": 0}
+                return {
+                    "character": {
+                        "id": "actor-1",
+                        "revision": self.character_revision,
+                        "sheet": sheet,
+                    },
+                    "result": {"after_hp": 6},
+                }
+            if (
+                tool_id == "character_state_change"
+                and arguments["action"] == "knock_prone"
+            ):
+                assert arguments["expected_revision"] == 4
+                self.campaign_revision += 1
+                self.character_revision += 1
+                sheet = default_character_sheet()
+                sheet["combat"]["hp"] = {"value": 6, "max": 10, "temp": 0}
+                sheet["conditions"] = ["prone"]
+                return {
+                    "character": {
+                        "id": "actor-1",
+                        "revision": self.character_revision,
+                        "sheet": sheet,
+                    },
+                    "status": "knocked_prone",
+                }
+            if tool_id == "continuity_commit":
+                event = arguments["payload"]["event"]
+                assert event["payload"]["amount"] == 4
+                assert event["payload"]["source_ref"] == source_ref
+                self.campaign_revision += 1
+                return {"event": {"id": "event-1"}, "snapshot": {"slot": 2}}
+            if tool_id == "playthrough_manifest":
+                assert arguments["action"] == "sync"
+                return {
+                    "manifest": {"status": "in_progress"},
+                    "campaign_revision": self.campaign_revision,
+                }
+            raise AssertionError((tool_id, arguments))
+
+    result = asyncio.run(
+        _apply_source_damage(
+            Client(),
+            campaign_id="campaign-1",
+            run_id="run-1",
+            scene_id="scene-1",
+            location_key="3-kennel",
+            source_excerpt="On a result of 5 or less, the character falls.",
+            source_ref=source_ref,
+            actor_id="actor-1",
+            expression="1d6",
+            damage_type="bludgeoning",
+            reason="falling 10 feet in the chimney",
+            knock_prone=True,
+            knowledge_actor_ids=["actor-2"],
+        )
+    )
+
+    assert result["damage"]["result"]["after_hp"] == 6
+    assert result["prone"]["status"] == "knocked_prone"
+    assert result["character"]["sheet"]["conditions"] == ["prone"]
+    assert result["knowledge_actor_ids"] == ["actor-1", "actor-2"]
 
 
 def test_partially_committed_check_is_recovered_without_reroll() -> None:

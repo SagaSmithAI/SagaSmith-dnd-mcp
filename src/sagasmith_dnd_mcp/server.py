@@ -129,6 +129,7 @@ from sagasmith_dnd.lifecycle import (
     advance_effect_durations,
     advance_world_effect_durations,
     apply_rest,
+    knock_prone_outside_combat,
     record_rest_completion,
     recover_stable_creature,
     stand_outside_combat,
@@ -9044,6 +9045,43 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             rule_receipts=receipts,
         )
 
+    def character_knock_prone(
+        character_id: str,
+        principal_id: str = "system:local",
+        expected_revision: int | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Knock a conscious living character Prone outside active combat."""
+        current = characters.get(character_id)
+        require_character_control(current, principal_id)
+        require_outside_active_combat(current, "knocking prone")
+        if current.campaign_id is None:
+            raise ValueError("knocking prone requires a campaign-bound character")
+        applied = knock_prone_outside_combat(current.sheet)
+        rules = effective_rule_context(
+            current.campaign_id, facts={"actor_id": character_id, "condition": "prone"}
+        )
+        receipts = core_receipts(
+            rules,
+            ["dnd5e.core.movement.prone_crawl_stand"],
+            "character.knock_prone",
+        )
+        return update_sheet(
+            character_id,
+            applied["sheet"],
+            operation="character.knock_prone",
+            principal_id=principal_id,
+            expected_revision=expected_revision,
+            idempotency_key=idempotency_key,
+            payload={"operation": "knock_prone"},
+            response_extra={
+                "status": applied["status"],
+                "added_condition": applied["added_condition"],
+                "rule_receipts": receipts,
+            },
+            rule_receipts=receipts,
+        )
+
     def character_level_advance(
         character_id: str,
         class_name: str,
@@ -15588,6 +15626,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "level_advance",
             "stable_recovery",
             "stand",
+            "knock_prone",
             "memory_add",
             "memory_resolve",
         ],
@@ -15684,6 +15723,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             )
         elif action == "stand":
             result = character_stand(
+                character_id,
+                principal_id,
+                expected_revision,
+                idempotency_key,
+            )
+        elif action == "knock_prone":
+            result = character_knock_prone(
                 character_id,
                 principal_id,
                 expected_revision,

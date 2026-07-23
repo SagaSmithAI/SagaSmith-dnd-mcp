@@ -68,6 +68,29 @@ def test_play_hp_changes_use_the_same_zero_hp_and_recovery_rules(tmp_path: Path)
             "successes": 0,
             "failures": 0,
         }
+        stood = await call(
+            server,
+            "character_state_change",
+            {
+                "character_id": pc["id"],
+                "action": "stand",
+                "expected_revision": healed_character["revision"],
+                "idempotency_key": "stand",
+            },
+        )
+        knocked_prone = await call(
+            server,
+            "character_state_change",
+            {
+                "character_id": pc["id"],
+                "action": "knock_prone",
+                "expected_revision": stood["character"]["revision"],
+                "idempotency_key": "knock-prone",
+            },
+        )
+        assert knocked_prone["status"] == "knocked_prone"
+        assert knocked_prone["added_condition"] == "prone"
+        assert knocked_prone["character"]["sheet"]["conditions"] == ["prone"]
 
         monster_sheet = default_character_sheet()
         monster_sheet["edition"] = "2014"

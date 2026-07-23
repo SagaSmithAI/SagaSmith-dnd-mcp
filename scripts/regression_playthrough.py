@@ -37,6 +37,7 @@ def _arguments() -> argparse.Namespace:
             "advance-scene",
             "record-event",
             "resolve-check",
+            "apply-damage",
             "award-xp",
             "configure-advancement",
             "refresh-module",
@@ -74,6 +75,11 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--knowledge-actor-id", action="append", default=[])
     parser.add_argument("--success-knowledge", default="")
     parser.add_argument("--failure-knowledge", default="")
+    parser.add_argument("--damage-actor-id", default="")
+    parser.add_argument("--damage-expression", default="")
+    parser.add_argument("--damage-type", default="")
+    parser.add_argument("--damage-reason", default="")
+    parser.add_argument("--damage-knock-prone", action="store_true")
     parser.add_argument("--event-type", default="")
     parser.add_argument("--event-summary", default="")
     parser.add_argument("--event-knowledge", default="")
@@ -947,6 +953,204 @@ async def _record_event(
     }
 
 
+def _dice_result(value: dict[str, Any]) -> dict[str, Any]:
+    result = dict(value.get("result") or value)
+    total = result.get("total")
+    if isinstance(total, bool) or not isinstance(total, int) or total <= 0:
+        raise RuntimeError("server dice roll did not return a positive integer total")
+    return result
+
+
+async def _apply_source_damage(
+    client: ExposureClient,
+    *,
+    campaign_id: str,
+    run_id: str,
+    scene_id: str,
+    location_key: str,
+    source_excerpt: str,
+    source_ref: dict[str, Any] | None,
+    actor_id: str,
+    expression: str,
+    damage_type: str,
+    reason: str,
+    knock_prone: bool,
+    knowledge_actor_ids: list[str],
+) -> dict[str, Any]:
+    if not all(
+        (
+            scene_id,
+            location_key,
+            source_excerpt,
+            actor_id,
+            expression,
+            damage_type,
+            reason,
+        )
+    ):
+        raise ValueError(
+            "apply-damage requires scene, location, excerpt, actor, expression, "
+            "damage type, and reason"
+        )
+    scene = await client.domain(
+        "module_query",
+        {
+            "campaign_id": campaign_id,
+            "view": "scene",
+            "payload": {"scene_id": scene_id},
+        },
+    )
+    exact_ref = _validate_source_ref(scene, source_ref, excerpt=source_excerpt)
+    location_keys = {str(item.get("key") or "") for item in _scene_locations(scene)}
+    if location_key not in location_keys:
+        raise ValueError("apply-damage location is not present in the scene atlas")
+    actor = await client.domain(
+        "character_query",
+        {"view": "get", "payload": {"character_id": actor_id}},
+    )
+    if actor.get("campaign_id") != campaign_id:
+        raise ValueError("apply-damage actor does not belong to the campaign")
+    branches = await client.domain(
+        "branch_query",
+        {"campaign_id": campaign_id, "view": "list"},
+    )
+    branch = next((item for item in branches if item.get("is_current")), None)
+    if branch is None:
+        raise RuntimeError("campaign has no current branch")
+    campaign = await _campaign(client, campaign_id)
+    rolled = await client.domain(
+        "dnd_dice_roll",
+        {
+            "campaign_id": campaign_id,
+            "expression": expression,
+            "branch_id": str(branch["id"]),
+            "expected_campaign_revision": campaign["revision"],
+            "idempotency_key": _mutation_key(
+                run_id, "source-damage-roll", f"{scene_id}:{actor_id}:{expression}"
+            ),
+        },
+    )
+    roll_result = _dice_result(rolled)
+    amount = int(roll_result["total"])
+    damaged = await client.domain(
+        "character_state_change",
+        {
+            "character_id": actor_id,
+            "action": "damage",
+            "payload": {
+                "parts": [{"amount": amount, "damage_type": damage_type}],
+            },
+            "expected_revision": actor["revision"],
+            "idempotency_key": _mutation_key(
+                run_id, "source-damage", f"{scene_id}:{actor_id}:{amount}"
+            ),
+        },
+    )
+    character_after = dict(damaged["character"])
+    conditions = {
+        str(item).casefold()
+        for item in dict(character_after.get("sheet") or {}).get("conditions", [])
+    }
+    hp = int(
+        dict(dict(character_after.get("sheet") or {}).get("combat", {}).get("hp") or {}).get(
+            "value", 0
+        )
+        or 0
+    )
+    prone_result = None
+    if knock_prone and hp > 0 and "prone" not in conditions:
+        prone_result = await client.domain(
+            "character_state_change",
+            {
+                "character_id": actor_id,
+                "action": "knock_prone",
+                "expected_revision": character_after["revision"],
+                "idempotency_key": _mutation_key(
+                    run_id, "source-damage-prone", f"{scene_id}:{actor_id}"
+                ),
+            },
+        )
+        character_after = dict(prone_result["character"])
+    recipients = list(dict.fromkeys([actor_id, *knowledge_actor_ids]))
+    campaign = await _campaign(client, campaign_id)
+    committed = await client.domain(
+        "continuity_commit",
+        {
+            "campaign_id": campaign_id,
+            "payload": {
+                "event": {
+                    "summary": (
+                        f"{actor['name']} took {amount} {damage_type} damage: {reason.strip()}"
+                    ),
+                    "event_type": "environmental_damage",
+                    "audience_scope": "party",
+                    "payload": {
+                        "scene_id": scene_id,
+                        "location_key": location_key,
+                        "actor_id": actor_id,
+                        "damage_expression": expression,
+                        "damage_roll": roll_result,
+                        "damage_type": damage_type,
+                        "amount": amount,
+                        "knock_prone": knock_prone,
+                        "reason": reason.strip(),
+                        "source_excerpt": source_excerpt,
+                        "source_ref": exact_ref,
+                    },
+                },
+                "actor_knowledge": [
+                    {
+                        "actor_id": recipient,
+                        "knowledge_key": (
+                            f"playthrough.{_token(run_id)}.{_token(scene_id)}."
+                            f"{_token(actor_id)}.environmental_damage"
+                        ),
+                        "proposition": (
+                            f"{actor['name']} took {amount} {damage_type} damage "
+                            f"from {reason.strip()}."
+                        ),
+                        "disclosure_scope": "owner",
+                    }
+                    for recipient in recipients
+                ],
+                "snapshot": {
+                    "label": (
+                        f"Full playthrough environmental damage: {actor['name']} at "
+                        f"{location_key}"
+                    )
+                },
+                "branch_id": str(branch["id"]),
+            },
+            "expected_revision": campaign["revision"],
+            "idempotency_key": _mutation_key(
+                run_id, "source-damage-continuity", f"{scene_id}:{actor_id}"
+            ),
+        },
+    )
+    synced = await _manifest_mutation(
+        client,
+        campaign_id=campaign_id,
+        action="sync",
+        run_id=run_id,
+        identity=f"source-damage-sync:{scene_id}:{actor_id}",
+    )
+    return {
+        "scene": {
+            "scene_id": scene_id,
+            "location_key": location_key,
+            "source_ref": exact_ref,
+        },
+        "actor": {"id": actor_id, "name": actor["name"]},
+        "roll": rolled,
+        "damage": damaged,
+        "prone": prone_result,
+        "character": character_after,
+        "knowledge_actor_ids": recipients,
+        "continuity": committed,
+        "sync": synced,
+    }
+
+
 async def _award_experience(
     client: ExposureClient,
     *,
@@ -1491,6 +1695,25 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     knowledge=args.event_knowledge,
                     knowledge_actor_ids=args.event_knowledge_actor_id,
                     progress_percent=args.progress_percent,
+                )
+            elif args.action == "apply-damage":
+                if phase != "play":
+                    raise RuntimeError("apply-damage requires the play phase")
+                await client.load("play.characters", "play.resolution")
+                report["result"] = await _apply_source_damage(
+                    client,
+                    campaign_id=args.campaign_id,
+                    run_id=args.run_id,
+                    scene_id=str(args.scene_id or ""),
+                    location_key=args.location_key,
+                    source_excerpt=args.source_excerpt,
+                    source_ref=args.source_ref_json,
+                    actor_id=args.damage_actor_id,
+                    expression=args.damage_expression,
+                    damage_type=args.damage_type,
+                    reason=args.damage_reason,
+                    knock_prone=args.damage_knock_prone,
+                    knowledge_actor_ids=args.knowledge_actor_id,
                 )
             elif args.action == "award-xp":
                 if phase != "play":
