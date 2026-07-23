@@ -264,5 +264,66 @@ def test_source_bound_loot_is_atomic_idempotent_and_branch_audited(tmp_path: Pat
                     "idempotency_key": "duplicate-spend",
                 },
             )
+        item_spend_arguments = {
+            "campaign_id": campaign["id"],
+            "action": "item_spend",
+            "payload": {
+                "spend_id": "offer-jade-frog",
+                "item_id": "jade-frog",
+                "quantity": 1,
+                "reason": "The party surrendered the source-bound jade frog.",
+                "source_ref": source_ref,
+            },
+            "expected_revision": spent["campaign"]["revision"],
+            "idempotency_key": "item-spend",
+        }
+        with pytest.raises(Exception, match="quantity exceeds the item stack"):
+            await _call(
+                server,
+                "campaign_change",
+                {
+                    **item_spend_arguments,
+                    "payload": {**item_spend_arguments["payload"], "quantity": 2},
+                    "idempotency_key": "item-spend-too-many",
+                },
+            )
+        unchanged = await _call(
+            server,
+            "campaign_query",
+            {"view": "party", "payload": {"campaign_id": campaign["id"]}},
+        )
+        assert any(
+            item["id"] == "jade-frog" for item in unchanged["inventory"]["items"]
+        )
+        item_spent = await _call(server, "campaign_change", item_spend_arguments)
+        item_spend_replay = await _call(server, "campaign_change", item_spend_arguments)
+
+        assert item_spend_replay == item_spent
+        assert item_spent["status"] == "committed"
+        assert item_spent["removed"]["id"] == "jade-frog"
+        assert all(
+            item["id"] != "jade-frog"
+            for item in item_spent["party"]["inventory"]["items"]
+        )
+        assert item_spent["campaign"]["state"]["item_spends"] == [
+            {
+                "id": "offer-jade-frog",
+                "item_id": "jade-frog",
+                "quantity": 1,
+                "reason": "The party surrendered the source-bound jade frog.",
+                "source_ref": source_ref,
+                "removed": item_spent["removed"],
+            }
+        ]
+        with pytest.raises(Exception, match="item spend_id already exists"):
+            await _call(
+                server,
+                "campaign_change",
+                {
+                    **item_spend_arguments,
+                    "expected_revision": item_spent["campaign"]["revision"],
+                    "idempotency_key": "duplicate-item-spend",
+                },
+            )
 
     asyncio.run(exercise())

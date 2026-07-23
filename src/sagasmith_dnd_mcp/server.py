@@ -3488,6 +3488,139 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             campaign_id=campaign_id,
         )
 
+    def campaign_item_spend(
+        campaign_id: str,
+        spend_id: str,
+        item_id: str,
+        quantity: int,
+        reason: str,
+        source_ref: str,
+        principal_id: str = "system:local",
+        expected_revision: int | None = None,
+        branch_id: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Atomically expend one source-bound item from the shared party inventory."""
+        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        require_write_contract(expected_revision, idempotency_key)
+        resolved_branch_id = require_current_branch(campaign_id, branch_id)
+        campaign = campaigns.get(campaign_id)
+        state = dict(campaign.state or {})
+        if state.get("game_phase", PROFILE_LOBBY) != PROFILE_PLAY:
+            raise CombatEngineError("source-bound items can be spent only in play")
+        if isinstance(state.get("combat"), dict) and state["combat"].get("active", False):
+            raise CombatEngineError("end active combat before spending a party item")
+
+        normalized_spend_id = str(spend_id).strip()
+        normalized_item_id = str(item_id).strip()
+        normalized_reason = str(reason).strip()
+        normalized_source_ref = str(source_ref).strip()
+        if not normalized_spend_id or len(normalized_spend_id) > 200:
+            raise ValueError("spend_id must contain 1 to 200 characters")
+        if not normalized_item_id or len(normalized_item_id) > 200:
+            raise ValueError("item_id must contain 1 to 200 characters")
+        if isinstance(quantity, bool) or not isinstance(quantity, int) or quantity <= 0:
+            raise ValueError("quantity must be a positive integer")
+        if not normalized_reason or len(normalized_reason) > 1000:
+            raise ValueError("reason must contain 1 to 1000 characters")
+        if not normalized_source_ref or len(normalized_source_ref) > 8192:
+            raise ValueError("source_ref must contain 1 to 8192 characters")
+        try:
+            source = json.loads(normalized_source_ref)
+        except json.JSONDecodeError as exc:
+            raise ValueError("source_ref must be a JSON object") from exc
+        if not isinstance(source, dict):
+            raise ValueError("source_ref must be a JSON object")
+        required_source_fields = {
+            "module_id",
+            "scene_id",
+            "chunk_id",
+            "content_sha256",
+        }
+        if any(not str(source.get(field) or "").strip() for field in required_source_fields):
+            raise ValueError(
+                "source_ref requires module_id, scene_id, chunk_id, and content_sha256"
+            )
+        expanded = modules.expand(str(source["chunk_id"]))
+        if str(expanded.get("campaign_id")) != campaign_id:
+            raise ValueError("source_ref chunk does not belong to the campaign")
+        if str(dict(expanded.get("module") or {}).get("id")) != str(source["module_id"]):
+            raise ValueError("source_ref module_id does not match its chunk")
+        if str(dict(expanded.get("scene") or {}).get("id")) != str(source["scene_id"]):
+            raise ValueError("source_ref scene_id does not match its chunk")
+        chunk_content_sha256 = hashlib.sha256(
+            str(expanded.get("content") or "").encode("utf-8")
+        ).hexdigest()
+        if str(source["content_sha256"]).casefold() != chunk_content_sha256:
+            raise ValueError("source_ref content_sha256 does not match its chunk")
+
+        request_payload = {
+            "spend_id": normalized_spend_id,
+            "item_id": normalized_item_id,
+            "quantity": quantity,
+            "reason": normalized_reason,
+            "source_ref": normalized_source_ref,
+            "expected_revision": expected_revision,
+            "branch_id": resolved_branch_id,
+        }
+        scope = f"campaign-item-spend:{campaign_id}:{resolved_branch_id}:{principal_id}"
+        replay = replay_idempotent(scope, idempotency_key, request_payload)
+        if replay is not None:
+            return replay
+
+        spends = list(state.get("item_spends") or [])
+        if any(
+            str(dict(item).get("id") or "") == normalized_spend_id
+            for item in spends
+            if isinstance(item, dict)
+        ):
+            raise ValueError("item spend_id already exists on this branch")
+
+        sheet, removed = remove_inventory_item(
+            party_sheet(state),
+            normalized_item_id,
+            quantity,
+        )
+        spends.append(
+            {
+                "id": normalized_spend_id,
+                "item_id": normalized_item_id,
+                "quantity": quantity,
+                "reason": normalized_reason,
+                "source_ref": normalized_source_ref,
+                "removed": deepcopy(removed),
+            }
+        )
+        next_state = party_state(state, sheet)
+        next_state["item_spends"] = spends
+        StateMutationService(storage.database).replace(
+            campaign_id,
+            campaign_state=validate_party_state(next_state),
+            expected_campaign_revision=expected_revision,
+            operation="campaign.item.spend",
+            actor=principal_id,
+            branch_id=resolved_branch_id,
+            idempotency_key=idempotency_key,
+        )
+        response = {
+            "status": "committed",
+            "spend_id": normalized_spend_id,
+            "item_id": normalized_item_id,
+            "quantity": quantity,
+            "removed": removed,
+            "reason": normalized_reason,
+            "source_ref": normalized_source_ref,
+            "party": party_show(campaign_id, principal_id=principal_id),
+            "campaign": asdict(campaigns.get(campaign_id)),
+        }
+        return remember_idempotent(
+            scope,
+            idempotency_key,
+            request_payload,
+            response,
+            campaign_id=campaign_id,
+        )
+
     def campaign_consumable_use(
         campaign_id: str,
         use_id: str,
@@ -16845,6 +16978,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "experience_award",
             "loot_acquire",
             "currency_spend",
+            "item_spend",
             "consumable_use",
         ] = "update",
         principal_id: str = "system:local",
@@ -16946,6 +17080,19 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 required(data, "reason"),
                 required(data, "source_ref"),
                 required(data, "rule_ref"),
+                principal_id,
+                expected_revision,
+                branch_id,
+                idempotency_key,
+            )
+        elif action == "item_spend":
+            result = campaign_item_spend(
+                campaign_id,
+                required(data, "spend_id"),
+                required(data, "item_id"),
+                required(data, "quantity"),
+                required(data, "reason"),
+                required(data, "source_ref"),
                 principal_id,
                 expected_revision,
                 branch_id,

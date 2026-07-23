@@ -49,6 +49,7 @@ def _arguments() -> argparse.Namespace:
             "recover-stable",
             "acquire-loot",
             "spend-coins",
+            "spend-item",
             "use-consumable",
             "award-xp",
             "advance-level",
@@ -149,6 +150,8 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--loot-reason", default="")
     parser.add_argument("--spend-id", default="")
     parser.add_argument("--spend-coins-json", type=json.loads, default={})
+    parser.add_argument("--spend-item-id", default="")
+    parser.add_argument("--spend-item-quantity", type=int, default=1)
     parser.add_argument("--spend-reason", default="")
     parser.add_argument("--spend-rule-ref", default="")
     parser.add_argument("--consumable-use-id", default="")
@@ -3487,6 +3490,201 @@ async def _spend_source_currency(
     }
 
 
+async def _spend_source_item(
+    client: ExposureClient,
+    *,
+    campaign_id: str,
+    run_id: str,
+    scene_id: str,
+    location_key: str,
+    source_excerpt: str,
+    source_ref: dict[str, Any] | None,
+    spend_id: str,
+    item_id: str,
+    quantity: int,
+    reason: str,
+    knowledge_actor_ids: list[str],
+    source_scene_id: str = "",
+) -> dict[str, Any]:
+    normalized_spend_id = spend_id.strip()
+    normalized_item_id = item_id.strip()
+    normalized_reason = reason.strip()
+    cited_scene_id = source_scene_id.strip() or scene_id
+    recipients = list(dict.fromkeys(knowledge_actor_ids))
+    if not all(
+        (
+            scene_id,
+            location_key,
+            source_excerpt.strip(),
+            normalized_spend_id,
+            normalized_item_id,
+            normalized_reason,
+        )
+    ):
+        raise ValueError(
+            "spend-item requires scene, location, excerpt, spend id, item id, and reason"
+        )
+    if isinstance(quantity, bool) or not isinstance(quantity, int) or quantity <= 0:
+        raise ValueError("spend-item requires a positive item quantity")
+    if not recipients or len(recipients) != len(knowledge_actor_ids):
+        raise ValueError("spend-item requires unique actor knowledge recipients")
+
+    source_scene = await client.domain(
+        "module_query",
+        {
+            "campaign_id": campaign_id,
+            "view": "scene",
+            "payload": {"scene_id": cited_scene_id},
+        },
+    )
+    exact_ref = _validate_source_ref(source_scene, source_ref, excerpt=source_excerpt)
+    occurrence_scene = (
+        source_scene
+        if cited_scene_id == scene_id
+        else await client.domain(
+            "module_query",
+            {
+                "campaign_id": campaign_id,
+                "view": "scene",
+                "payload": {"scene_id": scene_id},
+            },
+        )
+    )
+    if location_key not in {
+        str(item.get("key") or "") for item in _scene_locations(occurrence_scene)
+    }:
+        raise ValueError("spend-item location is not present in the occurrence scene atlas")
+    serialized_source_ref = json.dumps(
+        exact_ref,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+    campaign = await _campaign(client, campaign_id)
+    prior = next(
+        (
+            dict(item)
+            for item in list(dict(campaign.get("state") or {}).get("item_spends") or [])
+            if isinstance(item, dict) and str(item.get("id") or "") == normalized_spend_id
+        ),
+        None,
+    )
+    recovered = prior is not None
+    if prior is not None:
+        expected = {
+            "id": normalized_spend_id,
+            "item_id": normalized_item_id,
+            "quantity": quantity,
+            "reason": normalized_reason,
+            "source_ref": serialized_source_ref,
+        }
+        if any(prior.get(key) != value for key, value in expected.items()):
+            raise RuntimeError("existing item spend does not match this request")
+        spent: dict[str, Any] = {
+            "status": "recovered",
+            "spend_id": normalized_spend_id,
+            "item_id": normalized_item_id,
+            "quantity": quantity,
+            "removed": deepcopy(prior.get("removed") or {}),
+            "reason": normalized_reason,
+            "source_ref": serialized_source_ref,
+        }
+    else:
+        spent = await client.domain(
+            "campaign_change",
+            {
+                "campaign_id": campaign_id,
+                "action": "item_spend",
+                "payload": {
+                    "spend_id": normalized_spend_id,
+                    "item_id": normalized_item_id,
+                    "quantity": quantity,
+                    "reason": normalized_reason,
+                    "source_ref": serialized_source_ref,
+                },
+                "expected_revision": campaign["revision"],
+                "idempotency_key": _mutation_key(
+                    run_id, "item-spend", normalized_spend_id
+                ),
+            },
+        )
+        if spent.get("status") != "committed":
+            raise RuntimeError("source-bound item spend did not commit")
+
+    branches = await client.domain(
+        "branch_query",
+        {"campaign_id": campaign_id, "view": "list"},
+    )
+    branch = next((item for item in branches if item.get("is_current")), None)
+    if branch is None:
+        raise RuntimeError("campaign has no current branch")
+    campaign = await _campaign(client, campaign_id)
+    committed = await client.domain(
+        "continuity_commit",
+        {
+            "campaign_id": campaign_id,
+            "payload": {
+                "event": {
+                    "summary": normalized_reason,
+                    "event_type": "item_spent",
+                    "audience_scope": "party",
+                    "payload": {
+                        "scene_id": scene_id,
+                        "location_key": location_key,
+                        "spend_id": normalized_spend_id,
+                        "item_id": normalized_item_id,
+                        "quantity": quantity,
+                        "removed": deepcopy(spent.get("removed") or {}),
+                        "source_excerpt": source_excerpt.strip(),
+                        "source_ref": exact_ref,
+                    },
+                },
+                "actor_knowledge": [
+                    {
+                        "actor_id": actor_id,
+                        "knowledge_key": (
+                            f"playthrough.{_token(run_id)}.item-spend."
+                            f"{_token(normalized_spend_id)}"
+                        ),
+                        "proposition": normalized_reason,
+                        "disclosure_scope": "owner",
+                    }
+                    for actor_id in recipients
+                ],
+                "snapshot": {
+                    "label": f"Full playthrough item spend: {normalized_spend_id}"
+                },
+                "branch_id": str(branch["id"]),
+            },
+            "expected_revision": campaign["revision"],
+            "idempotency_key": _mutation_key(
+                run_id, "item-spend-continuity", normalized_spend_id
+            ),
+        },
+    )
+    synced = await _manifest_mutation(
+        client,
+        campaign_id=campaign_id,
+        action="sync",
+        run_id=run_id,
+        identity=f"item-spend-sync:{normalized_spend_id}",
+    )
+    return {
+        "scene": {
+            "scene_id": scene_id,
+            "location_key": location_key,
+            "source_scene_id": cited_scene_id,
+            "source_ref": exact_ref,
+        },
+        "spend": spent,
+        "spend_recovered": recovered,
+        "knowledge_actor_ids": recipients,
+        "continuity": committed,
+        "sync": synced,
+    }
+
+
 async def _use_shared_consumable(
     client: ExposureClient,
     *,
@@ -5083,6 +5281,24 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     coins=args.spend_coins_json,
                     reason=args.spend_reason,
                     rule_ref=args.spend_rule_ref,
+                    knowledge_actor_ids=args.knowledge_actor_id,
+                    source_scene_id=args.source_scene_id,
+                )
+            elif args.action == "spend-item":
+                if phase != "play":
+                    raise RuntimeError("spend-item requires the play phase")
+                report["result"] = await _spend_source_item(
+                    client,
+                    campaign_id=args.campaign_id,
+                    run_id=args.run_id,
+                    scene_id=str(args.scene_id or ""),
+                    location_key=args.location_key,
+                    source_excerpt=args.source_excerpt,
+                    source_ref=args.source_ref_json,
+                    spend_id=args.spend_id,
+                    item_id=args.spend_item_id,
+                    quantity=args.spend_item_quantity,
+                    reason=args.spend_reason,
                     knowledge_actor_ids=args.knowledge_actor_id,
                     source_scene_id=args.source_scene_id,
                 )
