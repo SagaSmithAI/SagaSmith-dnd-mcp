@@ -10,8 +10,25 @@ import pytest
 from scripts.regression_campaign import (
     _configure_utf8_streams,
     _expanded_source_ref,
+    _load_review_override,
     _validate_noncombat_scene,
 )
+
+
+def test_blocked_candidate_override_requires_nonempty_visual_evidence(tmp_path: Path) -> None:
+    path = tmp_path / "wolf.md"
+    path.write_text("# WOLF\n\n**Armor Class** 13\n", encoding="utf-8")
+
+    content, observation, resolved = _load_review_override(
+        path,
+        "Rendered source PDF page 63 at 200 DPI and checked all six ability scores.",
+    )
+
+    assert content.startswith("# WOLF")
+    assert observation.startswith("Rendered source PDF page 63")
+    assert resolved == path.resolve()
+    with pytest.raises(ValueError, match="visual evidence"):
+        _load_review_override(path, "")
 
 
 def test_expanded_source_ref_keeps_exact_module_scene_and_content_identity() -> None:

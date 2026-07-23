@@ -23,6 +23,17 @@ from mcp.client.stdio import StdioServerParameters, stdio_client
 PRINCIPAL_ID = "system:local"
 
 
+def _load_review_override(path: Path, observation: str) -> tuple[str, str, Path]:
+    resolved = path.expanduser().resolve()
+    content = resolved.read_text(encoding="utf-8").strip()
+    if not content:
+        raise ValueError("review override must not be empty")
+    evidence = observation.strip()
+    if not evidence:
+        raise ValueError("review override requires visual evidence")
+    return content, evidence, resolved
+
+
 def _arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--home", type=Path, required=True, help="Existing D&D MCP home")
@@ -55,6 +66,16 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument(
         "--candidate-id",
         help="Review-ready text candidate to review and create during prepare-statblock",
+    )
+    parser.add_argument(
+        "--review-override",
+        type=Path,
+        help="DM-verified statblock transcription for a blocked module candidate",
+    )
+    parser.add_argument(
+        "--review-observation",
+        default="",
+        help="Visual review evidence for --review-override",
     )
     parser.add_argument(
         "--actor-name",
@@ -1817,10 +1838,56 @@ async def _prepare_statblock(args: argparse.Namespace) -> dict[str, Any]:
                         f"candidate id must resolve exactly once; found {len(matches)}"
                     )
                 candidate = matches[0]
-                if candidate.get("execution_state") != "review_ready":
+                if (
+                    candidate.get("execution_state") != "review_ready"
+                    and args.review_override is None
+                ):
                     raise RuntimeError(
                         str(candidate.get("review_error") or "candidate is not review-ready")
                     )
+                normalized_content = str(candidate.get("normalized_content") or "")
+                source_asset_id = None
+                page_number = None
+                review_metadata = None
+                observation = (
+                    "Regression DM reviewed the normalized statblock against "
+                    "every cited module text chunk."
+                )
+                if args.review_override is not None:
+                    normalized_content, observation, override_path = _load_review_override(
+                        args.review_override,
+                        args.review_observation,
+                    )
+                    if candidate.get("page_start") != candidate.get("page_end"):
+                        raise ValueError(
+                            "review override requires a candidate from one source page"
+                        )
+                    assets = _facade_value(
+                        await client.domain(
+                            "module_query",
+                            {
+                                "campaign_id": args.campaign_id,
+                                "view": "assets",
+                                "payload": {"module_id": candidate["module_id"]},
+                            },
+                        )
+                    )
+                    pdf_assets = [
+                        item
+                        for item in assets
+                        if str(item.get("media_type") or "") == "application/pdf"
+                    ]
+                    if len(pdf_assets) != 1:
+                        raise RuntimeError(
+                            "review override requires exactly one source PDF asset"
+                        )
+                    source_asset_id = str(pdf_assets[0]["id"])
+                    page_number = int(candidate["page_start"])
+                    review_metadata = {
+                        "review_method": "rendered_source_page",
+                        "candidate_id": candidate["id"],
+                        "override_path": str(override_path),
+                    }
                 reviewed = _facade_value(
                     await client.domain(
                         "module_content_review",
@@ -1832,12 +1899,12 @@ async def _prepare_statblock(args: argparse.Namespace) -> dict[str, Any]:
                                 f"{_idempotency_token(str(candidate['name'])).lower()}-"
                                 f"{str(candidate['id']).split(':')[-1][:10]}"
                             ),
-                            "normalized_content": candidate["normalized_content"],
+                            "normalized_content": normalized_content,
                             "source_chunk_ids": candidate["source_chunk_ids"],
-                            "observation": (
-                                "Regression DM reviewed the normalized statblock against "
-                                "every cited module text chunk."
-                            ),
+                            "source_asset_id": source_asset_id,
+                            "page_number": page_number,
+                            "observation": observation,
+                            "metadata": review_metadata,
                             "idempotency_key": f"{token}-review-candidate",
                         },
                     )
