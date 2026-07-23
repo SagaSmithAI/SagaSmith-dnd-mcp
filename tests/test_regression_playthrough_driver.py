@@ -892,6 +892,74 @@ def test_play_activity_records_structured_effect_and_random_receipt() -> None:
     assert result["knowledge_actor_ids"] == ["fighter", "cleric"]
 
 
+def test_dm_event_keeps_enemy_knowledge_out_of_party_event_stream() -> None:
+    source_ref = {
+        "module_id": "module-1",
+        "scene_id": "scene-1",
+        "chunk_id": "chunk-1",
+        "page_start": 12,
+        "page_end": 12,
+        "heading_path": ["Developments"],
+        "content_sha256": "abc",
+    }
+
+    class Client:
+        revision = 7
+
+        async def core(self, tool_id: str, arguments: dict):
+            assert tool_id == "campaign_query"
+            return {"result": {"id": "campaign-1", "revision": self.revision}}
+
+        async def domain(self, tool_id: str, arguments: dict):
+            if tool_id == "module_query" and arguments["view"] == "scene":
+                return {
+                    "module_id": "module-1",
+                    "scene_id": "scene-1",
+                    "content": "A messenger warned the leader.",
+                    "locations": [{"key": "8-cave"}],
+                }
+            if tool_id == "module_query" and arguments["view"] == "progress":
+                return []
+            if tool_id == "module_set_progress":
+                self.revision += 1
+                return {"scene_id": "scene-1", "state_version": 1}
+            if tool_id == "branch_query":
+                return [{"id": "branch-1", "is_current": True}]
+            if tool_id == "continuity_commit":
+                event = arguments["payload"]["event"]
+                assert event["audience_scope"] == "dm"
+                knowledge = arguments["payload"]["actor_knowledge"]
+                assert [item["actor_id"] for item in knowledge] == ["enemy"]
+                self.revision += 1
+                return {"event": {"id": "event-1"}, "snapshot": {"slot": 7}}
+            if tool_id == "playthrough_manifest":
+                return {
+                    "manifest": {"status": "in_progress"},
+                    "campaign_revision": self.revision,
+                }
+            raise AssertionError((tool_id, arguments))
+
+    result = asyncio.run(
+        _record_event(
+            Client(),
+            campaign_id="campaign-1",
+            run_id="run-1",
+            scene_id="scene-1",
+            location_key="8-cave",
+            source_excerpt="A messenger warned the leader.",
+            source_ref=source_ref,
+            event_type="enemy_alerted",
+            summary="The leader received the warning.",
+            knowledge="The party is approaching.",
+            knowledge_actor_ids=["enemy"],
+            progress_percent=60,
+            audience_scope="dm",
+        )
+    )
+
+    assert result["knowledge_actor_ids"] == ["enemy"]
+
+
 def test_long_rest_uses_atomic_party_rest_and_records_checkpoint() -> None:
     class Client:
         def __init__(self) -> None:

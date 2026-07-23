@@ -105,6 +105,11 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--rest-duration-minutes", type=int, default=60)
     parser.add_argument("--rest-reason", default="")
     parser.add_argument("--event-type", default="")
+    parser.add_argument(
+        "--event-audience-scope",
+        choices=("party", "dm"),
+        default="party",
+    )
     parser.add_argument("--event-summary", default="")
     parser.add_argument("--event-knowledge", default="")
     parser.add_argument("--event-knowledge-actor-id", action="append", default=[])
@@ -997,6 +1002,7 @@ async def _record_event(
     knowledge: str,
     knowledge_actor_ids: list[str],
     progress_percent: int | None,
+    audience_scope: str = "party",
 ) -> dict[str, Any]:
     if not all((scene_id, location_key, source_excerpt, event_type, summary)):
         raise ValueError("record-event requires scene, location, excerpt, event type, and summary")
@@ -1006,6 +1012,8 @@ async def _record_event(
         )
     if progress_percent is not None and not 0 <= progress_percent <= 100:
         raise ValueError("record-event progress percent must be between 0 and 100")
+    if audience_scope not in {"party", "dm"}:
+        raise ValueError("record-event audience scope must be party or dm")
     scene = await client.domain(
         "module_query",
         {
@@ -1070,7 +1078,7 @@ async def _record_event(
                 "event": {
                     "summary": summary.strip(),
                     "event_type": event_type,
-                    "audience_scope": "party",
+                    "audience_scope": audience_scope,
                     "payload": {
                         "scene_id": scene_id,
                         "location_key": location_key,
@@ -2512,6 +2520,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     knowledge=args.event_knowledge,
                     knowledge_actor_ids=args.event_knowledge_actor_id,
                     progress_percent=args.progress_percent,
+                    audience_scope=args.event_audience_scope,
                 )
             elif args.action == "apply-damage":
                 if phase != "play":
