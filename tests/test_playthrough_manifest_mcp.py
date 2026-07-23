@@ -170,6 +170,26 @@ def test_manifest_syncs_canonical_state_and_verifies_source_defined_ending(
         )
         assert replay == initialized
 
+        actor_sheet = default_character_sheet()
+        actor_sheet["resources"]["second_wind"] = {
+            "label": "Second Wind",
+            "value": 0,
+            "max": 1,
+            "recovers_on": "short_rest",
+        }
+        actor_sheet["combat"]["hit_dice"]["d8"] = {
+            "label": "Hit Die",
+            "value": 1,
+            "max": 1,
+            "recovers_on": "long_rest",
+        }
+        actor_sheet["combat"]["death_saves"]["successes"] = 1
+        actor_sheet["spellcasting"]["spell_slots"]["1"] = {
+            "label": "1st-level spell slots",
+            "value": 1,
+            "max": 2,
+            "recovers_on": "long_rest",
+        }
         actor = await _call(
             server,
             "character_create_from",
@@ -178,7 +198,7 @@ def test_manifest_syncs_canonical_state_and_verifies_source_defined_ending(
                 "payload": {
                     "campaign_id": campaign_id,
                     "name": "Pregenerated Hero",
-                    "sheet": default_character_sheet(),
+                    "sheet": actor_sheet,
                 },
                 "idempotency_key": "actor",
             },
@@ -253,7 +273,13 @@ def test_manifest_syncs_canonical_state_and_verifies_source_defined_ending(
             },
         )
         assert synced["manifest"]["status"] == "in_progress"
-        assert synced["manifest"]["party"]["members"][0]["name"] == "Pregenerated Hero"
+        synced_member = synced["manifest"]["party"]["members"][0]
+        assert synced_member["name"] == "Pregenerated Hero"
+        assert synced_member["resources"]["character"]["second_wind"]["value"] == 0
+        assert synced_member["resources"]["spell_slots"]["1"]["value"] == 1
+        assert synced_member["resources"]["hit_dice"]["d8"]["value"] == 1
+        assert synced_member["resources"]["death_saves"]["successes"] == 1
+        assert synced["runtime"]["world_state"]["combat_active"] is False
         assert synced["manifest"]["random_stream"]["position"] == 0
 
         branches = await _call(

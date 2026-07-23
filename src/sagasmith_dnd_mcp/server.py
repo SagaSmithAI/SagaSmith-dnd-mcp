@@ -15916,13 +15916,17 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             status = "dead" if "dead" in conditions else str(member["status"])
             if status == "dead" and "dead" not in conditions:
                 status = str(member["status"])
+            combat = dict(sheet["combat"])
+            spellcasting = dict(sheet["spellcasting"])
             resources = {
-                str(key): {
-                    "value": int(item.get("value", 0) or 0),
-                    "max": int(item.get("max", 0) or 0),
-                    "recovers_on": str(item.get("recovers_on") or ""),
-                }
-                for key, item in dict(sheet.get("resources") or {}).items()
+                "character": deepcopy(dict(sheet.get("resources") or {})),
+                "spell_slots": deepcopy(dict(spellcasting.get("spell_slots") or {})),
+                "pact_magic": deepcopy(spellcasting.get("pact_magic")),
+                "spell_points": deepcopy(spellcasting.get("spell_points")),
+                "casting_economy": str(spellcasting.get("casting_economy") or "slots"),
+                "hit_dice": deepcopy(dict(combat.get("hit_dice") or {})),
+                "death_saves": deepcopy(dict(combat.get("death_saves") or {})),
+                "exhaustion": int(combat.get("exhaustion", 0) or 0),
             }
             return {
                 **deepcopy(member),
@@ -15976,7 +15980,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "game_phase": str(campaign.state.get("game_phase") or PROFILE_LOBBY),
                 "world_time": deepcopy(dict(campaign.state.get("world_time") or {})),
                 "world_effects": deepcopy(list(campaign.state.get("world_effects") or [])),
-                "combat_active": bool(campaign.state.get("combat")),
+                "combat_active": bool(
+                    dict(campaign.state.get("combat") or {}).get("active", False)
+                ),
             },
         }
 
