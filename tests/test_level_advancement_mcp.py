@@ -517,6 +517,7 @@ def test_xp_mode_awards_atomically_and_enforces_level_threshold(tmp_path: Path) 
             },
         )
 
+        exact_source_ref = '{"chunk_id":"' + ("a" * 400) + '","page_start":7}'
         first_arguments = {
             "campaign_id": campaign["id"],
             "action": "experience_award",
@@ -529,7 +530,7 @@ def test_xp_mode_awards_atomically_and_enforces_level_threshold(tmp_path: Path) 
                     }
                 ],
                 "reason": "resolved the first threat",
-                "source_ref": "module:test#encounter-1",
+                "source_ref": exact_source_ref,
             },
             "expected_revision": campaign["revision"],
             "idempotency_key": "xp-299",
@@ -538,6 +539,7 @@ def test_xp_mode_awards_atomically_and_enforces_level_threshold(tmp_path: Path) 
         assert first["awards"][0]["new_xp"] == 299
         assert first["awards"][0]["advancement"]["eligible"] is False
         assert first["awards"][0]["character"]["sheet"]["progression"]["level"] == 1
+        assert first["source_ref"] == exact_source_ref
         assert await _call(server, "campaign_change", first_arguments) == first
 
         with pytest.raises(Exception, match="XP threshold"):

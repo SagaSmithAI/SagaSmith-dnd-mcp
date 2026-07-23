@@ -2975,8 +2975,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         normalized_source_ref = str(source_ref).strip()
         if not normalized_reason or not normalized_source_ref:
             raise ValueError("reason and source_ref are required for audited experience awards")
-        if len(f"{normalized_source_ref}: {normalized_reason}") > 300:
-            raise ValueError("combined source_ref and reason must not exceed 300 characters")
+        if len(normalized_reason) > 1000:
+            raise ValueError("experience award reason must not exceed 1000 characters")
+        if len(normalized_source_ref) > 8192:
+            raise ValueError("experience award source_ref must not exceed 8192 characters")
         if not isinstance(awards, list) or not awards:
             raise ValueError("awards must be a non-empty array")
 
