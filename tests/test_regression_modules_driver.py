@@ -15,7 +15,11 @@ from scripts.regression_full_campaigns import (
     _load_and_verify_manifest,
     _selected_lines,
 )
-from scripts.regression_modules import _create_baseline_snapshot, _facade_value
+from scripts.regression_modules import (
+    _create_baseline_snapshot,
+    _domain_value,
+    _facade_value,
+)
 
 
 def test_exposure_facade_unwrap_preserves_structured_domain_status() -> None:
@@ -28,6 +32,27 @@ def test_exposure_facade_unwrap_preserves_structured_domain_status() -> None:
 
     assert _facade_value(facade) == {"id": "campaign"}
     assert _facade_value(structured) == structured
+
+
+def test_exposure_domain_preserves_random_stream_receipt() -> None:
+    receipt = {
+        "operation": "character_action",
+        "position_before": 7,
+        "position_after": 8,
+    }
+    wrapped = {
+        "result": {
+            "action": "use_activity",
+            "result": {"status": "committed", "result": {"kind": "second_wind"}},
+        },
+        "random_stream_receipt": receipt,
+    }
+
+    assert _domain_value(wrapped) == {
+        "status": "committed",
+        "result": {"kind": "second_wind"},
+        "random_stream_receipt": receipt,
+    }
 
 
 def test_campaign_baseline_reuses_existing_public_snapshot() -> None:

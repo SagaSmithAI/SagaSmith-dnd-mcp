@@ -31,6 +31,7 @@ from scripts.regression_playthrough import (
     _short_rest,
     _stand_after_source_event,
     _start_play,
+    _use_activity,
 )
 
 
@@ -805,6 +806,90 @@ def test_short_rest_advances_clock_and_applies_only_explicit_resource_choices() 
     assert result["member_ids"] == ["fighter", "wizard"]
     assert result["clock_advanced"]["world_time"]["hour"] == 15
     assert len(result["rests"]) == 2
+
+
+def test_play_activity_records_structured_effect_and_random_receipt() -> None:
+    receipt = {
+        "operation": "character_action",
+        "position_before": 10,
+        "position_after": 11,
+    }
+
+    class Client:
+        revision = 8
+
+        async def core(self, tool_id: str, arguments: dict):
+            assert tool_id == "campaign_query"
+            return {
+                "result": {
+                    "id": "campaign-1",
+                    "revision": self.revision,
+                    "state": {"game_phase": "play"},
+                }
+            }
+
+        async def domain(self, tool_id: str, arguments: dict):
+            if tool_id == "module_query":
+                return {
+                    "scene_id": "scene-1",
+                    "locations": [{"key": "6-goblin-den"}],
+                }
+            if tool_id == "character_query":
+                return {
+                    "id": "fighter",
+                    "name": "Fighter",
+                    "campaign_id": "campaign-1",
+                    "revision": 3,
+                }
+            if tool_id == "character_action":
+                assert arguments["action"] == "use_activity"
+                assert arguments["payload"] == {
+                    "activity_id": "fighter-second-wind"
+                }
+                self.revision += 1
+                return {
+                    "status": "committed",
+                    "result": {
+                        "core_effect": {
+                            "kind": "second_wind",
+                            "before_hp": 2,
+                            "after_hp": 10,
+                        }
+                    },
+                    "random_stream_receipt": receipt,
+                }
+            if tool_id == "branch_query":
+                return [{"id": "branch-1", "is_current": True}]
+            if tool_id == "continuity_commit":
+                payload = arguments["payload"]["event"]["payload"]
+                assert payload["core_effect"]["kind"] == "second_wind"
+                assert payload["random_stream_receipt"] == receipt
+                self.revision += 1
+                return {"event": {"id": "event-1"}, "snapshot": {"slot": 6}}
+            if tool_id == "playthrough_manifest":
+                return {
+                    "manifest": {"status": "in_progress"},
+                    "campaign_revision": self.revision,
+                }
+            raise AssertionError((tool_id, arguments))
+
+    result = asyncio.run(
+        _use_activity(
+            Client(),
+            campaign_id="campaign-1",
+            run_id="run-1",
+            scene_id="scene-1",
+            location_key="6-goblin-den",
+            actor_id="fighter",
+            activity_id="fighter-second-wind",
+            declaration=None,
+            reason="The fighter used Second Wind before pursuing the hostage bargain.",
+            knowledge_actor_ids=["cleric"],
+        )
+    )
+
+    assert result["action"]["result"]["core_effect"]["after_hp"] == 10
+    assert result["knowledge_actor_ids"] == ["fighter", "cleric"]
 
 
 def test_long_rest_uses_atomic_party_rest_and_records_checkpoint() -> None:

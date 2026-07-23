@@ -101,6 +101,14 @@ def _facade_value(payload: Any) -> Any:
     return payload
 
 
+def _domain_value(wrapped: dict[str, Any]) -> Any:
+    value = _facade_value(wrapped["result"])
+    receipt = wrapped.get("random_stream_receipt")
+    if isinstance(value, dict) and isinstance(receipt, dict):
+        value = {**value, "random_stream_receipt": deepcopy(receipt)}
+    return value
+
+
 def _token(value: str, *, length: int = 16) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()[:length]
 
@@ -169,7 +177,7 @@ class ExposureClient:
                 "arguments": arguments,
             },
         )
-        return _facade_value(wrapped["result"])
+        return _domain_value(wrapped)
 
 
 def _preview_audit(preview: dict[str, Any]) -> dict[str, Any]:
