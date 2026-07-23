@@ -18,6 +18,7 @@ from scripts.regression_playthrough import (
     _committed_check_result,
     _configure_advancement,
     _extend_manifest_for_module_revision,
+    _matching_check_progress,
     _mutation_key,
     _party_member,
     _party_selections,
@@ -362,6 +363,8 @@ def test_source_cited_check_persists_result_and_explicit_knowledge() -> None:
             if tool_id == "character_check":
                 assert arguments["kind"] == "ability"
                 assert arguments["ability"] == "survival"
+                assert arguments["advantage"] is False
+                assert arguments["disadvantage"] is True
                 self.revision += 1
                 return {"status": "committed", "result": {"success": True, "total": 14}}
             if tool_id == "continuity_commit":
@@ -400,6 +403,7 @@ def test_source_cited_check_persists_result_and_explicit_knowledge() -> None:
             ability="survival",
             dc=10,
             proficient=True,
+            disadvantage=True,
             knowledge_actor_ids=["actor-2"],
             success_knowledge="The trail shows twelve goblins and two captives.",
             failure_knowledge="The trail's traffic remains unclear.",
@@ -444,6 +448,58 @@ def test_character_check_accepts_full_and_compact_exposure_shapes() -> None:
     assert _committed_check_result(result) == result
     with pytest.raises(RuntimeError, match="did not commit"):
         _committed_check_result({"status": "pending_ruling"})
+
+
+def test_check_recovery_identity_includes_actor_and_roll_mode() -> None:
+    source_ref = {"chunk_id": "chunk-1"}
+    progress = {
+        "current_location_key": "bridge",
+        "state": {
+            "full_playthrough_check": {
+                "actor_id": "fighter",
+                "kind": "ability",
+                "ability": "stealth",
+                "dc": 9,
+                "advantage": False,
+                "disadvantage": True,
+                "source_ref": source_ref,
+            }
+        },
+    }
+
+    assert _matching_check_progress(
+        progress,
+        location_key="bridge",
+        actor_id="fighter",
+        kind="ability",
+        ability="stealth",
+        dc=9,
+        advantage=False,
+        disadvantage=True,
+        source_ref=source_ref,
+    )
+    assert not _matching_check_progress(
+        progress,
+        location_key="bridge",
+        actor_id="rogue",
+        kind="ability",
+        ability="stealth",
+        dc=9,
+        advantage=False,
+        disadvantage=True,
+        source_ref=source_ref,
+    )
+    assert not _matching_check_progress(
+        progress,
+        location_key="bridge",
+        actor_id="fighter",
+        kind="ability",
+        ability="stealth",
+        dc=9,
+        advantage=False,
+        disadvantage=False,
+        source_ref=source_ref,
+    )
 
 
 def test_source_damage_rolls_then_damages_and_knocks_prone_through_public_tools() -> None:

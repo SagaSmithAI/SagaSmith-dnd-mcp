@@ -74,6 +74,8 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--check-ability", default="")
     parser.add_argument("--check-dc", type=int)
     parser.add_argument("--check-proficient", action="store_true")
+    parser.add_argument("--check-advantage", action="store_true")
+    parser.add_argument("--check-disadvantage", action="store_true")
     parser.add_argument("--knowledge-actor-id", action="append", default=[])
     parser.add_argument("--success-knowledge", default="")
     parser.add_argument("--failure-knowledge", default="")
@@ -345,9 +347,12 @@ def _matching_check_progress(
     progress: dict[str, Any] | None,
     *,
     location_key: str,
+    actor_id: str,
     kind: str,
     ability: str,
     dc: int,
+    advantage: bool,
+    disadvantage: bool,
     source_ref: dict[str, Any],
 ) -> bool:
     if not isinstance(progress, dict):
@@ -356,9 +361,12 @@ def _matching_check_progress(
     check = dict(state.get("full_playthrough_check") or {})
     return bool(
         str(progress.get("current_location_key") or "") == location_key
+        and check.get("actor_id") == actor_id
         and check.get("kind") == kind
         and check.get("ability") == ability
         and check.get("dc") == dc
+        and bool(check.get("advantage", False)) == advantage
+        and bool(check.get("disadvantage", False)) == disadvantage
         and check.get("source_ref") == source_ref
     )
 
@@ -755,6 +763,8 @@ async def _resolve_check(
     ability: str,
     dc: int | None,
     proficient: bool,
+    advantage: bool = False,
+    disadvantage: bool = False,
     knowledge_actor_ids: list[str],
     success_knowledge: str,
     failure_knowledge: str,
@@ -767,6 +777,8 @@ async def _resolve_check(
         raise ValueError("resolve-check requires a non-negative --check-dc")
     if kind not in {"ability", "check", "save", "death_save"}:
         raise ValueError("resolve-check kind is not supported by character_check")
+    if advantage and disadvantage:
+        raise ValueError("resolve-check cannot apply advantage and disadvantage together")
     scene = await client.domain(
         "module_query",
         {
@@ -796,9 +808,12 @@ async def _resolve_check(
     progress_matches = _matching_check_progress(
         progress_before,
         location_key=location_key,
+        actor_id=actor_id,
         kind=kind,
         ability=ability,
         dc=dc,
+        advantage=advantage,
+        disadvantage=disadvantage,
         source_ref=exact_ref,
     )
     if progress_matches:
@@ -819,6 +834,8 @@ async def _resolve_check(
                         "kind": kind,
                         "ability": ability,
                         "dc": dc,
+                        "advantage": advantage,
+                        "disadvantage": disadvantage,
                         "source_ref": exact_ref,
                     },
                 },
@@ -856,6 +873,8 @@ async def _resolve_check(
                 "ability": ability,
                 "dc": dc,
                 "proficient": proficient,
+                "advantage": advantage,
+                "disadvantage": disadvantage,
                 "branch_id": str(branch["id"]),
                 "expected_revision": campaign["revision"],
                 "idempotency_key": _mutation_key(
@@ -893,6 +912,8 @@ async def _resolve_check(
                         "kind": kind,
                         "ability": ability,
                         "dc": dc,
+                        "advantage": advantage,
+                        "disadvantage": disadvantage,
                         "success": success,
                         "source_excerpt": source_excerpt,
                         "source_ref": exact_ref,
@@ -1932,6 +1953,8 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     ability=args.check_ability,
                     dc=args.check_dc,
                     proficient=args.check_proficient,
+                    advantage=args.check_advantage,
+                    disadvantage=args.check_disadvantage,
                     knowledge_actor_ids=args.knowledge_actor_id,
                     success_knowledge=args.success_knowledge,
                     failure_knowledge=args.failure_knowledge,
