@@ -127,7 +127,7 @@ async def _create_campaign(
     await client.load("lobby.bootstrap")
     line_id = str(line["id"])
     identity = _token(f"{args.run_id}\0full-campaign\0{line_id}")
-    return await client.domain(
+    campaign = await client.domain(
         "campaign_create",
         {
             "name": f"Full campaign regression: {line['title']} [{_token(args.run_id, length=8)}]",
@@ -138,6 +138,25 @@ async def _create_campaign(
             "idempotency_key": f"full-campaign-create-{identity}",
         },
     )
+    await client.open(str(campaign["id"]))
+    await client.load("lobby.campaign")
+    advancement = dict(line["play_requirements"].get("advancement") or {})
+    selected_advancement = str(advancement.get("selected") or "")
+    if selected_advancement not in {"xp", "milestone"}:
+        raise ValueError(
+            f"campaign line {line_id} must select xp or milestone advancement"
+        )
+    configured = await client.domain(
+        "campaign_change",
+        {
+            "campaign_id": campaign["id"],
+            "action": "advancement_configure",
+            "payload": {"mode": selected_advancement},
+            "expected_revision": campaign["revision"],
+            "idempotency_key": f"full-campaign-advancement-{identity}",
+        },
+    )
+    return dict(configured["campaign"])
 
 
 async def _resolve_scene(

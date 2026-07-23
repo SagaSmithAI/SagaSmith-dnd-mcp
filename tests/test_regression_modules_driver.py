@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import asyncio
 import hashlib
 import json
@@ -9,6 +10,7 @@ import pytest
 
 from scripts.regression_full_campaigns import (
     _build_playthrough_manifest,
+    _create_campaign,
     _line_review_blocks,
     _load_and_verify_manifest,
     _selected_lines,
@@ -75,6 +77,57 @@ def test_campaign_baseline_reuses_existing_public_snapshot() -> None:
     assert result["branch_id"] == "branch-1"
     assert result["random_stream"]["position"] == 0
     assert client.created is False
+
+
+def test_full_campaign_creation_configures_selected_advancement_mode() -> None:
+    class Client:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict]] = []
+
+        async def open(self, campaign_id: str | None = None) -> None:
+            self.calls.append(("open", {"campaign_id": campaign_id}))
+
+        async def load(self, *group_ids: str) -> None:
+            self.calls.append(("load", {"group_ids": group_ids}))
+
+        async def domain(self, tool_id: str, arguments: dict):
+            self.calls.append((tool_id, arguments))
+            if tool_id == "campaign_create":
+                return {"id": "campaign-1", "revision": 1}
+            if tool_id == "campaign_change":
+                assert arguments["payload"] == {"mode": "xp"}
+                return {
+                    "campaign": {
+                        "id": "campaign-1",
+                        "revision": 2,
+                        "settings": {"advancement": {"mode": "xp"}},
+                    }
+                }
+            raise AssertionError(tool_id)
+
+    args = argparse.Namespace(
+        run_id="run-1",
+        edition="2014",
+        locale="en",
+    )
+    line = {
+        "id": "line-1",
+        "title": "Line One",
+        "play_requirements": {"advancement": {"selected": "xp"}},
+    }
+    client = Client()
+
+    campaign = asyncio.run(_create_campaign(client, line=line, args=args))
+
+    assert campaign["settings"]["advancement"]["mode"] == "xp"
+    assert [name for name, _ in client.calls] == [
+        "open",
+        "load",
+        "campaign_create",
+        "open",
+        "load",
+        "campaign_change",
+    ]
 
 
 def test_full_campaign_manifest_verifies_checksums_and_selection(tmp_path: Path) -> None:

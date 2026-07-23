@@ -59,6 +59,7 @@
         },
         "advancement": {
           "mode": "experience_points",
+          "selected": "xp",
           "milestone_supported": false
         },
         "encounter_scaling": {
@@ -133,6 +134,7 @@
         },
         "advancement": {
           "mode": "experience_points_or_story_milestones",
+          "selected": "milestone",
           "milestone_supported": true
         },
         "encounter_scaling": {
@@ -224,6 +226,14 @@
         },
         "advancement": {
           "mode": "experience_points_or_milestones_then_milestones",
+          "selected": "xp",
+          "transitions": [
+            {
+              "module_sequence": 2,
+              "mode": "milestone",
+              "reason": "The Rise of Tiamat source explicitly uses advancement by milestone."
+            }
+          ],
           "milestone_supported": true
         },
         "encounter_scaling": {
@@ -390,6 +400,7 @@
         },
         "advancement": {
           "mode": "story_milestones",
+          "selected": "milestone",
           "milestone_supported": true,
           "xp_alternative_supported": true
         },
@@ -469,6 +480,7 @@
         },
         "advancement": {
           "mode": "experience_points",
+          "selected": "xp",
           "milestone_supported": false,
           "ad_hoc_xp_supported": true
         },
