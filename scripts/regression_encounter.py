@@ -674,8 +674,8 @@ def _source_outcome(
     if party_down:
         return (
             "defeat",
-            "The party was defeated; surviving hostiles stopped attacking as required "
-            "by the source development and left resolved unconscious or dead characters.",
+            "The party was defeated. Combat ended with resolved unconscious or dead "
+            "characters; their later treatment requires explicit source support or DM review.",
         )
     return None
 

@@ -123,6 +123,20 @@ def test_specific_source_flee_counts_only_that_hostile_as_resolved() -> None:
     )
 
 
+def test_party_defeat_does_not_invent_a_source_defined_aftermath() -> None:
+    assert _source_outcome(
+        defeated_hostiles=1,
+        hostile_count=4,
+        flee_after_defeated=0,
+        unresolved_party=False,
+        party_down=True,
+    ) == (
+        "defeat",
+        "The party was defeated. Combat ended with resolved unconscious or dead "
+        "characters; their later treatment requires explicit source support or DM review.",
+    )
+
+
 def test_source_departure_is_distinct_from_hiding() -> None:
     assert _source_departure_patch(
         "goblin-3",
