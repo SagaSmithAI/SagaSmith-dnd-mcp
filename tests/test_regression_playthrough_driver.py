@@ -27,6 +27,7 @@ from scripts.regression_playthrough import (
     _query_source,
     _record_event,
     _recover_committed_check,
+    _recover_stable_party,
     _resolve_check,
     _scene_progress_percent,
     _short_rest,
@@ -80,6 +81,59 @@ def test_query_source_searches_and_expands_only_public_mcp_results() -> None:
         ),
         ("module_expand", {"chunk_id": "chunk-1"}),
     ]
+
+
+def test_stable_party_recovery_uses_one_public_campaign_transition() -> None:
+    class Client:
+        def __init__(self) -> None:
+            self.tools: list[str] = []
+
+        async def core(self, tool_id: str, arguments: dict):
+            assert tool_id == "campaign_query"
+            return {"result": {"id": "campaign-1", "revision": 8}}
+
+        async def domain(self, tool_id: str, arguments: dict):
+            self.tools.append(tool_id)
+            if tool_id == "character_query":
+                actor_id = arguments["payload"]["character_id"]
+                return {
+                    "id": actor_id,
+                    "name": actor_id,
+                    "campaign_id": "campaign-1",
+                    "revision": 3,
+                }
+            if tool_id == "branch_query":
+                return [{"id": "branch-1", "is_current": True}]
+            if tool_id == "campaign_change":
+                assert arguments["action"] == "stable_recovery"
+                assert len(arguments["payload"]["members"]) == 2
+                return {
+                    "status": "recovered",
+                    "elapsed_hours": 4,
+                    "recoveries": {"actor-1": {}, "actor-2": {}},
+                    "random_stream_receipt": {"start_position": 10, "end_position": 12},
+                }
+            if tool_id == "continuity_commit":
+                assert len(arguments["payload"]["actor_knowledge"]) == 3
+                return {"event": {"id": "event-1"}, "snapshot": {"slot": 7}}
+            if tool_id == "playthrough_manifest":
+                return {"manifest": {"status": "in_progress"}, "campaign_revision": 10}
+            raise AssertionError((tool_id, arguments))
+
+    client = Client()
+    result = asyncio.run(
+        _recover_stable_party(
+            client,
+            campaign_id="campaign-1",
+            run_id="run-1",
+            actor_ids=["actor-1", "actor-2"],
+            knowledge_actor_ids=["witness"],
+            reason="Both stable adventurers recovered while the party waited.",
+        )
+    )
+
+    assert result["recovery"]["elapsed_hours"] == 4
+    assert client.tools.count("campaign_change") == 1
 
 
 def test_module_revision_extension_remaps_current_and_traversed_scenes() -> None:

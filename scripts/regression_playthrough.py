@@ -43,6 +43,7 @@ def _arguments() -> argparse.Namespace:
             "branch-from-snapshot",
             "short-rest",
             "long-rest",
+            "recover-stable",
             "award-xp",
             "configure-advancement",
             "refresh-module",
@@ -112,6 +113,7 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--rest-start-clock-json", type=json.loads)
     parser.add_argument("--rest-duration-minutes", type=int, default=60)
     parser.add_argument("--rest-reason", default="")
+    parser.add_argument("--recovery-actor-id", action="append", default=[])
     parser.add_argument("--event-type", default="")
     parser.add_argument(
         "--event-audience-scope",
@@ -2021,6 +2023,119 @@ async def _long_rest(
     }
 
 
+async def _recover_stable_party(
+    client: ExposureClient,
+    *,
+    campaign_id: str,
+    run_id: str,
+    actor_ids: list[str],
+    knowledge_actor_ids: list[str],
+    reason: str,
+) -> dict[str, Any]:
+    member_ids = list(dict.fromkeys(actor_ids))
+    if not member_ids or len(member_ids) != len(actor_ids) or not reason.strip():
+        raise ValueError(
+            "recover-stable requires unique actor ids and a non-empty --rest-reason"
+        )
+    actors = []
+    for actor_id in member_ids:
+        actor = await client.domain(
+            "character_query",
+            {"view": "get", "payload": {"character_id": actor_id}},
+        )
+        if actor.get("campaign_id") != campaign_id:
+            raise ValueError("every stable recovery actor must belong to the campaign")
+        actors.append(actor)
+    branches = await client.domain(
+        "branch_query",
+        {"campaign_id": campaign_id, "view": "list"},
+    )
+    branch = next((item for item in branches if item.get("is_current")), None)
+    if branch is None:
+        raise RuntimeError("campaign has no current branch")
+    campaign = await _campaign(client, campaign_id)
+    recovered = await client.domain(
+        "campaign_change",
+        {
+            "campaign_id": campaign_id,
+            "action": "stable_recovery",
+            "payload": {
+                "members": [
+                    {
+                        "character_id": actor["id"],
+                        "expected_revision": actor["revision"],
+                    }
+                    for actor in actors
+                ]
+            },
+            "expected_revision": campaign["revision"],
+            "branch_id": branch["id"],
+            "idempotency_key": _mutation_key(
+                run_id, "stable-recovery", ":".join(member_ids)
+            ),
+        },
+    )
+    if recovered.get("status") != "recovered":
+        raise RuntimeError("party stable recovery did not commit")
+    recipients = list(dict.fromkeys([*member_ids, *knowledge_actor_ids]))
+    campaign = await _campaign(client, campaign_id)
+    committed = await client.domain(
+        "continuity_commit",
+        {
+            "campaign_id": campaign_id,
+            "payload": {
+                "event": {
+                    "summary": reason.strip(),
+                    "event_type": "stable_recovery",
+                    "audience_scope": "party",
+                    "payload": {
+                        "member_ids": member_ids,
+                        "elapsed_hours": recovered["elapsed_hours"],
+                        "recoveries": deepcopy(recovered["recoveries"]),
+                        "random_stream_receipt": deepcopy(
+                            recovered.get("random_stream_receipt")
+                        ),
+                    },
+                },
+                "actor_knowledge": [
+                    {
+                        "actor_id": actor_id,
+                        "knowledge_key": (
+                            f"playthrough.{_token(run_id)}.stable_recovery."
+                            f"{_token(':'.join(member_ids))}"
+                        ),
+                        "proposition": reason.strip(),
+                        "disclosure_scope": "owner",
+                    }
+                    for actor_id in recipients
+                ],
+                "snapshot": {
+                    "label": f"Full playthrough stable recovery: {reason.strip()}"
+                },
+                "branch_id": str(branch["id"]),
+            },
+            "expected_revision": campaign["revision"],
+            "idempotency_key": _mutation_key(
+                run_id, "stable-recovery-continuity", ":".join(member_ids)
+            ),
+        },
+    )
+    synced = await _manifest_mutation(
+        client,
+        campaign_id=campaign_id,
+        action="sync",
+        run_id=run_id,
+        identity=f"stable-recovery-sync:{':'.join(member_ids)}",
+    )
+    return {
+        "member_ids": member_ids,
+        "knowledge_actor_ids": recipients,
+        "recovery": recovered,
+        "continuity": committed,
+        "sync": synced,
+    }
+
+
 async def _award_experience(
     client: ExposureClient,
     *,
@@ -2663,6 +2778,18 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     members=args.rest_member_json,
                     start_clock=args.rest_start_clock_json,
                     duration_minutes=args.rest_duration_minutes,
+                    reason=args.rest_reason,
+                )
+            elif args.action == "recover-stable":
+                if phase != "play":
+                    raise RuntimeError("recover-stable requires the play phase")
+                await client.load("play.characters")
+                report["result"] = await _recover_stable_party(
+                    client,
+                    campaign_id=args.campaign_id,
+                    run_id=args.run_id,
+                    actor_ids=args.recovery_actor_id,
+                    knowledge_actor_ids=args.knowledge_actor_id,
                     reason=args.rest_reason,
                 )
             elif args.action == "award-xp":
