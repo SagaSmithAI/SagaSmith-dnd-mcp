@@ -46,7 +46,7 @@ def test_query_source_searches_and_expands_only_public_mcp_results() -> None:
             if tool_id == "module_search":
                 return {
                     "result": [
-                        {"chunk_id": "chunk-1", "content": "A captured character..."}
+                        {"id": "chunk-1", "content": "A captured character..."}
                     ]
                 }
             if tool_id == "module_expand":

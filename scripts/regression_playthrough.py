@@ -200,9 +200,9 @@ async def _query_source(
     expanded = []
     if expand:
         for hit in hits:
-            chunk_id = str(hit.get("chunk_id") or "")
+            chunk_id = str(hit.get("chunk_id") or hit.get("id") or "")
             if not chunk_id:
-                raise RuntimeError("module_search returned a hit without chunk_id")
+                raise RuntimeError("module_search returned a hit without a chunk identifier")
             expanded.append(
                 await client.domain(
                     "module_expand",
