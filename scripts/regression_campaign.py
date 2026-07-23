@@ -36,7 +36,9 @@ def _arguments() -> argparse.Namespace:
             "restore-regression",
             "relock-core",
             "prepare-statblock",
+            "prepare-rule-statblock",
             "prepare-core-wizard",
+            "noncombat-check",
             "branch-continuity",
             "structured-combat",
         ),
@@ -57,6 +59,22 @@ def _arguments() -> argparse.Namespace:
         "--actor-name",
         default="Structured regression actor",
         help="Canonical actor name for actor preparation actions",
+    )
+    parser.add_argument(
+        "--actor-count",
+        type=int,
+        default=1,
+        help="Number of source-identical actors to create for prepare-rule-statblock",
+    )
+    parser.add_argument(
+        "--source-path", type=Path, help="Rule statblock source to stage and ingest"
+    )
+    parser.add_argument("--source-id", help="Already-ingested rule statblock source")
+    parser.add_argument(
+        "--chunk-id",
+        action="append",
+        default=[],
+        help="Optional source chunk selection for prepare-rule-statblock",
     )
     parser.add_argument(
         "--ability-method",
@@ -97,6 +115,15 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument(
         "--source-excerpt",
         help="Exact encounter-scene text supporting the hostile manifest",
+    )
+    parser.add_argument("--check-actor-id", help="Source-bound actor for noncombat-check")
+    parser.add_argument("--check-kind", help="Check or skill kind from the cited scene")
+    parser.add_argument("--check-ability", help="Ability used by the cited non-combat check")
+    parser.add_argument("--check-dc", type=int, help="Exact DC printed in the cited scene")
+    parser.add_argument(
+        "--check-proficient",
+        action="store_true",
+        help="Apply the actor's proficiency bonus to noncombat-check",
     )
     parser.add_argument(
         "--resume-source-branch-id",
@@ -330,6 +357,25 @@ def _current_scene_summary(current: Any) -> Any:
         )
         if key in current
     } | {"content_characters": len(content)}
+
+
+def _normalized_source_text(value: Any) -> str:
+    """Normalize PDF control characters and whitespace for source containment checks."""
+
+    text = str(value or "").replace("\x02", "").replace("\u00ad", "")
+    text = text.translate(
+        str.maketrans(
+            {
+                "\u2018": "'",
+                "\u2019": "'",
+                "\u201c": '"',
+                "\u201d": '"',
+                "\u2013": "-",
+                "\u2014": "-",
+            }
+        )
+    )
+    return " ".join(text.split()).casefold()
 
 
 async def _audit(args: argparse.Namespace) -> dict[str, Any]:
@@ -1258,7 +1304,7 @@ async def _restore_regression(args: argparse.Namespace) -> dict[str, Any]:
                 raise RuntimeError("current or requested source branch does not exist")
             if interrupted["id"] == source_branch["id"]:
                 raise RuntimeError("campaign is already on the requested source branch")
-            allowed_prefixes = ("scene-walk-", "continuity-", "regression-")
+            allowed_prefixes = ("scene-walk-", "continuity-", "regression-", "check-")
             if not str(interrupted.get("name") or "").startswith(allowed_prefixes):
                 raise RuntimeError(
                     "refusing to leave a branch that is not a known regression branch"
@@ -1968,6 +2014,225 @@ async def _prepare_statblock(args: argparse.Namespace) -> dict[str, Any]:
             }
 
 
+async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
+    """Ingest one strict SRD statblock and create source-identical encounter actors."""
+
+    if bool(args.source_path) == bool(args.source_id):
+        raise ValueError(
+            "prepare-rule-statblock requires exactly one of --source-path or --source-id"
+        )
+    if args.actor_count < 1:
+        raise ValueError("--actor-count must be positive")
+    token = _idempotency_token(args.run_id)
+    async with stdio_client(_server_parameters(args)) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            client = CampaignMcp(session, args.campaign_id)
+            phase_payload = await client.core(
+                "game_phase", {"campaign_id": args.campaign_id, "action": "get"}
+            )
+            initial_phase = str(_facade_value(phase_payload)["tool_profile"])
+            if initial_phase == "combat":
+                raise RuntimeError("prepare-rule-statblock cannot run during active combat")
+            await client.open()
+            await client.load(*_phase_groups(initial_phase))
+            branches = _facade_value(
+                await client.domain(
+                    "branch_query", {"campaign_id": args.campaign_id, "view": "list"}
+                )
+            )
+            current_branch = next((item for item in branches if item.get("is_current")), None)
+            if current_branch is None:
+                raise RuntimeError("campaign has no current branch")
+            if initial_phase != "lobby":
+                campaign = _facade_value(
+                    await client.core(
+                        "campaign_query",
+                        {"view": "get", "payload": {"campaign_id": args.campaign_id}},
+                    )
+                )
+                await client.core(
+                    "game_phase",
+                    {
+                        "campaign_id": args.campaign_id,
+                        "action": "set",
+                        "tool_profile": "lobby",
+                        "expected_revision": campaign["revision"],
+                        "branch_id": current_branch["id"],
+                        "idempotency_key": _phase_transition_key(
+                            token, "rule-statblock-enter-lobby", campaign
+                        ),
+                    },
+                )
+            await client.open()
+            await client.load("lobby.campaign", "lobby.rules", "lobby.characters")
+
+            import_report: dict[str, Any] | None = None
+            if args.source_path:
+                source_path = args.source_path.expanduser().resolve()
+                source_key = f"regression/statblock/{_idempotency_token(source_path.stem).lower()}"
+                staged = _facade_value(
+                    await client.domain(
+                        "rule_import",
+                        {
+                            "campaign_id": args.campaign_id,
+                            "action": "stage",
+                            "payload": {
+                                "source_path": str(source_path),
+                                "source_key": source_key,
+                                "title": source_path.stem,
+                                "edition": "2014",
+                                "publication_id": "srd2014",
+                            },
+                            "idempotency_key": f"{token}-stage-rule-statblock",
+                        },
+                    )
+                )
+                job_id = str(dict(staged.get("job") or staged)["id"])
+                inspected = _facade_value(
+                    await client.domain(
+                        "rule_import",
+                        {
+                            "campaign_id": args.campaign_id,
+                            "action": "inspect",
+                            "payload": {"job_id": job_id},
+                            "idempotency_key": f"{token}-inspect-rule-statblock",
+                        },
+                    )
+                )
+                inspection = dict(inspected.get("inspection") or inspected)
+                warnings = list(inspection.get("warnings") or [])
+                ingested = _facade_value(
+                    await client.domain(
+                        "rule_import",
+                        {
+                            "campaign_id": args.campaign_id,
+                            "action": "ingest",
+                            "payload": {
+                                "job_id": job_id,
+                                "acknowledge_warnings": bool(warnings),
+                            },
+                            "idempotency_key": f"{token}-ingest-rule-statblock",
+                        },
+                    )
+                )
+                source_value = dict(ingested.get("source") or {})
+                source_id = str(source_value.get("id") or ingested.get("source_id") or "")
+                if not source_id:
+                    raise RuntimeError("rule statblock ingestion returned no source id")
+                import_report = {
+                    "job_id": job_id,
+                    "source": source_value or {"id": source_id, "source_key": source_key},
+                    "inspection": {
+                        key: inspection.get(key)
+                        for key in ("page_count", "sections", "chunks", "warnings", "metadata")
+                    },
+                }
+            else:
+                source_id = str(args.source_id)
+
+            actors: list[dict[str, Any]] = []
+            statblock_report: dict[str, Any] | None = None
+            source_report: dict[str, Any] | None = None
+            for index in range(1, args.actor_count + 1):
+                actor_name = (
+                    args.actor_name if args.actor_count == 1 else f"{args.actor_name} {index}"
+                )
+                payload: dict[str, Any] = {
+                    "campaign_id": args.campaign_id,
+                    "source_id": source_id,
+                    "name": actor_name,
+                    "character_type": "monster",
+                    "summary": "Strict source-bound encounter actor for campaign regression.",
+                }
+                if args.chunk_id:
+                    payload["chunk_ids"] = args.chunk_id
+                created = _facade_value(
+                    await client.domain(
+                        "character_create_from",
+                        {
+                            "mode": "statblock",
+                            "payload": payload,
+                            "idempotency_key": f"{token}-create-rule-statblock-{index}",
+                        },
+                    )
+                )
+                actor = dict(created["character"])
+                summary = _character_summary(actor)
+                if not summary["source_bound"] or summary["attack_count"] < 1:
+                    raise RuntimeError("created statblock actor is not settlement-ready")
+                actors.append(summary)
+                statblock_report = dict(created.get("statblock") or {})
+                source_report = dict(created.get("source") or {})
+
+            campaign_lobby = _facade_value(
+                await client.core(
+                    "campaign_query",
+                    {"view": "get", "payload": {"campaign_id": args.campaign_id}},
+                )
+            )
+            branches_after = _facade_value(
+                await client.domain(
+                    "branch_query", {"campaign_id": args.campaign_id, "view": "list"}
+                )
+            )
+            branch_after = next(item for item in branches_after if item.get("is_current"))
+            snapshot = await client.domain(
+                "snapshot_create",
+                {
+                    "campaign_id": args.campaign_id,
+                    "label": f"Prepared rule statblock actors: {args.actor_name}",
+                    "expected_revision": campaign_lobby["revision"],
+                    "expected_head_snapshot_id": branch_after.get("head_snapshot_id") or "",
+                    "idempotency_key": f"{token}-rule-statblock-snapshot",
+                },
+            )
+            verified = _facade_value(
+                await client.domain(
+                    "snapshot_query",
+                    {
+                        "campaign_id": args.campaign_id,
+                        "view": "verify",
+                        "payload": {"slot": snapshot["slot"]},
+                    },
+                )
+            )
+            campaign_at_return = _facade_value(
+                await client.core(
+                    "campaign_query",
+                    {"view": "get", "payload": {"campaign_id": args.campaign_id}},
+                )
+            )
+            phase_change = _facade_value(
+                await client.core(
+                    "game_phase",
+                    {
+                        "campaign_id": args.campaign_id,
+                        "action": "set",
+                        "tool_profile": "play",
+                        "expected_revision": campaign_at_return["revision"],
+                        "branch_id": current_branch["id"],
+                        "idempotency_key": _phase_transition_key(
+                            token, "rule-statblock-return-play", campaign_at_return
+                        ),
+                    },
+                )
+            )
+            return {
+                "action": "prepare-rule-statblock",
+                "transport": "stdio",
+                "campaign_id": args.campaign_id,
+                "source_id": source_id,
+                "import": import_report,
+                "source": source_report,
+                "statblock": statblock_report,
+                "actors": actors,
+                "snapshot": snapshot,
+                "snapshot_verification": verified,
+                "phase_change": phase_change,
+            }
+
+
 async def _prepare_core_wizard(args: argparse.Namespace) -> dict[str, Any]:
     """Build one complete level-3 Wizard through public lobby tools and Core content."""
 
@@ -2476,6 +2741,476 @@ async def _prepare_core_wizard(args: argparse.Namespace) -> dict[str, Any]:
                 "snapshot": snapshot,
                 "snapshot_verification": verified,
                 "phase_change": phase_change,
+            }
+
+
+async def _noncombat_check(args: argparse.Namespace) -> dict[str, Any]:
+    """Resolve one source-cited character check on an isolated play branch."""
+
+    if not all(
+        (
+            args.check_actor_id,
+            args.scene_id,
+            args.location_key,
+            args.source_excerpt,
+            args.check_kind,
+            args.check_ability,
+            args.check_dc is not None,
+        )
+    ):
+        raise ValueError(
+            "noncombat-check requires actor, scene, location, source excerpt, kind, ability, and DC"
+        )
+    if args.check_dc < 0:
+        raise ValueError("--check-dc cannot be negative")
+    token = _idempotency_token(args.run_id)
+    knowledge_key = f"regression.{token}.check-outcome"
+    async with stdio_client(_server_parameters(args)) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            client = CampaignMcp(session, args.campaign_id)
+            phase_payload = await client.core(
+                "game_phase", {"campaign_id": args.campaign_id, "action": "get"}
+            )
+            initial_phase = str(_facade_value(phase_payload)["tool_profile"])
+            if initial_phase == "combat":
+                raise RuntimeError("noncombat-check cannot run during active combat")
+            await client.open()
+            await client.load(*_phase_groups(initial_phase))
+            branches = _facade_value(
+                await client.domain(
+                    "branch_query", {"campaign_id": args.campaign_id, "view": "list"}
+                )
+            )
+            source_branch = next((item for item in branches if item.get("is_current")), None)
+            if source_branch is None:
+                raise RuntimeError("campaign has no current branch")
+            actor = _facade_value(
+                await client.domain(
+                    "character_query",
+                    {"view": "get", "payload": {"character_id": args.check_actor_id}},
+                )
+            )
+            if str(actor.get("campaign_id")) != args.campaign_id:
+                raise RuntimeError("check actor does not belong to this campaign")
+            source_current_before = _facade_value(
+                await client.domain(
+                    "module_query", {"campaign_id": args.campaign_id, "view": "current"}
+                )
+            )
+            campaign_source_before = _facade_value(
+                await client.core(
+                    "campaign_query",
+                    {"view": "get", "payload": {"campaign_id": args.campaign_id}},
+                )
+            )
+            resolution_log_before = deepcopy(
+                dict(campaign_source_before.get("state") or {}).get("resolution_log") or []
+            )
+
+            if initial_phase != "lobby":
+                await client.core(
+                    "game_phase",
+                    {
+                        "campaign_id": args.campaign_id,
+                        "action": "set",
+                        "tool_profile": "lobby",
+                        "expected_revision": campaign_source_before["revision"],
+                        "branch_id": source_branch["id"],
+                        "idempotency_key": _phase_transition_key(
+                            token, "check-enter-lobby", campaign_source_before
+                        ),
+                    },
+                )
+            await client.open()
+            await client.load("lobby.campaign", "lobby.memory_control")
+            campaign_lobby = _facade_value(
+                await client.core(
+                    "campaign_query",
+                    {"view": "get", "payload": {"campaign_id": args.campaign_id}},
+                )
+            )
+            source_checkpoint = await client.domain(
+                "snapshot_create",
+                {
+                    "campaign_id": args.campaign_id,
+                    "label": f"Before source-cited non-combat check: {token}",
+                    "expected_revision": campaign_lobby["revision"],
+                    "expected_head_snapshot_id": source_branch.get("head_snapshot_id") or "",
+                    "idempotency_key": f"{token}-check-source-checkpoint",
+                },
+            )
+            regression_branch = _facade_value(
+                await client.domain(
+                    "branch_change",
+                    {
+                        "campaign_id": args.campaign_id,
+                        "action": "create",
+                        "payload": {
+                            "name": f"check-{token}",
+                            "from_snapshot_id": source_checkpoint["id"],
+                            "checkout": True,
+                        },
+                        "expected_revision": campaign_lobby["revision"],
+                        "expected_branch_id": source_branch["id"],
+                        "idempotency_key": f"{token}-check-branch-create",
+                    },
+                )
+            )
+            campaign_branch_lobby = _facade_value(
+                await client.core(
+                    "campaign_query",
+                    {"view": "get", "payload": {"campaign_id": args.campaign_id}},
+                )
+            )
+            await client.core(
+                "game_phase",
+                {
+                    "campaign_id": args.campaign_id,
+                    "action": "set",
+                    "tool_profile": "play",
+                    "expected_revision": campaign_branch_lobby["revision"],
+                    "branch_id": regression_branch["id"],
+                    "idempotency_key": _phase_transition_key(
+                        token, "check-enter-play", campaign_branch_lobby
+                    ),
+                },
+            )
+            await client.open()
+            await client.load(
+                "play.scene",
+                "play.scene_control",
+                "play.characters",
+                "play.resolution",
+            )
+            scene = _facade_value(
+                await client.domain(
+                    "module_query",
+                    {
+                        "campaign_id": args.campaign_id,
+                        "view": "scene",
+                        "payload": {"scene_id": args.scene_id},
+                    },
+                )
+            )
+            excerpt = _normalized_source_text(args.source_excerpt)
+            scene_text = _normalized_source_text(scene.get("content"))
+            if not excerpt or excerpt not in scene_text:
+                raise RuntimeError("non-combat check excerpt is not contained in the cited scene")
+            location_keys = {str(item.get("key")) for item in _scene_locations(scene)}
+            if args.location_key not in location_keys:
+                raise RuntimeError("non-combat check location is not present in the scene atlas")
+            progress_values = _facade_value(
+                await client.domain(
+                    "module_query", {"campaign_id": args.campaign_id, "view": "progress"}
+                )
+            )
+            progress_before = next(
+                (item for item in progress_values if item.get("scene_id") == args.scene_id), None
+            )
+            progress = _facade_value(
+                await client.domain(
+                    "module_set_progress",
+                    {
+                        "campaign_id": args.campaign_id,
+                        "scene_id": args.scene_id,
+                        "status": "active",
+                        "progress": 50,
+                        "state": {
+                            "regression_run_id": token,
+                            "source_check": {
+                                "kind": args.check_kind,
+                                "ability": args.check_ability,
+                                "dc": args.check_dc,
+                            },
+                        },
+                        "current_location_key": args.location_key,
+                        "expected_state_version": int(
+                            (progress_before or {}).get("state_version", 0) or 0
+                        ),
+                        "idempotency_key": f"{token}-check-scene-progress",
+                    },
+                )
+            )
+            campaign_before_check = _facade_value(
+                await client.core(
+                    "campaign_query",
+                    {"view": "get", "payload": {"campaign_id": args.campaign_id}},
+                )
+            )
+            settled = await client.domain(
+                "character_check",
+                {
+                    "campaign_id": args.campaign_id,
+                    "actor_id": args.check_actor_id,
+                    "kind": args.check_kind,
+                    "ability": args.check_ability,
+                    "dc": args.check_dc,
+                    "proficient": args.check_proficient,
+                    "branch_id": regression_branch["id"],
+                    "expected_revision": campaign_before_check["revision"],
+                    "idempotency_key": f"{token}-character-check",
+                },
+            )
+            if settled.get("status") != "committed":
+                raise RuntimeError("non-combat character check did not commit")
+            check_result = dict(settled.get("result") or {})
+            campaign_before_commit = _facade_value(
+                await client.core(
+                    "campaign_query",
+                    {"view": "get", "payload": {"campaign_id": args.campaign_id}},
+                )
+            )
+            success = bool(check_result.get("success"))
+            committed = _facade_value(
+                await client.domain(
+                    "continuity_commit",
+                    {
+                        "campaign_id": args.campaign_id,
+                        "payload": {
+                            "event": {
+                                "summary": (
+                                    f"{actor['name']} attempted a source-cited "
+                                    f"{args.check_kind} check at {args.location_key}."
+                                ),
+                                "event_type": "ability_check",
+                                "audience_scope": "actor",
+                                "payload": {
+                                    "scene_id": args.scene_id,
+                                    "location_key": args.location_key,
+                                    "kind": args.check_kind,
+                                    "ability": args.check_ability,
+                                    "dc": args.check_dc,
+                                    "success": success,
+                                    "source_excerpt": args.source_excerpt,
+                                },
+                            },
+                            "actor_knowledge": [
+                                {
+                                    "actor_id": args.check_actor_id,
+                                    "knowledge_key": knowledge_key,
+                                    "proposition": (
+                                        f"I {'succeeded' if success else 'failed'} on the "
+                                        f"{args.check_kind} check at {args.location_key}."
+                                    ),
+                                    "disclosure_scope": "owner",
+                                }
+                            ],
+                            "snapshot": {
+                                "label": f"Source-cited non-combat check: {args.check_kind}"
+                            },
+                            "branch_id": regression_branch["id"],
+                        },
+                        "expected_revision": campaign_before_commit["revision"],
+                        "idempotency_key": f"{token}-check-continuity",
+                    },
+                )
+            )
+            branch_knowledge = _facade_value(
+                await client.domain(
+                    "actor_knowledge_query",
+                    {
+                        "campaign_id": args.campaign_id,
+                        "actor_id": args.check_actor_id,
+                        "view": "list",
+                        "payload": {"branch_id": regression_branch["id"]},
+                    },
+                )
+            )
+            if knowledge_key not in {
+                str(item.get("knowledge_key")) for item in branch_knowledge or []
+            }:
+                raise RuntimeError("non-combat outcome was not written to actor knowledge")
+            regression_snapshot = dict(committed["snapshot"])
+            regression_verified = _facade_value(
+                await client.domain(
+                    "snapshot_query",
+                    {
+                        "campaign_id": args.campaign_id,
+                        "view": "verify",
+                        "payload": {"slot": regression_snapshot["slot"]},
+                    },
+                )
+            )
+
+            campaign_regression_play = _facade_value(
+                await client.core(
+                    "campaign_query",
+                    {"view": "get", "payload": {"campaign_id": args.campaign_id}},
+                )
+            )
+            await client.core(
+                "game_phase",
+                {
+                    "campaign_id": args.campaign_id,
+                    "action": "set",
+                    "tool_profile": "lobby",
+                    "expected_revision": campaign_regression_play["revision"],
+                    "branch_id": regression_branch["id"],
+                    "idempotency_key": _phase_transition_key(
+                        token, "check-close-lobby", campaign_regression_play
+                    ),
+                },
+            )
+            await client.open()
+            await client.load("lobby.campaign", "lobby.memory_control")
+            campaign_regression_lobby = _facade_value(
+                await client.core(
+                    "campaign_query",
+                    {"view": "get", "payload": {"campaign_id": args.campaign_id}},
+                )
+            )
+            branches_lobby = _facade_value(
+                await client.domain(
+                    "branch_query", {"campaign_id": args.campaign_id, "view": "list"}
+                )
+            )
+            branch_lobby = next(item for item in branches_lobby if item.get("is_current"))
+            branch_lobby_snapshot = await client.domain(
+                "snapshot_create",
+                {
+                    "campaign_id": args.campaign_id,
+                    "label": f"Closed non-combat check branch: {token}",
+                    "expected_revision": campaign_regression_lobby["revision"],
+                    "expected_head_snapshot_id": branch_lobby.get("head_snapshot_id") or "",
+                    "idempotency_key": f"{token}-check-lobby-snapshot",
+                },
+            )
+            checkout = _facade_value(
+                await client.domain(
+                    "branch_change",
+                    {
+                        "campaign_id": args.campaign_id,
+                        "action": "checkout",
+                        "payload": {"branch_id": source_branch["id"]},
+                        "expected_revision": campaign_regression_lobby["revision"],
+                        "expected_branch_id": regression_branch["id"],
+                        "idempotency_key": f"{token}-check-return-source",
+                    },
+                )
+            )
+            if initial_phase != "lobby":
+                campaign_source_lobby = _facade_value(
+                    await client.core(
+                        "campaign_query",
+                        {"view": "get", "payload": {"campaign_id": args.campaign_id}},
+                    )
+                )
+                await client.core(
+                    "game_phase",
+                    {
+                        "campaign_id": args.campaign_id,
+                        "action": "set",
+                        "tool_profile": initial_phase,
+                        "expected_revision": campaign_source_lobby["revision"],
+                        "branch_id": source_branch["id"],
+                        "idempotency_key": _phase_transition_key(
+                            token, "check-restore-source-phase", campaign_source_lobby
+                        ),
+                    },
+                )
+            await client.open()
+            await client.load(*_phase_groups(initial_phase))
+            campaign_source_after = _facade_value(
+                await client.core(
+                    "campaign_query",
+                    {"view": "get", "payload": {"campaign_id": args.campaign_id}},
+                )
+            )
+            resolution_log_after = deepcopy(
+                dict(campaign_source_after.get("state") or {}).get("resolution_log") or []
+            )
+            source_current_after = _facade_value(
+                await client.domain(
+                    "module_query", {"campaign_id": args.campaign_id, "view": "current"}
+                )
+            )
+            source_knowledge = _facade_value(
+                await client.domain(
+                    "actor_knowledge_query",
+                    {
+                        "campaign_id": args.campaign_id,
+                        "actor_id": args.check_actor_id,
+                        "view": "list",
+                        "payload": {"branch_id": source_branch["id"]},
+                    },
+                )
+            )
+            resolution_restored = resolution_log_after == resolution_log_before
+            scene_restored = _current_scene_summary(source_current_after) == (
+                _current_scene_summary(source_current_before)
+            )
+            key_absent = knowledge_key not in {
+                str(item.get("knowledge_key")) for item in source_knowledge or []
+            }
+            if not resolution_restored or not scene_restored or not key_absent:
+                raise RuntimeError("non-combat regression leaked into the source branch")
+            final_branches = _facade_value(
+                await client.domain(
+                    "branch_query", {"campaign_id": args.campaign_id, "view": "list"}
+                )
+            )
+            final_source = next(item for item in final_branches if item.get("is_current"))
+            final_snapshot = await client.domain(
+                "snapshot_create",
+                {
+                    "campaign_id": args.campaign_id,
+                    "label": f"Returned after non-combat check: {token}",
+                    "expected_revision": campaign_source_after["revision"],
+                    "expected_head_snapshot_id": final_source.get("head_snapshot_id") or "",
+                    "idempotency_key": f"{token}-check-source-final",
+                },
+            )
+            final_verified = _facade_value(
+                await client.domain(
+                    "snapshot_query",
+                    {
+                        "campaign_id": args.campaign_id,
+                        "view": "verify",
+                        "payload": {"slot": final_snapshot["slot"]},
+                    },
+                )
+            )
+            return {
+                "action": "noncombat-check",
+                "transport": "stdio",
+                "campaign_id": args.campaign_id,
+                "source_branch_id": source_branch["id"],
+                "regression_branch_id": regression_branch["id"],
+                "actor": _character_summary(actor),
+                "scene": {
+                    "scene_id": args.scene_id,
+                    "title": scene.get("title"),
+                    "location_key": args.location_key,
+                    "page_start": scene.get("page_start"),
+                    "page_end": scene.get("page_end"),
+                    "source_excerpt": args.source_excerpt,
+                },
+                "progress": progress,
+                "check": {
+                    "kind": args.check_kind,
+                    "ability": args.check_ability,
+                    "dc": args.check_dc,
+                    "proficient": args.check_proficient,
+                    "result": check_result,
+                },
+                "continuity": {
+                    "event_id": committed["event"]["id"],
+                    "knowledge_key": knowledge_key,
+                    "knowledge_count": len(branch_knowledge or []),
+                },
+                "source_checkpoint": source_checkpoint,
+                "regression_snapshot": regression_snapshot,
+                "regression_snapshot_verification": regression_verified,
+                "branch_lobby_snapshot": branch_lobby_snapshot,
+                "checkout": checkout,
+                "source_isolation": {
+                    "resolution_log_restored": resolution_restored,
+                    "scene_restored": scene_restored,
+                    "actor_knowledge_absent": key_absent,
+                },
+                "final_snapshot": final_snapshot,
+                "final_snapshot_verification": final_verified,
             }
 
 
@@ -3654,7 +4389,9 @@ def main() -> int:
         "restore-regression": _restore_regression,
         "relock-core": _relock_core,
         "prepare-statblock": _prepare_statblock,
+        "prepare-rule-statblock": _prepare_rule_statblock,
         "prepare-core-wizard": _prepare_core_wizard,
+        "noncombat-check": _noncombat_check,
         "branch-continuity": _branch_continuity,
         "structured-combat": _structured_combat,
     }[args.action]
