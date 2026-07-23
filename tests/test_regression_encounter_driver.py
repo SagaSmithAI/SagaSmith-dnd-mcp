@@ -10,6 +10,7 @@ from scripts.regression_encounter import (
     _participant_manifest,
     _preferred_hostile_weapon_id,
     _roll_total,
+    _source_departure_patch,
     _source_outcome,
     _source_truce_outcome,
     _surprise_from_check_report,
@@ -101,6 +102,21 @@ def test_specific_source_flee_counts_only_that_hostile_as_resolved() -> None:
         )
         is None
     )
+
+
+def test_source_departure_is_distinct_from_hiding() -> None:
+    assert _source_departure_patch(
+        "goblin-3",
+        reason="As soon as a fight breaks out, one goblin flees to warn Klarg.",
+        destination_location_key="8-klarg-s-cave",
+    ) == {
+        "key": "combatant_departure",
+        "value": {
+            "actor_id": "goblin-3",
+            "reason": "As soon as a fight breaks out, one goblin flees to warn Klarg.",
+            "destination_location_key": "8-klarg-s-cave",
+        },
+    }
 
 
 def test_source_hostage_truce_requires_a_living_leader_and_resolved_party() -> None:

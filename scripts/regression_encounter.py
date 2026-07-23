@@ -53,6 +53,8 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--flee-after-defeated", type=int, default=0)
     parser.add_argument("--flee-actor-id", default="")
     parser.add_argument("--flee-trigger-defeated-actor-id", default="")
+    parser.add_argument("--flee-on-start-actor-id", default="")
+    parser.add_argument("--flee-destination-location-key", default="")
     parser.add_argument("--flee-source-excerpt", default="")
     parser.add_argument("--truce-after-defeated", type=int, default=0)
     parser.add_argument("--truce-actor-id", default="")
@@ -132,6 +134,24 @@ def _participant_manifest(
             }
         ],
         "notes": "Exact source count; no party-size scaling was applied.",
+    }
+
+
+def _source_departure_patch(
+    actor_id: str,
+    *,
+    reason: str,
+    destination_location_key: str = "",
+) -> dict[str, Any]:
+    if not actor_id or not reason.strip():
+        raise ValueError("source departure requires actor_id and reason")
+    return {
+        "key": "combatant_departure",
+        "value": {
+            "actor_id": actor_id,
+            "reason": reason.strip(),
+            "destination_location_key": destination_location_key.strip(),
+        },
     }
 
 
@@ -772,6 +792,7 @@ async def _auto_run(
     source_flee_ids = {
         str(args.flee_actor_id or ""),
         str(args.flee_trigger_defeated_actor_id or ""),
+        str(args.flee_on_start_actor_id or ""),
     } - {""}
     if bool(args.flee_actor_id) != bool(args.flee_trigger_defeated_actor_id):
         raise ValueError(
@@ -780,12 +801,19 @@ async def _auto_run(
         )
     if source_flee_ids and (
         not source_flee_ids <= set(hostile_ids)
-        or args.flee_actor_id == args.flee_trigger_defeated_actor_id
         or not str(args.flee_source_excerpt or "").strip()
     ):
         raise ValueError(
-            "source-specific flee actors must be distinct encounter hostiles and "
-            "require --flee-source-excerpt"
+            "source-specific flee actors must be encounter hostiles and require "
+            "--flee-source-excerpt"
+        )
+    if args.flee_actor_id and (
+        args.flee_actor_id == args.flee_trigger_defeated_actor_id
+        or args.flee_on_start_actor_id
+    ):
+        raise ValueError(
+            "triggered and on-start source departures are mutually exclusive, and "
+            "triggered actors must be distinct"
         )
     if bool(args.truce_after_defeated) != bool(args.truce_actor_id):
         raise ValueError(
@@ -842,6 +870,39 @@ async def _auto_run(
         )
     turns: list[dict[str, Any]] = []
     fled_hostile_ids: set[str] = set()
+    if args.flee_on_start_actor_id:
+        campaign = await _campaign(client, args.campaign_id)
+        escaped = await client.domain(
+            "combat_map_patch",
+            {
+                "campaign_id": args.campaign_id,
+                "patches": [
+                    _source_departure_patch(
+                        args.flee_on_start_actor_id,
+                        reason=str(args.flee_source_excerpt),
+                        destination_location_key=args.flee_destination_location_key,
+                    )
+                ],
+                "branch_id": branch["id"],
+                "expected_revision": campaign["revision"],
+                "idempotency_key": (
+                    f"encounter-source-start-flee-"
+                    f"{_token(f'{args.run_id}:{args.flee_on_start_actor_id}', length=24)}"
+                ),
+            },
+        )
+        fled_hostile_ids.add(args.flee_on_start_actor_id)
+        turns.append(
+            {
+                "sequence": 0,
+                "kind": "source_flee",
+                "actor_id": args.flee_on_start_actor_id,
+                "trigger": "combat_start",
+                "source_excerpt": str(args.flee_source_excerpt).strip(),
+                "destination_location_key": args.flee_destination_location_key,
+                "map_patch": escaped,
+            }
+        )
     outcome_status = ""
     outcome_summary = ""
     for sequence in range(1, args.max_turns + 1):
@@ -922,12 +983,13 @@ async def _auto_run(
                     "campaign_id": args.campaign_id,
                     "patches": [
                         {
-                            "key": "combatant_visibility",
-                            "value": {
-                                "actor_id": actor_id,
-                                "hidden": True,
-                                "reason": str(args.flee_source_excerpt).strip(),
-                            },
+                            **_source_departure_patch(
+                                actor_id,
+                                reason=str(args.flee_source_excerpt),
+                                destination_location_key=(
+                                    args.flee_destination_location_key
+                                ),
+                            ),
                         }
                     ],
                     "branch_id": branch["id"],
@@ -993,6 +1055,7 @@ async def _auto_run(
         )
         if (
             flee_triggered
+            or actor_id in fled_hostile_ids
             or party_down
             or _hit_points(actor) <= 0
             or "attack" not in set(available.get("actions") or [])

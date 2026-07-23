@@ -606,5 +606,44 @@ def test_combat_move_charges_reviewed_difficult_cells_and_records_core_receipt(
         assert mover_after["hidden"] is False
         assert mover_after["visible_to_actor_ids"] is None
         assert revealed["campaign_revision"] == moved["campaign_revision"] + 1
+        departed = await _call_raw(
+            server,
+            "combat_map_patch",
+            {
+                "campaign_id": campaign["id"],
+                "patches": [
+                    {
+                        "key": "combatant_departure",
+                        "value": {
+                            "actor_id": other["id"],
+                            "reason": "The source says one guard flees to warn the leader.",
+                            "destination_location_key": "8-klarg-s-cave",
+                        },
+                    }
+                ],
+                "expected_revision": revealed["campaign_revision"],
+                "idempotency_key": "source-departure",
+            },
+        )
+        other_after = next(
+            item
+            for item in departed["combat"]["combatants"]
+            if item["actor_id"] == other["id"]
+        )
+        assert other_after["departed"] == {
+            "reason": "The source says one guard flees to warn the leader.",
+            "destination_location_key": "8-klarg-s-cave",
+        }
+        assert other_after["hidden"] is True
+        assert departed["world_patches"] == [
+            {
+                "key": "combatant_departure",
+                "value": {
+                    "actor_id": other["id"],
+                    "reason": "The source says one guard flees to warn the leader.",
+                    "destination_location_key": "8-klarg-s-cave",
+                },
+            }
+        ]
 
     asyncio.run(exercise())

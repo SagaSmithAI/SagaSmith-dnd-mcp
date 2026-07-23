@@ -11226,7 +11226,42 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             str(item.get("actor_id")) for item in next_encounter.get("combatants", [])
         }
         seen_visibility_actors: set[str] = set()
+        seen_departure_actors: set[str] = set()
         for patch in normalized:
+            if patch["key"] == "combatant_departure":
+                departure = patch.get("value")
+                if not isinstance(departure, dict) or set(departure) - {
+                    "actor_id",
+                    "reason",
+                    "destination_location_key",
+                }:
+                    raise ValueError(
+                        "combatant_departure requires actor_id, reason, and optional "
+                        "destination_location_key"
+                    )
+                target_id = str(departure.get("actor_id") or "")
+                if target_id not in participant_ids or target_id in seen_departure_actors:
+                    raise ValueError(
+                        "combatant_departure actor_id must be a unique encounter participant"
+                    )
+                seen_departure_actors.add(target_id)
+                reason = str(departure.get("reason") or "").strip()
+                if not reason:
+                    raise ValueError("combatant_departure requires a source or DM ruling reason")
+                destination = str(
+                    departure.get("destination_location_key") or ""
+                ).strip()
+                combatant = next(
+                    item
+                    for item in next_encounter["combatants"]
+                    if str(item.get("actor_id")) == target_id
+                )
+                combatant["departed"] = {
+                    "reason": reason,
+                    "destination_location_key": destination,
+                }
+                combatant["hidden"] = True
+                continue
             if patch["key"] != "combatant_visibility":
                 continue
             visibility = patch.get("value")
