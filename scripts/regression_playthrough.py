@@ -19,6 +19,7 @@ from typing import Any
 
 from mcp import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
+from sagasmith_dnd.playthrough import validate_playthrough_manifest
 
 from scripts.regression_modules import PRINCIPAL_ID, ExposureClient, _token
 
@@ -212,8 +213,7 @@ async def _query_source(
     )
     hits = (
         search_result.get("result")
-        if isinstance(search_result, dict)
-        and isinstance(search_result.get("result"), list)
+        if isinstance(search_result, dict) and isinstance(search_result.get("result"), list)
         else search_result
     )
     if not isinstance(hits, list) or any(not isinstance(hit, dict) for hit in hits):
@@ -1136,9 +1136,7 @@ async def _record_event(
             "state": state,
             "current_location_key": location_key,
             "expected_state_version": int((progress_before or {}).get("state_version", 0) or 0),
-            "idempotency_key": _mutation_key(
-                run_id, "scene-event-progress", event_identity
-            ),
+            "idempotency_key": _mutation_key(run_id, "scene-event-progress", event_identity),
         },
     )
     branches = await client.domain(
@@ -1168,9 +1166,7 @@ async def _record_event(
                 "actor_knowledge": [
                     {
                         "actor_id": actor_id,
-                        "knowledge_key": (
-                            f"playthrough.{_token(run_id)}.{_token(event_identity)}"
-                        ),
+                        "knowledge_key": (f"playthrough.{_token(run_id)}.{_token(event_identity)}"),
                         "proposition": knowledge.strip(),
                         "disclosure_scope": "owner",
                     }
@@ -1180,9 +1176,7 @@ async def _record_event(
                 "branch_id": str(branch["id"]),
             },
             "expected_revision": campaign["revision"],
-            "idempotency_key": _mutation_key(
-                run_id, "continuity-event", event_identity
-            ),
+            "idempotency_key": _mutation_key(run_id, "continuity-event", event_identity),
         },
     )
     synced = await _manifest_mutation(
@@ -1262,13 +1256,11 @@ async def _record_outcome(
         )
     ):
         raise ValueError(
-            "record-outcome requires outcome id, scene, location, excerpt, "
-            "event type, and summary"
+            "record-outcome requires outcome id, scene, location, excerpt, event type, and summary"
         )
     if bool(knowledge.strip()) != bool(knowledge_actor_ids):
         raise ValueError(
-            "record-outcome knowledge text and knowledge actor ids must be "
-            "provided together"
+            "record-outcome knowledge text and knowledge actor ids must be provided together"
         )
     if not facts:
         raise ValueError("record-outcome requires at least one stable fact")
@@ -1283,11 +1275,31 @@ async def _record_outcome(
         if not isinstance(raw, dict):
             raise ValueError(f"fact-json[{index}] must be an object")
         fact = deepcopy(raw)
-        if not str(fact.get("fact_key") or "").strip() or not str(
-            fact.get("content") or ""
-        ).strip():
+        if (
+            not str(fact.get("fact_key") or "").strip()
+            or not str(fact.get("content") or "").strip()
+        ):
             raise ValueError(f"fact-json[{index}] requires fact_key and content")
         normalized_facts.append(fact)
+
+    current_manifest = await _manifest_get(client, campaign_id)
+    manifest = deepcopy(dict(current_manifest["manifest"]))
+    manifest["npcs"] = _upsert_manifest_rows(
+        list(manifest.get("npcs") or []), npc_states, key="actor_id"
+    )
+    manifest["quests"] = _upsert_manifest_rows(
+        list(manifest.get("quests") or []), quest_states, key="id"
+    )
+    manifest["clues"] = _upsert_manifest_rows(
+        list(manifest.get("clues") or []), clue_states, key="id"
+    )
+    manifest["world_state"] = {
+        **deepcopy(dict(manifest.get("world_state") or {})),
+        **deepcopy(world_state),
+    }
+    if objective.strip():
+        manifest["current"]["objective"] = objective.strip()
+    manifest = validate_playthrough_manifest(manifest)
 
     await client.load("play.characters")
     scene = await client.domain(
@@ -1299,9 +1311,7 @@ async def _record_outcome(
         },
     )
     exact_ref = _validate_source_ref(scene, source_ref, excerpt=source_excerpt)
-    if location_key not in {
-        str(item.get("key") or "") for item in _scene_locations(scene)
-    }:
+    if location_key not in {str(item.get("key") or "") for item in _scene_locations(scene)}:
         raise ValueError("record-outcome location is not present in the scene atlas")
 
     recipients = list(dict.fromkeys(knowledge_actor_ids))
@@ -1332,34 +1342,37 @@ async def _record_outcome(
     )
     state = deepcopy(dict((progress_before or {}).get("state") or {}))
     outcomes = deepcopy(dict(state.get("full_playthrough_outcomes") or {}))
-    outcomes[outcome_id.strip()] = {
+    outcome_record = {
         "event_type": event_type,
         "summary": summary.strip(),
         "source_ref": exact_ref,
         "fact_keys": [str(item["fact_key"]) for item in normalized_facts],
     }
-    state["full_playthrough_outcomes"] = outcomes
-    progress = await client.domain(
-        "module_set_progress",
-        {
-            "campaign_id": campaign_id,
-            "scene_id": scene_id,
-            "status": "completed" if progress_percent == 100 else "active",
-            "progress": (
-                progress_percent
-                if progress_percent is not None
-                else _scene_progress_percent(progress_before)
-            ),
-            "state": state,
-            "current_location_key": location_key,
-            "expected_state_version": int(
-                (progress_before or {}).get("state_version", 0) or 0
-            ),
-            "idempotency_key": _mutation_key(
-                run_id, "scene-outcome-progress", outcome_id
-            ),
-        },
-    )
+    existing_outcome = outcomes.get(outcome_id.strip())
+    if existing_outcome is not None:
+        if existing_outcome != outcome_record:
+            raise ValueError("record-outcome id already exists with different scene outcome data")
+        progress = progress_before
+    else:
+        outcomes[outcome_id.strip()] = outcome_record
+        state["full_playthrough_outcomes"] = outcomes
+        progress = await client.domain(
+            "module_set_progress",
+            {
+                "campaign_id": campaign_id,
+                "scene_id": scene_id,
+                "status": "completed" if progress_percent == 100 else "active",
+                "progress": (
+                    progress_percent
+                    if progress_percent is not None
+                    else _scene_progress_percent(progress_before)
+                ),
+                "state": state,
+                "current_location_key": location_key,
+                "expected_state_version": int((progress_before or {}).get("state_version", 0) or 0),
+                "idempotency_key": _mutation_key(run_id, "scene-outcome-progress", outcome_id),
+            },
+        )
     branches = await client.domain(
         "branch_query",
         {"campaign_id": campaign_id, "view": "list"},
@@ -1390,8 +1403,7 @@ async def _record_outcome(
                     {
                         "actor_id": actor_id,
                         "knowledge_key": (
-                            f"playthrough.{_token(run_id)}."
-                            f"outcome.{_token(outcome_id.strip())}"
+                            f"playthrough.{_token(run_id)}.outcome.{_token(outcome_id.strip())}"
                         ),
                         "proposition": knowledge.strip(),
                         "disclosure_scope": "owner",
@@ -1401,29 +1413,10 @@ async def _record_outcome(
                 "branch_id": str(branch["id"]),
             },
             "expected_revision": campaign["revision"],
-            "idempotency_key": _mutation_key(
-                run_id, "continuity-outcome", outcome_id
-            ),
+            "idempotency_key": _mutation_key(run_id, "continuity-outcome", outcome_id),
         },
     )
 
-    current_manifest = await _manifest_get(client, campaign_id)
-    manifest = deepcopy(dict(current_manifest["manifest"]))
-    manifest["npcs"] = _upsert_manifest_rows(
-        list(manifest.get("npcs") or []), npc_states, key="actor_id"
-    )
-    manifest["quests"] = _upsert_manifest_rows(
-        list(manifest.get("quests") or []), quest_states, key="id"
-    )
-    manifest["clues"] = _upsert_manifest_rows(
-        list(manifest.get("clues") or []), clue_states, key="id"
-    )
-    manifest["world_state"] = {
-        **deepcopy(dict(manifest.get("world_state") or {})),
-        **deepcopy(world_state),
-    }
-    if objective.strip():
-        manifest["current"]["objective"] = objective.strip()
     replaced = await _manifest_mutation(
         client,
         campaign_id=campaign_id,
@@ -1582,9 +1575,9 @@ async def _apply_source_damage(
             "payload": {
                 "event": {
                     "summary": (
-                            f"{actor['name']} took {amount} {damage_type} damage"
-                            f"{f' (half of {rolled_amount})' if half_damage else ''}: "
-                            f"{reason.strip()}"
+                        f"{actor['name']} took {amount} {damage_type} damage"
+                        f"{f' (half of {rolled_amount})' if half_damage else ''}: "
+                        f"{reason.strip()}"
                     ),
                     "event_type": "environmental_damage",
                     "audience_scope": "party",
@@ -1620,8 +1613,7 @@ async def _apply_source_damage(
                 ],
                 "snapshot": {
                     "label": (
-                        f"Full playthrough environmental damage: {actor['name']} at "
-                        f"{location_key}"
+                        f"Full playthrough environmental damage: {actor['name']} at {location_key}"
                     )
                 },
                 "branch_id": str(branch["id"]),
@@ -1686,9 +1678,7 @@ async def _stand_after_source_event(
         if source_ref is not None
         else None
     )
-    if location_key not in {
-        str(item.get("key") or "") for item in _scene_locations(scene)
-    }:
+    if location_key not in {str(item.get("key") or "") for item in _scene_locations(scene)}:
         raise ValueError("stand-up location is not present in the scene atlas")
     actor = await client.domain(
         "character_query",
@@ -1721,8 +1711,7 @@ async def _stand_after_source_event(
         else f"{actor['name']} stood from Prone at {location_key}."
     )
     knowledge = reason.strip() or (
-        f"{actor['name']} recovered from the source-cited fall and stood at "
-        f"{location_key}."
+        f"{actor['name']} recovered from the source-cited fall and stood at {location_key}."
         if exact_ref is not None
         else f"{actor['name']} recovered from Prone and stood at {location_key}."
     )
@@ -1762,9 +1751,7 @@ async def _stand_after_source_event(
                     }
                     for recipient in recipients
                 ],
-                "snapshot": {
-                    "label": f"Full playthrough stand: {actor['name']} at {location_key}"
-                },
+                "snapshot": {"label": f"Full playthrough stand: {actor['name']} at {location_key}"},
                 "branch_id": str(branch["id"]),
             },
             "expected_revision": campaign["revision"],
@@ -1817,10 +1804,11 @@ async def _short_rest(
         actor_id = str(member.get("actor_id") or "")
         arcane_recovery = member.get("arcane_recovery")
         hit_dice_spends = member.get("hit_dice_spends")
-        if unexpected or not actor_id or (
-            arcane_recovery is not None and not isinstance(arcane_recovery, dict)
-        ) or (
-            hit_dice_spends is not None and not isinstance(hit_dice_spends, list)
+        if (
+            unexpected
+            or not actor_id
+            or (arcane_recovery is not None and not isinstance(arcane_recovery, dict))
+            or (hit_dice_spends is not None and not isinstance(hit_dice_spends, list))
         ):
             raise ValueError(
                 "short-rest members accept actor_id, optional arcane_recovery, "
@@ -1840,9 +1828,7 @@ async def _short_rest(
                     f"rest-member-json[{index}].hit_dice_spends[{spend_index}] "
                     "must contain a key and positive integer count"
                 )
-            normalized_spends.append(
-                {"key": str(spend["key"]), "count": int(spend["count"])}
-            )
+            normalized_spends.append({"key": str(spend["key"]), "count": int(spend["count"])})
         normalized.append(
             {
                 "actor_id": actor_id,
@@ -1996,9 +1982,7 @@ async def _use_activity(
     knowledge_actor_ids: list[str],
 ) -> dict[str, Any]:
     if not all((scene_id, location_key, actor_id, activity_id, reason.strip())):
-        raise ValueError(
-            "use-activity requires scene, location, actor, activity id, and reason"
-        )
+        raise ValueError("use-activity requires scene, location, actor, activity id, and reason")
     scene = await client.domain(
         "module_query",
         {
@@ -2007,9 +1991,7 @@ async def _use_activity(
             "payload": {"scene_id": scene_id},
         },
     )
-    if location_key not in {
-        str(item.get("key") or "") for item in _scene_locations(scene)
-    }:
+    if location_key not in {str(item.get("key") or "") for item in _scene_locations(scene)}:
         raise ValueError("use-activity location is not present in the scene atlas")
     actor = await client.domain(
         "character_query",
@@ -2062,9 +2044,7 @@ async def _use_activity(
                         "activity_id": activity_id,
                         "declaration": deepcopy(declaration or {}),
                         "core_effect": core_effect,
-                        "random_stream_receipt": deepcopy(
-                            acted.get("random_stream_receipt")
-                        ),
+                        "random_stream_receipt": deepcopy(acted.get("random_stream_receipt")),
                     },
                 },
                 "actor_knowledge": [
@@ -2148,10 +2128,7 @@ async def _long_rest(
             unexpected
             or not actor_id
             or (prepared_ids is not None and not isinstance(prepared_ids, list))
-            or (
-                hit_dice_recovery is not None
-                and not isinstance(hit_dice_recovery, dict)
-            )
+            or (hit_dice_recovery is not None and not isinstance(hit_dice_recovery, dict))
             or not isinstance(food_and_drink, bool)
         ):
             raise ValueError(
@@ -2168,9 +2145,7 @@ async def _long_rest(
         normalized.append(
             {
                 "actor_id": actor_id,
-                "prepared_spell_ids": (
-                    list(prepared_ids) if prepared_ids is not None else None
-                ),
+                "prepared_spell_ids": (list(prepared_ids) if prepared_ids is not None else None),
                 "hit_dice_recovery": deepcopy(hit_dice_recovery),
                 "food_and_drink": food_and_drink,
             }
@@ -2302,9 +2277,7 @@ async def _recover_stable_party(
 ) -> dict[str, Any]:
     member_ids = list(dict.fromkeys(actor_ids))
     if not member_ids or len(member_ids) != len(actor_ids) or not reason.strip():
-        raise ValueError(
-            "recover-stable requires unique actor ids and a non-empty --rest-reason"
-        )
+        raise ValueError("recover-stable requires unique actor ids and a non-empty --rest-reason")
     actors = []
     for actor_id in member_ids:
         actor = await client.domain(
@@ -2338,9 +2311,7 @@ async def _recover_stable_party(
             },
             "expected_revision": campaign["revision"],
             "branch_id": branch["id"],
-            "idempotency_key": _mutation_key(
-                run_id, "stable-recovery", ":".join(member_ids)
-            ),
+            "idempotency_key": _mutation_key(run_id, "stable-recovery", ":".join(member_ids)),
         },
     )
     if recovered.get("status") != "recovered":
@@ -2360,9 +2331,7 @@ async def _recover_stable_party(
                         "member_ids": member_ids,
                         "elapsed_hours": recovered["elapsed_hours"],
                         "recoveries": deepcopy(recovered["recoveries"]),
-                        "random_stream_receipt": deepcopy(
-                            recovered.get("random_stream_receipt")
-                        ),
+                        "random_stream_receipt": deepcopy(recovered.get("random_stream_receipt")),
                     },
                 },
                 "actor_knowledge": [
@@ -2377,9 +2346,7 @@ async def _recover_stable_party(
                     }
                     for actor_id in recipients
                 ],
-                "snapshot": {
-                    "label": f"Full playthrough stable recovery: {reason.strip()}"
-                },
+                "snapshot": {"label": f"Full playthrough stable recovery: {reason.strip()}"},
                 "branch_id": str(branch["id"]),
             },
             "expected_revision": campaign["revision"],
@@ -2450,9 +2417,7 @@ async def _acquire_source_loot(
         },
     )
     exact_ref = _validate_source_ref(scene, source_ref, excerpt=source_excerpt)
-    if location_key not in {
-        str(item.get("key") or "") for item in _scene_locations(scene)
-    }:
+    if location_key not in {str(item.get("key") or "") for item in _scene_locations(scene)}:
         raise ValueError("acquire-loot location is not present in the scene atlas")
     serialized_source_ref = json.dumps(
         exact_ref,
@@ -2466,8 +2431,7 @@ async def _acquire_source_loot(
         (
             dict(item)
             for item in list(dict(campaign.get("state") or {}).get("loot_acquisitions") or [])
-            if isinstance(item, dict)
-            and str(item.get("id") or "") == normalized_acquisition_id
+            if isinstance(item, dict) and str(item.get("id") or "") == normalized_acquisition_id
         ),
         None,
     )
@@ -2482,9 +2446,7 @@ async def _acquire_source_loot(
         if any(prior.get(key) != value for key, value in expected.items()):
             raise RuntimeError("existing loot acquisition does not match this request")
         requested_item_ids = [str(item.get("id") or "") for item in items]
-        if [str(item.get("id") or "") for item in prior.get("items", [])] != (
-            requested_item_ids
-        ):
+        if [str(item.get("id") or "") for item in prior.get("items", [])] != (requested_item_ids):
             raise RuntimeError("existing loot acquisition items do not match this request")
         acquired: dict[str, Any] = {
             "status": "recovered",
@@ -2508,9 +2470,7 @@ async def _acquire_source_loot(
                     "source_ref": serialized_source_ref,
                 },
                 "expected_revision": campaign["revision"],
-                "idempotency_key": _mutation_key(
-                    run_id, "loot-acquire", normalized_acquisition_id
-                ),
+                "idempotency_key": _mutation_key(run_id, "loot-acquire", normalized_acquisition_id),
             },
         )
         if acquired.get("status") != "committed":
@@ -2547,23 +2507,18 @@ async def _acquire_source_loot(
                     {
                         "actor_id": actor_id,
                         "knowledge_key": (
-                            f"playthrough.{_token(run_id)}.loot."
-                            f"{_token(normalized_acquisition_id)}"
+                            f"playthrough.{_token(run_id)}.loot.{_token(normalized_acquisition_id)}"
                         ),
                         "proposition": normalized_reason,
                         "disclosure_scope": "owner",
                     }
                     for actor_id in recipients
                 ],
-                "snapshot": {
-                    "label": f"Full playthrough loot: {normalized_acquisition_id}"
-                },
+                "snapshot": {"label": f"Full playthrough loot: {normalized_acquisition_id}"},
                 "branch_id": str(branch["id"]),
             },
             "expected_revision": campaign["revision"],
-            "idempotency_key": _mutation_key(
-                run_id, "loot-continuity", normalized_acquisition_id
-            ),
+            "idempotency_key": _mutation_key(run_id, "loot-continuity", normalized_acquisition_id),
         },
     )
     synced = await _manifest_mutation(
@@ -2623,9 +2578,7 @@ async def _use_shared_consumable(
             "payload": {"scene_id": scene_id},
         },
     )
-    if location_key not in {
-        str(item.get("key") or "") for item in _scene_locations(scene)
-    }:
+    if location_key not in {str(item.get("key") or "") for item in _scene_locations(scene)}:
         raise ValueError("use-consumable location is not present in the scene atlas")
     target = await client.domain(
         "character_query",
@@ -2675,9 +2628,7 @@ async def _use_shared_consumable(
                     "reason": normalized_reason,
                 },
                 "expected_revision": campaign["revision"],
-                "idempotency_key": _mutation_key(
-                    run_id, "consumable-use", normalized_use_id
-                ),
+                "idempotency_key": _mutation_key(run_id, "consumable-use", normalized_use_id),
             },
         )
         if used.get("status") != "committed":
@@ -2716,23 +2667,18 @@ async def _use_shared_consumable(
                     {
                         "actor_id": actor_id,
                         "knowledge_key": (
-                            f"playthrough.{_token(run_id)}.consumable."
-                            f"{_token(normalized_use_id)}"
+                            f"playthrough.{_token(run_id)}.consumable.{_token(normalized_use_id)}"
                         ),
                         "proposition": normalized_reason,
                         "disclosure_scope": "owner",
                     }
                     for actor_id in recipients
                 ],
-                "snapshot": {
-                    "label": f"Full playthrough consumable: {normalized_use_id}"
-                },
+                "snapshot": {"label": f"Full playthrough consumable: {normalized_use_id}"},
                 "branch_id": str(branch["id"]),
             },
             "expected_revision": campaign["revision"],
-            "idempotency_key": _mutation_key(
-                run_id, "consumable-continuity", normalized_use_id
-            ),
+            "idempotency_key": _mutation_key(run_id, "consumable-continuity", normalized_use_id),
         },
     )
     synced = await _manifest_mutation(
@@ -3027,9 +2973,7 @@ async def _relock_core(
             "branch_id": str(branch["id"]),
             "expected_revision": campaign["revision"],
             "expected_head_snapshot_id": str(branch["head_snapshot_id"]),
-            "idempotency_key": _mutation_key(
-                run_id, "core-relock", previous_fingerprint
-            ),
+            "idempotency_key": _mutation_key(run_id, "core-relock", previous_fingerprint),
         },
     )
     if relocked.get("status") != "relocked":
