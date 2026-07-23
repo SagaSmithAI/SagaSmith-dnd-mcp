@@ -1848,6 +1848,7 @@ async def _prepare_statblock(args: argparse.Namespace) -> dict[str, Any]:
                 normalized_content = str(candidate.get("normalized_content") or "")
                 source_asset_id = None
                 page_number = None
+                source_chunk_ids = candidate["source_chunk_ids"]
                 review_metadata = None
                 observation = (
                     "Regression DM reviewed the normalized statblock against "
@@ -1883,6 +1884,7 @@ async def _prepare_statblock(args: argparse.Namespace) -> dict[str, Any]:
                         )
                     source_asset_id = str(pdf_assets[0]["id"])
                     page_number = int(candidate["page_start"])
+                    source_chunk_ids = None
                     review_metadata = {
                         "review_method": "rendered_source_page",
                         "candidate_id": candidate["id"],
@@ -1900,7 +1902,7 @@ async def _prepare_statblock(args: argparse.Namespace) -> dict[str, Any]:
                                 f"{str(candidate['id']).split(':')[-1][:10]}"
                             ),
                             "normalized_content": normalized_content,
-                            "source_chunk_ids": candidate["source_chunk_ids"],
+                            "source_chunk_ids": source_chunk_ids,
                             "source_asset_id": source_asset_id,
                             "page_number": page_number,
                             "observation": observation,
