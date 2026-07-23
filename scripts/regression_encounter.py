@@ -31,6 +31,13 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--party-report", type=Path, required=True)
     parser.add_argument("--hostile-report", type=Path, action="append", default=[])
     parser.add_argument(
+        "--additional-hostile-report",
+        type=Path,
+        action="append",
+        default=[],
+        help="Already-arrived source combatants tracked as a separate manifest group",
+    )
+    parser.add_argument(
         "--required-hostile-weapon-id",
         action="append",
         default=[],
@@ -44,6 +51,8 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--source-excerpt")
     parser.add_argument("--encounter-name", default="Source-defined encounter")
     parser.add_argument("--hostile-label", default="Source-defined hostiles")
+    parser.add_argument("--additional-hostile-label", default="Additional source hostiles")
+    parser.add_argument("--additional-hostile-source-excerpt", default="")
     parser.add_argument("--surprise-check-report", type=Path)
     parser.add_argument(
         "--no-surprise",
@@ -118,21 +127,39 @@ def _participant_manifest(
     *,
     label: str,
     source_excerpt: str,
+    additional_hostile_ids: list[str] | None = None,
+    additional_label: str = "",
+    additional_source_excerpt: str = "",
 ) -> dict[str, Any]:
     if not source_excerpt.strip():
         raise ValueError("encounter start requires an exact source excerpt")
+    additional_ids = list(additional_hostile_ids or [])
+    if additional_ids and not additional_source_excerpt.strip():
+        raise ValueError("additional source hostiles require an exact source excerpt")
+    groups = [
+        {
+            "key": "source-hostiles",
+            "label": label,
+            "role": "combatant",
+            "required_count": len(hostile_ids),
+            "actor_ids": hostile_ids,
+            "source_excerpt": source_excerpt,
+        }
+    ]
+    if additional_ids:
+        groups.append(
+            {
+                "key": "additional-source-hostiles",
+                "label": additional_label,
+                "role": "combatant",
+                "required_count": len(additional_ids),
+                "actor_ids": additional_ids,
+                "source_excerpt": additional_source_excerpt,
+            }
+        )
     return {
         "schema_version": 1,
-        "groups": [
-            {
-                "key": "source-hostiles",
-                "label": label,
-                "role": "combatant",
-                "required_count": len(hostile_ids),
-                "actor_ids": hostile_ids,
-                "source_excerpt": source_excerpt,
-            }
-        ],
+        "groups": groups,
         "notes": "Exact source count; no party-size scaling was applied.",
     }
 
@@ -357,6 +384,7 @@ async def _start(
     args: argparse.Namespace,
     party_ids: list[str],
     hostile_ids: list[str],
+    additional_hostile_ids: list[str],
 ) -> dict[str, Any]:
     if not args.scene_id or not args.location_key:
         raise ValueError("encounter start requires --scene-id and --location-key")
@@ -372,11 +400,12 @@ async def _start(
     if phase != "play":
         raise RuntimeError("encounter start requires the play phase")
     branch = await _current_branch(client, args.campaign_id)
+    all_hostile_ids = [*hostile_ids, *additional_hostile_ids]
     actors = {
         actor_id: await _character(client, actor_id)
-        for actor_id in [*party_ids, *hostile_ids]
+        for actor_id in [*party_ids, *all_hostile_ids]
     }
-    for actor_id in hostile_ids:
+    for actor_id in all_hostile_ids:
         attacks = list(
             dict(dict(actors[actor_id].get("derived") or {}).get("inventory") or {}).get(
                 "weapon_attacks", []
@@ -391,7 +420,7 @@ async def _start(
     if args.no_surprise and args.surprise_check_report is not None:
         raise ValueError("--no-surprise cannot be combined with --surprise-check-report")
     if args.no_surprise:
-        surprise = {actor_id: False for actor_id in [*party_ids, *hostile_ids]}
+        surprise = {actor_id: False for actor_id in [*party_ids, *all_hostile_ids]}
         surprise_basis = {
             "mode": "source_scene_no_surprise",
             "source_excerpt": str(args.source_excerpt or ""),
@@ -404,7 +433,7 @@ async def _start(
             scene_id=args.scene_id,
             location_key=args.location_key,
             party_ids=party_ids,
-            hostile_ids=hostile_ids,
+            hostile_ids=all_hostile_ids,
         )
         expected_revision = campaign["revision"]
     else:
@@ -431,17 +460,17 @@ async def _start(
             actor_id: score < stealth_total
             for actor_id, score in passive_perception.items()
         }
-        surprise.update({actor_id: False for actor_id in hostile_ids})
+        surprise.update({actor_id: False for actor_id in all_hostile_ids})
         surprise_basis = {"mode": "hostile_group_stealth", "roll": rolled}
         expected_revision = rolled["campaign_revision"]
     started = await client.domain(
         "combat_start",
         {
             "campaign_id": args.campaign_id,
-            "participant_ids": [*party_ids, *hostile_ids],
+            "participant_ids": [*party_ids, *all_hostile_ids],
             "participant_config": _participant_config(
                 party_ids,
-                hostile_ids,
+                all_hostile_ids,
                 surprise_by_actor=surprise,
                 hostiles_hidden=not args.no_surprise,
             ),
@@ -449,6 +478,11 @@ async def _start(
                 hostile_ids,
                 label=args.hostile_label,
                 source_excerpt=str(args.source_excerpt or ""),
+                additional_hostile_ids=additional_hostile_ids,
+                additional_label=args.additional_hostile_label,
+                additional_source_excerpt=str(
+                    args.additional_hostile_source_excerpt or ""
+                ),
             ),
             "name": args.encounter_name,
             "scene_id": args.scene_id,
@@ -1309,6 +1343,14 @@ async def _auto_run(
 async def _run(args: argparse.Namespace) -> dict[str, Any]:
     party_ids = _party_ids(args.party_report)
     hostile_ids = _hostile_ids(args.hostile_report)
+    additional_hostile_ids = (
+        _hostile_ids(args.additional_hostile_report)
+        if args.additional_hostile_report
+        else []
+    )
+    if set(hostile_ids) & set(additional_hostile_ids):
+        raise ValueError("base and additional hostile reports must be disjoint")
+    all_hostile_ids = [*hostile_ids, *additional_hostile_ids]
     report: dict[str, Any] = {
         "action": args.action,
         "transport": "stdio",
@@ -1316,15 +1358,24 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
         "run_id": args.run_id,
         "party_ids": party_ids,
         "hostile_ids": hostile_ids,
+        "additional_hostile_ids": additional_hostile_ids,
     }
     async with stdio_client(_server_parameters(args)) as (read, write):
         async with ClientSession(read, write) as session:
             await session.initialize()
             client = ExposureClient(session)
             if args.action == "start":
-                report["result"] = await _start(client, args, party_ids, hostile_ids)
+                report["result"] = await _start(
+                    client,
+                    args,
+                    party_ids,
+                    hostile_ids,
+                    additional_hostile_ids,
+                )
             elif args.action == "auto-run":
-                report["result"] = await _auto_run(client, args, party_ids, hostile_ids)
+                report["result"] = await _auto_run(
+                    client, args, party_ids, all_hostile_ids
+                )
             else:
                 opened = await client.open(args.campaign_id)
                 await client.load("combat.observe")
@@ -1336,7 +1387,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     ),
                     "actors": [
                         _character_summary(await _character(client, actor_id))
-                        for actor_id in [*party_ids, *hostile_ids]
+                        for actor_id in [*party_ids, *all_hostile_ids]
                     ],
                 }
     report["passed"] = True

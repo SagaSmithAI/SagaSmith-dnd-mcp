@@ -163,6 +163,36 @@ def test_encounter_manifest_preserves_exact_source_count_without_scaling() -> No
     assert manifest["notes"] == "Exact source count; no party-size scaling was applied."
 
 
+def test_encounter_manifest_tracks_arrived_source_group_separately() -> None:
+    manifest = _participant_manifest(
+        ["klarg", "ripper", "goblin-1", "goblin-2"],
+        label="Klarg, Ripper, and two goblins",
+        source_excerpt="Klarg shares this cave with Ripper and two goblins.",
+        additional_hostile_ids=["messenger"],
+        additional_label="Twin-pools messenger",
+        additional_source_excerpt="One goblin flees to area 8 to warn Klarg.",
+    )
+
+    assert manifest["groups"] == [
+        {
+            "key": "source-hostiles",
+            "label": "Klarg, Ripper, and two goblins",
+            "role": "combatant",
+            "required_count": 4,
+            "actor_ids": ["klarg", "ripper", "goblin-1", "goblin-2"],
+            "source_excerpt": "Klarg shares this cave with Ripper and two goblins.",
+        },
+        {
+            "key": "additional-source-hostiles",
+            "label": "Twin-pools messenger",
+            "role": "combatant",
+            "required_count": 1,
+            "actor_ids": ["messenger"],
+            "source_excerpt": "One goblin flees to area 8 to warn Klarg.",
+        },
+    ]
+
+
 def test_default_ambush_layout_keeps_two_goblins_thirty_feet_away() -> None:
     party_ids = ["pc-1", "pc-2", "pc-3", "pc-4", "pc-5"]
     hostile_ids = ["goblin-1", "goblin-2", "goblin-3", "goblin-4"]
