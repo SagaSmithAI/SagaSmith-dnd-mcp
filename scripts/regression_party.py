@@ -44,6 +44,22 @@ def _arguments() -> argparse.Namespace:
         choices=("lost-mine-of-phandelver",),
         default="lost-mine-of-phandelver",
     )
+    parser.add_argument(
+        "--profile-name",
+        default="",
+        help="Build only one named source-audited profile, for example a replacement PC",
+    )
+    parser.add_argument(
+        "--actor-name",
+        default="",
+        help="Override the new actor's name when --profile-name selects one profile",
+    )
+    parser.add_argument(
+        "--return-phase",
+        choices=("lobby", "play"),
+        default="",
+        help="Phase to expose after construction; defaults to the entry phase",
+    )
     return parser.parse_args()
 
 
@@ -597,6 +613,44 @@ def audit_profiles(profiles: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def select_profiles(
+    profiles: list[dict[str, Any]],
+    *,
+    profile_name: str,
+    actor_name: str,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Select a full party or one independently named replacement plan."""
+    requested = profile_name.strip()
+    replacement_name = actor_name.strip()
+    if not requested:
+        if replacement_name:
+            raise ValueError("--actor-name requires --profile-name")
+        return [deepcopy(item) for item in profiles], audit_profiles(profiles)
+    matches = [
+        item for item in profiles if str(item["name"]).casefold() == requested.casefold()
+    ]
+    if len(matches) != 1:
+        raise ValueError("--profile-name must identify exactly one campaign party profile")
+    profile = deepcopy(matches[0])
+    source_profile_name = str(profile["name"])
+    if replacement_name:
+        profile["name"] = replacement_name
+    return [profile], {
+        "selected_size": 1,
+        "purpose": "legal_replacement",
+        "source_profile_name": source_profile_name,
+        "actor_name": str(profile["name"]),
+        "class": str(profile["class"]),
+        "species": str(profile["species"]),
+        "background": str(profile["background"]),
+        "ability_method": str(profile["ability_method"]),
+        "spell_resource_model": str(
+            dict(profile.get("spellcasting") or {}).get("mode") or "none"
+        ),
+        "knowledge_inheritance": "none",
+    }
+
+
 def _normalized_catalog_name(value: str) -> str:
     cleaned = re.sub(r"^[~*\s]+|[~*\s]+$", "", value)
     return re.sub(r"\s+", " ", cleaned).casefold()
@@ -1002,38 +1056,139 @@ async def _build_character(
     }
 
 
+async def _campaign(client: ExposureClient, campaign_id: str) -> dict[str, Any]:
+    return dict(
+        _facade_value(
+            await client.core(
+                "campaign_query",
+                {
+                    "view": "get",
+                    "payload": {"campaign_id": campaign_id},
+                },
+            )
+        )
+    )
+
+
+async def _switch_phase(
+    client: ExposureClient,
+    *,
+    campaign_id: str,
+    run_id: str,
+    current_phase: str,
+    target_phase: str,
+    purpose: str,
+) -> dict[str, Any] | None:
+    if current_phase == target_phase:
+        return None
+    if current_phase not in {"lobby", "play"} or target_phase not in {"lobby", "play"}:
+        raise RuntimeError("party construction cannot transition through combat")
+    branches = await client.domain(
+        "branch_query",
+        {"campaign_id": campaign_id, "view": "list"},
+    )
+    branch = next((item for item in branches if item.get("is_current")), None)
+    if branch is None:
+        raise RuntimeError("campaign has no current branch")
+    campaign = await _campaign(client, campaign_id)
+    changed = _facade_value(
+        await client.core(
+            "game_phase",
+            {
+                "campaign_id": campaign_id,
+                "action": "set",
+                "tool_profile": target_phase,
+                "expected_revision": campaign["revision"],
+                "branch_id": str(branch["id"]),
+                "idempotency_key": (
+                    f"full-party-phase-{_token(run_id)}-{_token(purpose)}-"
+                    f"{current_phase}-{target_phase}-r{campaign['revision']}"
+                ),
+            },
+        )
+    )
+    await client.open(campaign_id)
+    if target_phase == "lobby":
+        await client.load("lobby.campaign", "lobby.rules", "lobby.characters")
+    else:
+        await client.load("play.scene_control", "play.scene")
+    return dict(changed)
+
+
 async def _run(args: argparse.Namespace) -> dict[str, Any]:
-    profiles = lost_mine_party_profiles()
-    profile_audit = audit_profiles(profiles)
+    profiles, profile_audit = select_profiles(
+        lost_mine_party_profiles(),
+        profile_name=args.profile_name,
+        actor_name=args.actor_name,
+    )
     async with stdio_client(_server_parameters(args)) as (read, write):
         async with ClientSession(read, write) as session:
             await session.initialize()
             client = ExposureClient(session)
             await client.open(args.campaign_id)
-            await client.load("lobby.campaign", "lobby.rules", "lobby.characters")
-            campaign = _facade_value(
-                await client.core(
-                    "campaign_query",
-                    {
-                        "view": "get",
-                        "payload": {"campaign_id": args.campaign_id},
-                    },
-                )
+            campaign = await _campaign(client, args.campaign_id)
+            entry_phase = str(
+                dict(campaign.get("state") or {}).get("game_phase") or "lobby"
             )
-            phase = str(dict(campaign.get("state") or {}).get("game_phase") or "lobby")
-            if phase != "lobby":
-                raise RuntimeError("party construction requires the public Lobby profile")
-            catalog = await _catalog(client, args.campaign_id)
-            characters = [
-                await _build_character(
+            if entry_phase == "combat":
+                raise RuntimeError("party construction cannot run during active combat")
+            if len(profiles) > 1 and entry_phase != "lobby":
+                raise RuntimeError("full party construction requires the public Lobby profile")
+            return_phase = args.return_phase or entry_phase
+            if return_phase not in {"lobby", "play"}:
+                raise ValueError("--return-phase must be lobby or play")
+            if entry_phase == "lobby":
+                await client.load("lobby.campaign", "lobby.rules", "lobby.characters")
+            else:
+                await client.load("play.scene_control", "play.scene")
+            phase_changes: list[dict[str, Any]] = []
+            current_phase = entry_phase
+            if current_phase == "play":
+                changed = await _switch_phase(
                     client,
                     campaign_id=args.campaign_id,
                     run_id=args.run_id,
-                    profile=profile,
-                    catalog=catalog,
+                    current_phase=current_phase,
+                    target_phase="lobby",
+                    purpose="enter-lobby",
                 )
-                for profile in profiles
-            ]
+                if changed is not None:
+                    phase_changes.append(changed)
+                current_phase = "lobby"
+            try:
+                catalog = await _catalog(client, args.campaign_id)
+                characters = [
+                    await _build_character(
+                        client,
+                        campaign_id=args.campaign_id,
+                        run_id=args.run_id,
+                        profile=profile,
+                        catalog=catalog,
+                    )
+                    for profile in profiles
+                ]
+            except Exception:
+                if entry_phase == "play" and current_phase == "lobby":
+                    await _switch_phase(
+                        client,
+                        campaign_id=args.campaign_id,
+                        run_id=args.run_id,
+                        current_phase="lobby",
+                        target_phase="play",
+                        purpose="failure-restore-play",
+                    )
+                raise
+            if current_phase != return_phase:
+                changed = await _switch_phase(
+                    client,
+                    campaign_id=args.campaign_id,
+                    run_id=args.run_id,
+                    current_phase=current_phase,
+                    target_phase=return_phase,
+                    purpose="return",
+                )
+                if changed is not None:
+                    phase_changes.append(changed)
             return {
                 "action": "build-campaign-party",
                 "transport": "stdio",
@@ -1041,6 +1196,9 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                 "campaign_line_id": args.party,
                 "profile_audit": profile_audit,
                 "characters": characters,
+                "entry_phase": entry_phase,
+                "return_phase": return_phase,
+                "phase_changes": phase_changes,
                 "manifest_members": [
                     {
                         key: character[key]

@@ -56,6 +56,7 @@ def _arguments() -> argparse.Namespace:
             "refresh-module",
             "query-source",
             "register-party",
+            "register-replacement",
             "start-play",
             "verify-ending",
         ),
@@ -157,6 +158,9 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--event-summary", default="")
     parser.add_argument("--event-knowledge", default="")
     parser.add_argument("--event-knowledge-actor-id", action="append", default=[])
+    parser.add_argument("--replacement-predecessor-id", default="")
+    parser.add_argument("--replacement-actor-id", default="")
+    parser.add_argument("--replacement-knowledge", action="append", default=[])
     parser.add_argument("--outcome-id", default="")
     parser.add_argument("--fact-json", action="append", type=json.loads, default=[])
     parser.add_argument("--npc-state-json", action="append", type=json.loads, default=[])
@@ -698,6 +702,321 @@ async def _register_party(
         run_id=run_id,
         identity="register-party-sync",
     ) | {"replace": replaced}
+
+
+async def _register_replacement(
+    client: ExposureClient,
+    *,
+    campaign_id: str,
+    run_id: str,
+    predecessor_actor_id: str,
+    replacement_actor_id: str,
+    scene_id: str,
+    location_key: str,
+    source_excerpt: str,
+    source_ref: dict[str, Any] | None,
+    summary: str,
+    handoff_knowledge: list[str],
+    witness_actor_ids: list[str],
+) -> dict[str, Any]:
+    predecessor_id = predecessor_actor_id.strip()
+    replacement_id = replacement_actor_id.strip()
+    normalized_summary = summary.strip()
+    handoff = [item.strip() for item in handoff_knowledge if item.strip()]
+    witnesses = list(dict.fromkeys(witness_actor_ids))
+    if not all(
+        (
+            predecessor_id,
+            replacement_id,
+            scene_id,
+            location_key,
+            source_excerpt.strip(),
+            normalized_summary,
+        )
+    ):
+        raise ValueError(
+            "register-replacement requires predecessor, replacement, scene, "
+            "location, source excerpt, and summary"
+        )
+    if predecessor_id == replacement_id:
+        raise ValueError("replacement actor must differ from predecessor")
+    if not handoff or len(handoff) != len(set(handoff)):
+        raise ValueError("register-replacement requires unique explicit handoff knowledge")
+    if not witnesses or len(witnesses) != len(witness_actor_ids):
+        raise ValueError("register-replacement requires unique witnesses")
+    if predecessor_id in witnesses:
+        raise ValueError("a dead or departed predecessor cannot witness replacement joining")
+    if replacement_id not in witnesses:
+        raise ValueError("replacement actor must witness their own joining event")
+
+    current = await _manifest_get(client, campaign_id)
+    manifest = deepcopy(dict(current["manifest"]))
+    if str(dict(manifest["current"]).get("scene_id") or "") != scene_id:
+        raise ValueError("replacement must join in the manifest's current scene")
+    members = list(manifest["party"]["members"])
+    predecessor_index = next(
+        (
+            index
+            for index, member in enumerate(members)
+            if str(member.get("actor_id") or "") == predecessor_id
+        ),
+        None,
+    )
+    if predecessor_index is None:
+        raise ValueError("predecessor is not an active manifest party slot")
+    predecessor_member = dict(members[predecessor_index])
+    if predecessor_member.get("status") not in {"dead", "departed"}:
+        raise ValueError("predecessor must be dead or departed before replacement")
+    if any(str(member.get("actor_id") or "") == replacement_id for member in members):
+        raise ValueError("replacement actor already occupies a party slot")
+    if any(
+        replacement_id
+        in {
+            str(item.get("predecessor_actor_id") or ""),
+            str(item.get("replacement_actor_id") or ""),
+        }
+        for item in manifest["party"]["replacements"]
+    ):
+        raise ValueError("replacement actor is already present in replacement history")
+
+    scene = await client.domain(
+        "module_query",
+        {
+            "campaign_id": campaign_id,
+            "view": "scene",
+            "payload": {"scene_id": scene_id},
+        },
+    )
+    exact_ref = _validate_source_ref(scene, source_ref, excerpt=source_excerpt)
+    if location_key not in {str(item.get("key") or "") for item in _scene_locations(scene)}:
+        raise ValueError("replacement location is not present in the scene atlas")
+
+    predecessor = await client.domain(
+        "character_query",
+        {"view": "get", "payload": {"character_id": predecessor_id}},
+    )
+    replacement = await client.domain(
+        "character_query",
+        {"view": "get", "payload": {"character_id": replacement_id}},
+    )
+    for label, actor in (("predecessor", predecessor), ("replacement", replacement)):
+        if actor.get("campaign_id") != campaign_id or actor.get("character_type") != "pc":
+            raise ValueError(f"{label} must be a PC in this campaign")
+    replacement_hp = dict(dict(replacement["sheet"])["combat"]["hp"])
+    replacement_derived_hp = dict(
+        dict(replacement.get("derived") or {}).get("hit_points") or {}
+    )
+    replacement_conditions = {
+        str(item).casefold()
+        for item in list(replacement_derived_hp.get("conditions") or [])
+    }
+    if int(replacement_hp.get("value", 0) or 0) <= 0 or "dead" in replacement_conditions:
+        raise ValueError("replacement must be a living PC")
+    for actor_id in witnesses:
+        actor = await client.domain(
+            "character_query",
+            {"view": "get", "payload": {"character_id": actor_id}},
+        )
+        if actor.get("campaign_id") != campaign_id:
+            raise ValueError("every replacement witness must belong to the campaign")
+
+    branches = await client.domain(
+        "branch_query",
+        {"campaign_id": campaign_id, "view": "list"},
+    )
+    branch = next((item for item in branches if item.get("is_current")), None)
+    if branch is None:
+        raise RuntimeError("campaign has no current branch")
+    branch_id = str(branch["id"])
+    predecessor_knowledge_before = list(
+        await client.domain(
+            "actor_knowledge_query",
+            {
+                "campaign_id": campaign_id,
+                "actor_id": predecessor_id,
+                "view": "list",
+                "payload": {"branch_id": branch_id},
+            },
+        )
+        or []
+    )
+    replacement_knowledge_before = list(
+        await client.domain(
+            "actor_knowledge_query",
+            {
+                "campaign_id": campaign_id,
+                "actor_id": replacement_id,
+                "view": "list",
+                "payload": {"branch_id": branch_id},
+            },
+        )
+        or []
+    )
+    if replacement_knowledge_before:
+        raise ValueError("new replacement must begin with independent empty ActorKnowledge")
+
+    knowledge_prefix = (
+        f"playthrough.{_token(run_id)}.replacement.{_token(replacement_id)}"
+    )
+    join_key = f"{knowledge_prefix}.joined"
+    handoff_rows = [
+        {
+            "actor_id": replacement_id,
+            "knowledge_key": f"{knowledge_prefix}.handoff.{index + 1}.{_token(proposition)}",
+            "proposition": proposition,
+            "cause": "told_by",
+            "disclosure_scope": "owner",
+        }
+        for index, proposition in enumerate(handoff)
+    ]
+    actor_knowledge = [
+        {
+            "actor_id": actor_id,
+            "knowledge_key": join_key,
+            "proposition": normalized_summary,
+            "cause": "witnessed",
+            "disclosure_scope": "owner",
+        }
+        for actor_id in witnesses
+    ] + handoff_rows
+
+    replacement_member = _party_member(
+        replacement,
+        {
+            "source": "replacement",
+            "source_asset_path": "",
+            "status": "active",
+        },
+    )
+    prospective = deepcopy(manifest)
+    prospective["party"]["members"][predecessor_index] = replacement_member
+    prospective["party"]["replacements"].append(
+        {
+            "predecessor_actor_id": predecessor_id,
+            "replacement_actor_id": replacement_id,
+            "handoff_event_id": f"pending:{_token(run_id + replacement_id)}",
+        }
+    )
+    validate_playthrough_manifest(prospective)
+
+    campaign = await _campaign(client, campaign_id)
+    committed = await client.domain(
+        "continuity_commit",
+        {
+            "campaign_id": campaign_id,
+            "payload": {
+                "event": {
+                    "summary": normalized_summary,
+                    "event_type": "replacement_joined",
+                    "audience_scope": "party",
+                    "payload": {
+                        "scene_id": scene_id,
+                        "location_key": location_key,
+                        "predecessor_actor_id": predecessor_id,
+                        "replacement_actor_id": replacement_id,
+                        "handoff_knowledge": handoff,
+                        "source_excerpt": source_excerpt.strip(),
+                        "source_ref": exact_ref,
+                    },
+                },
+                "actor_knowledge": actor_knowledge,
+                "snapshot": {
+                    "label": (
+                        f"Replacement handoff: {replacement['name']} succeeds "
+                        f"{predecessor['name']}"
+                    )
+                },
+                "branch_id": branch_id,
+            },
+            "expected_revision": campaign["revision"],
+            "idempotency_key": _mutation_key(
+                run_id,
+                "replacement-continuity",
+                f"{predecessor_id}:{replacement_id}",
+            ),
+        },
+    )
+    handoff_event_id = str(dict(committed["event"])["id"])
+    prospective["party"]["replacements"][-1]["handoff_event_id"] = handoff_event_id
+    prospective = validate_playthrough_manifest(prospective)
+    replaced = await _manifest_mutation(
+        client,
+        campaign_id=campaign_id,
+        action="replace",
+        run_id=run_id,
+        identity=f"replacement-manifest:{predecessor_id}:{replacement_id}",
+        payload={"manifest": prospective},
+    )
+    checkpoint = await _checkpoint(
+        client,
+        campaign_id=campaign_id,
+        run_id=run_id,
+        label=(
+            f"Full playthrough replacement: {replacement['name']} succeeds "
+            f"{predecessor['name']}"
+        ),
+    )
+
+    replacement_knowledge_after = list(
+        await client.domain(
+            "actor_knowledge_query",
+            {
+                "campaign_id": campaign_id,
+                "actor_id": replacement_id,
+                "view": "list",
+                "payload": {"branch_id": branch_id},
+            },
+        )
+        or []
+    )
+    expected_keys = {join_key, *(row["knowledge_key"] for row in handoff_rows)}
+    actual_keys = {
+        str(item.get("knowledge_key") or "") for item in replacement_knowledge_after
+    }
+    if actual_keys != expected_keys:
+        raise RuntimeError("replacement ActorKnowledge does not match explicit handoff")
+    predecessor_knowledge_after = list(
+        await client.domain(
+            "actor_knowledge_query",
+            {
+                "campaign_id": campaign_id,
+                "actor_id": predecessor_id,
+                "view": "list",
+                "payload": {"branch_id": branch_id},
+            },
+        )
+        or []
+    )
+    before_ids = {str(item.get("id") or "") for item in predecessor_knowledge_before}
+    after_ids = {str(item.get("id") or "") for item in predecessor_knowledge_after}
+    if before_ids != after_ids:
+        raise RuntimeError("predecessor ActorKnowledge changed during replacement")
+    retained_predecessor = await client.domain(
+        "character_query",
+        {"view": "get", "payload": {"character_id": predecessor_id}},
+    )
+    if str(retained_predecessor.get("id") or "") != predecessor_id:
+        raise RuntimeError("predecessor actor was not retained")
+    return {
+        "scene": {
+            "scene_id": scene_id,
+            "location_key": location_key,
+            "source_ref": exact_ref,
+        },
+        "predecessor": {
+            "actor_id": predecessor_id,
+            "name": predecessor["name"],
+            "status": predecessor_member["status"],
+            "retained": True,
+            "knowledge_count": len(predecessor_knowledge_after),
+        },
+        "replacement": replacement_member,
+        "handoff_knowledge": handoff,
+        "witness_actor_ids": witnesses,
+        "continuity": committed,
+        "manifest_replace": replaced,
+        "checkpoint": checkpoint,
+    }
 
 
 async def _advance_scene(
@@ -4008,6 +4327,24 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     campaign_id=args.campaign_id,
                     run_id=args.run_id,
                     selections=_party_selections(args),
+                )
+            elif args.action == "register-replacement":
+                if phase != "play":
+                    raise RuntimeError("register-replacement requires the play phase")
+                await client.load("play.characters")
+                report["result"] = await _register_replacement(
+                    client,
+                    campaign_id=args.campaign_id,
+                    run_id=args.run_id,
+                    predecessor_actor_id=args.replacement_predecessor_id,
+                    replacement_actor_id=args.replacement_actor_id,
+                    scene_id=str(args.scene_id or ""),
+                    location_key=args.location_key,
+                    source_excerpt=args.source_excerpt,
+                    source_ref=args.source_ref_json,
+                    summary=args.event_summary,
+                    handoff_knowledge=args.replacement_knowledge,
+                    witness_actor_ids=args.knowledge_actor_id,
                 )
             elif args.action == "configure-advancement":
                 if phase == "combat":

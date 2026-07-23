@@ -7,7 +7,10 @@ from copy import deepcopy
 
 import pytest
 from sagasmith_dnd.character_schema import default_character_sheet
-from sagasmith_dnd.playthrough import new_playthrough_manifest
+from sagasmith_dnd.playthrough import (
+    new_playthrough_manifest,
+    validate_playthrough_manifest,
+)
 
 from scripts.regression_playthrough import (
     _acquire_source_loot,
@@ -33,6 +36,7 @@ from scripts.regression_playthrough import (
     _record_outcome,
     _recover_committed_check,
     _recover_stable_party,
+    _register_replacement,
     _relock_core,
     _resolve_check,
     _restore_phase_after_failed_refresh,
@@ -498,6 +502,180 @@ def test_party_projection_keeps_knowledge_bound_to_the_new_actor() -> None:
     assert member["knowledge_scope_actor_id"] == "replacement-actor"
     assert member["xp"] == 300
     assert member["hit_points"]["current"] == 7
+
+
+def test_replacement_join_preserves_predecessor_and_only_hands_off_explicit_knowledge() -> None:
+    source_ref = {
+        "module_id": "module-1",
+        "scene_id": "scene-1",
+        "chunk_id": "chunk-1",
+        "page_start": 15,
+        "page_end": 15,
+        "heading_path": ["Town", "Inn"],
+        "content_sha256": "abc",
+    }
+    predecessor_sheet = default_character_sheet()
+    predecessor_sheet["combat"]["hp"] = {"value": 0, "max": 8, "temp": 0}
+    replacement_sheet = default_character_sheet()
+    replacement_sheet["combat"]["hp"] = {"value": 8, "max": 8, "temp": 0}
+    predecessor = {
+        "id": "predecessor",
+        "name": "Fallen Wizard",
+        "campaign_id": "campaign-1",
+        "character_type": "pc",
+        "sheet": predecessor_sheet,
+        "derived": {"hit_points": {"conditions": ["dead"]}},
+    }
+    replacement = {
+        "id": "replacement",
+        "name": "New Wizard",
+        "campaign_id": "campaign-1",
+        "character_type": "pc",
+        "sheet": replacement_sheet,
+        "derived": {"hit_points": {"conditions": []}},
+    }
+    manifest = new_playthrough_manifest(
+        run_id="run-1",
+        campaign_line_id="line-1",
+        module_ids=["module-1"],
+        recommended_party_minimum=1,
+        recommended_party_maximum=1,
+        selected_party_size=1,
+        source_refs=[],
+    )
+    manifest["status"] = "in_progress"
+    manifest["current"] = {
+        "module_id": "module-1",
+        "chapter_id": "chapter-1",
+        "chapter_title": "Town",
+        "scene_id": "scene-1",
+        "scene_title": "Town",
+        "objective": "Recruit a replacement.",
+    }
+    manifest["party"]["members"] = [
+        _party_member(
+            predecessor,
+            {"source": "generated", "source_asset_path": "", "status": "dead"},
+        )
+    ]
+
+    class Client:
+        def __init__(self) -> None:
+            self.revision = 10
+            self.manifest = validate_playthrough_manifest(manifest)
+            self.knowledge = {
+                "predecessor": [{"id": "old-knowledge", "knowledge_key": "old.fact"}],
+                "replacement": [],
+            }
+            self.head_snapshot_id = ""
+
+        async def core(self, tool_id: str, arguments: dict):
+            assert tool_id == "campaign_query"
+            return {
+                "result": {
+                    "id": "campaign-1",
+                    "revision": self.revision,
+                    "state": {"game_phase": "play"},
+                }
+            }
+
+        async def domain(self, tool_id: str, arguments: dict):
+            if tool_id == "playthrough_manifest":
+                action = arguments["action"]
+                if action == "get":
+                    return {
+                        "manifest": deepcopy(self.manifest),
+                        "campaign_revision": self.revision,
+                    }
+                if action == "replace":
+                    self.manifest = deepcopy(arguments["payload"]["manifest"])
+                    self.revision += 1
+                elif action == "sync":
+                    self.revision += 1
+                return {
+                    "manifest": deepcopy(self.manifest),
+                    "campaign_revision": self.revision,
+                }
+            if tool_id == "module_query":
+                return {
+                    "module_id": "module-1",
+                    "scene_id": "scene-1",
+                    "content": "The local inn has rooms for rent.",
+                    "spatial": {"locations": [{"key": "inn"}]},
+                }
+            if tool_id == "character_query":
+                actor_id = arguments["payload"]["character_id"]
+                return deepcopy(
+                    predecessor if actor_id == "predecessor" else replacement
+                )
+            if tool_id == "branch_query":
+                return [
+                    {
+                        "id": "branch-1",
+                        "is_current": True,
+                        "head_snapshot_id": self.head_snapshot_id,
+                    }
+                ]
+            if tool_id == "actor_knowledge_query":
+                return deepcopy(self.knowledge[arguments["actor_id"]])
+            if tool_id == "continuity_commit":
+                rows = arguments["payload"]["actor_knowledge"]
+                assert [item["actor_id"] for item in rows] == [
+                    "replacement",
+                    "replacement",
+                ]
+                self.knowledge["replacement"] = [
+                    {
+                        "id": f"knowledge-{index}",
+                        "knowledge_key": item["knowledge_key"],
+                    }
+                    for index, item in enumerate(rows)
+                ]
+                self.head_snapshot_id = "snapshot-1"
+                self.revision += 1
+                return {
+                    "event": {"id": "event-join"},
+                    "snapshot": {"id": "snapshot-1", "slot": 1},
+                }
+            if tool_id == "snapshot_create":
+                assert arguments["expected_head_snapshot_id"] == "snapshot-1"
+                self.head_snapshot_id = "snapshot-2"
+                self.revision += 1
+                return {"id": "snapshot-2", "slot": 2}
+            if tool_id == "snapshot_query":
+                return {"valid": True}
+            raise AssertionError((tool_id, arguments))
+
+    client = Client()
+    result = asyncio.run(
+        _register_replacement(
+            client,
+            campaign_id="campaign-1",
+            run_id="run-1",
+            predecessor_actor_id="predecessor",
+            replacement_actor_id="replacement",
+            scene_id="scene-1",
+            location_key="inn",
+            source_excerpt="The local inn has rooms for rent.",
+            source_ref=source_ref,
+            summary="New Wizard joined the party at the inn.",
+            handoff_knowledge=["Gundren was taken to Cragmaw Castle."],
+            witness_actor_ids=["replacement"],
+        )
+    )
+
+    assert result["predecessor"]["retained"] is True
+    assert result["predecessor"]["knowledge_count"] == 1
+    assert result["replacement"]["knowledge_scope_actor_id"] == "replacement"
+    assert client.manifest["party"]["members"][0]["actor_id"] == "replacement"
+    assert client.manifest["party"]["replacements"] == [
+        {
+            "predecessor_actor_id": "predecessor",
+            "replacement_actor_id": "replacement",
+            "handoff_event_id": "event-join",
+        }
+    ]
+    assert result["checkpoint"]["snapshot"]["slot"] == 2
 
 
 def test_phase_and_idempotency_namespaces_are_stable() -> None:
