@@ -541,6 +541,14 @@ def _conditions(actor: dict[str, Any]) -> set[str]:
     }
 
 
+def _should_stand(actor: dict[str, Any], available_actions: set[str]) -> bool:
+    return (
+        _hit_points(actor) > 0
+        and "prone" in _conditions(actor)
+        and "move" in available_actions
+    )
+
+
 def _choose_party_spell(
     actor_id: str,
     *,
@@ -1131,12 +1139,38 @@ async def _auto_run(
                 "actor_id": actor_id,
             },
         )
+        available_actions = set(available.get("actions") or [])
+        if _should_stand(actor, available_actions):
+            campaign = await _campaign(client, args.campaign_id)
+            stood = await client.domain(
+                "combat_movement",
+                {
+                    "campaign_id": args.campaign_id,
+                    "actor_id": actor_id,
+                    "action": "stand",
+                    "branch_id": branch["id"],
+                    "expected_revision": campaign["revision"],
+                    "idempotency_key": (
+                        f"encounter-stand-"
+                        f"{_token(f'{args.run_id}:{sequence}:{actor_id}', length=24)}"
+                    ),
+                },
+            )
+            turns.append(
+                {
+                    "sequence": sequence,
+                    "kind": "stand",
+                    "actor_id": actor_id,
+                    "result": stood,
+                }
+            )
+            continue
         if (
             flee_triggered
             or actor_id in fled_hostile_ids
             or party_down
             or _hit_points(actor) <= 0
-            or "attack" not in set(available.get("actions") or [])
+            or "attack" not in available_actions
         ):
             ended_turn = await _end_turn(
                 client,

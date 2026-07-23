@@ -12,6 +12,7 @@ from scripts.regression_encounter import (
     _participant_manifest,
     _preferred_hostile_weapon_id,
     _roll_total,
+    _should_stand,
     _source_departure_patch,
     _source_outcome,
     _source_truce_outcome,
@@ -98,6 +99,22 @@ def test_party_tactics_focus_observably_wounded_targets() -> None:
     wounded = {"sheet": {"combat": {"hp": {"value": 22, "max": 27}}}}
 
     assert _wound_priority(wounded) < _wound_priority(healthy)
+
+
+def test_conscious_prone_combatant_stands_before_moving() -> None:
+    actor = {
+        "sheet": {
+            "combat": {"hp": {"value": 7, "max": 8}},
+            "conditions": ["prone"],
+        }
+    }
+
+    assert _should_stand(actor, {"move", "attack"})
+    assert not _should_stand(actor, {"attack"})
+
+    actor["sheet"]["conditions"].append("unconscious")
+    actor["sheet"]["combat"]["hp"]["value"] = 0
+    assert not _should_stand(actor, {"move", "attack"})
 
 
 def test_movement_pending_reaction_blocks_followup_attack() -> None:
