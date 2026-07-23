@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -13,6 +14,7 @@ class SkillDocument:
     title: str
     source: str
     path: Path
+    checksum: str
 
 
 @dataclass(frozen=True)
@@ -20,6 +22,7 @@ class SkillAsset:
     id: str
     source: str
     path: Path
+    checksum: str
 
 
 class SkillCatalog:
@@ -32,6 +35,8 @@ class SkillCatalog:
             if not root.is_dir():
                 continue
             for path in sorted(root.rglob("SKILL.md")):
+                if self._is_install_shadow(path, root):
+                    continue
                 relative = path.relative_to(root).parent
                 suffix = "root" if relative == Path(".") else ".".join(relative.parts)
                 documents.append(
@@ -40,6 +45,7 @@ class SkillCatalog:
                         title=self._title(path, suffix),
                         source=source,
                         path=path,
+                        checksum=self._checksum(path),
                     )
                 )
         return documents
@@ -72,7 +78,9 @@ class SkillCatalog:
             if not root.is_dir():
                 continue
             paths = (
-                item for item in root.rglob("*") if item.is_file() and ".git" not in item.parts
+                item
+                for item in root.rglob("*")
+                if item.is_file() and not self._is_install_shadow(item, root)
             )
             for path in sorted(paths):
                 relative = path.relative_to(root).as_posix()
@@ -80,7 +88,14 @@ class SkillCatalog:
                 is_asset = bool(path_parts & asset_directories) or "template" in path.stem.lower()
                 if not is_asset or path.suffix.lower() not in text_extensions:
                     continue
-                assets.append(SkillAsset(id=f"{source}:{relative}", source=source, path=path))
+                assets.append(
+                    SkillAsset(
+                        id=f"{source}:{relative}",
+                        source=source,
+                        path=path,
+                        checksum=self._checksum(path),
+                    )
+                )
         return assets
 
     def read_asset(self, asset_id: str) -> str:
@@ -101,6 +116,26 @@ class SkillCatalog:
         except (UnicodeDecodeError, ValueError) as error:
             raise LookupError(f"invalid skill asset resource id {resource_id!r}") from error
         return self.read_asset(asset_id)
+
+    def manifest(self) -> list[dict[str, str]]:
+        """Return a deterministic workflow-version manifest for event/snapshot provenance."""
+        return [
+            {
+                "id": document.id,
+                "source": document.source,
+                "checksum": document.checksum,
+            }
+            for document in self.list()
+        ]
+
+    @staticmethod
+    def _checksum(path: Path) -> str:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+
+    @staticmethod
+    def _is_install_shadow(path: Path, root: Path) -> bool:
+        """Ignore hidden package-manager mirrors such as nested .agents installs."""
+        return any(part.startswith(".") for part in path.relative_to(root).parts)
 
     @staticmethod
     def _title(path: Path, fallback: str) -> str:

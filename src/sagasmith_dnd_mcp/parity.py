@@ -36,6 +36,8 @@ FULL_SKILL_CAPABILITIES: dict[str, frozenset[str]] = {
             "branch_change",
             "branch_query",
             "continuity_context",
+            "continuity_commit",
+            "continuity_diagnostics",
             "campaign_event",
             "memory_change",
             "memory_query",
