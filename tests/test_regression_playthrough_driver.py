@@ -22,8 +22,15 @@ from scripts.regression_playthrough import (
     _record_event,
     _recover_committed_check,
     _resolve_check,
+    _scene_progress_percent,
     _start_play,
 )
+
+
+def test_scene_progress_percent_accepts_query_and_mutation_shapes() -> None:
+    assert _scene_progress_percent({"percent": 65}) == 65
+    assert _scene_progress_percent({"progress": 70}) == 70
+    assert _scene_progress_percent(None) == 0
 
 
 def test_party_projection_keeps_knowledge_bound_to_the_new_actor() -> None:

@@ -177,6 +177,13 @@ def _scene_locations(scene: dict[str, Any]) -> list[dict[str, Any]]:
     return [item for item in values if isinstance(item, dict)]
 
 
+def _scene_progress_percent(progress: dict[str, Any] | None) -> int:
+    if not progress:
+        return 0
+    value = progress.get("progress", progress.get("percent", 0))
+    return int(value or 0)
+
+
 def _normalized_source_text(value: Any) -> str:
     return " ".join(str(value or "").split())
 
@@ -618,7 +625,7 @@ async def _resolve_check(
                 "campaign_id": campaign_id,
                 "scene_id": scene_id,
                 "status": "active",
-                "progress": max(int((progress_before or {}).get("progress", 0) or 0), 50),
+                "progress": max(_scene_progress_percent(progress_before), 50),
                 "state": {
                     **deepcopy(dict((progress_before or {}).get("state") or {})),
                     "full_playthrough_check": {
@@ -814,7 +821,7 @@ async def _record_event(
             "progress": (
                 progress_percent
                 if progress_percent is not None
-                else int((progress_before or {}).get("progress", 0) or 0)
+                else _scene_progress_percent(progress_before)
             ),
             "state": state,
             "current_location_key": location_key,
