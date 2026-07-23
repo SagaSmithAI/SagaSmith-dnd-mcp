@@ -16,6 +16,8 @@ from mcp.client.stdio import StdioServerParameters, stdio_client
 from scripts.regression_modules import PRINCIPAL_ID, ExposureClient, _token
 from scripts.regression_playthrough import _checkpoint
 
+GUIDING_BOLT_ID = "dnd5e.content.srd2014.spell.guiding-bolt"
+HEALING_WORD_ID = "dnd5e.content.srd2014.spell.healing-word"
 MAGIC_MISSILE_ID = "dnd5e.content.srd2014.spell.magic-missile"
 
 
@@ -448,6 +450,46 @@ def _conditions(actor: dict[str, Any]) -> set[str]:
         str(item).casefold()
         for item in dict(actor.get("sheet") or {}).get("conditions", [])
     }
+
+
+def _choose_party_spell(
+    actor_id: str,
+    *,
+    party_ids: list[str],
+    actors: dict[str, dict[str, Any]],
+    living_targets: list[str],
+) -> tuple[str, str] | None:
+    """Choose a supported level-1 spell with an explicit auditable target."""
+
+    if actor_id not in party_ids:
+        return None
+    actor = actors[actor_id]
+    spells = {
+        str(item.get("id") or "")
+        for item in dict(actor.get("sheet") or {}).get("content", {}).get("spells", [])
+    }
+    slot = (
+        dict(dict(actor.get("sheet") or {}).get("spellcasting") or {})
+        .get("spell_slots", {})
+        .get("1", {})
+    )
+    if int(dict(slot).get("value", 0) or 0) <= 0:
+        return None
+    downed_allies = [
+        ally_id
+        for ally_id in party_ids
+        if ally_id != actor_id
+        and _hit_points(actors[ally_id]) == 0
+        and "dead" not in _conditions(actors[ally_id])
+    ]
+    downed_allies.sort(key=lambda item: "stable" in _conditions(actors[item]))
+    if HEALING_WORD_ID in spells and downed_allies:
+        return HEALING_WORD_ID, downed_allies[0]
+    if MAGIC_MISSILE_ID in spells and living_targets:
+        return MAGIC_MISSILE_ID, living_targets[0]
+    if GUIDING_BOLT_ID in spells and living_targets:
+        return GUIDING_BOLT_ID, living_targets[0]
+    return None
 
 
 def _distance(left: dict[str, Any], right: dict[str, Any]) -> int:
@@ -913,49 +955,81 @@ async def _auto_run(
                 dict(combatants[item].get("position") or {"x": 0, "y": 0}),
             )
         )
-        spells = {
-            str(item.get("id") or ""): item
-            for item in dict(actor.get("sheet") or {}).get("content", {}).get("spells", [])
-        }
-        slot = (
-            dict(dict(actor.get("sheet") or {}).get("spellcasting") or {})
-            .get("spell_slots", {})
-            .get("1", {})
+        spell_choice = _choose_party_spell(
+            actor_id,
+            party_ids=party_ids,
+            actors=actors,
+            living_targets=living_targets,
         )
-        if (
-            actor_id in party_ids
-            and MAGIC_MISSILE_ID in spells
-            and int(dict(slot).get("value", 0) or 0) > 0
-            and living_targets
-        ):
+        if spell_choice is not None:
+            spell_id, spell_target_id = spell_choice
             campaign = await _campaign(client, args.campaign_id)
-            cast = await client.domain(
-                "combat_cast_spell",
-                {
-                    "campaign_id": args.campaign_id,
-                    "actor_id": actor_id,
-                    "spell_id": MAGIC_MISSILE_ID,
-                    "cast_level": 1,
-                    "target_allocations": [
-                        {"target_id": living_targets[0], "darts": 3}
-                    ],
-                    "branch_id": branch["id"],
-                    "expected_revision": campaign["revision"],
-                    "idempotency_key": (
-                        f"encounter-magic-missile-"
-                        f"{_token(f'{args.run_id}:{sequence}', length=24)}"
-                    ),
-                },
-            )
+            cast_arguments: dict[str, Any] = {
+                "campaign_id": args.campaign_id,
+                "actor_id": actor_id,
+                "spell_id": spell_id,
+                "cast_level": 1,
+                "branch_id": branch["id"],
+                "expected_revision": campaign["revision"],
+                "idempotency_key": (
+                    f"encounter-spell-"
+                    f"{_token(f'{args.run_id}:{sequence}:{spell_id}', length=24)}"
+                ),
+            }
+            if spell_id == MAGIC_MISSILE_ID:
+                cast_arguments["target_allocations"] = [
+                    {"target_id": spell_target_id, "darts": 3}
+                ]
+            elif spell_id == HEALING_WORD_ID:
+                cast_arguments["declaration"] = {"target_id": spell_target_id}
+            cast = await client.domain("combat_cast_spell", cast_arguments)
+            spell_result: dict[str, Any] = {"cast": cast}
+            pending_reaction = cast.get("status") == "pending_reaction"
+            if spell_id == GUIDING_BOLT_ID:
+                if cast.get("status") != "pending_resolution":
+                    raise RuntimeError(
+                        "Guiding Bolt did not open a source-bound spell attack resolution"
+                    )
+                campaign = await _campaign(client, args.campaign_id)
+                settled = await client.domain(
+                    "combat_resolve_attack",
+                    {
+                        "campaign_id": args.campaign_id,
+                        "actor_id": actor_id,
+                        "target_id": spell_target_id,
+                        "action": {
+                            "spell_resolution_id": str(cast["result"]["resolution_id"])
+                        },
+                        "branch_id": branch["id"],
+                        "expected_revision": campaign["revision"],
+                        "idempotency_key": (
+                            f"encounter-guiding-bolt-"
+                            f"{_token(f'{args.run_id}:{sequence}', length=24)}"
+                        ),
+                    },
+                )
+                spell_result["settlement"] = settled
+                pending_reaction = settled.get("status") == "pending_reaction"
+                if settled.get("status") not in {"committed", "pending_reaction"}:
+                    raise RuntimeError(
+                        "Guiding Bolt spell attack did not commit or open a reaction"
+                    )
+            elif cast.get("status") not in {"committed", "pending_reaction"}:
+                raise RuntimeError(
+                    f"{spell_id} did not commit through structured spell settlement"
+                )
             turns.append(
                 {
                     "sequence": sequence,
                     "kind": "spell",
                     "actor_id": actor_id,
-                    "target_id": living_targets[0],
-                    "result": cast,
+                    "spell_id": spell_id,
+                    "target_id": spell_target_id,
+                    "result": spell_result,
                 }
             )
+            if pending_reaction:
+                continue
             await _end_turn(client, args, str(branch["id"]), actor_id, sequence)
             continue
         preferred_weapon_id = (

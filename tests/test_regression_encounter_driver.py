@@ -1,7 +1,11 @@
 import json
 
 from scripts.regression_encounter import (
+    GUIDING_BOLT_ID,
+    HEALING_WORD_ID,
+    MAGIC_MISSILE_ID,
     _choose_destination,
+    _choose_party_spell,
     _participant_config,
     _participant_manifest,
     _preferred_hostile_weapon_id,
@@ -10,6 +14,47 @@ from scripts.regression_encounter import (
     _surprise_from_check_report,
     _validate_hostile_attacks,
 )
+
+
+def _spell_actor(*spell_ids: str, hp: int = 10, slots: int = 1) -> dict:
+    return {
+        "sheet": {
+            "combat": {"hp": {"value": hp}},
+            "conditions": [],
+            "spellcasting": {"spell_slots": {"1": {"value": slots}}},
+            "content": {"spells": [{"id": spell_id} for spell_id in spell_ids]},
+        }
+    }
+
+
+def test_party_spell_tactics_prioritize_recovery_then_supported_offense() -> None:
+    actors = {
+        "cleric": _spell_actor(HEALING_WORD_ID, GUIDING_BOLT_ID),
+        "wizard": _spell_actor(MAGIC_MISSILE_ID),
+        "ally": _spell_actor(hp=0, slots=0),
+        "goblin": _spell_actor(slots=0),
+    }
+
+    assert _choose_party_spell(
+        "cleric",
+        party_ids=["cleric", "wizard", "ally"],
+        actors=actors,
+        living_targets=["goblin"],
+    ) == (HEALING_WORD_ID, "ally")
+
+    actors["ally"]["sheet"]["combat"]["hp"]["value"] = 3
+    assert _choose_party_spell(
+        "cleric",
+        party_ids=["cleric", "wizard", "ally"],
+        actors=actors,
+        living_targets=["goblin"],
+    ) == (GUIDING_BOLT_ID, "goblin")
+    assert _choose_party_spell(
+        "wizard",
+        party_ids=["cleric", "wizard", "ally"],
+        actors=actors,
+        living_targets=["goblin"],
+    ) == (MAGIC_MISSILE_ID, "goblin")
 
 
 def test_all_source_hostiles_defeated_is_victory_without_flee_rule() -> None:
