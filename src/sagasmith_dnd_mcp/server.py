@@ -9803,6 +9803,23 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "result": {key: value for key, value in applied.items() if key != "sheet"},
                 "character": character_view(current),
             }
+        if activity_id == "dnd5e.content.srd2014.feature.fighter-second-wind":
+            rule_context = effective_rule_context(
+                current.campaign_id,
+                facts={"actor_id": character_id, "activity_id": activity_id},
+            )
+            second_wind = resolve_second_wind_to_sheet(applied["sheet"])
+            applied["sheet"] = second_wind.pop("sheet")
+            applied["requires_ruling"] = False
+            applied["core_effect"] = second_wind
+            applied["rule_receipts"] = [
+                *list(applied.get("rule_receipts") or []),
+                *core_receipts(
+                    rule_context,
+                    ["dnd5e.core.activity.second_wind"],
+                    "activity.second_wind",
+                ),
+            ]
         activation_type = str(applied["activation"].get("type") or "")
         if activation_type in {"reaction", "special"} and not is_dm(
             current.campaign_id, principal_id

@@ -327,6 +327,97 @@ def test_second_wind_heals_and_pays_bonus_action_atomically(tmp_path: Path) -> N
     asyncio.run(exercise())
 
 
+def test_second_wind_heals_and_advances_random_stream_outside_combat(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        server = create_server(_config(tmp_path))
+        campaign = await _call(
+            server,
+            "campaign_create",
+            {
+                "name": "Noncombat Second Wind",
+                "edition": "2014",
+                "random_seed": "noncombat-second-wind",
+                "idempotency_key": "campaign",
+            },
+        )
+        sheet = default_character_sheet()
+        sheet["progression"]["level"] = 1
+        sheet["progression"]["classes"] = [
+            {"name": "Fighter", "level": 1, "subclass": "", "hit_die": 10}
+        ]
+        sheet["combat"]["hp"] = {"value": 2, "max": 12, "temp": 0}
+        sheet["content"]["features"] = [
+            {
+                "id": "dnd5e.content.srd2014.feature.fighter-second-wind",
+                "name": "Second Wind",
+                "source_key": "Fighter",
+                "description": "Regain 1d10 + Fighter level hit points.",
+                "uses": {
+                    "label": "Second Wind",
+                    "value": 1,
+                    "max": 1,
+                    "recovers_on": "short_rest",
+                },
+                "resource_key": "",
+                "activation": {"type": "bonus_action", "cost": 1, "trigger": ""},
+                "scaling": [],
+                "choices": {"outcome": "roll 1d10 + fighter level"},
+            }
+        ]
+        actor = await _call(
+            server,
+            "character_create",
+            {
+                "campaign_id": campaign["id"],
+                "name": "Fighter",
+                "sheet": sheet,
+                "idempotency_key": "actor",
+            },
+        )
+        arguments = {
+            "character_id": actor["id"],
+            "activity_id": "dnd5e.content.srd2014.feature.fighter-second-wind",
+            "expected_revision": actor["revision"],
+            "idempotency_key": "second-wind",
+        }
+
+        before = await _call(
+            server, "campaign_get", {"campaign_id": campaign["id"]}
+        )
+        stream = server_module.CampaignRandomStream.from_campaign_state(
+            campaign["id"],
+            before["state"],
+            operation="character_action",
+            idempotency_key="second-wind",
+        )
+        with server_module.use_random_stream(stream):
+            result = await _call_raw(server, "character_use_activity", arguments)
+        assert stream.has_unpersisted_draws is False
+        assert await _call_raw(server, "character_use_activity", arguments) == result
+        assert result["status"] == "committed"
+        effect = result["result"]["core_effect"]
+        assert effect["kind"] == "second_wind"
+        assert effect["fighter_level"] == 1
+        assert 4 <= effect["after_hp"] <= 12
+        assert effect["after_hp"] == result["character"]["sheet"]["combat"]["hp"]["value"]
+        assert (
+            result["character"]["sheet"]["content"]["features"][0]["uses"]["value"]
+            == 0
+        )
+        assert any(
+            item["mechanic_id"] == "dnd5e.core.activity.second_wind"
+            for item in result["result"]["rule_receipts"]
+        )
+        current = await _call(
+            server, "campaign_get", {"campaign_id": campaign["id"]}
+        )
+        assert current["state"]["random_stream"]["position"] == 1
+
+    asyncio.run(exercise())
+
+
 def test_cunning_action_dash_uses_bonus_action_and_doubles_movement(tmp_path: Path) -> None:
     async def exercise() -> None:
         server = create_server(_config(tmp_path))
