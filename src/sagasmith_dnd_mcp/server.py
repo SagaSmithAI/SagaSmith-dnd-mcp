@@ -137,6 +137,7 @@ from sagasmith_dnd.module_profile import DndModuleProfile
 from sagasmith_dnd.playthrough import validate_playthrough_manifest
 from sagasmith_dnd.progression import (
     advance_single_class_level,
+    apply_constitution_score_hit_point_change,
     apply_per_level_hit_point_bonus,
     award_experience,
     experience_status,
@@ -14105,6 +14106,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 sheet["skills"][skill_key]["proficiency"] = "proficient"
         elif kind == "species":
             selected_species = str(card.get("name") or artifact_id)
+            constitution_score_before = int(
+                sheet["abilities"]["constitution"]["score"]
+            )
             base_species = str(card.get("base_species") or selected_species)
             existing_species = str(sheet["progression"].get("species") or "")
             if existing_species and existing_species.casefold() not in {
@@ -14183,6 +14187,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     sheet["abilities"][ability]["score"] = int(
                         sheet["abilities"][ability]["score"]
                     ) + int(amount)
+                sheet = apply_constitution_score_hit_point_change(
+                    sheet,
+                    previous_score=constitution_score_before,
+                    new_score=int(sheet["abilities"]["constitution"]["score"]),
+                    source=f"{selected_species}: Constitution ability score increase",
+                )
             if not hp_includes_grants:
                 hp_per_level = int(grants.get("hp_per_level", 0) or 0)
                 if hp_per_level:

@@ -438,13 +438,16 @@ def test_core_srd_content_catalog_is_structured_and_selectable(tmp_path: Path) -
         assert dwarf["sheet"]["abilities"]["constitution"]["score"] == 12
         assert dwarf["sheet"]["abilities"]["wisdom"]["score"] == 11
         assert dwarf["sheet"]["traits"]["resistances"] == ["poison"]
-        assert dwarf["sheet"]["combat"]["hp"]["max"] == 2
+        assert dwarf["sheet"]["combat"]["hp"]["max"] == 3
         assert dwarf["sheet"]["combat"]["hp_progression"] == [
             {
                 "level": 1,
                 "method": "manual",
-                "value": 2,
-                "source": "level 1; Hill Dwarf: Dwarven Toughness",
+                "value": 3,
+                "source": (
+                    "level 1; Hill Dwarf: Constitution ability score increase; "
+                    "Hill Dwarf: Dwarven Toughness"
+                ),
             }
         ]
         assert any(
