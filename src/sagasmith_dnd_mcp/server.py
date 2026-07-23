@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+from contextlib import nullcontext
 from copy import deepcopy
 from dataclasses import asdict
 from datetime import datetime
@@ -36,7 +37,6 @@ from sagasmith_core import (
     RuleReceiptService,
     RuleService,
     SnapshotService,
-    StateMutationService,
     default_local_principal,
     normalize_document,
     render_pdf_page,
@@ -140,6 +140,12 @@ from sagasmith_dnd.progression import (
     award_experience,
     experience_status,
 )
+from sagasmith_dnd.random_stream import (
+    CampaignRandomStream,
+    active_random_stream,
+    initial_random_stream,
+    use_random_stream,
+)
 from sagasmith_dnd.rule_engine import (
     RuleCompilationError,
     apply_rule_event,
@@ -181,6 +187,7 @@ from sagasmith_dnd.system import DND5E
 
 from sagasmith_dnd_mcp.config import McpConfig
 from sagasmith_dnd_mcp.exposure import Exposure, ExposureError, ExposureRegistry
+from sagasmith_dnd_mcp.random_state import RandomStateMutationService as StateMutationService
 from sagasmith_dnd_mcp.skills import SkillCatalog
 from sagasmith_dnd_mcp.storage import SagaSmithStorage
 from sagasmith_dnd_mcp.tool_profiles import (
@@ -244,13 +251,16 @@ class SessionExposureFastMCP(FastMCP):
         exposure_registry: ExposureRegistry,
         phase_lookup: Any,
         scope_validator: Any,
+        random_context_factory: Any,
         **kwargs: Any,
     ) -> None:
         self.exposure_registry = exposure_registry
         self._phase_lookup = phase_lookup
         self._scope_validator = scope_validator
+        self._random_context_factory = random_context_factory
         self._sessions: WeakValueDictionary[str, Any] = WeakValueDictionary()
         self._exposure_locks: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
+        self._campaign_locks: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
         super().__init__(*args, **kwargs)
 
     def _request_session(self) -> tuple[str, Any] | None:
@@ -268,6 +278,62 @@ class SessionExposureFastMCP(FastMCP):
 
     def _exposure_lock(self, exposure_id: str) -> asyncio.Lock:
         return self._exposure_locks.setdefault(exposure_id, asyncio.Lock())
+
+    def _campaign_lock(self, campaign_id: str) -> asyncio.Lock:
+        return self._campaign_locks.setdefault(campaign_id, asyncio.Lock())
+
+    @staticmethod
+    def _attach_random_receipt(result: Any, receipt: dict[str, Any] | None) -> Any:
+        if receipt is None or not (isinstance(result, tuple) and len(result) == 2):
+            return result
+        content, structured = result
+
+        def attach(value: Any) -> Any:
+            if not isinstance(value, dict):
+                return value
+            updated = deepcopy(value)
+            payload = updated.get("result")
+            if isinstance(payload, dict):
+                payload["random_stream_receipt"] = deepcopy(receipt)
+            else:
+                updated["random_stream_receipt"] = deepcopy(receipt)
+            return updated
+
+        updated_content = []
+        for item in content:
+            if not isinstance(item, TextContent):
+                updated_content.append(item)
+                continue
+            try:
+                decoded = json.loads(item.text)
+            except json.JSONDecodeError:
+                updated_content.append(item)
+                continue
+            updated_content.append(
+                item.model_copy(
+                    update={
+                        "text": json.dumps(
+                            attach(decoded),
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        )
+                    }
+                )
+            )
+        return updated_content, attach(structured)
+
+    @staticmethod
+    def _finalize_random_stream(
+        stream: CampaignRandomStream | None,
+    ) -> dict[str, Any] | None:
+        if stream is None or stream.draw_count == 0:
+            return None
+        if stream.has_unpersisted_draws:
+            raise RuntimeError(
+                f"Tool {stream.operation!r} consumed campaign randomness without "
+                "atomically persisting the random-stream position."
+            )
+        return stream.receipt()
 
     def _principal_argument(self, tool_id: str) -> str | None:
         tool = self._tool_manager.get_tool(tool_id)
@@ -355,7 +421,21 @@ class SessionExposureFastMCP(FastMCP):
             assert exposure is not None
             async with self._exposure_lock(exposure.id):
                 self.exposure_registry.require_tool(exposure, name)
-                result = await super().call_tool(name, arguments)
+                context_manager = (
+                    self._random_context_factory(exposure.campaign_id, name, arguments)
+                    if exposure.campaign_id
+                    else nullcontext(None)
+                )
+                if exposure.campaign_id:
+                    async with self._campaign_lock(exposure.campaign_id):
+                        with context_manager as random_stream:
+                            result = await super().call_tool(name, arguments)
+                            random_receipt = self._finalize_random_stream(random_stream)
+                else:
+                    with context_manager as random_stream:
+                        result = await super().call_tool(name, arguments)
+                        random_receipt = self._finalize_random_stream(random_stream)
+                result = self._attach_random_receipt(result, random_receipt)
                 exposure_changed = self.exposure_registry.consume_tool(exposure, name)
         else:
             result = await super().call_tool(name, arguments)
@@ -698,12 +778,28 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             )
 
     exposures = ExposureRegistry()
+
+    def campaign_random_context(
+        campaign_id: str,
+        tool_id: str,
+        arguments: dict[str, Any],
+    ):
+        campaign = campaigns.get(campaign_id)
+        stream = CampaignRandomStream.from_campaign_state(
+            campaign_id,
+            campaign.state,
+            operation=tool_id,
+            idempotency_key=str(arguments.get("idempotency_key") or ""),
+        )
+        return use_random_stream(stream)
+
     mcp = SessionExposureFastMCP(
         "SagaSmith D&D",
         instructions="D&D 5e campaign runtime, module storage, and skill packs.",
         exposure_registry=exposures,
         phase_lookup=authoritative_phase,
         scope_validator=validate_exposure_scope,
+        random_context_factory=campaign_random_context,
     )
 
     def character_view(character: Any) -> dict[str, Any]:
@@ -2118,6 +2214,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         response: dict[str, Any],
         campaign_id: str | None = None,
     ) -> dict[str, Any]:
+        stream = active_random_stream()
+        if (
+            stream is not None
+            and stream.draw_count > 0
+            and not stream.has_unpersisted_draws
+        ):
+            response = deepcopy(response)
+            response.setdefault("random_stream_receipt", stream.receipt())
         if key:
             idempotency.remember(scope, key, payload, response, campaign_id=campaign_id)
         return response
@@ -2139,6 +2243,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "atomic_undo_redo": True,
                 "idempotency": True,
                 "optimistic_concurrency": True,
+                "snapshot_random_stream": {
+                    "algorithm": "sha256-counter-v1",
+                    "atomic_position_updates": True,
+                    "branch_isolation": True,
+                    "replay_receipts": True,
+                },
                 "principal_memberships": True,
                 "actor_knowledge_isolation": True,
                 "branch_compare": True,
@@ -2305,12 +2415,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         edition: str = "2024",
         locale: str = "en",
         advancement_mode: Literal["milestone", "xp"] = "milestone",
+        random_seed: str | None = None,
         principal_id: str = "system:local",
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Create a D&D 5e campaign inside the MCP-owned SQLite database."""
         if not idempotency_key:
             raise ValueError("idempotency_key is required for campaign creation")
+        if random_seed is not None and (not random_seed or len(random_seed) > 512):
+            raise ValueError("random_seed must contain between 1 and 512 characters")
         normalized_mode = normalized_advancement_mode(advancement_mode)
         # Reject before persistence so an unsupported edition cannot leave a
         # partially initialized campaign without its required Core lock.
@@ -2326,6 +2439,17 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "locale": locale,
                 "advancement": {"mode": normalized_mode},
             },
+            state=validate_party_state(
+                {
+                    "random_stream": initial_random_stream(
+                        random_seed
+                        or (
+                            f"sagasmith-dnd:{principal_id}:{idempotency_key}:"
+                            f"{name}:{edition}:{locale}"
+                        )
+                    )
+                }
+            ),
         )
         if rule_profiles.get(created.id) is None:
             rule_profiles.set(
@@ -10269,13 +10393,94 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             campaign_id=campaign_id,
         )
 
+    def settle_campaign_randomness(
+        campaign_id: str,
+        *,
+        principal_id: str,
+        branch_id: str | None,
+        expected_campaign_revision: int | None,
+        idempotency_key: str | None,
+        operation: str,
+        payload: dict[str, Any],
+        resolver: Any,
+    ) -> dict[str, Any]:
+        access.require_campaign(campaign_id, principal_id)
+        if expected_campaign_revision is None or not idempotency_key:
+            raise ValueError(
+                "expected_campaign_revision and idempotency_key are required for random resolution"
+            )
+        resolved_branch_id = require_current_branch(campaign_id, branch_id)
+        scope = f"campaign-random:{campaign_id}:{resolved_branch_id}:{principal_id}"
+        request_payload = {"operation": operation, **deepcopy(payload)}
+        replay = replay_idempotent(scope, idempotency_key, request_payload)
+        if replay is not None:
+            return replay
+        campaign = campaigns.get(campaign_id)
+        if campaign.revision != expected_campaign_revision:
+            raise ValueError(
+                "campaign revision conflict: "
+                f"expected {expected_campaign_revision}, found {campaign.revision}"
+            )
+        inherited_stream = active_random_stream()
+        if inherited_stream is not None and inherited_stream.campaign_id != campaign_id:
+            raise ValueError("active random stream belongs to another campaign")
+        stream = inherited_stream or CampaignRandomStream.from_campaign_state(
+            campaign_id,
+            campaign.state,
+            operation=operation,
+            idempotency_key=idempotency_key,
+        )
+        context_manager = nullcontext(stream) if inherited_stream else use_random_stream(stream)
+        with context_manager:
+            result = resolver()
+            if stream.draw_count == 0:
+                raise ValueError("random resolution must consume at least one random draw")
+            StateMutationService(storage.database).replace(
+                campaign_id,
+                campaign_state=validate_party_state(campaign.state),
+                expected_campaign_revision=expected_campaign_revision,
+                operation=operation,
+                actor=principal_id,
+                branch_id=resolved_branch_id,
+                idempotency_key=idempotency_key,
+            )
+        response = {
+            **dict(result),
+            "campaign_revision": campaigns.get(campaign_id).revision,
+            "random_stream_receipt": stream.receipt(),
+        }
+        return remember_idempotent(
+            scope,
+            idempotency_key,
+            request_payload,
+            response,
+            campaign_id=campaign_id,
+        )
+
     @mcp.tool()
-    def dnd_dice_roll(expression: str) -> dict[str, Any]:
-        """Roll a validated D&D dice expression such as 2d6+3."""
-        return asdict(roll(expression))
+    def dnd_dice_roll(
+        campaign_id: str,
+        expression: str,
+        principal_id: str = "system:local",
+        branch_id: str | None = None,
+        expected_campaign_revision: int | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Roll a validated expression and atomically advance the campaign random stream."""
+        return settle_campaign_randomness(
+            campaign_id,
+            principal_id=principal_id,
+            branch_id=branch_id,
+            expected_campaign_revision=expected_campaign_revision,
+            idempotency_key=idempotency_key,
+            operation="dnd.dice.roll",
+            payload={"expression": expression},
+            resolver=lambda: asdict(roll(expression)),
+        )
 
     @mcp.tool()
     def dnd_check(
+        campaign_id: str,
         dc: int,
         ability_score: int,
         proficient: bool = False,
@@ -10284,23 +10489,53 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         advantage: bool = False,
         disadvantage: bool = False,
         kind: str = "ability",
+        principal_id: str = "system:local",
+        branch_id: str | None = None,
+        expected_campaign_revision: int | None = None,
+        idempotency_key: str | None = None,
     ) -> dict[str, Any]:
-        """Resolve an ability check or saving throw with explicit semantics."""
-        return resolve_check(
-            dc=dc,
-            ability_score=ability_score,
-            proficient=proficient,
-            level=level,
-            bonus=bonus,
-            advantage=advantage,
-            disadvantage=disadvantage,
-            kind=kind,
+        """Resolve a check and atomically advance the campaign random stream."""
+        payload = {
+            "dc": dc,
+            "ability_score": ability_score,
+            "proficient": proficient,
+            "level": level,
+            "bonus": bonus,
+            "advantage": advantage,
+            "disadvantage": disadvantage,
+            "kind": kind,
+        }
+        return settle_campaign_randomness(
+            campaign_id,
+            principal_id=principal_id,
+            branch_id=branch_id,
+            expected_campaign_revision=expected_campaign_revision,
+            idempotency_key=idempotency_key,
+            operation="dnd.check",
+            payload=payload,
+            resolver=lambda: resolve_check(**payload),
         )
 
     @mcp.tool()
-    def dnd_ability_roll(edition: str = "2024") -> dict[str, Any]:
-        """Generate six ability scores using the D&D 4d6 drop-lowest rule."""
-        return roll_ability_scores(edition)
+    def dnd_ability_roll(
+        campaign_id: str,
+        edition: str = "2024",
+        principal_id: str = "system:local",
+        branch_id: str | None = None,
+        expected_campaign_revision: int | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Generate ability scores and atomically advance the campaign random stream."""
+        return settle_campaign_randomness(
+            campaign_id,
+            principal_id=principal_id,
+            branch_id=branch_id,
+            expected_campaign_revision=expected_campaign_revision,
+            idempotency_key=idempotency_key,
+            operation="dnd.ability.roll",
+            payload={"edition": edition},
+            resolver=lambda: roll_ability_scores(edition),
+        )
 
     @mcp.tool()
     def character_update(
@@ -16395,11 +16630,27 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         validate_exposure_scope(exposure, tool_id, bound_arguments)
         context = mcp.get_context()
+        random_receipt: dict[str, Any] | None = None
         async with mcp._exposure_lock(exposure.id):
             exposures.require_tool(exposure, tool_id)
-            called = await mcp._tool_manager.call_tool(
-                tool_id, bound_arguments, context=context, convert_result=True
+            context_manager = (
+                campaign_random_context(exposure.campaign_id, tool_id, bound_arguments)
+                if exposure.campaign_id
+                else nullcontext(None)
             )
+            if exposure.campaign_id:
+                async with mcp._campaign_lock(exposure.campaign_id):
+                    with context_manager as random_stream:
+                        called = await mcp._tool_manager.call_tool(
+                            tool_id, bound_arguments, context=context, convert_result=True
+                        )
+                        random_receipt = mcp._finalize_random_stream(random_stream)
+            else:
+                with context_manager as random_stream:
+                    called = await mcp._tool_manager.call_tool(
+                        tool_id, bound_arguments, context=context, convert_result=True
+                    )
+                    random_receipt = mcp._finalize_random_stream(random_stream)
             if isinstance(called, tuple) and len(called) == 2:
                 content, structured = called
                 result = structured if structured is not None else content
@@ -16436,6 +16687,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "result": domain_result,
                 "exposure": exposure_status,
             }
+            if random_receipt is not None:
+                envelope["random_stream_receipt"] = random_receipt
             return CallToolResult(
                 content=[
                     TextContent(
@@ -16446,7 +16699,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 ],
                 structuredContent=envelope,
             )
-        return {"tool_id": tool_id, "result": result, "exposure": exposure_status}
+        response = {"tool_id": tool_id, "result": result, "exposure": exposure_status}
+        if random_receipt is not None:
+            response["random_stream_receipt"] = random_receipt
+        return response
 
     # No compatibility aliases: old tool names are removed before the server
     # advertises its capability list.  The underlying functions remain local

@@ -132,6 +132,7 @@ async def _create_campaign(
             "name": f"Full campaign regression: {line['title']} [{_token(args.run_id, length=8)}]",
             "edition": args.edition,
             "locale": args.locale,
+            "random_seed": f"{args.run_id}:full-campaign:{line_id}",
             "principal_id": PRINCIPAL_ID,
             "idempotency_key": f"full-campaign-create-{identity}",
         },
