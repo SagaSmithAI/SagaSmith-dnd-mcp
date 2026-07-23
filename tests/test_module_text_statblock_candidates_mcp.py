@@ -21,7 +21,7 @@ GOBLIN_MODULE = (
     "The goblin can take the Disengage or Hide action as a bonus action.\n\n"
     "##### ACTIONS\n\n"
     "Scimitar. Melee Weapon Attack: +4 to hit, reach 5 ft., one target. "
-    "Hit: 5 (1d6 + 2) slashing damage. Shortbow. Ranged Weapon Attack: "
+    "Hit: 5 (ld6 + 2) slashing damage. Shortbow. Ranged Weapon Attack: "
     "+4 to hit, range 80 ft./320 ft., one target. Hit: 5 (1d6 + 2) "
     "piercing damage.\n"
 )
