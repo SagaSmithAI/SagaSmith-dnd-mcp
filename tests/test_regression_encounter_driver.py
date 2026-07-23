@@ -6,6 +6,7 @@ from scripts.regression_encounter import (
     MAGIC_MISSILE_ID,
     _choose_destination,
     _choose_party_spell,
+    _has_blocking_pending,
     _participant_config,
     _participant_manifest,
     _preferred_hostile_weapon_id,
@@ -66,6 +67,24 @@ def test_party_spell_tactics_prioritize_recovery_then_supported_offense() -> Non
             leveled_spell_available=False,
         )
         is None
+    )
+
+
+def test_movement_pending_reaction_blocks_followup_attack() -> None:
+    assert _has_blocking_pending(
+        {
+            "pending": [
+                {
+                    "id": "reaction-1",
+                    "kind": "reaction",
+                    "trigger": "opportunity_attack",
+                    "status": "pending",
+                }
+            ]
+        }
+    )
+    assert not _has_blocking_pending(
+        {"pending": [{"id": "reaction-1", "status": "resolved"}]}
     )
 
 

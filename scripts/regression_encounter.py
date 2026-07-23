@@ -635,6 +635,14 @@ def _current_actor_id(combat: dict[str, Any]) -> str:
     return str(combatants[int(combat.get("turn_index", 0)) % len(combatants)]["actor_id"])
 
 
+def _has_blocking_pending(combat: dict[str, Any]) -> bool:
+    return any(
+        item.get("status", "pending") == "pending"
+        for item in combat.get("pending", [])
+        if isinstance(item, dict)
+    )
+
+
 def _source_outcome(
     *,
     defeated_hostiles: int,
@@ -1258,6 +1266,8 @@ async def _auto_run(
                         "result": moved,
                     }
                 )
+                if _has_blocking_pending(dict(moved.get("combat") or {})):
+                    continue
                 plan = await _preflight_attack(
                     client,
                     args,
