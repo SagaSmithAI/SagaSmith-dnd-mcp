@@ -45,6 +45,7 @@ def _arguments() -> argparse.Namespace:
             "long-rest",
             "recover-stable",
             "acquire-loot",
+            "use-consumable",
             "award-xp",
             "configure-advancement",
             "refresh-module",
@@ -119,6 +120,10 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--loot-coins-json", type=json.loads, default={})
     parser.add_argument("--loot-item-json", action="append", type=json.loads, default=[])
     parser.add_argument("--loot-reason", default="")
+    parser.add_argument("--consumable-use-id", default="")
+    parser.add_argument("--consumable-item-id", default="")
+    parser.add_argument("--consumable-target-id", default="")
+    parser.add_argument("--consumable-reason", default="")
     parser.add_argument("--event-type", default="")
     parser.add_argument(
         "--event-audience-scope",
@@ -2324,6 +2329,172 @@ async def _acquire_source_loot(
     }
 
 
+async def _use_shared_consumable(
+    client: ExposureClient,
+    *,
+    campaign_id: str,
+    run_id: str,
+    scene_id: str,
+    location_key: str,
+    use_id: str,
+    item_id: str,
+    target_character_id: str,
+    reason: str,
+    knowledge_actor_ids: list[str],
+) -> dict[str, Any]:
+    normalized_use_id = use_id.strip()
+    normalized_reason = reason.strip()
+    if not all(
+        (
+            scene_id,
+            location_key,
+            normalized_use_id,
+            item_id.strip(),
+            target_character_id.strip(),
+            normalized_reason,
+        )
+    ):
+        raise ValueError(
+            "use-consumable requires scene, location, use id, item id, target, and reason"
+        )
+    scene = await client.domain(
+        "module_query",
+        {
+            "campaign_id": campaign_id,
+            "view": "scene",
+            "payload": {"scene_id": scene_id},
+        },
+    )
+    if location_key not in {
+        str(item.get("key") or "") for item in _scene_locations(scene)
+    }:
+        raise ValueError("use-consumable location is not present in the scene atlas")
+    target = await client.domain(
+        "character_query",
+        {"view": "get", "payload": {"character_id": target_character_id}},
+    )
+    if target.get("campaign_id") != campaign_id:
+        raise ValueError("use-consumable target does not belong to the campaign")
+
+    campaign = await _campaign(client, campaign_id)
+    prior = next(
+        (
+            dict(item)
+            for item in list(dict(campaign.get("state") or {}).get("consumable_uses") or [])
+            if isinstance(item, dict) and str(item.get("id") or "") == normalized_use_id
+        ),
+        None,
+    )
+    recovered = prior is not None
+    if prior is not None:
+        if (
+            str(dict(prior.get("item") or {}).get("id") or "") != item_id
+            or str(prior.get("target_character_id") or "") != target_character_id
+            or str(prior.get("reason") or "") != normalized_reason
+        ):
+            raise RuntimeError("existing consumable use does not match this request")
+        used: dict[str, Any] = {
+            "status": "recovered",
+            "use_id": normalized_use_id,
+            "item": deepcopy(prior["item"]),
+            "target_character_id": target_character_id,
+            "reason": normalized_reason,
+            "formula": prior["formula"],
+            "roll": deepcopy(prior["roll"]),
+            "healing": deepcopy(prior["healing"]),
+        }
+    else:
+        used = await client.domain(
+            "campaign_change",
+            {
+                "campaign_id": campaign_id,
+                "action": "consumable_use",
+                "payload": {
+                    "use_id": normalized_use_id,
+                    "item_id": item_id,
+                    "target_character_id": target_character_id,
+                    "expected_character_revision": target["revision"],
+                    "reason": normalized_reason,
+                },
+                "expected_revision": campaign["revision"],
+                "idempotency_key": _mutation_key(
+                    run_id, "consumable-use", normalized_use_id
+                ),
+            },
+        )
+        if used.get("status") != "committed":
+            raise RuntimeError("shared consumable use did not commit")
+
+    branches = await client.domain(
+        "branch_query",
+        {"campaign_id": campaign_id, "view": "list"},
+    )
+    branch = next((item for item in branches if item.get("is_current")), None)
+    if branch is None:
+        raise RuntimeError("campaign has no current branch")
+    recipients = list(dict.fromkeys([target_character_id, *knowledge_actor_ids]))
+    campaign = await _campaign(client, campaign_id)
+    committed = await client.domain(
+        "continuity_commit",
+        {
+            "campaign_id": campaign_id,
+            "payload": {
+                "event": {
+                    "summary": normalized_reason,
+                    "event_type": "consumable_used",
+                    "audience_scope": "party",
+                    "payload": {
+                        "scene_id": scene_id,
+                        "location_key": location_key,
+                        "use_id": normalized_use_id,
+                        "item_id": item_id,
+                        "target_character_id": target_character_id,
+                        "formula": used["formula"],
+                        "roll": deepcopy(used["roll"]),
+                        "healing": deepcopy(used["healing"]),
+                    },
+                },
+                "actor_knowledge": [
+                    {
+                        "actor_id": actor_id,
+                        "knowledge_key": (
+                            f"playthrough.{_token(run_id)}.consumable."
+                            f"{_token(normalized_use_id)}"
+                        ),
+                        "proposition": normalized_reason,
+                        "disclosure_scope": "owner",
+                    }
+                    for actor_id in recipients
+                ],
+                "snapshot": {
+                    "label": f"Full playthrough consumable: {normalized_use_id}"
+                },
+                "branch_id": str(branch["id"]),
+            },
+            "expected_revision": campaign["revision"],
+            "idempotency_key": _mutation_key(
+                run_id, "consumable-continuity", normalized_use_id
+            ),
+        },
+    )
+    synced = await _manifest_mutation(
+        client,
+        campaign_id=campaign_id,
+        action="sync",
+        run_id=run_id,
+        identity=f"consumable-sync:{normalized_use_id}",
+    )
+    return {
+        "scene": {"scene_id": scene_id, "location_key": location_key},
+        "target": {"id": target_character_id, "name": target["name"]},
+        "use": used,
+        "use_recovered": recovered,
+        "knowledge_actor_ids": recipients,
+        "continuity": committed,
+        "sync": synced,
+    }
+
+
 async def _award_experience(
     client: ExposureClient,
     *,
@@ -2995,6 +3166,22 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     coins=args.loot_coins_json,
                     items=args.loot_item_json,
                     reason=args.loot_reason,
+                    knowledge_actor_ids=args.knowledge_actor_id,
+                )
+            elif args.action == "use-consumable":
+                if phase != "play":
+                    raise RuntimeError("use-consumable requires the play phase")
+                await client.load("play.characters")
+                report["result"] = await _use_shared_consumable(
+                    client,
+                    campaign_id=args.campaign_id,
+                    run_id=args.run_id,
+                    scene_id=str(args.scene_id or ""),
+                    location_key=args.location_key,
+                    use_id=args.consumable_use_id,
+                    item_id=args.consumable_item_id,
+                    target_character_id=args.consumable_target_id,
+                    reason=args.consumable_reason,
                     knowledge_actor_ids=args.knowledge_actor_id,
                 )
             elif args.action == "award-xp":

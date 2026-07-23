@@ -35,7 +35,77 @@ from scripts.regression_playthrough import (
     _stand_after_source_event,
     _start_play,
     _use_activity,
+    _use_shared_consumable,
 )
+
+
+def test_shared_consumable_driver_keeps_roll_item_and_healing_in_one_transition() -> None:
+    class Client:
+        def __init__(self) -> None:
+            self.revision = 10
+            self.tools: list[str] = []
+
+        async def core(self, tool_id: str, arguments: dict):
+            assert tool_id == "campaign_query"
+            return {
+                "result": {
+                    "id": "campaign-1",
+                    "revision": self.revision,
+                    "state": {"game_phase": "play"},
+                }
+            }
+
+        async def domain(self, tool_id: str, arguments: dict):
+            self.tools.append(tool_id)
+            if tool_id == "module_query":
+                return {
+                    "scene_id": "scene-1",
+                    "spatial": {"locations": [{"key": "room-1"}]},
+                }
+            if tool_id == "character_query":
+                return {
+                    "id": "actor-1",
+                    "name": "Actor One",
+                    "campaign_id": "campaign-1",
+                    "revision": 3,
+                }
+            if tool_id == "campaign_change":
+                assert arguments["action"] == "consumable_use"
+                assert arguments["payload"]["expected_character_revision"] == 3
+                self.revision += 1
+                return {
+                    "status": "committed",
+                    "formula": "2d4+2",
+                    "roll": {"total": 7},
+                    "healing": {"before_hp": 1, "after_hp": 8},
+                }
+            if tool_id == "branch_query":
+                return [{"id": "branch-1", "is_current": True}]
+            if tool_id == "continuity_commit":
+                return {"event": {"id": "event-1"}, "snapshot": {"slot": 8}}
+            if tool_id == "playthrough_manifest":
+                return {"manifest": {"status": "in_progress"}, "campaign_revision": 12}
+            raise AssertionError((tool_id, arguments))
+
+    client = Client()
+    result = asyncio.run(
+        _use_shared_consumable(
+            client,
+            campaign_id="campaign-1",
+            run_id="run-1",
+            scene_id="scene-1",
+            location_key="room-1",
+            use_id="potion-use-1",
+            item_id="healing-potions",
+            target_character_id="actor-1",
+            reason="Actor One drank a healing potion.",
+            knowledge_actor_ids=["actor-2"],
+        )
+    )
+
+    assert client.tools.count("campaign_change") == 1
+    assert result["use"]["roll"]["total"] == 7
+    assert result["knowledge_actor_ids"] == ["actor-1", "actor-2"]
 
 
 def test_source_loot_driver_uses_one_public_atomic_campaign_transition() -> None:

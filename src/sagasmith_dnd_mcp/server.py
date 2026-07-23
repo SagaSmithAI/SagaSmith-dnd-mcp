@@ -115,6 +115,7 @@ from sagasmith_dnd.combat_engine import (
     trigger_readied_action,
     trigger_readied_spell,
 )
+from sagasmith_dnd.consumables import HEALING_POTION_MECHANIC_ID, healing_potion_formula
 from sagasmith_dnd.content_import import (
     compiled_artifacts_from_candidates,
     extract_content_candidates,
@@ -3325,6 +3326,157 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "source_ref": normalized_source_ref,
             "party": party_show(campaign_id, principal_id=principal_id),
             "campaign": asdict(campaigns.get(campaign_id)),
+        }
+        return remember_idempotent(
+            scope,
+            idempotency_key,
+            request_payload,
+            response,
+            campaign_id=campaign_id,
+        )
+
+    def campaign_consumable_use(
+        campaign_id: str,
+        use_id: str,
+        item_id: str,
+        target_character_id: str,
+        expected_character_revision: int,
+        reason: str,
+        principal_id: str = "system:local",
+        expected_revision: int | None = None,
+        branch_id: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Atomically consume one shared healing potion and settle its rolled healing."""
+        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        require_write_contract(expected_revision, idempotency_key)
+        resolved_branch_id = require_current_branch(campaign_id, branch_id)
+        normalized_use_id = str(use_id).strip()
+        normalized_item_id = str(item_id).strip()
+        normalized_target_id = str(target_character_id).strip()
+        normalized_reason = str(reason).strip()
+        if not normalized_use_id or len(normalized_use_id) > 200:
+            raise ValueError("use_id must contain 1 to 200 characters")
+        if not normalized_item_id or not normalized_target_id:
+            raise ValueError("item_id and target_character_id are required")
+        if not normalized_reason or len(normalized_reason) > 1000:
+            raise ValueError("reason must contain 1 to 1000 characters")
+        if (
+            isinstance(expected_character_revision, bool)
+            or not isinstance(expected_character_revision, int)
+            or expected_character_revision < 0
+        ):
+            raise ValueError("expected_character_revision must be a non-negative integer")
+
+        request_payload = {
+            "use_id": normalized_use_id,
+            "item_id": normalized_item_id,
+            "target_character_id": normalized_target_id,
+            "expected_character_revision": expected_character_revision,
+            "reason": normalized_reason,
+            "expected_revision": expected_revision,
+            "branch_id": resolved_branch_id,
+        }
+        scope = f"campaign-consumable:{campaign_id}:{resolved_branch_id}:{principal_id}"
+        replay = replay_idempotent(scope, idempotency_key, request_payload)
+        if replay is not None:
+            return replay
+
+        campaign = campaigns.get(campaign_id)
+        state = dict(campaign.state or {})
+        if state.get("game_phase", PROFILE_LOBBY) != PROFILE_PLAY:
+            raise CombatEngineError("shared consumables can be used only in play")
+        if isinstance(state.get("combat"), dict) and state["combat"].get("active", False):
+            raise CombatEngineError("use combat actions for consumables during combat")
+        uses = list(state.get("consumable_uses") or [])
+        if any(
+            str(dict(item).get("id") or "") == normalized_use_id
+            for item in uses
+            if isinstance(item, dict)
+        ):
+            raise ValueError("consumable use_id already exists on this branch")
+
+        target = require_campaign_actor(campaign_id, normalized_target_id)
+        require_character_control(target, principal_id)
+        if target.revision != expected_character_revision:
+            raise ValueError(f"character revision conflict: {normalized_target_id}")
+        shared = party_sheet(state)
+        item = next(
+            (
+                entry
+                for entry in shared["inventory"]["items"]
+                if str(entry["id"]) == normalized_item_id
+            ),
+            None,
+        )
+        if item is None:
+            raise LookupError(normalized_item_id)
+        edition = str(campaign.settings.get("edition") or target.sheet.get("edition") or "")
+        expression = healing_potion_formula(item, edition=edition)
+        healing_roll = asdict(roll(expression))
+        healed = apply_healing_to_sheet(target.sheet, amount=int(healing_roll["total"]))
+        shared, removed = remove_inventory_item(shared, normalized_item_id, 1)
+        healing_result = {key: value for key, value in healed.items() if key != "sheet"}
+        uses.append(
+            {
+                "id": normalized_use_id,
+                "item": deepcopy(removed),
+                "target_character_id": normalized_target_id,
+                "reason": normalized_reason,
+                "formula": expression,
+                "roll": deepcopy(healing_roll),
+                "healing": deepcopy(healing_result),
+            }
+        )
+        next_state = party_state(state, shared)
+        next_state["consumable_uses"] = uses
+        rules = effective_rule_context(
+            campaign_id,
+            facts={
+                "use_id": normalized_use_id,
+                "item_id": normalized_item_id,
+                "target_character_id": normalized_target_id,
+                "formula": expression,
+            },
+        )
+        receipts = core_receipts(
+            rules,
+            [HEALING_POTION_MECHANIC_ID],
+            "campaign.consumable.healing_potion",
+        )
+        StateMutationService(storage.database).replace(
+            campaign_id,
+            campaign_state=validate_party_state(next_state),
+            character_updates=[
+                CharacterStateUpdate(
+                    character_id=target.id,
+                    sheet=validate_character_sheet(healed["sheet"]),
+                    notes=validate_character_notes(
+                        target.notes, character_type=target.character_type
+                    ),
+                    expected_revision=expected_character_revision,
+                )
+            ],
+            expected_campaign_revision=expected_revision,
+            operation="campaign.consumable.healing_potion",
+            actor=principal_id,
+            branch_id=resolved_branch_id,
+            idempotency_key=idempotency_key,
+            rule_receipts=receipts,
+        )
+        response = {
+            "status": "committed",
+            "use_id": normalized_use_id,
+            "item": removed,
+            "target_character_id": normalized_target_id,
+            "reason": normalized_reason,
+            "formula": expression,
+            "roll": healing_roll,
+            "healing": healing_result,
+            "party": party_show(campaign_id, principal_id=principal_id),
+            "character": character_view(characters.get(normalized_target_id)),
+            "campaign": asdict(campaigns.get(campaign_id)),
+            "rule_receipts": receipts,
         }
         return remember_idempotent(
             scope,
@@ -16349,6 +16501,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "advancement_configure",
             "experience_award",
             "loot_acquire",
+            "consumable_use",
         ] = "update",
         principal_id: str = "system:local",
         expected_revision: int | None = None,
@@ -16436,6 +16589,19 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 data.get("items") or [],
                 required(data, "reason"),
                 required(data, "source_ref"),
+                principal_id,
+                expected_revision,
+                branch_id,
+                idempotency_key,
+            )
+        elif action == "consumable_use":
+            result = campaign_consumable_use(
+                campaign_id,
+                required(data, "use_id"),
+                required(data, "item_id"),
+                required(data, "target_character_id"),
+                required(data, "expected_character_revision"),
+                required(data, "reason"),
                 principal_id,
                 expected_revision,
                 branch_id,
