@@ -68,6 +68,12 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--module-source-path", type=Path)
     parser.add_argument("--module-source-key", default="")
     parser.add_argument("--module-title", default="")
+    parser.add_argument(
+        "--refresh-return-phase",
+        choices=("lobby", "play"),
+        default="",
+        help="Phase to expose after a successful module refresh; defaults to the entry phase",
+    )
     parser.add_argument("--source-query", default="")
     parser.add_argument("--source-top-k", type=int, default=8)
     parser.add_argument(
@@ -3729,9 +3735,13 @@ async def _refresh_module(
     source_path: Path | None,
     source_key: str,
     title: str,
+    return_phase: str = "",
 ) -> dict[str, Any]:
-    if initial_phase != "play":
-        raise RuntimeError("refresh-module requires the play phase")
+    if initial_phase not in {"lobby", "play"}:
+        raise RuntimeError("refresh-module cannot run during active combat")
+    target_phase = return_phase.strip() or initial_phase
+    if target_phase not in {"lobby", "play"}:
+        raise ValueError("refresh-module return phase must be lobby or play")
     if source_path is None:
         raise ValueError("refresh-module requires --module-source-path")
     manifest_result = await _manifest_get(client, campaign_id)
@@ -3769,23 +3779,25 @@ async def _refresh_module(
     branch = next((item for item in branches if item.get("is_current")), None)
     if branch is None:
         raise RuntimeError("campaign has no current branch")
-    phase_changes = [
-        _facade_value(
-            await client.core(
-                "game_phase",
-                {
-                    "campaign_id": campaign_id,
-                    "action": "set",
-                    "tool_profile": "lobby",
-                    "expected_revision": campaign["revision"],
-                    "branch_id": branch["id"],
-                    "idempotency_key": _mutation_key(
-                        run_id, "phase", f"refresh-enter-lobby-r{campaign['revision']}"
-                    ),
-                },
+    phase_changes: list[dict[str, Any]] = []
+    if initial_phase == "play":
+        phase_changes.append(
+            _facade_value(
+                await client.core(
+                    "game_phase",
+                    {
+                        "campaign_id": campaign_id,
+                        "action": "set",
+                        "tool_profile": "lobby",
+                        "expected_revision": campaign["revision"],
+                        "branch_id": branch["id"],
+                        "idempotency_key": _mutation_key(
+                            run_id, "phase", f"refresh-enter-lobby-r{campaign['revision']}"
+                        ),
+                    },
+                )
             )
         )
-    ]
     await client.open(campaign_id)
     await client.load("lobby.campaign", "lobby.modules")
     staged = await client.domain(
@@ -3869,26 +3881,27 @@ async def _refresh_module(
         identity=f"refresh-module-manifest:{old_module_id}:{new_module_id}",
         payload={"manifest": refreshed_manifest},
     )
-    campaign = await _campaign(client, campaign_id)
-    phase_changes.append(
-        _facade_value(
-            await client.core(
-                "game_phase",
-                {
-                    "campaign_id": campaign_id,
-                    "action": "set",
-                    "tool_profile": "play",
-                    "expected_revision": campaign["revision"],
-                    "branch_id": branch["id"],
-                    "idempotency_key": _mutation_key(
-                        run_id, "phase", f"refresh-return-play-r{campaign['revision']}"
-                    ),
-                },
+    if target_phase == "play":
+        campaign = await _campaign(client, campaign_id)
+        phase_changes.append(
+            _facade_value(
+                await client.core(
+                    "game_phase",
+                    {
+                        "campaign_id": campaign_id,
+                        "action": "set",
+                        "tool_profile": "play",
+                        "expected_revision": campaign["revision"],
+                        "branch_id": branch["id"],
+                        "idempotency_key": _mutation_key(
+                            run_id, "phase", f"refresh-return-play-r{campaign['revision']}"
+                        ),
+                    },
+                )
             )
         )
-    )
-    await client.open(campaign_id)
-    await client.load("play.scene", "play.scene_control")
+        await client.open(campaign_id)
+        await client.load("play.scene", "play.scene_control")
     synced = await _manifest_mutation(
         client,
         campaign_id=campaign_id,
@@ -3915,8 +3928,56 @@ async def _refresh_module(
         "activation": activated["activation"],
         "manifest": extended["manifest"],
         "phase_changes": phase_changes,
+        "return_phase": target_phase,
         "sync": synced,
     }
+
+
+async def _restore_phase_after_failed_refresh(
+    client: ExposureClient,
+    *,
+    campaign_id: str,
+    run_id: str,
+    original_phase: str,
+) -> dict[str, Any] | None:
+    """Restore the entry exposure when a refresh fails after entering Lobby."""
+    if original_phase not in {"lobby", "play"}:
+        return None
+    campaign = await _campaign(client, campaign_id)
+    current_phase = _campaign_phase(campaign)
+    if current_phase == original_phase:
+        return None
+    if current_phase not in {"lobby", "play"}:
+        raise RuntimeError("failed module refresh left the campaign in combat")
+    await client.open(campaign_id)
+    await client.load(*_phase_groups(current_phase))
+    branches = await client.domain(
+        "branch_query",
+        {"campaign_id": campaign_id, "view": "list"},
+    )
+    branch = next((item for item in branches if item.get("is_current")), None)
+    if branch is None:
+        raise RuntimeError("campaign has no current branch for phase recovery")
+    restored = _facade_value(
+        await client.core(
+            "game_phase",
+            {
+                "campaign_id": campaign_id,
+                "action": "set",
+                "tool_profile": original_phase,
+                "expected_revision": campaign["revision"],
+                "branch_id": branch["id"],
+                "idempotency_key": _mutation_key(
+                    run_id,
+                    "phase",
+                    f"refresh-failure-restore-{original_phase}-r{campaign['revision']}",
+                ),
+            },
+        )
+    )
+    await client.open(campaign_id)
+    await client.load(*_phase_groups(original_phase))
+    return restored
 
 
 async def _run(args: argparse.Namespace) -> dict[str, Any]:
@@ -3978,15 +4039,25 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     reachable_scene_ids=args.reachable_scene_id,
                 )
             elif args.action == "refresh-module":
-                report["result"] = await _refresh_module(
-                    client,
-                    campaign_id=args.campaign_id,
-                    run_id=args.run_id,
-                    initial_phase=phase,
-                    source_path=args.module_source_path,
-                    source_key=args.module_source_key,
-                    title=args.module_title,
-                )
+                try:
+                    report["result"] = await _refresh_module(
+                        client,
+                        campaign_id=args.campaign_id,
+                        run_id=args.run_id,
+                        initial_phase=phase,
+                        source_path=args.module_source_path,
+                        source_key=args.module_source_key,
+                        title=args.module_title,
+                        return_phase=args.refresh_return_phase,
+                    )
+                except Exception:
+                    await _restore_phase_after_failed_refresh(
+                        client,
+                        campaign_id=args.campaign_id,
+                        run_id=args.run_id,
+                        original_phase=phase,
+                    )
+                    raise
             elif args.action == "query-source":
                 report["result"] = await _query_source(
                     client,

@@ -35,6 +35,7 @@ from scripts.regression_playthrough import (
     _recover_stable_party,
     _relock_core,
     _resolve_check,
+    _restore_phase_after_failed_refresh,
     _scene_progress_percent,
     _short_rest,
     _stand_after_source_event,
@@ -109,6 +110,55 @@ def test_core_relock_driver_requires_current_checkpoint_and_public_profile() -> 
     assert result["checkpoint_snapshot_id"] == "snapshot-1"
     assert result["relock"]["core_pack"]["fingerprint"] == "new-core"
     assert client.tools.count("campaign_core_relock") == 1
+
+
+def test_failed_module_refresh_restores_its_entry_phase() -> None:
+    class Client:
+        def __init__(self) -> None:
+            self.phase = "lobby"
+            self.revision = 12
+            self.loaded: list[tuple[str, ...]] = []
+
+        async def open(self, campaign_id: str) -> None:
+            assert campaign_id == "campaign-1"
+
+        async def load(self, *groups: str) -> None:
+            self.loaded.append(groups)
+
+        async def core(self, tool_id: str, arguments: dict):
+            if tool_id == "campaign_query":
+                return {
+                    "result": {
+                        "id": "campaign-1",
+                        "revision": self.revision,
+                        "state": {"game_phase": self.phase},
+                    }
+                }
+            assert tool_id == "game_phase"
+            assert arguments["tool_profile"] == "play"
+            assert arguments["expected_revision"] == 12
+            self.phase = "play"
+            self.revision += 1
+            return {"result": {"tool_profile": "play", "campaign_revision": self.revision}}
+
+        async def domain(self, tool_id: str, arguments: dict):
+            assert tool_id == "branch_query"
+            assert arguments == {"campaign_id": "campaign-1", "view": "list"}
+            return [{"id": "branch-1", "is_current": True}]
+
+    client = Client()
+    result = asyncio.run(
+        _restore_phase_after_failed_refresh(
+            client,
+            campaign_id="campaign-1",
+            run_id="run-1",
+            original_phase="play",
+        )
+    )
+
+    assert result == {"tool_profile": "play", "campaign_revision": 13}
+    assert client.phase == "play"
+    assert client.loaded[-1] == ("play.scene_control", "play.scene")
 
 
 def test_shared_consumable_driver_keeps_roll_item_and_healing_in_one_transition() -> None:
