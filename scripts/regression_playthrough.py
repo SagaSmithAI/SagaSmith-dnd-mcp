@@ -1107,7 +1107,8 @@ async def _record_event(
     )
     state = deepcopy(dict((progress_before or {}).get("state") or {}))
     events = deepcopy(dict(state.get("full_playthrough_events") or {}))
-    event_key = _token(run_id, length=24)
+    event_identity = f"{scene_id}:{event_type}:{summary.strip()}"
+    event_key = _token(f"{run_id}:{event_identity}", length=24)
     events[event_key] = {
         "event_type": event_type,
         "summary": summary.strip(),
@@ -1129,7 +1130,7 @@ async def _record_event(
             "current_location_key": location_key,
             "expected_state_version": int((progress_before or {}).get("state_version", 0) or 0),
             "idempotency_key": _mutation_key(
-                run_id, "scene-event-progress", f"{scene_id}:{event_type}"
+                run_id, "scene-event-progress", event_identity
             ),
         },
     )
@@ -1161,7 +1162,7 @@ async def _record_event(
                     {
                         "actor_id": actor_id,
                         "knowledge_key": (
-                            f"playthrough.{_token(run_id)}.{_token(scene_id)}.{_token(event_type)}"
+                            f"playthrough.{_token(run_id)}.{_token(event_identity)}"
                         ),
                         "proposition": knowledge.strip(),
                         "disclosure_scope": "owner",
@@ -1173,7 +1174,7 @@ async def _record_event(
             },
             "expected_revision": campaign["revision"],
             "idempotency_key": _mutation_key(
-                run_id, "continuity-event", f"{scene_id}:{event_type}"
+                run_id, "continuity-event", event_identity
             ),
         },
     )
@@ -1182,7 +1183,7 @@ async def _record_event(
         campaign_id=campaign_id,
         action="sync",
         run_id=run_id,
-        identity=f"record-event-sync:{scene_id}:{event_type}",
+        identity=f"record-event-sync:{event_identity}",
     )
     return {
         "scene": {

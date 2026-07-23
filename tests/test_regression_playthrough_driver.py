@@ -1524,6 +1524,88 @@ def test_source_cited_automatic_event_does_not_roll() -> None:
     assert "dnd_dice_roll" not in client.tools
 
 
+def test_record_event_preserves_prior_scene_events_in_same_run() -> None:
+    source_ref = {
+        "module_id": "module-1",
+        "scene_id": "scene-1",
+        "chunk_id": "chunk-1",
+        "page_start": 7,
+        "page_end": 7,
+        "heading_path": ["Goblin Den"],
+        "content_sha256": "abc",
+    }
+    prior_events = {
+        "prior-event-key": {
+            "event_type": "hostage_truce",
+            "summary": "Yeemik seized Sildar.",
+            "source_ref": source_ref,
+        }
+    }
+
+    class Client:
+        def __init__(self) -> None:
+            self.saved_events: dict = {}
+
+        async def core(self, tool_id: str, arguments: dict):
+            assert tool_id == "campaign_query"
+            return {"result": {"id": "campaign-1", "revision": 4}}
+
+        async def domain(self, tool_id: str, arguments: dict):
+            if tool_id == "module_query" and arguments["view"] == "scene":
+                return {
+                    "module_id": "module-1",
+                    "scene_id": "scene-1",
+                    "content": "Yeemik demands a rich ransom.",
+                    "locations": [{"key": "goblin-den"}],
+                }
+            if tool_id == "module_query" and arguments["view"] == "progress":
+                return [
+                    {
+                        "scene_id": "scene-1",
+                        "progress": 60,
+                        "state_version": 3,
+                        "state": {"full_playthrough_events": deepcopy(prior_events)},
+                    }
+                ]
+            if tool_id == "module_set_progress":
+                self.saved_events = deepcopy(
+                    arguments["state"]["full_playthrough_events"]
+                )
+                return {"scene_id": "scene-1", "state_version": 4}
+            if tool_id == "branch_query":
+                return [{"id": "branch-1", "is_current": True}]
+            if tool_id == "continuity_commit":
+                return {"event": {"id": "event-2"}, "snapshot": {"slot": 5}}
+            if tool_id == "playthrough_manifest":
+                return {"manifest": {"status": "in_progress"}, "campaign_revision": 5}
+            raise AssertionError((tool_id, arguments))
+
+    client = Client()
+    asyncio.run(
+        _record_event(
+            client,
+            campaign_id="campaign-1",
+            run_id="run-1",
+            scene_id="scene-1",
+            location_key="goblin-den",
+            source_excerpt="Yeemik demands a rich ransom.",
+            source_ref=source_ref,
+            event_type="ransom_demand",
+            summary="Yeemik demanded an additional ransom.",
+            knowledge="Yeemik has broken the spirit of the bargain.",
+            knowledge_actor_ids=["actor-1"],
+            progress_percent=70,
+        )
+    )
+
+    assert client.saved_events["prior-event-key"] == prior_events["prior-event-key"]
+    assert len(client.saved_events) == 2
+    assert {value["event_type"] for value in client.saved_events.values()} == {
+        "hostage_truce",
+        "ransom_demand",
+    }
+
+
 def test_start_play_uses_public_quality_gate_phase_and_scene_tools() -> None:
     class Client:
         def __init__(self) -> None:
