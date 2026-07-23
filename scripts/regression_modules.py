@@ -467,11 +467,33 @@ async def _create_baseline_snapshot(
     current_branch = next((item for item in branches if item.get("is_current")), None)
     if current_branch is None:
         raise RuntimeError(f"campaign has no current branch: {campaign_key}")
+    label = f"Imported campaign baseline: {campaign_key}"
+    snapshots = await client.domain(
+        "snapshot_query", {"campaign_id": campaign_id, "view": "list"}
+    )
+    existing = next(
+        (
+            item
+            for item in snapshots
+            if item.get("branch_id") == current_branch["id"] and item.get("label") == label
+        ),
+        None,
+    )
+    if existing is not None:
+        verification = await client.domain(
+            "snapshot_query",
+            {
+                "campaign_id": campaign_id,
+                "view": "verify",
+                "payload": {"slot": existing["slot"]},
+            },
+        )
+        return {"snapshot": existing, "verification": verification, "reused": True}
     snapshot = await client.domain(
         "snapshot_create",
         {
             "campaign_id": campaign_id,
-            "label": f"Imported campaign baseline: {campaign_key}",
+            "label": label,
             "expected_revision": campaign["revision"],
             "expected_head_snapshot_id": current_branch.get("head_snapshot_id") or "",
             "idempotency_key": f"module-corpus-baseline-{baseline_identity}",
