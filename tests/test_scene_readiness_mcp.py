@@ -38,7 +38,7 @@ def test_scene_readiness_blocks_missing_combatants_and_reserves(tmp_path: Path) 
                 "name": "ambush.md",
                 "content": (
                     "# Chapter\n## Ambush\n"
-                    "Captain Rusk and two bandits attack the party. "
+                    "Captain Rusk\u2019s two band\u00adits attack the party. "
                     "A tavern guard can be persuaded to join on the next round."
                 ),
             },
@@ -103,7 +103,7 @@ def test_scene_readiness_blocks_missing_combatants_and_reserves(tmp_path: Path) 
                         "role": "combatant",
                         "required_count": 1,
                         "actor_ids": [actors["captain"]["id"]],
-                        "source_excerpt": "Captain Rusk and two bandits attack the party.",
+                        "source_excerpt": "Captain Rusk's two bandits attack the party.",
                     },
                     {
                         "key": "rusk-bandits",
@@ -111,7 +111,7 @@ def test_scene_readiness_blocks_missing_combatants_and_reserves(tmp_path: Path) 
                         "role": "combatant",
                         "required_count": 2,
                         "actor_ids": bandit_ids,
-                        "source_excerpt": "Captain Rusk and two bandits attack the party.",
+                        "source_excerpt": "Captain Rusk's two bandits attack the party.",
                     },
                     {
                         "key": "tavern-guard",

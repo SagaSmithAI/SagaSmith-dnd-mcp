@@ -191,6 +191,24 @@ from sagasmith_dnd_mcp.tool_profiles import (
     validate_profile_coverage,
 )
 
+_SOURCE_EVIDENCE_TRANSLATION = str.maketrans(
+    {
+        "\u2018": "'",
+        "\u2019": "'",
+        "\u201c": '"',
+        "\u201d": '"',
+        "\u2013": "-",
+        "\u2014": "-",
+    }
+)
+
+
+def _normalize_source_evidence_text(value: Any) -> str:
+    """Normalize PDF artifacts without weakening exact source containment."""
+
+    text = str(value or "").replace("\x02", "").replace("\u00ad", "")
+    return " ".join(text.translate(_SOURCE_EVIDENCE_TRANSLATION).split()).casefold()
+
 
 def _validated_distinct_choices(value: Any, *, count: int, label: str) -> list[str]:
     if value is None:
@@ -11596,8 +11614,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             source_excerpt = " ".join(str(raw_group.get("source_excerpt") or "").split()).strip()
             if len(source_excerpt) < 8 or len(source_excerpt) > 500:
                 raise ValueError("participant source_excerpt must contain 8 to 500 characters")
-            normalized_content = " ".join(str(source_scene.get("content") or "").split())
-            if source_excerpt.casefold() not in normalized_content.casefold():
+            normalized_excerpt = _normalize_source_evidence_text(source_excerpt)
+            normalized_content = _normalize_source_evidence_text(source_scene.get("content"))
+            if normalized_excerpt not in normalized_content:
                 raise ValueError(
                     f"participant group {key!r} source_excerpt is not present in its scene"
                 )
