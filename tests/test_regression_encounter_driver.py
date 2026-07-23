@@ -146,6 +146,23 @@ def test_source_six_hostile_layout_keeps_every_actor_on_a_unique_space() -> None
     assert {item["actor_id"] for item in config} == {*party_ids, *hostile_ids}
 
 
+def test_no_surprise_layout_marks_neither_side_surprised() -> None:
+    party_ids = ["pc-1", "pc-2"]
+    hostile_ids = ["goblin-1", "goblin-2"]
+
+    config = _participant_config(
+        party_ids,
+        hostile_ids,
+        surprise_by_actor={
+            actor_id: False for actor_id in [*party_ids, *hostile_ids]
+        },
+        hostiles_hidden=False,
+    )
+
+    assert all(item["surprised"] is False for item in config)
+    assert all(item.get("hidden") is False for item in config if item["actor_id"] in hostile_ids)
+
+
 def test_source_cited_scout_check_surprises_only_hostiles(tmp_path) -> None:
     path = tmp_path / "check.json"
     path.write_text(

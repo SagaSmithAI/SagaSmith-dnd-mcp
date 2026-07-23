@@ -45,6 +45,11 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--encounter-name", default="Source-defined encounter")
     parser.add_argument("--hostile-label", default="Source-defined hostiles")
     parser.add_argument("--surprise-check-report", type=Path)
+    parser.add_argument(
+        "--no-surprise",
+        action="store_true",
+        help="Explicitly start with neither side surprised when the cited scene warrants it",
+    )
     parser.add_argument("--flee-after-defeated", type=int, default=0)
     parser.add_argument("--flee-actor-id", default="")
     parser.add_argument("--flee-trigger-defeated-actor-id", default="")
@@ -132,6 +137,7 @@ def _participant_config(
     hostile_ids: list[str],
     *,
     surprise_by_actor: dict[str, bool],
+    hostiles_hidden: bool = True,
 ) -> list[dict[str, Any]]:
     if len(party_ids) > 10 or len(hostile_ids) > 10:
         raise ValueError("default encounter layout supports at most 10 PCs and 10 hostiles")
@@ -162,7 +168,7 @@ def _participant_config(
             "actor_id": actor_id,
             "position": {"x": hostile_positions[index][0], "y": hostile_positions[index][1]},
             "disposition": "hostile",
-            "hidden": not bool(surprise_by_actor.get(actor_id, False)),
+            "hidden": hostiles_hidden and not bool(surprise_by_actor.get(actor_id, False)),
             "surprised": bool(surprise_by_actor.get(actor_id, False)),
             "death_saves": False,
         }
@@ -359,7 +365,16 @@ async def _start(
             required_weapon_ids=args.required_hostile_weapon_id,
         )
     passive_perception: dict[str, int] = {}
-    if args.surprise_check_report is not None:
+    if args.no_surprise and args.surprise_check_report is not None:
+        raise ValueError("--no-surprise cannot be combined with --surprise-check-report")
+    if args.no_surprise:
+        surprise = {actor_id: False for actor_id in [*party_ids, *hostile_ids]}
+        surprise_basis = {
+            "mode": "source_scene_no_surprise",
+            "source_excerpt": str(args.source_excerpt or ""),
+        }
+        expected_revision = campaign["revision"]
+    elif args.surprise_check_report is not None:
         surprise, surprise_basis = _surprise_from_check_report(
             args.surprise_check_report,
             campaign_id=args.campaign_id,
@@ -405,6 +420,7 @@ async def _start(
                 party_ids,
                 hostile_ids,
                 surprise_by_actor=surprise,
+                hostiles_hidden=not args.no_surprise,
             ),
             "participant_manifest": _participant_manifest(
                 hostile_ids,
