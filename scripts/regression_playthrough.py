@@ -1289,6 +1289,7 @@ async def _record_outcome(
             raise ValueError(f"fact-json[{index}] requires fact_key and content")
         normalized_facts.append(fact)
 
+    await client.load("play.characters")
     scene = await client.domain(
         "module_query",
         {

@@ -1621,6 +1621,7 @@ def test_record_outcome_commits_facts_then_syncs_manifest_and_checkpoint() -> No
     class Client:
         def __init__(self) -> None:
             self.revision = 10
+            self.loaded_groups: list[tuple[str, ...]] = []
             self.manifest = {
                 "current": {"objective": "Rescue the hostage."},
                 "npcs": [
@@ -1636,6 +1637,9 @@ def test_record_outcome_commits_facts_then_syncs_manifest_and_checkpoint() -> No
             }
             self.replaced_manifest: dict = {}
             self.continuity_payload: dict = {}
+
+        async def load(self, *group_ids: str) -> None:
+            self.loaded_groups.append(group_ids)
 
         async def core(self, tool_id: str, arguments: dict):
             assert tool_id == "campaign_query"
@@ -1774,6 +1778,7 @@ def test_record_outcome_commits_facts_then_syncs_manifest_and_checkpoint() -> No
     )
 
     assert result["checkpoint"]["verification"]["valid"] is True
+    assert client.loaded_groups == [("play.characters",)]
     assert client.replaced_manifest["current"]["objective"] == (
         "Escort the hostage to safety."
     )
