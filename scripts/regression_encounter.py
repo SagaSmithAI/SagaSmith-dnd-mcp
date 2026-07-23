@@ -64,6 +64,14 @@ def _arguments() -> argparse.Namespace:
         action="store_true",
         help="Keep source-positioned hostiles hidden independently of Surprise",
     )
+    parser.add_argument(
+        "--shared-hostile-stealth",
+        action="store_true",
+        help=(
+            "Roll one source-hostile Stealth check for the whole group only when "
+            "the cited encounter explicitly says to roll once for all of them"
+        ),
+    )
     parser.add_argument("--flee-after-defeated", type=int, default=0)
     parser.add_argument("--flee-actor-id", default="")
     parser.add_argument("--flee-trigger-defeated-actor-id", default="")
@@ -278,6 +286,28 @@ def _surprise_from_check_report(
     }
 
 
+def _surprise_from_hostile_stealth_totals(
+    *,
+    party_ids: list[str],
+    hostile_ids: list[str],
+    passive_perception: dict[str, int],
+    stealth_totals: dict[str, int],
+) -> dict[str, bool]:
+    if set(passive_perception) != set(party_ids):
+        raise ValueError("passive Perception must be available for every party member")
+    if set(stealth_totals) != set(hostile_ids):
+        raise ValueError("Stealth totals must be available for every source hostile")
+    surprise = {
+        actor_id: all(
+            int(passive_perception[actor_id]) < int(stealth_totals[hostile_id])
+            for hostile_id in hostile_ids
+        )
+        for actor_id in party_ids
+    }
+    surprise.update({actor_id: False for actor_id in hostile_ids})
+    return surprise
+
+
 async def _campaign(client: ExposureClient, campaign_id: str) -> dict[str, Any]:
     return _facade_value(
         await client.core(
@@ -288,6 +318,115 @@ async def _campaign(client: ExposureClient, campaign_id: str) -> dict[str, Any]:
                 "principal_id": PRINCIPAL_ID,
             },
         )
+    )
+
+
+async def _roll_hostile_stealth(
+    client: ExposureClient,
+    args: argparse.Namespace,
+    *,
+    branch_id: str,
+    actors: dict[str, dict[str, Any]],
+    party_ids: list[str],
+    hostile_ids: list[str],
+) -> tuple[dict[str, bool], dict[str, int], dict[str, Any], int]:
+    passive_perception = {
+        actor_id: int(
+            dict(actors[actor_id].get("derived") or {}).get("passive_perception", 10)
+        )
+        for actor_id in party_ids
+    }
+    stealth_profiles = {
+        actor_id: {
+            "bonus": int(
+                dict(dict(actors[actor_id].get("derived") or {}).get("skills") or {}).get(
+                    "stealth", 0
+                )
+            ),
+            "disadvantage": bool(
+                dict(actors[actor_id].get("derived") or {}).get(
+                    "stealth_disadvantage", False
+                )
+            ),
+        }
+        for actor_id in hostile_ids
+    }
+    if args.shared_hostile_stealth and len(
+        {(item["bonus"], item["disadvantage"]) for item in stealth_profiles.values()}
+    ) != 1:
+        raise ValueError(
+            "one shared hostile Stealth roll requires identical Stealth profiles"
+        )
+
+    roll_actor_ids = hostile_ids[:1] if args.shared_hostile_stealth else hostile_ids
+    rolls: list[dict[str, Any]] = []
+    stealth_totals: dict[str, int] = {}
+    for actor_id in roll_actor_ids:
+        campaign = await _campaign(client, args.campaign_id)
+        settled = await client.domain(
+            "character_check",
+            {
+                "campaign_id": args.campaign_id,
+                "actor_id": actor_id,
+                "kind": "ability",
+                "ability": "stealth",
+                "dc": 0,
+                "proficient": False,
+                "bonus": 0,
+                "advantage": False,
+                "disadvantage": False,
+                "branch_id": branch_id,
+                "expected_revision": campaign["revision"],
+                "idempotency_key": (
+                    "encounter-stealth-"
+                    + _token(
+                        f"{args.run_id}:{args.scene_id}:{actor_id}",
+                        length=24,
+                    )
+                ),
+            },
+        )
+        result = dict(settled.get("result") or {})
+        total = result.get("total")
+        if isinstance(total, bool) or not isinstance(total, int):
+            raise RuntimeError(f"hostile Stealth check for {actor_id} has no integer total")
+        stealth_totals[actor_id] = total
+        rolls.append(
+            {
+                "actor_id": actor_id,
+                "actor_name": actors[actor_id].get("name"),
+                "derived_stealth_bonus": stealth_profiles[actor_id]["bonus"],
+                "derived_stealth_disadvantage": stealth_profiles[actor_id][
+                    "disadvantage"
+                ],
+                "result": result,
+                "random_stream_receipt": settled.get("random_stream_receipt"),
+            }
+        )
+    if args.shared_hostile_stealth:
+        shared_total = stealth_totals[roll_actor_ids[0]]
+        stealth_totals = {actor_id: shared_total for actor_id in hostile_ids}
+
+    surprise = _surprise_from_hostile_stealth_totals(
+        party_ids=party_ids,
+        hostile_ids=hostile_ids,
+        passive_perception=passive_perception,
+        stealth_totals=stealth_totals,
+    )
+    campaign = await _campaign(client, args.campaign_id)
+    return (
+        surprise,
+        passive_perception,
+        {
+            "mode": (
+                "source_shared_hostile_stealth"
+                if args.shared_hostile_stealth
+                else "individual_hostile_stealth"
+            ),
+            "rolls": rolls,
+            "stealth_totals": stealth_totals,
+        },
+        int(campaign["revision"]),
     )
 
 
@@ -442,32 +581,19 @@ async def _start(
         )
         expected_revision = campaign["revision"]
     else:
-        rolled = await client.domain(
-            "dnd_dice_roll",
-            {
-                "campaign_id": args.campaign_id,
-                "expression": "1d20+6",
-                "branch_id": branch["id"],
-                "expected_campaign_revision": campaign["revision"],
-                "idempotency_key": (
-                    f"encounter-stealth-{_token(f'{args.run_id}:{args.scene_id}', length=24)}"
-                ),
-            },
+        (
+            surprise,
+            passive_perception,
+            surprise_basis,
+            expected_revision,
+        ) = await _roll_hostile_stealth(
+            client,
+            args,
+            branch_id=str(branch["id"]),
+            actors=actors,
+            party_ids=party_ids,
+            hostile_ids=all_hostile_ids,
         )
-        stealth_total = _roll_total(rolled)
-        passive_perception = {
-            actor_id: int(
-                dict(actors[actor_id].get("derived") or {}).get("passive_perception", 10)
-            )
-            for actor_id in party_ids
-        }
-        surprise = {
-            actor_id: score < stealth_total
-            for actor_id, score in passive_perception.items()
-        }
-        surprise.update({actor_id: False for actor_id in all_hostile_ids})
-        surprise_basis = {"mode": "hostile_group_stealth", "roll": rolled}
-        expected_revision = rolled["campaign_revision"]
     started = await client.domain(
         "combat_start",
         {

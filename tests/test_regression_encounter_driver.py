@@ -17,6 +17,7 @@ from scripts.regression_encounter import (
     _source_outcome,
     _source_truce_outcome,
     _surprise_from_check_report,
+    _surprise_from_hostile_stealth_totals,
     _validate_hostile_attacks,
     _wound_priority,
 )
@@ -374,6 +375,41 @@ def test_source_cited_scout_check_surprises_only_hostiles(tmp_path) -> None:
         "goblin-2": True,
     }
     assert basis["mode"] == "source_cited_party_scout"
+
+
+def test_hostile_stealth_uses_every_actor_total_and_ties_are_detected() -> None:
+    surprise = _surprise_from_hostile_stealth_totals(
+        party_ids=["unaware", "noticed-one", "tied"],
+        hostile_ids=["ruffian-1", "ruffian-2"],
+        passive_perception={
+            "unaware": 10,
+            "noticed-one": 12,
+            "tied": 17,
+        },
+        stealth_totals={"ruffian-1": 17, "ruffian-2": 11},
+    )
+
+    assert surprise == {
+        "unaware": True,
+        "noticed-one": False,
+        "tied": False,
+        "ruffian-1": False,
+        "ruffian-2": False,
+    }
+
+
+def test_hostile_stealth_requires_complete_party_and_hostile_evidence() -> None:
+    try:
+        _surprise_from_hostile_stealth_totals(
+            party_ids=["pc-1"],
+            hostile_ids=["ruffian-1", "ruffian-2"],
+            passive_perception={"pc-1": 12},
+            stealth_totals={"ruffian-1": 15},
+        )
+    except ValueError as exc:
+        assert str(exc) == "Stealth totals must be available for every source hostile"
+    else:
+        raise AssertionError("missing hostile Stealth evidence must be rejected")
 
 
 def test_movement_destination_stops_next_to_target_without_sharing_space() -> None:
