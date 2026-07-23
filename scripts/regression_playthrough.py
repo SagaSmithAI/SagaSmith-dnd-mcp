@@ -3749,6 +3749,8 @@ async def _refresh_module(
     old_module_id = str(manifest["current"].get("module_id") or "")
     if not old_module_id:
         raise ValueError("refresh-module requires a current manifest module")
+    if initial_phase == "lobby":
+        await client.load("lobby.modules")
     old_index = await client.domain(
         "module_query",
         {
