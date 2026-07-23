@@ -757,7 +757,12 @@ def test_short_rest_advances_clock_and_applies_only_explicit_resource_choices() 
                 return {"world_time": self.world_time}
             if tool_id == "character_state_change":
                 assert arguments["action"] == "rest"
-                assert "hit_dice_spends" not in arguments["payload"]
+                if arguments["character_id"] == "fighter":
+                    assert arguments["payload"]["hit_dice_spends"] == [
+                        {"key": "fighter:d10", "count": 1}
+                    ]
+                else:
+                    assert "hit_dice_spends" not in arguments["payload"]
                 if arguments["character_id"] == "wizard":
                     assert arguments["payload"]["arcane_recovery"] == {"1": 1}
                 else:
@@ -784,7 +789,10 @@ def test_short_rest_advances_clock_and_applies_only_explicit_resource_choices() 
             campaign_id="campaign-1",
             run_id="run-1",
             members=[
-                {"actor_id": "fighter"},
+                {
+                    "actor_id": "fighter",
+                    "hit_dice_spends": [{"key": "fighter:d10", "count": 1}],
+                },
                 {"actor_id": "wizard", "arcane_recovery": {"1": 1}},
             ],
             start_clock={"day": 1, "hour": 14, "label": "Hideout"},

@@ -1448,7 +1448,7 @@ async def _short_rest(
         raise ValueError("short-rest requires at least 60 minutes")
     if not members or not reason.strip():
         raise ValueError("short-rest requires members and --rest-reason")
-    allowed_fields = {"actor_id", "arcane_recovery"}
+    allowed_fields = {"actor_id", "arcane_recovery", "hit_dice_spends"}
     normalized: list[dict[str, Any]] = []
     for index, member in enumerate(members):
         if not isinstance(member, dict):
@@ -1456,16 +1456,38 @@ async def _short_rest(
         unexpected = set(member) - allowed_fields
         actor_id = str(member.get("actor_id") or "")
         arcane_recovery = member.get("arcane_recovery")
+        hit_dice_spends = member.get("hit_dice_spends")
         if unexpected or not actor_id or (
             arcane_recovery is not None and not isinstance(arcane_recovery, dict)
+        ) or (
+            hit_dice_spends is not None and not isinstance(hit_dice_spends, list)
         ):
             raise ValueError(
-                "short-rest members accept actor_id and optional arcane_recovery only"
+                "short-rest members accept actor_id, optional arcane_recovery, "
+                "and optional hit_dice_spends only"
+            )
+        normalized_spends: list[dict[str, Any]] = []
+        for spend_index, spend in enumerate(hit_dice_spends or []):
+            if (
+                not isinstance(spend, dict)
+                or set(spend) != {"key", "count"}
+                or not str(spend.get("key") or "")
+                or isinstance(spend.get("count"), bool)
+                or not isinstance(spend.get("count"), int)
+                or int(spend["count"]) <= 0
+            ):
+                raise ValueError(
+                    f"rest-member-json[{index}].hit_dice_spends[{spend_index}] "
+                    "must contain a key and positive integer count"
+                )
+            normalized_spends.append(
+                {"key": str(spend["key"]), "count": int(spend["count"])}
             )
         normalized.append(
             {
                 "actor_id": actor_id,
                 "arcane_recovery": deepcopy(arcane_recovery or {}),
+                "hit_dice_spends": normalized_spends,
             }
         )
     actor_ids = [item["actor_id"] for item in normalized]
@@ -1533,6 +1555,8 @@ async def _short_rest(
         payload: dict[str, Any] = {"rest_type": "short_rest"}
         if member["arcane_recovery"]:
             payload["arcane_recovery"] = member["arcane_recovery"]
+        if member["hit_dice_spends"]:
+            payload["hit_dice_spends"] = member["hit_dice_spends"]
         result = await client.domain(
             "character_state_change",
             {
@@ -1558,6 +1582,7 @@ async def _short_rest(
                     "audience_scope": "party",
                     "payload": {
                         "member_ids": actor_ids,
+                        "member_choices": normalized,
                         "duration_minutes": duration_minutes,
                         "clock_set": clock_set is not None,
                     },
