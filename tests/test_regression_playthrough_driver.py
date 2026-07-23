@@ -29,6 +29,7 @@ from scripts.regression_playthrough import (
     _record_event,
     _recover_committed_check,
     _recover_stable_party,
+    _relock_core,
     _resolve_check,
     _scene_progress_percent,
     _short_rest,
@@ -37,6 +38,61 @@ from scripts.regression_playthrough import (
     _use_activity,
     _use_shared_consumable,
 )
+
+
+def test_core_relock_driver_requires_current_checkpoint_and_public_profile() -> None:
+    class Client:
+        def __init__(self) -> None:
+            self.revision = 20
+            self.tools: list[str] = []
+
+        async def core(self, tool_id: str, arguments: dict):
+            assert tool_id == "campaign_query"
+            return {"result": {"id": "campaign-1", "revision": self.revision}}
+
+        async def domain(self, tool_id: str, arguments: dict):
+            self.tools.append(tool_id)
+            if tool_id == "campaign_rules":
+                return {
+                    "profile": {
+                        "options": {
+                            "_core_rule_pack_lock": {"fingerprint": "old-core"}
+                        }
+                    }
+                }
+            if tool_id == "branch_query":
+                return [
+                    {
+                        "id": "branch-1",
+                        "is_current": True,
+                        "head_snapshot_id": "snapshot-1",
+                    }
+                ]
+            if tool_id == "campaign_core_relock":
+                assert arguments["expected_core_fingerprint"] == "old-core"
+                assert arguments["expected_head_snapshot_id"] == "snapshot-1"
+                self.revision += 1
+                return {
+                    "status": "relocked",
+                    "core_pack": {"fingerprint": "new-core"},
+                }
+            if tool_id == "playthrough_manifest":
+                return {"manifest": {"status": "in_progress"}, "campaign_revision": 22}
+            raise AssertionError((tool_id, arguments))
+
+    client = Client()
+    result = asyncio.run(
+        _relock_core(
+            client,
+            campaign_id="campaign-1",
+            run_id="run-1",
+            reason="Adopt the checkpointed consumable rule boundary.",
+        )
+    )
+
+    assert result["checkpoint_snapshot_id"] == "snapshot-1"
+    assert result["relock"]["core_pack"]["fingerprint"] == "new-core"
+    assert client.tools.count("campaign_core_relock") == 1
 
 
 def test_shared_consumable_driver_keeps_roll_item_and_healing_in_one_transition() -> None:

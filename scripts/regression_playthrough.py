@@ -48,6 +48,7 @@ def _arguments() -> argparse.Namespace:
             "use-consumable",
             "award-xp",
             "configure-advancement",
+            "relock-core",
             "refresh-module",
             "query-source",
             "register-party",
@@ -58,6 +59,7 @@ def _arguments() -> argparse.Namespace:
     )
     parser.add_argument("--run-id", default="full-playthrough-v1")
     parser.add_argument("--advancement-mode", choices=("xp", "milestone"))
+    parser.add_argument("--core-relock-reason", default="")
     parser.add_argument("--module-root", type=Path)
     parser.add_argument("--module-source-path", type=Path)
     parser.add_argument("--module-source-key", default="")
@@ -2730,6 +2732,68 @@ async def _configure_advancement(
     return {"configured": configured, "phase_changes": phase_changes}
 
 
+async def _relock_core(
+    client: ExposureClient,
+    *,
+    campaign_id: str,
+    run_id: str,
+    reason: str,
+) -> dict[str, Any]:
+    normalized_reason = reason.strip()
+    if not normalized_reason:
+        raise ValueError("relock-core requires --core-relock-reason")
+    profile = await client.domain(
+        "campaign_rules",
+        {
+            "campaign_id": campaign_id,
+            "action": "get_profile",
+        },
+    )
+    profile_data = dict(profile.get("profile") or profile)
+    lock = dict(dict(profile_data.get("options") or {}).get("_core_rule_pack_lock") or {})
+    previous_fingerprint = str(lock.get("fingerprint") or "")
+    if not previous_fingerprint:
+        raise RuntimeError("campaign rule profile has no Core fingerprint lock")
+    branches = await client.domain(
+        "branch_query",
+        {"campaign_id": campaign_id, "view": "list"},
+    )
+    branch = next((item for item in branches if item.get("is_current")), None)
+    if branch is None or not branch.get("head_snapshot_id"):
+        raise RuntimeError("Core relock requires a current branch head snapshot")
+    campaign = await _campaign(client, campaign_id)
+    relocked = await client.domain(
+        "campaign_core_relock",
+        {
+            "campaign_id": campaign_id,
+            "expected_core_fingerprint": previous_fingerprint,
+            "reason": normalized_reason,
+            "branch_id": str(branch["id"]),
+            "expected_revision": campaign["revision"],
+            "expected_head_snapshot_id": str(branch["head_snapshot_id"]),
+            "idempotency_key": _mutation_key(
+                run_id, "core-relock", previous_fingerprint
+            ),
+        },
+    )
+    if relocked.get("status") != "relocked":
+        raise RuntimeError("Core relock did not commit")
+    synced = await _manifest_mutation(
+        client,
+        campaign_id=campaign_id,
+        action="sync",
+        run_id=run_id,
+        identity=f"core-relock-sync:{previous_fingerprint}",
+    )
+    return {
+        "reason": normalized_reason,
+        "previous_core_fingerprint": previous_fingerprint,
+        "checkpoint_snapshot_id": str(branch["head_snapshot_id"]),
+        "relock": relocked,
+        "sync": synced,
+    }
+
+
 async def _refresh_module(
     client: ExposureClient,
     *,
@@ -2967,6 +3031,15 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     run_id=args.run_id,
                     mode=str(args.advancement_mode or ""),
                     initial_phase=phase,
+                )
+            elif args.action == "relock-core":
+                if phase == "combat":
+                    raise RuntimeError("relock-core cannot run during active combat")
+                report["result"] = await _relock_core(
+                    client,
+                    campaign_id=args.campaign_id,
+                    run_id=args.run_id,
+                    reason=args.core_relock_reason,
                 )
             elif args.action == "start-play":
                 report["result"] = await _start_play(
