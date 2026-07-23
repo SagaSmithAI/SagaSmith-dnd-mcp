@@ -59,6 +59,11 @@ def _arguments() -> argparse.Namespace:
         action="store_true",
         help="Explicitly start with neither side surprised when the cited scene warrants it",
     )
+    parser.add_argument(
+        "--hostiles-hidden",
+        action="store_true",
+        help="Keep source-positioned hostiles hidden independently of Surprise",
+    )
     parser.add_argument("--flee-after-defeated", type=int, default=0)
     parser.add_argument("--flee-actor-id", default="")
     parser.add_argument("--flee-trigger-defeated-actor-id", default="")
@@ -472,7 +477,7 @@ async def _start(
                 party_ids,
                 all_hostile_ids,
                 surprise_by_actor=surprise,
-                hostiles_hidden=not args.no_surprise,
+                hostiles_hidden=args.hostiles_hidden or not args.no_surprise,
             ),
             "participant_manifest": _participant_manifest(
                 hostile_ids,

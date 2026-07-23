@@ -217,6 +217,15 @@ def test_default_ambush_layout_keeps_two_goblins_thirty_feet_away() -> None:
     surprised_by_actor = {item["actor_id"]: item for item in surprised_config}
     assert surprised_by_actor["goblin-1"]["surprised"] is True
     assert surprised_by_actor["goblin-1"]["hidden"] is False
+    warned_hidden = _participant_config(
+        party_ids,
+        hostile_ids,
+        surprise_by_actor={actor_id: False for actor_id in [*party_ids, *hostile_ids]},
+        hostiles_hidden=True,
+    )
+    warned_by_actor = {item["actor_id"]: item for item in warned_hidden}
+    assert warned_by_actor["goblin-1"]["surprised"] is False
+    assert warned_by_actor["goblin-1"]["hidden"] is True
 
 
 def test_source_six_hostile_layout_keeps_every_actor_on_a_unique_space() -> None:
