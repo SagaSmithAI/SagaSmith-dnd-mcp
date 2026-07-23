@@ -27,6 +27,7 @@ from scripts.regression_playthrough import (
     _phase_groups,
     _query_source,
     _record_event,
+    _record_outcome,
     _recover_committed_check,
     _recover_stable_party,
     _relock_core,
@@ -1604,6 +1605,185 @@ def test_record_event_preserves_prior_scene_events_in_same_run() -> None:
         "hostage_truce",
         "ransom_demand",
     }
+
+
+def test_record_outcome_commits_facts_then_syncs_manifest_and_checkpoint() -> None:
+    source_ref = {
+        "module_id": "module-1",
+        "scene_id": "scene-1",
+        "chunk_id": "chunk-1",
+        "page_start": 10,
+        "page_end": 11,
+        "heading_path": ["Goblin Den"],
+        "content_sha256": "abc",
+    }
+
+    class Client:
+        def __init__(self) -> None:
+            self.revision = 10
+            self.manifest = {
+                "current": {"objective": "Rescue the hostage."},
+                "npcs": [
+                    {
+                        "actor_id": "npc-1",
+                        "name": "Hostage",
+                        "status": "missing",
+                    }
+                ],
+                "quests": [],
+                "clues": [],
+                "world_state": {"prior_state": True},
+            }
+            self.replaced_manifest: dict = {}
+            self.continuity_payload: dict = {}
+
+        async def core(self, tool_id: str, arguments: dict):
+            assert tool_id == "campaign_query"
+            return {"result": {"id": "campaign-1", "revision": self.revision}}
+
+        async def domain(self, tool_id: str, arguments: dict):
+            if tool_id == "module_query" and arguments["view"] == "scene":
+                return {
+                    "module_id": "module-1",
+                    "scene_id": "scene-1",
+                    "content": "The hostage is released.",
+                    "locations": [{"key": "goblin-den"}],
+                }
+            if tool_id == "module_query" and arguments["view"] == "progress":
+                return [
+                    {
+                        "scene_id": "scene-1",
+                        "progress": 80,
+                        "state_version": 2,
+                        "state": {
+                            "full_playthrough_outcomes": {
+                                "prior": {"event_type": "prior"}
+                            }
+                        },
+                    }
+                ]
+            if tool_id == "character_query":
+                actor_id = arguments["payload"]["character_id"]
+                return {
+                    "id": actor_id,
+                    "campaign_id": "campaign-1",
+                    "name": actor_id,
+                }
+            if tool_id == "module_set_progress":
+                outcomes = arguments["state"]["full_playthrough_outcomes"]
+                assert set(outcomes) == {"prior", "hostage-released"}
+                assert arguments["status"] == "completed"
+                return {"scene_id": "scene-1", "state_version": 3}
+            if tool_id == "branch_query":
+                return [
+                    {
+                        "id": "branch-1",
+                        "is_current": True,
+                        "head_snapshot_id": "snapshot-old",
+                    }
+                ]
+            if tool_id == "continuity_commit":
+                self.continuity_payload = deepcopy(arguments["payload"])
+                assert "snapshot" not in self.continuity_payload
+                assert self.continuity_payload["facts"][0]["fact_key"] == (
+                    "quest:hostage:status"
+                )
+                self.revision += 1
+                return {
+                    "event": {"id": "event-1"},
+                    "facts": [{"fact_key": "quest:hostage:status"}],
+                }
+            if tool_id == "playthrough_manifest" and arguments["action"] == "get":
+                return {
+                    "manifest": deepcopy(self.manifest),
+                    "campaign_revision": self.revision,
+                }
+            if tool_id == "playthrough_manifest" and arguments["action"] == "replace":
+                self.replaced_manifest = deepcopy(arguments["payload"]["manifest"])
+                self.manifest = deepcopy(self.replaced_manifest)
+                self.revision += 1
+                return {
+                    "manifest": deepcopy(self.manifest),
+                    "campaign_revision": self.revision,
+                }
+            if tool_id == "playthrough_manifest" and arguments["action"] == "sync":
+                self.revision += 1
+                return {
+                    "manifest": deepcopy(self.manifest),
+                    "campaign_revision": self.revision,
+                }
+            if tool_id == "snapshot_create":
+                assert arguments["label"] == (
+                    "Full playthrough outcome: hostage-released"
+                )
+                self.revision += 1
+                return {"id": "snapshot-new", "slot": 7}
+            if tool_id == "snapshot_query":
+                return {"valid": True, "slot": 7}
+            raise AssertionError((tool_id, arguments))
+
+    client = Client()
+    result = asyncio.run(
+        _record_outcome(
+            client,
+            campaign_id="campaign-1",
+            run_id="run-1",
+            outcome_id="hostage-released",
+            scene_id="scene-1",
+            location_key="goblin-den",
+            source_excerpt="The hostage is released.",
+            source_ref=source_ref,
+            event_type="hostage_released",
+            summary="The hostage was released and the captor departed.",
+            knowledge="The hostage is free.",
+            knowledge_actor_ids=["pc-1", "npc-1"],
+            facts=[
+                {
+                    "fact_key": "quest:hostage:status",
+                    "content": "completed",
+                }
+            ],
+            npc_states=[
+                {
+                    "actor_id": "npc-1",
+                    "name": "Hostage",
+                    "status": "active",
+                    "relationship": "rescued ally",
+                },
+                {
+                    "actor_id": "npc-2",
+                    "name": "Captor",
+                    "status": "departed",
+                    "relationship": "hostile",
+                },
+            ],
+            quest_states=[
+                {
+                    "id": "rescue-hostage",
+                    "title": "Rescue the hostage",
+                    "status": "completed",
+                    "source_ref": {"purpose": "test"},
+                    "outcome": "Released alive.",
+                }
+            ],
+            clue_states=[],
+            world_state={"hostage_released": True},
+            objective="Escort the hostage to safety.",
+            progress_percent=100,
+        )
+    )
+
+    assert result["checkpoint"]["verification"]["valid"] is True
+    assert client.replaced_manifest["current"]["objective"] == (
+        "Escort the hostage to safety."
+    )
+    assert client.replaced_manifest["world_state"] == {
+        "prior_state": True,
+        "hostage_released": True,
+    }
+    assert client.replaced_manifest["npcs"][0]["status"] == "active"
+    assert client.replaced_manifest["npcs"][1]["actor_id"] == "npc-2"
+    assert client.replaced_manifest["quests"][0]["status"] == "completed"
 
 
 def test_start_play_uses_public_quality_gate_phase_and_scene_tools() -> None:

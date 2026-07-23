@@ -36,6 +36,7 @@ def _arguments() -> argparse.Namespace:
             "checkpoint",
             "advance-scene",
             "record-event",
+            "record-outcome",
             "resolve-check",
             "apply-damage",
             "stand-up",
@@ -135,6 +136,12 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--event-summary", default="")
     parser.add_argument("--event-knowledge", default="")
     parser.add_argument("--event-knowledge-actor-id", action="append", default=[])
+    parser.add_argument("--outcome-id", default="")
+    parser.add_argument("--fact-json", action="append", type=json.loads, default=[])
+    parser.add_argument("--npc-state-json", action="append", type=json.loads, default=[])
+    parser.add_argument("--quest-state-json", action="append", type=json.loads, default=[])
+    parser.add_argument("--clue-state-json", action="append", type=json.loads, default=[])
+    parser.add_argument("--world-state-json", type=json.loads, default={})
     parser.add_argument("--progress-percent", type=int)
     parser.add_argument("--xp-actor-id", action="append", default=[])
     parser.add_argument("--xp-amount", type=int)
@@ -1195,6 +1202,253 @@ async def _record_event(
         "continuity": committed,
         "knowledge_actor_ids": list(dict.fromkeys(knowledge_actor_ids)),
         "sync": synced,
+    }
+
+
+def _upsert_manifest_rows(
+    existing: list[dict[str, Any]],
+    updates: list[dict[str, Any]],
+    *,
+    key: str,
+) -> list[dict[str, Any]]:
+    rows = [deepcopy(dict(item)) for item in existing]
+    index = {str(item.get(key) or ""): position for position, item in enumerate(rows)}
+    for raw in updates:
+        if not isinstance(raw, dict):
+            raise ValueError(f"manifest {key} updates must be objects")
+        item = deepcopy(raw)
+        identity = str(item.get(key) or "").strip()
+        if not identity:
+            raise ValueError(f"manifest {key} updates require {key}")
+        if identity in index:
+            rows[index[identity]] = item
+        else:
+            index[identity] = len(rows)
+            rows.append(item)
+    return rows
+
+
+async def _record_outcome(
+    client: ExposureClient,
+    *,
+    campaign_id: str,
+    run_id: str,
+    outcome_id: str,
+    scene_id: str,
+    location_key: str,
+    source_excerpt: str,
+    source_ref: dict[str, Any] | None,
+    event_type: str,
+    summary: str,
+    knowledge: str,
+    knowledge_actor_ids: list[str],
+    facts: list[dict[str, Any]],
+    npc_states: list[dict[str, Any]],
+    quest_states: list[dict[str, Any]],
+    clue_states: list[dict[str, Any]],
+    world_state: dict[str, Any],
+    objective: str,
+    progress_percent: int | None,
+    audience_scope: str = "party",
+) -> dict[str, Any]:
+    if not all(
+        (
+            outcome_id.strip(),
+            scene_id,
+            location_key,
+            source_excerpt,
+            event_type,
+            summary.strip(),
+        )
+    ):
+        raise ValueError(
+            "record-outcome requires outcome id, scene, location, excerpt, "
+            "event type, and summary"
+        )
+    if bool(knowledge.strip()) != bool(knowledge_actor_ids):
+        raise ValueError(
+            "record-outcome knowledge text and knowledge actor ids must be "
+            "provided together"
+        )
+    if not facts:
+        raise ValueError("record-outcome requires at least one stable fact")
+    if progress_percent is not None and not 0 <= progress_percent <= 100:
+        raise ValueError("record-outcome progress percent must be between 0 and 100")
+    if audience_scope not in {"party", "dm"}:
+        raise ValueError("record-outcome audience scope must be party or dm")
+    if not isinstance(world_state, dict):
+        raise ValueError("record-outcome world state must be an object")
+    normalized_facts = []
+    for index, raw in enumerate(facts):
+        if not isinstance(raw, dict):
+            raise ValueError(f"fact-json[{index}] must be an object")
+        fact = deepcopy(raw)
+        if not str(fact.get("fact_key") or "").strip() or not str(
+            fact.get("content") or ""
+        ).strip():
+            raise ValueError(f"fact-json[{index}] requires fact_key and content")
+        normalized_facts.append(fact)
+
+    scene = await client.domain(
+        "module_query",
+        {
+            "campaign_id": campaign_id,
+            "view": "scene",
+            "payload": {"scene_id": scene_id},
+        },
+    )
+    exact_ref = _validate_source_ref(scene, source_ref, excerpt=source_excerpt)
+    if location_key not in {
+        str(item.get("key") or "") for item in _scene_locations(scene)
+    }:
+        raise ValueError("record-outcome location is not present in the scene atlas")
+
+    recipients = list(dict.fromkeys(knowledge_actor_ids))
+    for actor_id in recipients:
+        actor = await client.domain(
+            "character_query",
+            {"view": "get", "payload": {"character_id": actor_id}},
+        )
+        if actor.get("campaign_id") != campaign_id:
+            raise ValueError("every record-outcome witness must belong to the campaign")
+    for item in npc_states:
+        if not isinstance(item, dict) or not str(item.get("actor_id") or "").strip():
+            raise ValueError("npc-state-json entries require actor_id")
+        actor = await client.domain(
+            "character_query",
+            {"view": "get", "payload": {"character_id": str(item["actor_id"])}},
+        )
+        if actor.get("campaign_id") != campaign_id:
+            raise ValueError("every tracked outcome NPC must belong to the campaign")
+
+    progress_rows = await client.domain(
+        "module_query",
+        {"campaign_id": campaign_id, "view": "progress"},
+    )
+    progress_before = next(
+        (item for item in progress_rows if item.get("scene_id") == scene_id),
+        None,
+    )
+    state = deepcopy(dict((progress_before or {}).get("state") or {}))
+    outcomes = deepcopy(dict(state.get("full_playthrough_outcomes") or {}))
+    outcomes[outcome_id.strip()] = {
+        "event_type": event_type,
+        "summary": summary.strip(),
+        "source_ref": exact_ref,
+        "fact_keys": [str(item["fact_key"]) for item in normalized_facts],
+    }
+    state["full_playthrough_outcomes"] = outcomes
+    progress = await client.domain(
+        "module_set_progress",
+        {
+            "campaign_id": campaign_id,
+            "scene_id": scene_id,
+            "status": "completed" if progress_percent == 100 else "active",
+            "progress": (
+                progress_percent
+                if progress_percent is not None
+                else _scene_progress_percent(progress_before)
+            ),
+            "state": state,
+            "current_location_key": location_key,
+            "expected_state_version": int(
+                (progress_before or {}).get("state_version", 0) or 0
+            ),
+            "idempotency_key": _mutation_key(
+                run_id, "scene-outcome-progress", outcome_id
+            ),
+        },
+    )
+    branches = await client.domain(
+        "branch_query",
+        {"campaign_id": campaign_id, "view": "list"},
+    )
+    branch = next((item for item in branches if item.get("is_current")), None)
+    if branch is None:
+        raise RuntimeError("campaign has no current branch")
+    campaign = await _campaign(client, campaign_id)
+    committed = await client.domain(
+        "continuity_commit",
+        {
+            "campaign_id": campaign_id,
+            "payload": {
+                "event": {
+                    "summary": summary.strip(),
+                    "event_type": event_type,
+                    "audience_scope": audience_scope,
+                    "payload": {
+                        "outcome_id": outcome_id.strip(),
+                        "scene_id": scene_id,
+                        "location_key": location_key,
+                        "source_excerpt": source_excerpt,
+                        "source_ref": exact_ref,
+                    },
+                },
+                "facts": normalized_facts,
+                "actor_knowledge": [
+                    {
+                        "actor_id": actor_id,
+                        "knowledge_key": (
+                            f"playthrough.{_token(run_id)}."
+                            f"outcome.{_token(outcome_id.strip())}"
+                        ),
+                        "proposition": knowledge.strip(),
+                        "disclosure_scope": "owner",
+                    }
+                    for actor_id in recipients
+                ],
+                "branch_id": str(branch["id"]),
+            },
+            "expected_revision": campaign["revision"],
+            "idempotency_key": _mutation_key(
+                run_id, "continuity-outcome", outcome_id
+            ),
+        },
+    )
+
+    current_manifest = await _manifest_get(client, campaign_id)
+    manifest = deepcopy(dict(current_manifest["manifest"]))
+    manifest["npcs"] = _upsert_manifest_rows(
+        list(manifest.get("npcs") or []), npc_states, key="actor_id"
+    )
+    manifest["quests"] = _upsert_manifest_rows(
+        list(manifest.get("quests") or []), quest_states, key="id"
+    )
+    manifest["clues"] = _upsert_manifest_rows(
+        list(manifest.get("clues") or []), clue_states, key="id"
+    )
+    manifest["world_state"] = {
+        **deepcopy(dict(manifest.get("world_state") or {})),
+        **deepcopy(world_state),
+    }
+    if objective.strip():
+        manifest["current"]["objective"] = objective.strip()
+    replaced = await _manifest_mutation(
+        client,
+        campaign_id=campaign_id,
+        action="replace",
+        run_id=run_id,
+        identity=f"record-outcome-replace:{outcome_id}",
+        payload={"manifest": manifest},
+    )
+    checkpoint = await _checkpoint(
+        client,
+        campaign_id=campaign_id,
+        run_id=run_id,
+        label=f"Full playthrough outcome: {outcome_id.strip()}",
+    )
+    return {
+        "outcome_id": outcome_id.strip(),
+        "scene": {
+            "scene_id": scene_id,
+            "location_key": location_key,
+            "source_ref": exact_ref,
+        },
+        "progress": progress,
+        "continuity": committed,
+        "knowledge_actor_ids": recipients,
+        "manifest_replace": replaced,
+        "checkpoint": checkpoint,
     }
 
 
@@ -3132,6 +3386,31 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     summary=args.event_summary,
                     knowledge=args.event_knowledge,
                     knowledge_actor_ids=args.event_knowledge_actor_id,
+                    progress_percent=args.progress_percent,
+                    audience_scope=args.event_audience_scope,
+                )
+            elif args.action == "record-outcome":
+                if phase != "play":
+                    raise RuntimeError("record-outcome requires the play phase")
+                report["result"] = await _record_outcome(
+                    client,
+                    campaign_id=args.campaign_id,
+                    run_id=args.run_id,
+                    outcome_id=args.outcome_id,
+                    scene_id=str(args.scene_id or ""),
+                    location_key=args.location_key,
+                    source_excerpt=args.source_excerpt,
+                    source_ref=args.source_ref_json,
+                    event_type=args.event_type,
+                    summary=args.event_summary,
+                    knowledge=args.event_knowledge,
+                    knowledge_actor_ids=args.event_knowledge_actor_id,
+                    facts=args.fact_json,
+                    npc_states=args.npc_state_json,
+                    quest_states=args.quest_state_json,
+                    clue_states=args.clue_state_json,
+                    world_state=args.world_state_json,
+                    objective=args.objective,
                     progress_percent=args.progress_percent,
                     audience_scope=args.event_audience_scope,
                 )
