@@ -137,7 +137,7 @@ def _participant_config(
             "actor_id": actor_id,
             "position": {"x": hostile_positions[index][0], "y": hostile_positions[index][1]},
             "disposition": "hostile",
-            "hidden": True,
+            "hidden": not bool(surprise_by_actor.get(actor_id, False)),
             "surprised": bool(surprise_by_actor.get(actor_id, False)),
             "death_saves": False,
         }
@@ -580,6 +580,45 @@ async def _auto_run(
     if str(dict(campaign.get("state") or {}).get("game_phase") or "") != "combat":
         raise RuntimeError("auto-run requires an active combat")
     branch = await _current_branch(client, args.campaign_id)
+    initial_combat = await client.domain(
+        "combat_query",
+        {"campaign_id": args.campaign_id, "view": "status"},
+    )
+    revealed_surprised = [
+        str(item["actor_id"])
+        for item in initial_combat.get("combatants", [])
+        if item.get("actor_id") in hostile_ids
+        and item.get("surprised")
+        and item.get("hidden")
+    ]
+    visibility_patch = None
+    if revealed_surprised:
+        campaign = await _campaign(client, args.campaign_id)
+        visibility_patch = await client.domain(
+            "combat_map_patch",
+            {
+                "campaign_id": args.campaign_id,
+                "patches": [
+                    {
+                        "key": "combatant_visibility",
+                        "value": {
+                            "actor_id": actor_id,
+                            "hidden": False,
+                            "reason": (
+                                "The source-cited successful scout check surprised this "
+                                "lookout, so the party located it before initiative."
+                            ),
+                        },
+                    }
+                    for actor_id in revealed_surprised
+                ],
+                "branch_id": branch["id"],
+                "expected_revision": campaign["revision"],
+                "idempotency_key": (
+                    f"encounter-reveal-surprised-{_token(args.run_id, length=24)}"
+                ),
+            },
+        )
     turns: list[dict[str, Any]] = []
     outcome_status = ""
     outcome_summary = ""
@@ -863,6 +902,7 @@ async def _auto_run(
     ]
     return {
         "combat_exposure": opened_combat,
+        "visibility_patch": visibility_patch,
         "turns": turns,
         "outcome": ended,
         "play_exposure": opened_play,

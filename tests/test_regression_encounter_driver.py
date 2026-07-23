@@ -38,6 +38,14 @@ def test_default_ambush_layout_keeps_two_goblins_thirty_feet_away() -> None:
     assert by_actor["goblin-3"]["position"]["x"] == 7
     assert by_actor["goblin-3"]["hidden"] is True
     assert by_actor["goblin-1"]["surprised"] is False
+    surprised_config = _participant_config(
+        party_ids,
+        hostile_ids,
+        surprise_by_actor={"goblin-1": True},
+    )
+    surprised_by_actor = {item["actor_id"]: item for item in surprised_config}
+    assert surprised_by_actor["goblin-1"]["surprised"] is True
+    assert surprised_by_actor["goblin-1"]["hidden"] is False
 
 
 def test_source_cited_scout_check_surprises_only_hostiles(tmp_path) -> None:
