@@ -11,6 +11,7 @@ from scripts.regression_encounter import (
     _preferred_hostile_weapon_id,
     _roll_total,
     _source_outcome,
+    _source_truce_outcome,
     _surprise_from_check_report,
     _validate_hostile_attacks,
 )
@@ -87,6 +88,37 @@ def test_specific_source_flee_counts_only_that_hostile_as_resolved() -> None:
             flee_after_defeated=0,
             unresolved_party=False,
             party_down=False,
+        )
+        is None
+    )
+
+
+def test_source_hostage_truce_requires_a_living_leader_and_resolved_party() -> None:
+    assert _source_truce_outcome(
+        defeated_hostiles=2,
+        truce_after_defeated=2,
+        truce_actor_alive=True,
+        unresolved_party=False,
+    ) == (
+        "truce",
+        "After 2 source-defined hostiles were defeated, "
+        "the source-designated leader invoked the hostage truce.",
+    )
+    assert (
+        _source_truce_outcome(
+            defeated_hostiles=2,
+            truce_after_defeated=2,
+            truce_actor_alive=False,
+            unresolved_party=False,
+        )
+        is None
+    )
+    assert (
+        _source_truce_outcome(
+            defeated_hostiles=2,
+            truce_after_defeated=2,
+            truce_actor_alive=True,
+            unresolved_party=True,
         )
         is None
     )

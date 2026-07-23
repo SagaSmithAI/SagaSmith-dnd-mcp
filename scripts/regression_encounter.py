@@ -54,6 +54,9 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--flee-actor-id", default="")
     parser.add_argument("--flee-trigger-defeated-actor-id", default="")
     parser.add_argument("--flee-source-excerpt", default="")
+    parser.add_argument("--truce-after-defeated", type=int, default=0)
+    parser.add_argument("--truce-actor-id", default="")
+    parser.add_argument("--truce-source-excerpt", default="")
     parser.add_argument("--max-turns", type=int, default=200)
     parser.add_argument("--checkpoint-label", default="Encounter complete")
     return parser.parse_args()
@@ -609,6 +612,27 @@ def _source_outcome(
     return None
 
 
+def _source_truce_outcome(
+    *,
+    defeated_hostiles: int,
+    truce_after_defeated: int,
+    truce_actor_alive: bool,
+    unresolved_party: bool,
+) -> tuple[str, str] | None:
+    if (
+        truce_after_defeated > 0
+        and defeated_hostiles >= truce_after_defeated
+        and truce_actor_alive
+        and not unresolved_party
+    ):
+        return (
+            "truce",
+            f"After {defeated_hostiles} source-defined hostiles were defeated, "
+            "the source-designated leader invoked the hostage truce.",
+        )
+    return None
+
+
 async def _resolve_pending(
     client: ExposureClient,
     args: argparse.Namespace,
@@ -762,6 +786,20 @@ async def _auto_run(
             "source-specific flee actors must be distinct encounter hostiles and "
             "require --flee-source-excerpt"
         )
+    if bool(args.truce_after_defeated) != bool(args.truce_actor_id):
+        raise ValueError(
+            "source truce requires both --truce-after-defeated and --truce-actor-id"
+        )
+    if args.truce_after_defeated < 0:
+        raise ValueError("--truce-after-defeated must not be negative")
+    if args.truce_actor_id and (
+        args.truce_actor_id not in hostile_ids
+        or not str(args.truce_source_excerpt or "").strip()
+    ):
+        raise ValueError(
+            "source truce actor must be an encounter hostile and require "
+            "--truce-source-excerpt"
+        )
     initial_combat = await client.domain(
         "combat_query",
         {"campaign_id": args.campaign_id, "view": "status"},
@@ -826,14 +864,25 @@ async def _auto_run(
             and not _conditions(actors[actor_id]) & {"dead", "stable"}
         ]
         party_down = all(_hit_points(actors[actor_id]) <= 0 for actor_id in party_ids)
-        outcome = _source_outcome(
+        outcome = _source_truce_outcome(
             defeated_hostiles=len(defeated_hostiles),
-            fled_hostiles=len(fled_hostile_ids),
-            hostile_count=len(hostile_ids),
-            flee_after_defeated=args.flee_after_defeated,
+            truce_after_defeated=args.truce_after_defeated,
+            truce_actor_alive=bool(
+                args.truce_actor_id
+                and _hit_points(actors[args.truce_actor_id]) > 0
+                and "dead" not in _conditions(actors[args.truce_actor_id])
+            ),
             unresolved_party=bool(unresolved_party),
-            party_down=party_down,
         )
+        if outcome is None:
+            outcome = _source_outcome(
+                defeated_hostiles=len(defeated_hostiles),
+                fled_hostiles=len(fled_hostile_ids),
+                hostile_count=len(hostile_ids),
+                flee_after_defeated=args.flee_after_defeated,
+                unresolved_party=bool(unresolved_party),
+                party_down=party_down,
+            )
         if outcome is not None:
             outcome_status, outcome_summary = outcome
             break
@@ -1174,6 +1223,15 @@ async def _auto_run(
         "visibility_patch": visibility_patch,
         "turns": turns,
         "fled_hostile_ids": sorted(fled_hostile_ids),
+        "truce": (
+            {
+                "actor_id": args.truce_actor_id,
+                "after_defeated": args.truce_after_defeated,
+                "source_excerpt": str(args.truce_source_excerpt or "").strip(),
+            }
+            if args.truce_actor_id
+            else None
+        ),
         "outcome": ended,
         "play_exposure": opened_play,
         "checkpoint": checkpoint,
