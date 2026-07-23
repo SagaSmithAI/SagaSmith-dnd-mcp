@@ -142,7 +142,11 @@ def _arguments() -> argparse.Namespace:
         help="Exact encounter-scene text supporting the hostile manifest",
     )
     parser.add_argument("--check-actor-id", help="Source-bound actor for noncombat-check")
-    parser.add_argument("--check-kind", help="Check or skill kind from the cited scene")
+    parser.add_argument(
+        "--check-kind",
+        choices=("ability", "check", "save", "death_save"),
+        help="Public character_check kind; use ability with a skill name as --check-ability",
+    )
     parser.add_argument("--check-ability", help="Ability used by the cited non-combat check")
     parser.add_argument("--check-dc", type=int, help="Exact DC printed in the cited scene")
     parser.add_argument(

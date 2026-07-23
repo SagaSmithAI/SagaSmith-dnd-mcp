@@ -5,6 +5,7 @@ import asyncio
 import json
 from copy import deepcopy
 
+import pytest
 from sagasmith_dnd.character_schema import default_character_sheet
 
 from scripts.regression_playthrough import (
@@ -193,6 +194,8 @@ def test_source_cited_check_persists_result_and_explicit_knowledge() -> None:
             if tool_id == "branch_query":
                 return [{"id": "branch-1", "is_current": True}]
             if tool_id == "character_check":
+                assert arguments["kind"] == "ability"
+                assert arguments["ability"] == "survival"
                 self.revision += 1
                 return {"status": "committed", "result": {"success": True, "total": 14}}
             if tool_id == "continuity_commit":
@@ -222,8 +225,8 @@ def test_source_cited_check_persists_result_and_explicit_knowledge() -> None:
             source_excerpt="A DC 10 Wisdom (Survival) check reveals the trail.",
             source_ref=source_ref,
             actor_id="actor-1",
-            kind="survival",
-            ability="wisdom",
+            kind="ability",
+            ability="survival",
             dc=10,
             proficient=True,
             knowledge_actor_ids=["actor-2"],
@@ -235,6 +238,29 @@ def test_source_cited_check_persists_result_and_explicit_knowledge() -> None:
     assert result["check"] == {"success": True, "total": 14}
     assert result["knowledge_actor_ids"] == ["actor-1", "actor-2"]
     assert result["sync"]["campaign_revision"] == 7
+
+
+def test_source_cited_check_rejects_unsupported_kind_before_tools() -> None:
+    with pytest.raises(ValueError, match="not supported"):
+        asyncio.run(
+            _resolve_check(
+                object(),
+                campaign_id="campaign-1",
+                run_id="run-1",
+                scene_id="scene-1",
+                location_key="ambush",
+                source_excerpt="Source",
+                source_ref={},
+                actor_id="actor-1",
+                kind="survival",
+                ability="wisdom",
+                dc=10,
+                proficient=True,
+                knowledge_actor_ids=[],
+                success_knowledge="",
+                failure_knowledge="",
+            )
+        )
 
 
 def test_xp_award_uses_source_ref_and_all_exact_recipients() -> None:

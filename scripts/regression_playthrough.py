@@ -57,7 +57,12 @@ def _arguments() -> argparse.Namespace:
         help="Exact module source reference for the playthrough action",
     )
     parser.add_argument("--check-actor-id", default="")
-    parser.add_argument("--check-kind", default="")
+    parser.add_argument(
+        "--check-kind",
+        choices=("ability", "check", "save", "death_save"),
+        default="",
+        help="Public character_check kind; use ability with a skill name as --check-ability",
+    )
     parser.add_argument("--check-ability", default="")
     parser.add_argument("--check-dc", type=int)
     parser.add_argument("--check-proficient", action="store_true")
@@ -485,6 +490,8 @@ async def _resolve_check(
         )
     if dc is None or dc < 0:
         raise ValueError("resolve-check requires a non-negative --check-dc")
+    if kind not in {"ability", "check", "save", "death_save"}:
+        raise ValueError("resolve-check kind is not supported by character_check")
     scene = await client.domain(
         "module_query",
         {
