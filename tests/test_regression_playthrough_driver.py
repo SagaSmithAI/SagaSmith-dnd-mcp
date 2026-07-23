@@ -9,6 +9,7 @@ import pytest
 from sagasmith_dnd.character_schema import default_character_sheet
 
 from scripts.regression_playthrough import (
+    _acquire_source_loot,
     _apply_source_damage,
     _award_experience,
     _branch_from_snapshot,
@@ -35,6 +36,94 @@ from scripts.regression_playthrough import (
     _start_play,
     _use_activity,
 )
+
+
+def test_source_loot_driver_uses_one_public_atomic_campaign_transition() -> None:
+    source_ref = {
+        "module_id": "module-1",
+        "scene_id": "scene-1",
+        "chunk_id": "chunk-1",
+        "page_start": 1,
+        "page_end": 1,
+        "heading_path": ["Chapter One", "Treasure Room"],
+        "content_sha256": "a" * 64,
+    }
+
+    class Client:
+        def __init__(self) -> None:
+            self.revision = 4
+            self.tools: list[str] = []
+
+        async def core(self, tool_id: str, arguments: dict):
+            assert tool_id == "campaign_query"
+            return {
+                "result": {
+                    "id": "campaign-1",
+                    "revision": self.revision,
+                    "state": {"game_phase": "play"},
+                }
+            }
+
+        async def domain(self, tool_id: str, arguments: dict):
+            self.tools.append(tool_id)
+            if tool_id == "module_query":
+                return {
+                    "module_id": "module-1",
+                    "scene_id": "scene-1",
+                    "content": "The chest contains 60 cp and a jade frog.",
+                    "spatial": {
+                        "locations": [
+                            {"key": "treasure-room", "title": "Treasure Room"}
+                        ]
+                    },
+                }
+            if tool_id == "campaign_change":
+                assert arguments["action"] == "loot_acquire"
+                assert arguments["payload"]["coins"] == {"cp": 60}
+                self.revision += 1
+                return {
+                    "status": "committed",
+                    "acquisition_id": "chapter-one-chest",
+                    "coins": {"cp": 60},
+                    "items": [{"id": "jade-frog"}],
+                }
+            if tool_id == "branch_query":
+                return [{"id": "branch-1", "is_current": True}]
+            if tool_id == "continuity_commit":
+                assert len(arguments["payload"]["actor_knowledge"]) == 2
+                return {"event": {"id": "event-1"}, "snapshot": {"slot": 7}}
+            if tool_id == "playthrough_manifest":
+                return {"manifest": {"status": "in_progress"}, "campaign_revision": 6}
+            raise AssertionError((tool_id, arguments))
+
+    client = Client()
+    result = asyncio.run(
+        _acquire_source_loot(
+            client,
+            campaign_id="campaign-1",
+            run_id="run-1",
+            scene_id="scene-1",
+            location_key="treasure-room",
+            source_excerpt="contains 60 cp and a jade frog",
+            source_ref=source_ref,
+            acquisition_id="chapter-one-chest",
+            coins={"cp": 60},
+            items=[
+                {
+                    "id": "jade-frog",
+                    "name": "Jade frog",
+                    "kind": "loot",
+                    "quantity": 1,
+                }
+            ],
+            reason="The party recovered the treasure.",
+            knowledge_actor_ids=["actor-1", "actor-2"],
+        )
+    )
+
+    assert result["acquisition"]["status"] == "committed"
+    assert client.tools.count("campaign_change") == 1
+    assert result["knowledge_actor_ids"] == ["actor-1", "actor-2"]
 
 
 def test_query_source_searches_and_expands_only_public_mcp_results() -> None:

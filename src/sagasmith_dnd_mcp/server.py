@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import re
 from contextlib import nullcontext
@@ -3173,6 +3174,162 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             scope,
             idempotency_key,
             payload,
+            response,
+            campaign_id=campaign_id,
+        )
+
+    def campaign_loot_acquire(
+        campaign_id: str,
+        acquisition_id: str,
+        coins: dict[str, Any],
+        items: list[dict[str, Any]],
+        reason: str,
+        source_ref: str,
+        principal_id: str = "system:local",
+        expected_revision: int | None = None,
+        branch_id: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Atomically add one source-bound loot parcel to the shared party inventory."""
+        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        require_write_contract(expected_revision, idempotency_key)
+        resolved_branch_id = require_current_branch(campaign_id, branch_id)
+        campaign = campaigns.get(campaign_id)
+        state = dict(campaign.state or {})
+        if state.get("game_phase", PROFILE_LOBBY) != PROFILE_PLAY:
+            raise CombatEngineError("source-bound loot can be acquired only in play")
+        if isinstance(state.get("combat"), dict) and state["combat"].get("active", False):
+            raise CombatEngineError("end active combat before acquiring loot")
+
+        normalized_acquisition_id = str(acquisition_id).strip()
+        normalized_reason = str(reason).strip()
+        normalized_source_ref = str(source_ref).strip()
+        if not normalized_acquisition_id or len(normalized_acquisition_id) > 200:
+            raise ValueError("acquisition_id must contain 1 to 200 characters")
+        if not normalized_reason or len(normalized_reason) > 1000:
+            raise ValueError("reason must contain 1 to 1000 characters")
+        if not normalized_source_ref or len(normalized_source_ref) > 8192:
+            raise ValueError("source_ref must contain 1 to 8192 characters")
+        try:
+            source = json.loads(normalized_source_ref)
+        except json.JSONDecodeError as exc:
+            raise ValueError("source_ref must be a JSON object") from exc
+        if not isinstance(source, dict):
+            raise ValueError("source_ref must be a JSON object")
+        required_source_fields = {
+            "module_id",
+            "scene_id",
+            "chunk_id",
+            "content_sha256",
+        }
+        if any(not str(source.get(field) or "").strip() for field in required_source_fields):
+            raise ValueError(
+                "source_ref requires module_id, scene_id, chunk_id, and content_sha256"
+            )
+        expanded = modules.expand(str(source["chunk_id"]))
+        if str(expanded.get("campaign_id")) != campaign_id:
+            raise ValueError("source_ref chunk does not belong to the campaign")
+        if str(dict(expanded.get("module") or {}).get("id")) != str(source["module_id"]):
+            raise ValueError("source_ref module_id does not match its chunk")
+        if str(dict(expanded.get("scene") or {}).get("id")) != str(source["scene_id"]):
+            raise ValueError("source_ref scene_id does not match its chunk")
+        chunk_content_sha256 = hashlib.sha256(
+            str(expanded.get("content") or "").encode("utf-8")
+        ).hexdigest()
+        if str(source["content_sha256"]).casefold() != chunk_content_sha256:
+            raise ValueError("source_ref content_sha256 does not match its chunk")
+
+        if not isinstance(coins, dict):
+            raise ValueError("coins must be an object")
+        denominations = {"cp", "sp", "ep", "gp", "pp"}
+        unexpected_denominations = sorted(set(coins) - denominations)
+        if unexpected_denominations:
+            raise ValueError(f"coins has unsupported denominations: {unexpected_denominations}")
+        normalized_coins: dict[str, int] = {}
+        for denomination, amount in coins.items():
+            if isinstance(amount, bool) or not isinstance(amount, int) or amount <= 0:
+                raise ValueError("loot coin amounts must be positive integers")
+            normalized_coins[str(denomination)] = amount
+        if not isinstance(items, list) or any(not isinstance(item, dict) for item in items):
+            raise ValueError("items must be a list of objects")
+        if not normalized_coins and not items:
+            raise ValueError("loot acquisition requires coins or items")
+
+        request_payload = {
+            "acquisition_id": normalized_acquisition_id,
+            "coins": normalized_coins,
+            "items": deepcopy(items),
+            "reason": normalized_reason,
+            "source_ref": normalized_source_ref,
+            "expected_revision": expected_revision,
+            "branch_id": resolved_branch_id,
+        }
+        scope = f"campaign-loot:{campaign_id}:{resolved_branch_id}:{principal_id}"
+        replay = replay_idempotent(scope, idempotency_key, request_payload)
+        if replay is not None:
+            return replay
+
+        acquisitions = list(state.get("loot_acquisitions") or [])
+        if any(
+            str(dict(item).get("id") or "") == normalized_acquisition_id
+            for item in acquisitions
+            if isinstance(item, dict)
+        ):
+            raise ValueError("loot acquisition_id already exists on this branch")
+
+        sheet = party_sheet(state)
+        for denomination, amount in normalized_coins.items():
+            sheet = adjust_wallet(sheet, denomination, amount)
+        item_ids: list[str] = []
+        normalized_items: list[dict[str, Any]] = []
+        for item in items:
+            sheet, item_id = add_inventory_item(sheet, item)
+            item_ids.append(item_id)
+            normalized_items.append(
+                deepcopy(
+                    next(
+                        entry
+                        for entry in sheet["inventory"]["items"]
+                        if entry["id"] == item_id
+                    )
+                )
+            )
+
+        acquisitions.append(
+            {
+                "id": normalized_acquisition_id,
+                "reason": normalized_reason,
+                "source_ref": normalized_source_ref,
+                "coins": deepcopy(normalized_coins),
+                "items": deepcopy(normalized_items),
+            }
+        )
+        next_state = party_state(state, sheet)
+        next_state["loot_acquisitions"] = acquisitions
+        StateMutationService(storage.database).replace(
+            campaign_id,
+            campaign_state=validate_party_state(next_state),
+            expected_campaign_revision=expected_revision,
+            operation="campaign.loot.acquire",
+            actor=principal_id,
+            branch_id=resolved_branch_id,
+            idempotency_key=idempotency_key,
+        )
+        response = {
+            "status": "committed",
+            "acquisition_id": normalized_acquisition_id,
+            "coins": normalized_coins,
+            "items": normalized_items,
+            "item_ids": item_ids,
+            "reason": normalized_reason,
+            "source_ref": normalized_source_ref,
+            "party": party_show(campaign_id, principal_id=principal_id),
+            "campaign": asdict(campaigns.get(campaign_id)),
+        }
+        return remember_idempotent(
+            scope,
+            idempotency_key,
+            request_payload,
             response,
             campaign_id=campaign_id,
         )
@@ -16191,6 +16348,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "effect_remove",
             "advancement_configure",
             "experience_award",
+            "loot_acquire",
         ] = "update",
         principal_id: str = "system:local",
         expected_revision: int | None = None,
@@ -16263,6 +16421,19 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             result = campaign_experience_award(
                 campaign_id,
                 required(data, "awards"),
+                required(data, "reason"),
+                required(data, "source_ref"),
+                principal_id,
+                expected_revision,
+                branch_id,
+                idempotency_key,
+            )
+        elif action == "loot_acquire":
+            result = campaign_loot_acquire(
+                campaign_id,
+                required(data, "acquisition_id"),
+                data.get("coins") or {},
+                data.get("items") or [],
                 required(data, "reason"),
                 required(data, "source_ref"),
                 principal_id,
