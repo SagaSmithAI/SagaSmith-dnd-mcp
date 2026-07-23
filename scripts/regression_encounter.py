@@ -33,6 +33,7 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--source-excerpt")
     parser.add_argument("--encounter-name", default="Source-defined encounter")
     parser.add_argument("--hostile-label", default="Source-defined hostiles")
+    parser.add_argument("--surprise-check-report", type=Path)
     parser.add_argument("--flee-after-defeated", type=int, default=0)
     parser.add_argument("--max-turns", type=int, default=200)
     parser.add_argument("--checkpoint-label", default="Encounter complete")
@@ -137,6 +138,7 @@ def _participant_config(
             "position": {"x": hostile_positions[index][0], "y": hostile_positions[index][1]},
             "disposition": "hostile",
             "hidden": True,
+            "surprised": bool(surprise_by_actor.get(actor_id, False)),
             "death_saves": False,
         }
         for index, actor_id in enumerate(hostile_ids)
@@ -154,6 +156,40 @@ def _roll_total(value: dict[str, Any]) -> int:
     if "total" in value:
         return int(value["total"])
     return int(dict(value.get("result") or {}).get("total", 0))
+
+
+def _surprise_from_check_report(
+    path: Path,
+    *,
+    campaign_id: str,
+    scene_id: str,
+    location_key: str,
+    party_ids: list[str],
+    hostile_ids: list[str],
+) -> tuple[dict[str, bool], dict[str, Any]]:
+    report = _read_report(path)
+    result = dict(report.get("result") or {})
+    scene = dict(result.get("scene") or {})
+    actor = dict(result.get("actor") or {})
+    check = dict(result.get("check") or {})
+    if (
+        report.get("passed") is not True
+        or report.get("action") != "resolve-check"
+        or report.get("campaign_id") != campaign_id
+        or scene.get("scene_id") != scene_id
+        or scene.get("location_key") != location_key
+        or actor.get("id") not in party_ids
+        or not isinstance(check.get("success"), bool)
+    ):
+        raise ValueError("surprise check report does not match this encounter")
+    surprise = {actor_id: False for actor_id in party_ids}
+    surprise.update({actor_id: bool(check["success"]) for actor_id in hostile_ids})
+    return surprise, {
+        "mode": "source_cited_party_scout",
+        "report_path": str(path.expanduser().resolve()),
+        "actor": actor,
+        "check": check,
+    }
 
 
 async def _campaign(client: ExposureClient, campaign_id: str) -> dict[str, Any]:
@@ -251,28 +287,44 @@ async def _start(
             raise RuntimeError(f"source hostile {actor_id} has an invalid Shortbow range")
         if str(shortbow.get("on_hit_effect") or ""):
             raise RuntimeError(f"source hostile {actor_id} has unresolved trailing action prose")
-    rolled = await client.domain(
-        "dnd_dice_roll",
-        {
-            "campaign_id": args.campaign_id,
-            "expression": "1d20+6",
-            "branch_id": branch["id"],
-            "expected_campaign_revision": campaign["revision"],
-            "idempotency_key": (
-                f"encounter-stealth-{_token(f'{args.run_id}:{args.scene_id}', length=24)}"
-            ),
-        },
-    )
-    stealth_total = _roll_total(rolled)
-    passive_perception = {
-        actor_id: int(
-            dict(actors[actor_id].get("derived") or {}).get("passive_perception", 10)
+    passive_perception: dict[str, int] = {}
+    if args.surprise_check_report is not None:
+        surprise, surprise_basis = _surprise_from_check_report(
+            args.surprise_check_report,
+            campaign_id=args.campaign_id,
+            scene_id=args.scene_id,
+            location_key=args.location_key,
+            party_ids=party_ids,
+            hostile_ids=hostile_ids,
         )
-        for actor_id in party_ids
-    }
-    surprise = {
-        actor_id: score < stealth_total for actor_id, score in passive_perception.items()
-    }
+        expected_revision = campaign["revision"]
+    else:
+        rolled = await client.domain(
+            "dnd_dice_roll",
+            {
+                "campaign_id": args.campaign_id,
+                "expression": "1d20+6",
+                "branch_id": branch["id"],
+                "expected_campaign_revision": campaign["revision"],
+                "idempotency_key": (
+                    f"encounter-stealth-{_token(f'{args.run_id}:{args.scene_id}', length=24)}"
+                ),
+            },
+        )
+        stealth_total = _roll_total(rolled)
+        passive_perception = {
+            actor_id: int(
+                dict(actors[actor_id].get("derived") or {}).get("passive_perception", 10)
+            )
+            for actor_id in party_ids
+        }
+        surprise = {
+            actor_id: score < stealth_total
+            for actor_id, score in passive_perception.items()
+        }
+        surprise.update({actor_id: False for actor_id in hostile_ids})
+        surprise_basis = {"mode": "hostile_group_stealth", "roll": rolled}
+        expected_revision = rolled["campaign_revision"]
     started = await client.domain(
         "combat_start",
         {
@@ -293,7 +345,7 @@ async def _start(
             "battle_map": {"location_key": args.location_key},
             "ruleset": "2014",
             "branch_id": branch["id"],
-            "expected_revision": rolled["campaign_revision"],
+            "expected_revision": expected_revision,
             "idempotency_key": (
                 f"encounter-start-{_token(f'{args.run_id}:{args.scene_id}', length=24)}"
             ),
@@ -314,7 +366,7 @@ async def _start(
     )
     return {
         "play_exposure": opened_play,
-        "stealth": rolled,
+        "surprise_basis": surprise_basis,
         "passive_perception": passive_perception,
         "surprise": surprise,
         "start": started,

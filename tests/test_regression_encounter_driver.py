@@ -1,8 +1,11 @@
+import json
+
 from scripts.regression_encounter import (
     _choose_destination,
     _participant_config,
     _participant_manifest,
     _roll_total,
+    _surprise_from_check_report,
 )
 
 
@@ -34,6 +37,43 @@ def test_default_ambush_layout_keeps_two_goblins_thirty_feet_away() -> None:
     assert by_actor["goblin-1"]["position"]["x"] == 2
     assert by_actor["goblin-3"]["position"]["x"] == 7
     assert by_actor["goblin-3"]["hidden"] is True
+    assert by_actor["goblin-1"]["surprised"] is False
+
+
+def test_source_cited_scout_check_surprises_only_hostiles(tmp_path) -> None:
+    path = tmp_path / "check.json"
+    path.write_text(
+        json.dumps(
+            {
+                "action": "resolve-check",
+                "campaign_id": "campaign-1",
+                "passed": True,
+                "result": {
+                    "scene": {"scene_id": "scene-1", "location_key": "blind"},
+                    "actor": {"id": "pc-1", "name": "Scout"},
+                    "check": {"success": True, "natural": 16, "total": 21},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    surprise, basis = _surprise_from_check_report(
+        path,
+        campaign_id="campaign-1",
+        scene_id="scene-1",
+        location_key="blind",
+        party_ids=["pc-1", "pc-2"],
+        hostile_ids=["goblin-1", "goblin-2"],
+    )
+
+    assert surprise == {
+        "pc-1": False,
+        "pc-2": False,
+        "goblin-1": True,
+        "goblin-2": True,
+    }
+    assert basis["mode"] == "source_cited_party_scout"
 
 
 def test_movement_destination_stops_next_to_target_without_sharing_space() -> None:
