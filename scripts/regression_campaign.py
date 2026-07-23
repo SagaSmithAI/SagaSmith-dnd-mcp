@@ -31,6 +31,7 @@ def _arguments() -> argparse.Namespace:
         "--action",
         choices=(
             "audit",
+            "discover-scenes",
             "relock-core",
             "prepare-statblock",
             "prepare-core-wizard",
@@ -107,6 +108,12 @@ def _arguments() -> argparse.Namespace:
         "--module-root",
         type=Path,
         help="Optional allowlisted module root passed to the MCP server",
+    )
+    parser.add_argument(
+        "--query",
+        action="append",
+        default=[],
+        help="Module search text; repeat for discover-scenes",
     )
     return parser.parse_args()
 
@@ -596,6 +603,67 @@ async def _audit(args: argparse.Namespace) -> dict[str, Any]:
                 "actor_knowledge": knowledge,
                 "memory_count": len(memory or []),
                 "combat": combat,
+            }
+
+
+async def _discover_scenes(args: argparse.Namespace) -> dict[str, Any]:
+    """Search and expand source scenes through the public phase exposure."""
+
+    if not args.query:
+        raise ValueError("discover-scenes requires at least one --query")
+    async with stdio_client(_server_parameters(args)) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            client = CampaignMcp(session, args.campaign_id)
+            phase_payload = await client.core(
+                "game_phase", {"campaign_id": args.campaign_id, "action": "get"}
+            )
+            phase = str(_facade_value(phase_payload)["tool_profile"])
+            if phase == "combat":
+                raise RuntimeError("discover-scenes cannot run during active combat")
+            await client.open()
+            await client.load(*_phase_groups(phase))
+            results: list[dict[str, Any]] = []
+            for query in args.query:
+                hits = _facade_value(
+                    await client.domain(
+                        "module_search",
+                        {
+                            "campaign_id": args.campaign_id,
+                            "query": query,
+                            "top_k": 8,
+                        },
+                    )
+                )
+                expanded_hits: list[dict[str, Any]] = []
+                for hit in hits or []:
+                    chunk_id = str(hit.get("chunk_id") or hit.get("id") or "")
+                    if not chunk_id:
+                        continue
+                    expanded = _facade_value(
+                        await client.domain("module_expand", {"chunk_id": chunk_id})
+                    )
+                    content = str(expanded.get("content") or "")
+                    expanded_hits.append(
+                        {
+                            "chunk_id": chunk_id,
+                            "score": hit.get("score"),
+                            "module_id": expanded.get("module_id"),
+                            "scene_id": expanded.get("scene_id"),
+                            "page_start": expanded.get("page_start"),
+                            "page_end": expanded.get("page_end"),
+                            "heading_path": expanded.get("heading_path"),
+                            "content": content[:4_000],
+                            "content_characters": len(content),
+                        }
+                    )
+                results.append({"query": query, "hits": expanded_hits})
+            return {
+                "action": "discover-scenes",
+                "transport": "stdio",
+                "campaign_id": args.campaign_id,
+                "phase": phase,
+                "queries": results,
             }
 
 
@@ -2859,6 +2927,7 @@ def main() -> int:
     args = _arguments()
     operation = {
         "audit": _audit,
+        "discover-scenes": _discover_scenes,
         "relock-core": _relock_core,
         "prepare-statblock": _prepare_statblock,
         "prepare-core-wizard": _prepare_core_wizard,
