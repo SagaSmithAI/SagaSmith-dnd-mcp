@@ -5,7 +5,13 @@ import io
 import json
 from pathlib import Path
 
-from scripts.regression_campaign import _configure_utf8_streams, _expanded_source_ref
+import pytest
+
+from scripts.regression_campaign import (
+    _configure_utf8_streams,
+    _expanded_source_ref,
+    _validate_noncombat_scene,
+)
 
 
 def test_expanded_source_ref_keeps_exact_module_scene_and_content_identity() -> None:
@@ -51,10 +57,27 @@ def test_campaign_report_streams_are_reconfigured_for_source_text() -> None:
     assert stream.encoding == "utf-8"
 
 
-def test_full_campaign_corpus_accounts_for_every_asset_and_uses_max_party_size() -> None:
-    manifest_path = (
-        Path(__file__).resolve().parents[1] / "fixtures" / "full_campaign_corpus.json"
+def test_noncombat_scene_inputs_are_validated_before_branch_setup() -> None:
+    scene = {
+        "content": "A DC 10 Wisdom (Survival) check reveals the Goblin Trail.",
+        "locations": [{"key": "goblin-ambush"}],
+    }
+
+    _validate_noncombat_scene(
+        scene,
+        source_excerpt="A DC 10 Wisdom (Survival) check reveals the Goblin Trail.",
+        location_key="goblin-ambush",
     )
+    with pytest.raises(RuntimeError, match="location is not present"):
+        _validate_noncombat_scene(
+            scene,
+            source_excerpt="A DC 10 Wisdom (Survival) check reveals the Goblin Trail.",
+            location_key="goblin-trail",
+        )
+
+
+def test_full_campaign_corpus_accounts_for_every_asset_and_uses_max_party_size() -> None:
+    manifest_path = Path(__file__).resolve().parents[1] / "fixtures" / "full_campaign_corpus.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     entries = []
     for line in manifest["campaign_lines"]:

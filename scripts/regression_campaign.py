@@ -286,6 +286,23 @@ def _scene_locations(scene: dict[str, Any]) -> list[dict[str, Any]]:
     return [item for item in values if isinstance(item, dict)]
 
 
+def _validate_noncombat_scene(
+    scene: dict[str, Any],
+    *,
+    source_excerpt: str,
+    location_key: str,
+) -> None:
+    """Reject invalid cited check inputs before creating snapshots or branches."""
+
+    excerpt = _normalized_source_text(source_excerpt)
+    scene_text = _normalized_source_text(scene.get("content"))
+    if not excerpt or excerpt not in scene_text:
+        raise RuntimeError("non-combat check excerpt is not contained in the cited scene")
+    location_keys = {str(item.get("key")) for item in _scene_locations(scene)}
+    if location_key not in location_keys:
+        raise RuntimeError("non-combat check location is not present in the scene atlas")
+
+
 def _character_summary(character: dict[str, Any]) -> dict[str, Any]:
     sheet = character.get("sheet") if isinstance(character.get("sheet"), dict) else {}
     derived = character.get("derived") if isinstance(character.get("derived"), dict) else {}
@@ -2890,6 +2907,21 @@ async def _noncombat_check(args: argparse.Namespace) -> dict[str, Any]:
             )
             if str(actor.get("campaign_id")) != args.campaign_id:
                 raise RuntimeError("check actor does not belong to this campaign")
+            scene = _facade_value(
+                await client.domain(
+                    "module_query",
+                    {
+                        "campaign_id": args.campaign_id,
+                        "view": "scene",
+                        "payload": {"scene_id": args.scene_id},
+                    },
+                )
+            )
+            _validate_noncombat_scene(
+                scene,
+                source_excerpt=args.source_excerpt,
+                location_key=args.location_key,
+            )
             source_current_before = _facade_value(
                 await client.domain(
                     "module_query", {"campaign_id": args.campaign_id, "view": "current"}
@@ -2980,23 +3012,6 @@ async def _noncombat_check(args: argparse.Namespace) -> dict[str, Any]:
                 "play.characters",
                 "play.resolution",
             )
-            scene = _facade_value(
-                await client.domain(
-                    "module_query",
-                    {
-                        "campaign_id": args.campaign_id,
-                        "view": "scene",
-                        "payload": {"scene_id": args.scene_id},
-                    },
-                )
-            )
-            excerpt = _normalized_source_text(args.source_excerpt)
-            scene_text = _normalized_source_text(scene.get("content"))
-            if not excerpt or excerpt not in scene_text:
-                raise RuntimeError("non-combat check excerpt is not contained in the cited scene")
-            location_keys = {str(item.get("key")) for item in _scene_locations(scene)}
-            if args.location_key not in location_keys:
-                raise RuntimeError("non-combat check location is not present in the scene atlas")
             progress_values = _facade_value(
                 await client.domain(
                     "module_query", {"campaign_id": args.campaign_id, "view": "progress"}
