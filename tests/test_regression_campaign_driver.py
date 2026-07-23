@@ -10,6 +10,7 @@ import pytest
 
 from scripts.regression_campaign import (
     _arguments,
+    _character_summary,
     _configure_utf8_streams,
     _expanded_source_ref,
     _load_json_object,
@@ -78,6 +79,30 @@ def test_prepare_statblock_accepts_an_npc_actor_type(
     )
 
     assert _arguments().actor_type == "npc"
+
+
+def test_character_summary_keeps_provenance_for_a_disarmed_module_npc() -> None:
+    summary = _character_summary(
+        {
+            "id": "sildar",
+            "name": "Sildar Hallwinter",
+            "character_type": "npc",
+            "revision": 1,
+            "sheet": {"inventory": {"items": []}, "content": {}},
+            "derived": {
+                "hit_points": {"value": 1, "max": 27, "temp": 0},
+                "armor_class": 10,
+                "inventory": {"weapon_attacks": []},
+            },
+            "notes": {
+                "profile": {
+                    "dm_notes": "Reviewed module statblock: module-review:sildar."
+                }
+            },
+        }
+    )
+
+    assert summary["source_bound"] is True
 
 
 def test_expanded_source_ref_keeps_exact_module_scene_and_content_identity() -> None:

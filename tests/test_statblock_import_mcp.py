@@ -527,5 +527,29 @@ def test_statblock_reconstruction_preserves_reaction_heading_paths(tmp_path: Pat
         assert created["statblock"]["warnings"] == [
             "Parry: descriptive reaction is not automatically settled"
         ]
+        variant = await _call(
+            server,
+            "character_create_from",
+            {
+                "mode": "statblock",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "source_id": ingested["source_id"],
+                    "name": "Disarmed Reactive Commoner",
+                    "variant": {
+                        "source_ref": f"rule-chunk:{created['source']['chunk_ids'][0]}",
+                        "remove_activities": ["Parry"],
+                    },
+                },
+                "idempotency_key": "disarmed-actor",
+            },
+        )
+
+        assert all(
+            item["name"] != "Parry"
+            for item in variant["character"]["sheet"]["content"]["activities"]
+        )
+        assert variant["statblock"]["settlement"] == "automatic"
+        assert variant["statblock"]["warnings"] == []
 
     asyncio.run(exercise())

@@ -1111,6 +1111,23 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         source_refs.extend(str(item).strip() for item in variant.get("source_refs", []))
         return ", ".join(source_refs)
 
+    def retained_statblock_warnings(
+        warnings: list[str],
+        variant: dict[str, Any] | None,
+    ) -> list[str]:
+        if variant is None:
+            return warnings
+        removed_subjects = {
+            str(item).strip().casefold()
+            for field in ("remove_actions", "remove_items", "remove_activities")
+            for item in variant.get(field, [])
+        }
+        return [
+            warning
+            for warning in warnings
+            if warning.partition(":")[0].strip().casefold() not in removed_subjects
+        ]
+
     def combat_view(campaign_id: str, principal_id: str) -> dict[str, Any] | None:
         campaign = campaigns.get(campaign_id)
         encounter = dict(campaign.state or {}).get("combat")
@@ -15263,9 +15280,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 source_key=source_key,
                 rule_refs=source_rule_refs,
             )
-            statblock_warnings = [*parsed.warnings, *spell_warnings]
             variant = data.get("variant")
             variant_evidence = statblock_variant_evidence(campaign_id, variant)
+            statblock_warnings = retained_statblock_warnings(
+                [*parsed.warnings, *spell_warnings],
+                variant,
+            )
             sheet = (
                 apply_statblock_variant(hydrated_sheet, variant)
                 if variant is not None
@@ -15394,9 +15414,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 source_key=source_key,
                 rule_refs=selected_chunk_ids,
             )
-            statblock_warnings = [*parsed.warnings, *spell_warnings]
             variant = data.get("variant")
             variant_evidence = statblock_variant_evidence(campaign_id, variant)
+            statblock_warnings = retained_statblock_warnings(
+                [*parsed.warnings, *spell_warnings],
+                variant,
+            )
             sheet = (
                 apply_statblock_variant(hydrated_sheet, variant)
                 if variant is not None

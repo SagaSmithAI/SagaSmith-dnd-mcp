@@ -368,6 +368,19 @@ def _character_summary(character: dict[str, Any]) -> dict[str, Any]:
         for item in source_items
         if isinstance(item, dict)
     )
+    notes = (
+        character.get("notes") if isinstance(character.get("notes"), dict) else {}
+    )
+    profile = notes.get("profile") if isinstance(notes.get("profile"), dict) else {}
+    provenance = str(profile.get("dm_notes") or "")
+    source_bound = source_bound or any(
+        marker in provenance
+        for marker in (
+            "Reviewed module statblock:",
+            "Imported strict statblock:",
+            "rule-source:",
+        )
+    )
     return {
         "id": character.get("id"),
         "name": character.get("name"),
