@@ -122,6 +122,16 @@ def test_manifest_syncs_canonical_state_and_verifies_source_defined_ending(
         )
         module_id = activated["activation"]["module_id"]
         assert module_id == ingested["module_id"]
+        module_index = await _call(
+            server,
+            "module_query",
+            {
+                "campaign_id": campaign_id,
+                "view": "index",
+                "payload": {"module_id": module_id},
+            },
+        )
+        opening_scene = module_index[0]
         current = await _call(
             server,
             "campaign_query",
@@ -190,6 +200,15 @@ def test_manifest_syncs_canonical_state_and_verifies_source_defined_ending(
             }
         ]
         updated_manifest["world_state"]["victory"] = True
+        updated_manifest["status"] = "in_progress"
+        updated_manifest["current"] = {
+            "module_id": module_id,
+            "chapter_id": str(opening_scene.get("chapter_id") or ""),
+            "chapter_title": str(opening_scene.get("chapter") or ""),
+            "scene_id": str(opening_scene["scene_id"]),
+            "scene_title": str(opening_scene.get("title") or ""),
+            "objective": "Complete the source-defined ending.",
+        }
         updated_manifest["ending"]["conditions"] = [
             {
                 "id": "victory",
@@ -233,7 +252,7 @@ def test_manifest_syncs_canonical_state_and_verifies_source_defined_ending(
                 "idempotency_key": "manifest-sync",
             },
         )
-        assert synced["manifest"]["status"] == "ready"
+        assert synced["manifest"]["status"] == "in_progress"
         assert synced["manifest"]["party"]["members"][0]["name"] == "Pregenerated Hero"
         assert synced["manifest"]["random_stream"]["position"] == 0
 

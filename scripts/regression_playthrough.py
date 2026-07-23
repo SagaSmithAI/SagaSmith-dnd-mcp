@@ -35,12 +35,15 @@ def _arguments() -> argparse.Namespace:
             "sync",
             "checkpoint",
             "advance-scene",
+            "configure-advancement",
             "register-party",
+            "start-play",
             "verify-ending",
         ),
         default="status",
     )
     parser.add_argument("--run-id", default="full-playthrough-v1")
+    parser.add_argument("--advancement-mode", choices=("xp", "milestone"))
     parser.add_argument("--module-root", type=Path)
     parser.add_argument("--checkpoint-label", default="")
     parser.add_argument("--scene-id")
@@ -399,6 +402,169 @@ async def _advance_scene(
     )
 
 
+async def _start_play(
+    client: ExposureClient,
+    *,
+    campaign_id: str,
+    run_id: str,
+    initial_phase: str,
+    scene_id: str,
+    objective: str,
+    reachable_scene_ids: list[str],
+) -> dict[str, Any]:
+    current = await _manifest_get(client, campaign_id)
+    manifest = deepcopy(current["manifest"])
+    ready = None
+    phase_change = None
+    if initial_phase == "lobby":
+        manifest["status"] = "ready"
+        ready = await _manifest_mutation(
+            client,
+            campaign_id=campaign_id,
+            action="replace",
+            run_id=run_id,
+            identity="start-play-ready",
+            payload={"manifest": manifest},
+        )
+        campaign = await _campaign(client, campaign_id)
+        branches = await client.domain(
+            "branch_query",
+            {"campaign_id": campaign_id, "view": "list"},
+        )
+        branch = next((item for item in branches if item.get("is_current")), None)
+        if branch is None:
+            raise RuntimeError("campaign has no current branch")
+        phase_change = _facade_value(
+            await client.core(
+                "game_phase",
+                {
+                    "campaign_id": campaign_id,
+                    "action": "set",
+                    "tool_profile": "play",
+                    "expected_revision": campaign["revision"],
+                    "branch_id": branch["id"],
+                    "idempotency_key": _mutation_key(
+                        run_id,
+                        "phase",
+                        f"start-play-r{campaign['revision']}",
+                    ),
+                },
+            )
+        )
+    elif initial_phase != "play":
+        raise RuntimeError("start-play cannot run during active combat")
+    elif manifest["status"] not in {"ready", "in_progress"}:
+        raise RuntimeError("play phase does not have a ready playthrough manifest")
+    await client.open(campaign_id)
+    await client.load("play.scene", "play.scene_control")
+    scene = await _advance_scene(
+        client,
+        campaign_id=campaign_id,
+        run_id=run_id,
+        scene_id=scene_id,
+        objective=objective,
+        mark_visited=True,
+        reachable_scene_ids=reachable_scene_ids,
+        excluded_scenes=[],
+    )
+    synced = await _manifest_mutation(
+        client,
+        campaign_id=campaign_id,
+        action="sync",
+        run_id=run_id,
+        identity=f"start-play-sync:{scene_id}",
+    )
+    return {
+        "ready": ready,
+        "phase_change": phase_change,
+        "scene": scene,
+        "sync": synced,
+    }
+
+
+async def _configure_advancement(
+    client: ExposureClient,
+    *,
+    campaign_id: str,
+    run_id: str,
+    mode: str,
+    initial_phase: str,
+) -> dict[str, Any]:
+    if mode not in {"xp", "milestone"}:
+        raise ValueError("configure-advancement requires --advancement-mode")
+    phase_changes: list[dict[str, Any]] = []
+    branch_id = ""
+    if initial_phase == "play":
+        await client.load("play.scene")
+        branches = await client.domain(
+            "branch_query",
+            {"campaign_id": campaign_id, "view": "list"},
+        )
+        branch = next((item for item in branches if item.get("is_current")), None)
+        if branch is None:
+            raise RuntimeError("campaign has no current branch")
+        branch_id = str(branch["id"])
+        campaign = await _campaign(client, campaign_id)
+        phase_changes.append(
+            _facade_value(
+                await client.core(
+                    "game_phase",
+                    {
+                        "campaign_id": campaign_id,
+                        "action": "set",
+                        "tool_profile": "lobby",
+                        "expected_revision": campaign["revision"],
+                        "branch_id": branch_id,
+                        "idempotency_key": _mutation_key(
+                            run_id,
+                            "phase",
+                            f"advancement-enter-lobby-r{campaign['revision']}",
+                        ),
+                    },
+                )
+            )
+        )
+        await client.open(campaign_id)
+        await client.load("lobby.campaign")
+    elif initial_phase != "lobby":
+        raise RuntimeError("configure-advancement cannot run during active combat")
+    campaign = await _campaign(client, campaign_id)
+    configured = await client.domain(
+        "campaign_change",
+        {
+            "campaign_id": campaign_id,
+            "action": "advancement_configure",
+            "payload": {"mode": mode},
+            "expected_revision": campaign["revision"],
+            "idempotency_key": _mutation_key(
+                run_id, "advancement", f"{mode}:r{campaign['revision']}"
+            ),
+        },
+    )
+    if initial_phase == "play":
+        campaign = await _campaign(client, campaign_id)
+        phase_changes.append(
+            _facade_value(
+                await client.core(
+                    "game_phase",
+                    {
+                        "campaign_id": campaign_id,
+                        "action": "set",
+                        "tool_profile": "play",
+                        "expected_revision": campaign["revision"],
+                        "branch_id": branch_id,
+                        "idempotency_key": _mutation_key(
+                            run_id,
+                            "phase",
+                            f"advancement-return-play-r{campaign['revision']}",
+                        ),
+                    },
+                )
+            )
+        )
+    return {"configured": configured, "phase_changes": phase_changes}
+
+
 async def _run(args: argparse.Namespace) -> dict[str, Any]:
     server = _server_parameters(args)
     report: dict[str, Any] = {
@@ -425,6 +591,30 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     campaign_id=args.campaign_id,
                     run_id=args.run_id,
                     selections=_party_selections(args),
+                )
+            elif args.action == "configure-advancement":
+                if phase == "combat":
+                    raise RuntimeError(
+                        "configure-advancement cannot run during active combat"
+                    )
+                if phase == "play":
+                    await client.load("play.scene_control")
+                report["result"] = await _configure_advancement(
+                    client,
+                    campaign_id=args.campaign_id,
+                    run_id=args.run_id,
+                    mode=str(args.advancement_mode or ""),
+                    initial_phase=phase,
+                )
+            elif args.action == "start-play":
+                report["result"] = await _start_play(
+                    client,
+                    campaign_id=args.campaign_id,
+                    run_id=args.run_id,
+                    initial_phase=phase,
+                    scene_id=str(args.scene_id or ""),
+                    objective=args.objective,
+                    reachable_scene_ids=args.reachable_scene_id,
                 )
             elif args.action == "advance-scene":
                 if phase != "play":
@@ -496,12 +686,22 @@ def main() -> int:
     try:
         report = asyncio.run(_run(args))
     except Exception as error:
+        def leaf_messages(item: BaseException) -> list[str]:
+            nested = getattr(item, "exceptions", ())
+            if nested:
+                return [
+                    message
+                    for child in nested
+                    for message in leaf_messages(child)
+                ]
+            return [f"{type(item).__name__}: {item}"]
+
         report = {
             "action": args.action,
             "campaign_id": args.campaign_id,
             "run_id": args.run_id,
             "passed": False,
-            "error": f"{type(error).__name__}: {error}",
+            "error": "; ".join(leaf_messages(error)),
         }
     rendered = json.dumps(report, ensure_ascii=False, indent=2)
     args.output.parent.mkdir(parents=True, exist_ok=True)
