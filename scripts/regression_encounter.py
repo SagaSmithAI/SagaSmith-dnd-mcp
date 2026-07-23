@@ -133,8 +133,8 @@ def _participant_config(
     *,
     surprise_by_actor: dict[str, bool],
 ) -> list[dict[str, Any]]:
-    if len(party_ids) > 10 or len(hostile_ids) > 4:
-        raise ValueError("default encounter layout supports at most 10 PCs and 4 hostiles")
+    if len(party_ids) > 10 or len(hostile_ids) > 10:
+        raise ValueError("default encounter layout supports at most 10 PCs and 10 hostiles")
     configs = [
         {
             "actor_id": actor_id,
@@ -145,7 +145,18 @@ def _participant_config(
         }
         for index, actor_id in enumerate(party_ids)
     ]
-    hostile_positions = ((2, 2), (2, 4), (7, 2), (7, 4))
+    hostile_positions = (
+        (2, 2),
+        (2, 4),
+        (7, 2),
+        (7, 4),
+        (4, 2),
+        (4, 4),
+        (9, 2),
+        (9, 4),
+        (6, 6),
+        (8, 6),
+    )
     configs.extend(
         {
             "actor_id": actor_id,

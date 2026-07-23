@@ -131,6 +131,21 @@ def test_default_ambush_layout_keeps_two_goblins_thirty_feet_away() -> None:
     assert surprised_by_actor["goblin-1"]["hidden"] is False
 
 
+def test_source_six_hostile_layout_keeps_every_actor_on_a_unique_space() -> None:
+    party_ids = [f"pc-{index}" for index in range(1, 6)]
+    hostile_ids = [f"goblin-{index}" for index in range(1, 7)]
+
+    config = _participant_config(party_ids, hostile_ids, surprise_by_actor={})
+    positions = [
+        (item["position"]["x"], item["position"]["y"])
+        for item in config
+    ]
+
+    assert len(config) == 11
+    assert len(positions) == len(set(positions))
+    assert {item["actor_id"] for item in config} == {*party_ids, *hostile_ids}
+
+
 def test_source_cited_scout_check_surprises_only_hostiles(tmp_path) -> None:
     path = tmp_path / "check.json"
     path.write_text(
