@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import argparse
 import asyncio
+import json
 
 from sagasmith_dnd.character_schema import default_character_sheet
 
@@ -9,6 +11,7 @@ from scripts.regression_playthrough import (
     _checkpoint,
     _mutation_key,
     _party_member,
+    _party_selections,
 )
 
 
@@ -45,6 +48,22 @@ def test_phase_and_idempotency_namespaces_are_stable() -> None:
     assert _mutation_key("run", "snapshot", "scene-1") != _mutation_key(
         "run", "snapshot", "scene-2"
     )
+
+
+def test_party_report_supplies_exact_manifest_members(tmp_path) -> None:
+    report_path = tmp_path / "party.json"
+    members = [
+        {
+            "actor_id": "actor-1",
+            "source": "generated",
+            "source_asset_path": "",
+            "status": "active",
+        }
+    ]
+    report_path.write_text(json.dumps({"manifest_members": members}), encoding="utf-8")
+    args = argparse.Namespace(party_member_json=[], party_report=report_path)
+
+    assert _party_selections(args) == members
 
 
 def test_checkpoint_uses_only_public_manifest_branch_and_snapshot_tools() -> None:

@@ -23,7 +23,7 @@
           "size": 1674883,
           "sha256": "b8568e8b217c4ebbbc33228e03f53f782a76470ba4e94d0fbc2b36e9db08b242",
           "priority": "review_before_fallback_generation",
-          "review_status": "blocked_incomplete_unconfirmed_content",
+          "review_status": "reviewed_excluded_from_party",
           "notes": [
             "The public character document inspector reports an incomplete level, ability scores, and hit points.",
             "The template uses artificer/Gunsmith content that is not in the enabled built-in 2014 Core pack.",
@@ -69,7 +69,7 @@
           "module_mentions_included_characters": true,
           "official_sheets_present_in_corpus": false,
           "associated_templates_present": 1,
-          "selection_policy": "review associated templates, then legally create all remaining seats"
+          "selection_policy": "use official module pregenerated characters first when present; PC-Smalls.pdf is reviewed as non-module, incomplete, unsupported associated material and must not be instantiated; legally create all five seats"
         },
         "source_refs": [
           {

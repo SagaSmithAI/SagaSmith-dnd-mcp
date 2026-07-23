@@ -64,8 +64,27 @@ def _arguments() -> argparse.Namespace:
             "source_asset_path, and optional status"
         ),
     )
+    parser.add_argument(
+        "--party-report",
+        type=Path,
+        help="Party-builder JSON report whose manifest_members should be registered",
+    )
     parser.add_argument("--condition-id")
     return parser.parse_args()
+
+
+def _party_selections(args: argparse.Namespace) -> list[dict[str, Any]]:
+    selections = deepcopy(list(args.party_member_json))
+    if args.party_report is None:
+        return selections
+    report_path = args.party_report.expanduser().resolve()
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    report_members = report.get("manifest_members")
+    if not isinstance(report_members, list) or not report_members:
+        raise ValueError("party report must contain a non-empty manifest_members array")
+    if selections:
+        raise ValueError("--party-report cannot be combined with --party-member-json")
+    return [dict(item) for item in report_members]
 
 
 def _server_parameters(args: argparse.Namespace) -> StdioServerParameters:
@@ -405,7 +424,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     client,
                     campaign_id=args.campaign_id,
                     run_id=args.run_id,
-                    selections=args.party_member_json,
+                    selections=_party_selections(args),
                 )
             elif args.action == "advance-scene":
                 if phase != "play":

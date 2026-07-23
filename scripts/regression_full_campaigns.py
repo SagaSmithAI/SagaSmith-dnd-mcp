@@ -239,9 +239,13 @@ def _line_review_blocks(
         )
     for document in player_documents:
         inspection = dict(document.get("character_document") or {})
+        declared = dict(document.get("declared_player_material") or {})
         if inspection.get("document_kind") == "character_sheet" and not inspection.get(
             "ready_to_create"
-        ):
+        ) and declared.get("review_status") not in {
+            "reviewed_excluded_from_party",
+            "reviewed_not_module_pregen",
+        }:
             blocks.append(
                 {
                     "kind": "incomplete_character_template",
@@ -296,6 +300,9 @@ def _build_playthrough_manifest(
         "clues": [],
         "world_state": {
             "continuation": deepcopy(dict(requirements.get("continuity") or {})),
+            "pregenerated_characters": deepcopy(
+                dict(requirements.get("pregenerated_characters") or {})
+            ),
         },
         "snapshot_dag": {
             "active_branch_id": "",
@@ -450,6 +457,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                             index=document_index,
                             total=total_documents,
                         )
+                        document["declared_player_material"] = deepcopy(entry)
                         player_documents.append(document)
                         line_report["documents"].append(document)
                         line_report["attachments"].append(

@@ -156,6 +156,35 @@ def test_full_campaign_review_blocks_missing_party_count_and_incomplete_preset()
     ]
 
 
+def test_reviewed_non_module_character_material_does_not_block_fallback_party() -> None:
+    line = {
+        "id": "line-1",
+        "play_requirements": {
+            "recommended_party_size": {
+                "status": "source_confirmed",
+                "minimum": 4,
+                "maximum": 5,
+                "selected": 5,
+            }
+        },
+    }
+    player_documents = [
+        {
+            "relative_path": "associated.pdf",
+            "declared_player_material": {
+                "review_status": "reviewed_excluded_from_party",
+            },
+            "character_document": {
+                "document_kind": "character_sheet",
+                "ready_to_create": False,
+                "missing_fields": ["level", "ability_scores", "hp"],
+            },
+        }
+    ]
+
+    assert _line_review_blocks(line, player_documents) == []
+
+
 def test_playthrough_manifest_builder_preserves_unknown_party_size_review() -> None:
     line = {
         "id": "line-1",
