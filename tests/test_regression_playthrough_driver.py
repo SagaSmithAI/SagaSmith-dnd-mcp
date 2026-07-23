@@ -20,6 +20,7 @@ from scripts.regression_playthrough import (
     _award_experience,
     _branch_from_snapshot,
     _campaign_phase,
+    _check_identity,
     _check_knowledge_key,
     _checkpoint,
     _committed_check_result,
@@ -1448,6 +1449,18 @@ def test_source_cited_check_persists_result_and_explicit_knowledge() -> None:
         "heading_path": ["Goblin Trail"],
         "content_sha256": "abc",
     }
+    expected_identity = _check_identity(
+        scene_id="scene-1",
+        location_key="ambush",
+        kind="ability",
+        ability="survival",
+        actor_id="actor-1",
+        dc=10,
+        proficient=True,
+        advantage=False,
+        disadvantage=True,
+        source_ref=source_ref,
+    )
 
     class Client:
         def __init__(self) -> None:
@@ -1468,6 +1481,9 @@ def test_source_cited_check_persists_result_and_explicit_knowledge() -> None:
             if tool_id == "module_query" and arguments["view"] == "progress":
                 return []
             if tool_id == "module_set_progress":
+                assert arguments["idempotency_key"] == _mutation_key(
+                    "run-1", "scene-progress", expected_identity
+                )
                 return {"state_version": 1}
             if tool_id == "character_query":
                 return {
@@ -1483,6 +1499,9 @@ def test_source_cited_check_persists_result_and_explicit_knowledge() -> None:
                 assert arguments["ability"] == "survival"
                 assert arguments["advantage"] is False
                 assert arguments["disadvantage"] is True
+                assert arguments["idempotency_key"] == _mutation_key(
+                    "run-1", "character-check", expected_identity
+                )
                 self.revision += 1
                 return {"status": "committed", "result": {"success": True, "total": 14}}
             if tool_id == "continuity_commit":
@@ -1496,14 +1515,32 @@ def test_source_cited_check_persists_result_and_explicit_knowledge() -> None:
                 )
                 assert all(
                     item["knowledge_key"]
-                    == _check_knowledge_key("run-1", "scene-1", "ability", "survival", "actor-1")
+                    == _check_knowledge_key(
+                        "run-1",
+                        "scene-1",
+                        "ambush",
+                        "ability",
+                        "survival",
+                        "actor-1",
+                        10,
+                        True,
+                        False,
+                        True,
+                        source_ref,
+                    )
                     for item in arguments["payload"]["actor_knowledge"]
                 )
                 assert arguments["payload"]["event"]["payload"]["source_ref"] == source_ref
+                assert arguments["idempotency_key"] == _mutation_key(
+                    "run-1", "continuity", expected_identity
+                )
                 self.revision += 1
                 return {"event": {"id": "event-1"}, "snapshot": {"slot": 3}}
             if tool_id == "playthrough_manifest":
                 assert arguments["action"] == "sync"
+                assert arguments["idempotency_key"] == _mutation_key(
+                    "run-1", "sync", f"resolve-check-sync:{expected_identity}"
+                )
                 return {"manifest": {"status": "in_progress"}, "campaign_revision": 7}
             raise AssertionError((tool_id, arguments))
 
@@ -1532,8 +1569,53 @@ def test_source_cited_check_persists_result_and_explicit_knowledge() -> None:
     assert result["knowledge_actor_ids"] == ["actor-1", "actor-2"]
     assert result["sync"]["campaign_revision"] == 7
     assert _check_knowledge_key(
-        "run-1", "scene-1", "ability", "survival", "actor-1"
-    ) != _check_knowledge_key("run-1", "scene-1", "ability", "perception", "actor-1")
+        "run-1",
+        "scene-1",
+        "ambush",
+        "ability",
+        "survival",
+        "actor-1",
+        10,
+        True,
+        False,
+        True,
+        source_ref,
+    ) != _check_knowledge_key(
+        "run-1",
+        "scene-1",
+        "ambush",
+        "ability",
+        "perception",
+        "actor-1",
+        10,
+        True,
+        False,
+        True,
+        source_ref,
+    )
+
+
+def test_check_identity_separates_same_scene_checks_by_location_dc_and_source() -> None:
+    base = {
+        "scene_id": "scene-1",
+        "location_key": "6-armory",
+        "kind": "ability",
+        "ability": "dexterity",
+        "actor_id": "rogue-1",
+        "dc": 10,
+        "proficient": True,
+        "advantage": False,
+        "disadvantage": False,
+        "source_ref": {"chunk_id": "armory-lock"},
+    }
+    identity = _check_identity(**base)
+
+    assert identity != _check_identity(**{**base, "location_key": "5-slave-pens"})
+    assert identity != _check_identity(**{**base, "dc": 22})
+    assert identity != _check_identity(
+        **{**base, "source_ref": {"chunk_id": "slave-pens-lock"}}
+    )
+    assert identity != _check_identity(**{**base, "proficient": False})
 
 
 def test_source_cited_check_rejects_unsupported_kind_before_tools() -> None:
@@ -1574,10 +1656,12 @@ def test_check_recovery_identity_includes_actor_and_roll_mode() -> None:
         "current_location_key": "bridge",
         "state": {
             "full_playthrough_check": {
+                "run_id": "run-1",
                 "actor_id": "fighter",
                 "kind": "ability",
                 "ability": "stealth",
                 "dc": 9,
+                "proficient": True,
                 "advantage": False,
                 "disadvantage": True,
                 "source_ref": source_ref,
@@ -1587,33 +1671,39 @@ def test_check_recovery_identity_includes_actor_and_roll_mode() -> None:
 
     assert _matching_check_progress(
         progress,
+        run_id="run-1",
         location_key="bridge",
         actor_id="fighter",
         kind="ability",
         ability="stealth",
         dc=9,
+        proficient=True,
         advantage=False,
         disadvantage=True,
         source_ref=source_ref,
     )
     assert not _matching_check_progress(
         progress,
+        run_id="run-1",
         location_key="bridge",
         actor_id="rogue",
         kind="ability",
         ability="stealth",
         dc=9,
+        proficient=True,
         advantage=False,
         disadvantage=True,
         source_ref=source_ref,
     )
     assert not _matching_check_progress(
         progress,
+        run_id="run-1",
         location_key="bridge",
         actor_id="fighter",
         kind="ability",
         ability="stealth",
         dc=9,
+        proficient=True,
         advantage=False,
         disadvantage=False,
         source_ref=source_ref,

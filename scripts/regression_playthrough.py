@@ -487,13 +487,63 @@ def _mutation_key(run_id: str, action: str, identity: str) -> str:
 def _check_knowledge_key(
     run_id: str,
     scene_id: str,
+    location_key: str,
     kind: str,
     ability: str,
     actor_id: str,
+    dc: int,
+    proficient: bool,
+    advantage: bool,
+    disadvantage: bool,
+    source_ref: dict[str, Any],
 ) -> str:
-    return (
-        f"playthrough.{_token(run_id)}.{_token(scene_id)}."
-        f"{_token(kind)}.{_token(ability)}.{_token(actor_id)}"
+    identity = _check_identity(
+        scene_id=scene_id,
+        location_key=location_key,
+        kind=kind,
+        ability=ability,
+        actor_id=actor_id,
+        dc=dc,
+        proficient=proficient,
+        advantage=advantage,
+        disadvantage=disadvantage,
+        source_ref=source_ref,
+    )
+    return f"playthrough.{_token(run_id)}.check.{_token(identity, length=32)}"
+
+
+def _check_identity(
+    *,
+    scene_id: str,
+    location_key: str,
+    kind: str,
+    ability: str,
+    actor_id: str,
+    dc: int,
+    proficient: bool,
+    advantage: bool,
+    disadvantage: bool,
+    source_ref: dict[str, Any],
+) -> str:
+    source_identity = str(
+        source_ref.get("chunk_id")
+        or source_ref.get("content_sha256")
+        or source_ref.get("chunk_content_sha256")
+        or ""
+    )
+    return ":".join(
+        (
+            scene_id,
+            location_key,
+            kind,
+            ability,
+            actor_id,
+            str(dc),
+            f"proficient={int(proficient)}",
+            f"advantage={int(advantage)}",
+            f"disadvantage={int(disadvantage)}",
+            source_identity,
+        )
     )
 
 
@@ -510,11 +560,13 @@ def _committed_check_result(settled: dict[str, Any]) -> dict[str, Any]:
 def _matching_check_progress(
     progress: dict[str, Any] | None,
     *,
+    run_id: str,
     location_key: str,
     actor_id: str,
     kind: str,
     ability: str,
     dc: int,
+    proficient: bool,
     advantage: bool,
     disadvantage: bool,
     source_ref: dict[str, Any],
@@ -525,10 +577,12 @@ def _matching_check_progress(
     check = dict(state.get("full_playthrough_check") or {})
     return bool(
         str(progress.get("current_location_key") or "") == location_key
+        and check.get("run_id") == run_id
         and check.get("actor_id") == actor_id
         and check.get("kind") == kind
         and check.get("ability") == ability
         and check.get("dc") == dc
+        and bool(check.get("proficient", False)) == proficient
         and bool(check.get("advantage", False)) == advantage
         and bool(check.get("disadvantage", False)) == disadvantage
         and check.get("source_ref") == source_ref
@@ -1286,11 +1340,25 @@ async def _resolve_check(
     )
     progress_matches = _matching_check_progress(
         progress_before,
+        run_id=run_id,
         location_key=location_key,
         actor_id=actor_id,
         kind=kind,
         ability=ability,
         dc=dc,
+        proficient=proficient,
+        advantage=advantage,
+        disadvantage=disadvantage,
+        source_ref=exact_ref,
+    )
+    check_identity = _check_identity(
+        scene_id=scene_id,
+        location_key=location_key,
+        kind=kind,
+        ability=ability,
+        actor_id=actor_id,
+        dc=dc,
+        proficient=proficient,
         advantage=advantage,
         disadvantage=disadvantage,
         source_ref=exact_ref,
@@ -1313,6 +1381,7 @@ async def _resolve_check(
                         "kind": kind,
                         "ability": ability,
                         "dc": dc,
+                        "proficient": proficient,
                         "advantage": advantage,
                         "disadvantage": disadvantage,
                         "source_ref": exact_ref,
@@ -1323,7 +1392,7 @@ async def _resolve_check(
                 "idempotency_key": _mutation_key(
                     run_id,
                     "scene-progress",
-                    f"{scene_id}:{kind}:{ability}:{actor_id}",
+                    check_identity,
                 ),
             },
         )
@@ -1359,7 +1428,7 @@ async def _resolve_check(
                 "idempotency_key": _mutation_key(
                     run_id,
                     "character-check",
-                    f"{scene_id}:{kind}:{ability}:{actor_id}",
+                    check_identity,
                 ),
             },
         )
@@ -1404,9 +1473,15 @@ async def _resolve_check(
                         "knowledge_key": _check_knowledge_key(
                             run_id,
                             scene_id,
+                            location_key,
                             kind,
                             ability,
                             actor_id,
+                            dc,
+                            proficient,
+                            advantage,
+                            disadvantage,
+                            exact_ref,
                         ),
                         "proposition": proposition,
                         "disclosure_scope": "owner",
@@ -1418,7 +1493,7 @@ async def _resolve_check(
             },
             "expected_revision": campaign["revision"],
             "idempotency_key": _mutation_key(
-                run_id, "continuity", f"{scene_id}:{kind}:{ability}:{actor_id}"
+                run_id, "continuity", check_identity
             ),
         },
     )
@@ -1427,7 +1502,7 @@ async def _resolve_check(
         campaign_id=campaign_id,
         action="sync",
         run_id=run_id,
-        identity=f"resolve-check-sync:{scene_id}:{kind}:{ability}:{actor_id}",
+        identity=f"resolve-check-sync:{check_identity}",
     )
     return {
         "scene": {
