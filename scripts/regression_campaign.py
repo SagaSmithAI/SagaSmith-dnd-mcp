@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import os
 import sys
@@ -402,6 +403,36 @@ def _normalized_source_text(value: Any) -> str:
     return " ".join(text.split()).casefold()
 
 
+def _expanded_source_ref(expanded: dict[str, Any]) -> dict[str, Any]:
+    """Build a portable, checksum-bound citation from module_expand output."""
+    module = dict(expanded.get("module") or {})
+    scene = dict(expanded.get("scene") or {})
+    chapter = dict(expanded.get("chapter") or {})
+    content = str(expanded.get("content") or "")
+    return {
+        "module_id": module.get("id"),
+        "module_title": module.get("title"),
+        "chapter_id": chapter.get("id"),
+        "chapter_title": chapter.get("title"),
+        "scene_id": scene.get("id"),
+        "scene_title": scene.get("title"),
+        "scene_stable_key": scene.get("stable_key"),
+        "chunk_id": expanded.get("chunk_id"),
+        "heading_path": list(expanded.get("heading_path") or []),
+        "page_start": expanded.get("page_start"),
+        "page_end": expanded.get("page_end"),
+        "content_sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+    }
+
+
+def _configure_utf8_streams(*streams: Any) -> None:
+    """Avoid source-text failures on legacy Windows console code pages."""
+    for stream in streams:
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            reconfigure(encoding="utf-8", errors="backslashreplace")
+
+
 async def _audit(args: argparse.Namespace) -> dict[str, Any]:
     params = _server_parameters(args)
     async with stdio_client(params) as (read, write):
@@ -746,15 +777,17 @@ async def _discover_scenes(args: argparse.Namespace) -> dict[str, Any]:
                         await client.domain("module_expand", {"chunk_id": chunk_id})
                     )
                     content = str(expanded.get("content") or "")
+                    source_ref = _expanded_source_ref(expanded)
                     expanded_hits.append(
                         {
                             "chunk_id": chunk_id,
                             "score": hit.get("score"),
-                            "module_id": expanded.get("module_id"),
-                            "scene_id": expanded.get("scene_id"),
+                            "module_id": source_ref["module_id"],
+                            "scene_id": source_ref["scene_id"],
                             "page_start": expanded.get("page_start"),
                             "page_end": expanded.get("page_end"),
                             "heading_path": expanded.get("heading_path"),
+                            "source_ref": source_ref,
                             "content": content[:4_000],
                             "content_characters": len(content),
                         }
@@ -4448,6 +4481,7 @@ async def _structured_combat(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def main() -> int:
+    _configure_utf8_streams(sys.stdout, sys.stderr)
     args = _arguments()
     operation = {
         "audit": _audit,

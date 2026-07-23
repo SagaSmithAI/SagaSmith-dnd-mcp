@@ -1,0 +1,535 @@
+{
+  "schema_version": 1,
+  "corpus_id": "sagasmith-local-dnd5e-campaigns-20260723",
+  "edition": "2014",
+  "expected_asset_count": 21,
+  "campaign_lines": [
+    {
+      "id": "lost-mine-of-phandelver",
+      "title": "Lost Mine of Phandelver",
+      "modules": [
+        {
+          "path": "Lost Mine of Phandelver/Lost Mine of Phandelver.pdf",
+          "role": "primary_campaign",
+          "sequence": 1,
+          "size": 55961050,
+          "sha256": "c3095b66e2f690d8a16b43a6b73c0aa6209c2e913714df5a65b3d2d0481aec07"
+        }
+      ],
+      "player_materials": [
+        {
+          "path": "Lost Mine of Phandelver/PC-Smalls.pdf",
+          "role": "associated_character_template",
+          "size": 1674883,
+          "sha256": "b8568e8b217c4ebbbc33228e03f53f782a76470ba4e94d0fbc2b36e9db08b242",
+          "priority": "review_before_fallback_generation",
+          "review_status": "blocked_incomplete_unconfirmed_content",
+          "notes": [
+            "The public character document inspector reports an incomplete level, ability scores, and hit points.",
+            "The template uses artificer/Gunsmith content that is not in the enabled built-in 2014 Core pack.",
+            "It is associated local player material, not evidence of one of the official Starter Set pregenerated characters."
+          ]
+        }
+      ],
+      "assets": [
+        {
+          "path": "Lost Mine of Phandelver/Sword Coast Map.png",
+          "role": "regional_map",
+          "size": 1838570,
+          "sha256": "c6f7771a667f69deaadab65570969aca4326819e8ea1a025e9d7ec1875985f81",
+          "attach_to_module_sequence": 1,
+          "association_scope": "module"
+        }
+      ],
+      "play_requirements": {
+        "recommended_party_size": {
+          "status": "source_confirmed",
+          "minimum": 4,
+          "maximum": 5,
+          "selected": 5
+        },
+        "starting_level": {
+          "minimum": 1,
+          "maximum": 1,
+          "selected": 1
+        },
+        "ending_level": {
+          "minimum": 5,
+          "maximum": 5
+        },
+        "advancement": {
+          "mode": "experience_points",
+          "milestone_supported": false
+        },
+        "encounter_scaling": {
+          "mode": "source_only",
+          "blanket_adjustment_allowed": false
+        },
+        "pregenerated_characters": {
+          "module_mentions_included_characters": true,
+          "official_sheets_present_in_corpus": false,
+          "associated_templates_present": 1,
+          "selection_policy": "review associated templates, then legally create all remaining seats"
+        },
+        "source_refs": [
+          {
+            "purpose": "party_size_and_level_span",
+            "asset_path": "Lost Mine of Phandelver/Lost Mine of Phandelver.pdf",
+            "asset_sha256": "c3095b66e2f690d8a16b43a6b73c0aa6209c2e913714df5a65b3d2d0481aec07",
+            "page_start": 2,
+            "page_end": 2,
+            "heading_path": [
+              "Front Matter",
+              "RUNNING THE ADVENTURE"
+            ],
+            "chunk_content_sha256": "2252e193cfddc4c0141da1964f3c14e744309b31824b7ecdf0622cc8b3abb325"
+          },
+          {
+            "purpose": "included_character_applicability",
+            "asset_path": "Lost Mine of Phandelver/Lost Mine of Phandelver.pdf",
+            "asset_sha256": "c3095b66e2f690d8a16b43a6b73c0aa6209c2e913714df5a65b3d2d0481aec07",
+            "page_start": 4,
+            "page_end": 5,
+            "heading_path": [
+              "Front Matter",
+              "THE FORGOTTEN REALMS",
+              "ROLEPLAYING AND INSPIRATION"
+            ],
+            "chunk_content_sha256": "d660f9a6a25e98b854950a9210b03f7a356ae23ddf245d0a7a71f5dfb9ab1585"
+          }
+        ]
+      }
+    },
+    {
+      "id": "waterdeep-dragon-heist",
+      "title": "Waterdeep: Dragon Heist",
+      "modules": [
+        {
+          "path": "D&D 5E - Waterdeep - Dragon Heist.pdf",
+          "role": "primary_campaign",
+          "sequence": 1,
+          "size": 82929099,
+          "sha256": "8f582d64c01c84fca6a2e6106aa616ca8daa929fd7cc6243de56525d1f35f455"
+        }
+      ],
+      "player_materials": [],
+      "assets": [],
+      "play_requirements": {
+        "recommended_party_size": {
+          "status": "dm_review_required",
+          "minimum": null,
+          "maximum": null,
+          "selected": null,
+          "reason": "The imported module states the level span but no recommended player-count range was found by source search. Do not default to four."
+        },
+        "starting_level": {
+          "minimum": 1,
+          "maximum": 1,
+          "selected": 1
+        },
+        "ending_level": {
+          "minimum": 5,
+          "maximum": null
+        },
+        "advancement": {
+          "mode": "experience_points_or_story_milestones",
+          "milestone_supported": true
+        },
+        "encounter_scaling": {
+          "mode": "source_only",
+          "blanket_adjustment_allowed": false
+        },
+        "pregenerated_characters": {
+          "official_sheets_present_in_corpus": false,
+          "associated_templates_present": 0,
+          "selection_policy": "legally create the reviewed party size"
+        },
+        "source_refs": [
+          {
+            "purpose": "level_span",
+            "asset_path": "D&D 5E - Waterdeep - Dragon Heist.pdf",
+            "asset_sha256": "8f582d64c01c84fca6a2e6106aa616ca8daa929fd7cc6243de56525d1f35f455",
+            "page_start": 6,
+            "page_end": 6,
+            "heading_path": [
+              "Front Matter",
+              "INTRODUCTION",
+              "ELCOME TO WATERDEEP, THE CROWN OF"
+            ],
+            "chunk_content_sha256": "b6bcf6ceabd4002bb4a6755437c702b8fd168013defc038e9ad7722bf08c3b9d"
+          },
+          {
+            "purpose": "advancement",
+            "asset_path": "D&D 5E - Waterdeep - Dragon Heist.pdf",
+            "asset_sha256": "8f582d64c01c84fca6a2e6106aa616ca8daa929fd7cc6243de56525d1f35f455",
+            "page_start": 15,
+            "page_end": 15,
+            "heading_path": [
+              "Front Matter",
+              "CHARACTER ADVANCEMENT"
+            ],
+            "chunk_content_sha256": "433aec7137cb9a1c9799fb31b72e6a7fa358a06f8a8847d7d65d7895cb06678c"
+          }
+        ],
+        "review_queries": [
+          "ideal party size",
+          "adventure for four characters",
+          "adventure for five characters",
+          "adventure for six characters",
+          "four to six characters"
+        ]
+      }
+    },
+    {
+      "id": "tyranny-of-dragons",
+      "title": "Tyranny of Dragons",
+      "modules": [
+        {
+          "path": "D&D 5E - Tyranny of Dragons - Hoard of the Dragon Queen.pdf",
+          "role": "primary_campaign",
+          "sequence": 1,
+          "size": 8285755,
+          "sha256": "1191bd8c8b43967cae144d60e3c9e85afe76480885759cd7211f3c58e5aa4fd4"
+        },
+        {
+          "path": "D&D 5E - Tyranny of Dragons - The Rise of Tiamat.pdf",
+          "role": "continuation_campaign",
+          "sequence": 2,
+          "size": 8875109,
+          "sha256": "5bf2aa264299b52ecd6181ff6d192379045acf728555ade89a0b08d275d2a3e0"
+        }
+      ],
+      "player_materials": [],
+      "assets": [],
+      "play_requirements": {
+        "recommended_party_size": {
+          "status": "source_confirmed",
+          "minimum": 4,
+          "maximum": 4,
+          "selected": 4
+        },
+        "starting_level": {
+          "minimum": 1,
+          "maximum": 1,
+          "selected": 1
+        },
+        "handoff_level": {
+          "minimum": 7,
+          "maximum": 8,
+          "preferred_continuation_start": 8
+        },
+        "ending_level": {
+          "minimum": 15,
+          "maximum": null
+        },
+        "advancement": {
+          "mode": "experience_points_or_milestones_then_milestones",
+          "milestone_supported": true
+        },
+        "encounter_scaling": {
+          "mode": "explicitly_allowed_by_source",
+          "blanket_adjustment_allowed": true,
+          "notes": "Both volumes explicitly discuss changing opponent counts for party size. The selected party already equals the ideal size, so no adjustment is planned."
+        },
+        "pregenerated_characters": {
+          "official_sheets_present_in_corpus": false,
+          "associated_templates_present": 0,
+          "selection_policy": "legally create four characters once and preserve them across both volumes"
+        },
+        "continuity": {
+          "required": true,
+          "preserve_party": true,
+          "preserve_world_state": true,
+          "preserve_random_stream": true
+        },
+        "source_refs": [
+          {
+            "purpose": "hoard_party_size_level_span_and_continuation",
+            "asset_path": "D&D 5E - Tyranny of Dragons - Hoard of the Dragon Queen.pdf",
+            "asset_sha256": "1191bd8c8b43967cae144d60e3c9e85afe76480885759cd7211f3c58e5aa4fd4",
+            "page_start": 6,
+            "page_end": 6,
+            "heading_path": [
+              "Front Matter",
+              "Introduction"
+            ],
+            "chunk_content_sha256": "dfc01f523a4b310b0e9934a6c35a7fa794f7c041839a48e0a243e5701738f88e"
+          },
+          {
+            "purpose": "rise_party_size_and_level_span",
+            "asset_path": "D&D 5E - Tyranny of Dragons - The Rise of Tiamat.pdf",
+            "asset_sha256": "5bf2aa264299b52ecd6181ff6d192379045acf728555ade89a0b08d275d2a3e0",
+            "page_start": 5,
+            "page_end": 5,
+            "heading_path": [
+              "Front Matter",
+              "Tyanny of Dragons"
+            ],
+            "chunk_content_sha256": "1315f5f0c44a3fd88567566be8d572479e4ae1adbf20a9ff724a40836d9171ce"
+          },
+          {
+            "purpose": "rise_advancement",
+            "asset_path": "D&D 5E - Tyranny of Dragons - The Rise of Tiamat.pdf",
+            "asset_sha256": "5bf2aa264299b52ecd6181ff6d192379045acf728555ade89a0b08d275d2a3e0",
+            "page_start": 7,
+            "page_end": 7,
+            "heading_path": [
+              "Front Matter",
+              "Outline of Episodes"
+            ],
+            "chunk_content_sha256": "b6a24aea4e7dbbcce13482f0031d6edfe2ad6206702aea0ab559e7e805e2697f"
+          }
+        ]
+      }
+    },
+    {
+      "id": "storm-kings-thunder",
+      "title": "Storm King's Thunder",
+      "modules": [
+        {
+          "path": "Storm King's Thunder/Storm King's Thunder (1-10).pdf",
+          "role": "primary_campaign",
+          "sequence": 1,
+          "size": 89952807,
+          "sha256": "cd0f080a660cdccbf303efe48798cb17bf5545a2ce667a208e6e51c8aece02da"
+        },
+        {
+          "path": "Storm King's Thunder/A_Guide_to_Storm_Kings_Thunder.pdf",
+          "role": "dm_guide",
+          "sequence": 2,
+          "size": 1148864,
+          "sha256": "28bcb94c3c52e4c0091f4a1f4231148c945a370d018345a76150aaed3f3b4c99"
+        }
+      ],
+      "player_materials": [
+        {
+          "path": "Storm King's Thunder/Characters/AncestralGuardianBarbarian.pdf",
+          "role": "associated_character_template",
+          "size": 1606689,
+          "sha256": "6c36a52e1761237e87969ef1b151424f085382d6f9bd0ae745c9c3d5b4aac27c"
+        },
+        {
+          "path": "Storm King's Thunder/Characters/HunterRanger.pdf",
+          "role": "associated_character_template",
+          "size": 1661212,
+          "sha256": "a9349243dff771d5a8ed8b62447efd266b5d598742cb7a5dd6296e83d341f457"
+        },
+        {
+          "path": "Storm King's Thunder/Characters/OpenHandMonk.pdf",
+          "role": "associated_character_template",
+          "size": 1654655,
+          "sha256": "4dbc4c54b2093ab60d04b0236149cf5c8209e0702059fa8d5ef704458dbc74ec"
+        },
+        {
+          "path": "Storm King's Thunder/Characters/ShadowSorcerer.pdf",
+          "role": "associated_character_template",
+          "size": 1531922,
+          "sha256": "ddbc69b6bb308a4ddfc95b6060f626909c83546271b04c9ba65ad0f5ec068622"
+        },
+        {
+          "path": "Storm King's Thunder/Characters/TempestCleric.pdf",
+          "role": "associated_character_template",
+          "size": 1615934,
+          "sha256": "b4b6ca74d6f2b53a0766ed652d17081326fe0669b16119890f01e802151b5291"
+        },
+        {
+          "path": "Storm King's Thunder/Characters/VengencePaladin.pdf",
+          "role": "associated_character_template",
+          "size": 1618256,
+          "sha256": "5a8771b8e8a6f8aeb45472c47c24690683aecece1265f8e9ca947a56881c2a7a"
+        },
+        {
+          "path": "Storm King's Thunder/Characters/WildSorcerer.pdf",
+          "role": "associated_character_template",
+          "size": 1533048,
+          "sha256": "b17da317249b739e21a75b4e05630f443c5b488924fc78075bb71901b01083f5"
+        },
+        {
+          "path": "Storm King's Thunder/SKT-PCStats.txt",
+          "role": "ability_score_options",
+          "size": 291,
+          "sha256": "6ba506d8b67734d253d9c542098fbcbff461631cbe54538bbbdf81a59f8d0de2"
+        }
+      ],
+      "assets": [
+        {
+          "path": "Storm King's Thunder/Nightstone.png",
+          "role": "scene_map",
+          "size": 1100064,
+          "sha256": "d744afbbc428c7fda9dcca5496f07a1fd5beedc52ce53858fa4174b4dfbd104b",
+          "attach_to_module_sequence": 1,
+          "scene_search": "Nightstone"
+        },
+        {
+          "path": "Storm King's Thunder/DrippingCaves.png",
+          "role": "scene_map",
+          "size": 1043860,
+          "sha256": "37bc3288199061dc029b1c8a666fd6f2e574f2c18ba2426874a4c8c159b0f5d5",
+          "attach_to_module_sequence": 1,
+          "scene_search": "Dripping Caves"
+        }
+      ],
+      "play_requirements": {
+        "recommended_party_size": {
+          "status": "source_confirmed",
+          "minimum": 4,
+          "maximum": 6,
+          "selected": 6
+        },
+        "starting_level": {
+          "allowed": [
+            1,
+            5
+          ],
+          "selected": 1,
+          "reason": "Use the formal opening rather than skipping the level 1 opening chapter."
+        },
+        "ending_level": {
+          "minimum": 11,
+          "maximum": null
+        },
+        "advancement": {
+          "mode": "story_milestones",
+          "milestone_supported": true,
+          "xp_alternative_supported": true
+        },
+        "encounter_scaling": {
+          "mode": "source_only",
+          "blanket_adjustment_allowed": false
+        },
+        "pregenerated_characters": {
+          "official_sheets_present_in_corpus": false,
+          "associated_templates_present": 7,
+          "selected_count": 6,
+          "status": "incomplete_templates_require_legal_completion",
+          "selection_policy": "complete and use six legal associated templates, excluding one duplicate sorcerer unless review establishes a better composition",
+          "additional_requirement": "At least one selected character must know Giant."
+        },
+        "source_refs": [
+          {
+            "purpose": "party_size_level_span_and_giant_language",
+            "asset_path": "Storm King's Thunder/Storm King's Thunder (1-10).pdf",
+            "asset_sha256": "cd0f080a660cdccbf303efe48798cb17bf5545a2ce667a208e6e51c8aece02da",
+            "page_start": 8,
+            "page_end": 8,
+            "heading_path": [
+              "Front Matter",
+              "INTRODUCTION",
+              "OU ARE ABOUT TO EMBARK ON A GREAT"
+            ],
+            "chunk_content_sha256": "b20ba08f05b6c5cf6493cfcc7beebd791b2a92782d367a3099750fb51a082630"
+          },
+          {
+            "purpose": "advancement",
+            "asset_path": "Storm King's Thunder/Storm King's Thunder (1-10).pdf",
+            "asset_sha256": "cd0f080a660cdccbf303efe48798cb17bf5545a2ce667a208e6e51c8aece02da",
+            "page_start": 17,
+            "page_end": 17,
+            "heading_path": [
+              "Front Matter",
+              "INTRODUCTION",
+              "RUNNING THE ADVENTURE",
+              "ADVENTURE SYNOPSIS",
+              "CHARACTER ADVANCEMENT"
+            ],
+            "chunk_content_sha256": "ee3d103104d5711de398ed9cb58f99ccfe9e6fe77aaf027105cda7b9270ec19c"
+          }
+        ]
+      }
+    },
+    {
+      "id": "tomb-of-annihilation",
+      "title": "Tomb of Annihilation",
+      "modules": [
+        {
+          "path": "D&D 5E - Tomb of Annihilation.pdf",
+          "role": "primary_campaign",
+          "sequence": 1,
+          "size": 92090940,
+          "sha256": "ffa5bd1234e50650aa190420b51ca7c972a5c282c219e22e4a2f5698756a98a8"
+        }
+      ],
+      "player_materials": [],
+      "assets": [],
+      "play_requirements": {
+        "recommended_party_size": {
+          "status": "source_confirmed",
+          "minimum": 4,
+          "maximum": 6,
+          "selected": 6
+        },
+        "starting_level": {
+          "minimum": 1,
+          "maximum": 1,
+          "selected": 1
+        },
+        "ending_level": {
+          "minimum": 11,
+          "maximum": null
+        },
+        "advancement": {
+          "mode": "experience_points",
+          "milestone_supported": false,
+          "ad_hoc_xp_supported": true
+        },
+        "encounter_scaling": {
+          "mode": "source_only",
+          "blanket_adjustment_allowed": false
+        },
+        "pregenerated_characters": {
+          "official_sheets_present_in_corpus": false,
+          "associated_templates_present": 0,
+          "selection_policy": "legally create six characters"
+        },
+        "source_refs": [
+          {
+            "purpose": "party_size_and_level_span",
+            "asset_path": "D&D 5E - Tomb of Annihilation.pdf",
+            "asset_sha256": "ffa5bd1234e50650aa190420b51ca7c972a5c282c219e22e4a2f5698756a98a8",
+            "page_start": 6,
+            "page_end": 6,
+            "heading_path": [
+              "Front Matter",
+              "INTRODUCTION",
+              "jungles of Xen'drik on Eberron, or a comparable setting"
+            ],
+            "chunk_content_sha256": "a23209c0f818edadc59be38300079d0fe925adb8132715e8b9a10bcde526b331"
+          },
+          {
+            "purpose": "advancement",
+            "asset_path": "D&D 5E - Tomb of Annihilation.pdf",
+            "asset_sha256": "ffa5bd1234e50650aa190420b51ca7c972a5c282c219e22e4a2f5698756a98a8",
+            "page_start": 8,
+            "page_end": 8,
+            "heading_path": [
+              "Front Matter",
+              "INTRODUCTION",
+              "RUNNING THE ADVENTURE",
+              "CHARACTER ADVANCEMENT"
+            ],
+            "chunk_content_sha256": "7e4a7453646a42ad306c97418c21167ce48a91834e4e8a5fd6cfd44e544a7f29"
+          }
+        ]
+      }
+    }
+  ],
+  "unassigned_assets": [
+    {
+      "path": "Nillian/Nillian 2019-02-03T03_29_17.932Z.png",
+      "role": "map",
+      "size": 1398062,
+      "sha256": "7743a80132fbd8fd18e7cf0395302d91397cb49d65848df318e82ee314c2c239",
+      "association_status": "dm_review_required",
+      "reason": "No campaign or scene provenance is encoded in the path or companion project export."
+    },
+    {
+      "path": "Nillian/project_Nillian 2019-02-03T03_28_55.373Z.html",
+      "role": "map_project",
+      "size": 796107,
+      "sha256": "cdb18c42a6b3647b4cadd3d08f1d6a4f1c5f7a5e5d8b87aa27b38ae27b0249b3",
+      "association_status": "dm_review_required",
+      "companion_asset": "Nillian/Nillian 2019-02-03T03_29_17.932Z.png",
+      "reason": "The HTML and PNG are paired, but the target campaign and scene are not source-grounded."
+    }
+  ]
+}
