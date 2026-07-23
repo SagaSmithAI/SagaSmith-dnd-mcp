@@ -2732,6 +2732,7 @@ async def _award_experience(
         if actor.get("campaign_id") != campaign_id:
             raise ValueError("award-xp actor does not belong to the campaign")
         actors.append(actor)
+    recipient_identity = ",".join(sorted(actor_ids))
     campaign = await _campaign(client, campaign_id)
     awarded = await client.domain(
         "campaign_change",
@@ -2753,7 +2754,11 @@ async def _award_experience(
                 ),
             },
             "expected_revision": campaign["revision"],
-            "idempotency_key": _mutation_key(run_id, "experience-award", f"{scene_id}:{amount}"),
+            "idempotency_key": _mutation_key(
+                run_id,
+                "experience-award",
+                f"{scene_id}:{amount}:{recipient_identity}",
+            ),
         },
     )
     synced = await _manifest_mutation(
@@ -2761,7 +2766,7 @@ async def _award_experience(
         campaign_id=campaign_id,
         action="sync",
         run_id=run_id,
-        identity=f"award-xp-sync:{scene_id}:{amount}",
+        identity=f"award-xp-sync:{scene_id}:{amount}:{recipient_identity}",
     )
     return {
         "scene_id": scene_id,

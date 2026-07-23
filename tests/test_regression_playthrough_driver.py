@@ -1458,6 +1458,68 @@ def test_xp_award_uses_source_ref_and_all_exact_recipients() -> None:
     assert [item["new_xp"] for item in result["award"]["awards"]] == [75, 75]
 
 
+def test_xp_award_idempotency_identity_includes_exact_recipient_set() -> None:
+    source_ref = {
+        "module_id": "module-1",
+        "scene_id": "scene-1",
+        "chunk_id": "chunk-1",
+        "page_start": 7,
+        "page_end": 7,
+        "heading_path": ["Awarding Experience Points"],
+        "content_sha256": "abc",
+    }
+
+    class Client:
+        def __init__(self) -> None:
+            self.award_keys: list[str] = []
+            self.sync_keys: list[str] = []
+
+        async def core(self, tool_id: str, arguments: dict):
+            assert tool_id == "campaign_query"
+            return {"result": {"id": "campaign-1", "revision": 4}}
+
+        async def domain(self, tool_id: str, arguments: dict):
+            if tool_id == "module_query":
+                return {
+                    "module_id": "module-1",
+                    "scene_id": "scene-1",
+                    "content": "Award each character 75 XP.",
+                }
+            if tool_id == "character_query":
+                actor_id = arguments["payload"]["character_id"]
+                return {
+                    "id": actor_id,
+                    "campaign_id": "campaign-1",
+                    "revision": 2,
+                }
+            if tool_id == "campaign_change":
+                self.award_keys.append(arguments["idempotency_key"])
+                return {"awards": [{"new_xp": 75}]}
+            if tool_id == "playthrough_manifest":
+                self.sync_keys.append(arguments["idempotency_key"])
+                return {"manifest": {"status": "in_progress"}, "campaign_revision": 5}
+            raise AssertionError((tool_id, arguments))
+
+    async def award(client: Client, actor_id: str) -> None:
+        await _award_experience(
+            client,
+            campaign_id="campaign-1",
+            run_id="run-1",
+            scene_id="scene-1",
+            source_ref=source_ref,
+            actor_ids=[actor_id],
+            amount=75,
+            reason="Reached the hideout",
+        )
+
+    client = Client()
+    asyncio.run(award(client, "actor-1"))
+    asyncio.run(award(client, "actor-2"))
+
+    assert len(set(client.award_keys)) == 2
+    assert len(set(client.sync_keys)) == 2
+
+
 def test_source_cited_automatic_event_does_not_roll() -> None:
     source_ref = {
         "module_id": "module-1",
