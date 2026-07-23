@@ -27,6 +27,7 @@ from scripts.regression_playthrough import (
     _recover_committed_check,
     _resolve_check,
     _scene_progress_percent,
+    _short_rest,
     _stand_after_source_event,
     _start_play,
 )
@@ -691,6 +692,95 @@ def test_source_event_stand_uses_validated_public_character_action() -> None:
 
     assert result["stand"]["status"] == "stood"
     assert result["knowledge_actor_ids"] == ["actor-1", "actor-2"]
+
+
+def test_short_rest_advances_clock_and_applies_only_explicit_resource_choices() -> None:
+    class Client:
+        def __init__(self) -> None:
+            self.revision = 5
+            self.world_time: dict = {}
+
+        async def core(self, tool_id: str, arguments: dict):
+            assert tool_id == "campaign_query"
+            return {
+                "result": {
+                    "id": "campaign-1",
+                    "revision": self.revision,
+                    "state": {"game_phase": "play", "world_time": self.world_time},
+                }
+            }
+
+        async def domain(self, tool_id: str, arguments: dict):
+            if tool_id == "character_query":
+                actor_id = arguments["payload"]["character_id"]
+                return {
+                    "id": actor_id,
+                    "campaign_id": "campaign-1",
+                    "revision": 2,
+                }
+            if tool_id == "branch_query":
+                return [{"id": "branch-1", "is_current": True}]
+            if tool_id == "campaign_change" and arguments["action"] == "clock_set":
+                assert arguments["payload"]["day"] == 1
+                self.world_time = {
+                    "day": 1,
+                    "hour": 14,
+                    "minute": 0,
+                    "elapsed_minutes": 840,
+                    "label": "Hideout",
+                }
+                self.revision += 1
+                return {"world_time": self.world_time}
+            if tool_id == "campaign_change" and arguments["action"] == "clock_advance":
+                assert arguments["payload"] == {"period": "minute", "count": 60}
+                self.world_time = {
+                    **self.world_time,
+                    "hour": 15,
+                    "elapsed_minutes": 900,
+                }
+                self.revision += 1
+                return {"world_time": self.world_time}
+            if tool_id == "character_state_change":
+                assert arguments["action"] == "rest"
+                assert "hit_dice_spends" not in arguments["payload"]
+                if arguments["character_id"] == "wizard":
+                    assert arguments["payload"]["arcane_recovery"] == {"1": 1}
+                else:
+                    assert "arcane_recovery" not in arguments["payload"]
+                self.revision += 1
+                return {
+                    "status": "committed",
+                    "character": {"id": arguments["character_id"]},
+                }
+            if tool_id == "continuity_commit":
+                assert arguments["payload"]["event"]["payload"]["duration_minutes"] == 60
+                self.revision += 1
+                return {"event": {"id": "event-1"}, "snapshot": {"slot": 4}}
+            if tool_id == "playthrough_manifest":
+                return {
+                    "manifest": {"status": "in_progress"},
+                    "campaign_revision": self.revision,
+                }
+            raise AssertionError((tool_id, arguments))
+
+    result = asyncio.run(
+        _short_rest(
+            Client(),
+            campaign_id="campaign-1",
+            run_id="run-1",
+            members=[
+                {"actor_id": "fighter"},
+                {"actor_id": "wizard", "arcane_recovery": {"1": 1}},
+            ],
+            start_clock={"day": 1, "hour": 14, "label": "Hideout"},
+            duration_minutes=60,
+            reason="The party regrouped outside the flooded passage.",
+        )
+    )
+
+    assert result["member_ids"] == ["fighter", "wizard"]
+    assert result["clock_advanced"]["world_time"]["hour"] == 15
+    assert len(result["rests"]) == 2
 
 
 def test_partially_committed_check_is_recovered_without_reroll() -> None:

@@ -40,6 +40,7 @@ def _arguments() -> argparse.Namespace:
             "apply-damage",
             "stand-up",
             "branch-from-snapshot",
+            "short-rest",
             "award-xp",
             "configure-advancement",
             "refresh-module",
@@ -87,6 +88,10 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--stand-actor-id", default="")
     parser.add_argument("--snapshot-slot", type=int)
     parser.add_argument("--branch-name", default="")
+    parser.add_argument("--rest-member-json", action="append", type=json.loads, default=[])
+    parser.add_argument("--rest-start-clock-json", type=json.loads)
+    parser.add_argument("--rest-duration-minutes", type=int, default=60)
+    parser.add_argument("--rest-reason", default="")
     parser.add_argument("--event-type", default="")
     parser.add_argument("--event-summary", default="")
     parser.add_argument("--event-knowledge", default="")
@@ -1419,6 +1424,169 @@ async def _stand_after_source_event(
     }
 
 
+async def _short_rest(
+    client: ExposureClient,
+    *,
+    campaign_id: str,
+    run_id: str,
+    members: list[dict[str, Any]],
+    start_clock: dict[str, Any] | None,
+    duration_minutes: int,
+    reason: str,
+) -> dict[str, Any]:
+    if duration_minutes < 60:
+        raise ValueError("short-rest requires at least 60 minutes")
+    if not members or not reason.strip():
+        raise ValueError("short-rest requires members and --rest-reason")
+    allowed_fields = {"actor_id", "arcane_recovery"}
+    normalized: list[dict[str, Any]] = []
+    for index, member in enumerate(members):
+        if not isinstance(member, dict):
+            raise ValueError(f"rest-member-json[{index}] must be an object")
+        unexpected = set(member) - allowed_fields
+        actor_id = str(member.get("actor_id") or "")
+        arcane_recovery = member.get("arcane_recovery")
+        if unexpected or not actor_id or (
+            arcane_recovery is not None and not isinstance(arcane_recovery, dict)
+        ):
+            raise ValueError(
+                "short-rest members accept actor_id and optional arcane_recovery only"
+            )
+        normalized.append(
+            {
+                "actor_id": actor_id,
+                "arcane_recovery": deepcopy(arcane_recovery or {}),
+            }
+        )
+    actor_ids = [item["actor_id"] for item in normalized]
+    if len(actor_ids) != len(set(actor_ids)):
+        raise ValueError("short-rest member actor ids must be unique")
+    actors = []
+    for actor_id in actor_ids:
+        actor = await client.domain(
+            "character_query",
+            {"view": "get", "payload": {"character_id": actor_id}},
+        )
+        if actor.get("campaign_id") != campaign_id:
+            raise ValueError("every short-rest actor must belong to the campaign")
+        actors.append(actor)
+    branches = await client.domain(
+        "branch_query",
+        {"campaign_id": campaign_id, "view": "list"},
+    )
+    branch = next((item for item in branches if item.get("is_current")), None)
+    if branch is None:
+        raise RuntimeError("campaign has no current branch")
+    campaign = await _campaign(client, campaign_id)
+    clock_set = None
+    if not dict(dict(campaign.get("state") or {}).get("world_time") or {}):
+        if not isinstance(start_clock, dict):
+            raise ValueError(
+                "short-rest requires --rest-start-clock-json when the campaign clock is unset"
+            )
+        clock_set = await client.domain(
+            "campaign_change",
+            {
+                "campaign_id": campaign_id,
+                "action": "clock_set",
+                "payload": {
+                    "day": start_clock.get("day"),
+                    "hour": start_clock.get("hour", 0),
+                    "minute": start_clock.get("minute", 0),
+                    "label": str(start_clock.get("label") or ""),
+                },
+                "branch_id": str(branch["id"]),
+                "expected_revision": campaign["revision"],
+                "idempotency_key": _mutation_key(run_id, "short-rest-clock-set", reason),
+            },
+        )
+    elif start_clock is not None:
+        raise ValueError("short-rest start clock must be omitted after the clock is set")
+    campaign = await _campaign(client, campaign_id)
+    clock_advanced = await client.domain(
+        "campaign_change",
+        {
+            "campaign_id": campaign_id,
+            "action": "clock_advance",
+            "payload": {"period": "minute", "count": duration_minutes},
+            "branch_id": str(branch["id"]),
+            "expected_revision": campaign["revision"],
+            "idempotency_key": _mutation_key(
+                run_id, "short-rest-clock-advance", str(duration_minutes)
+            ),
+        },
+    )
+    rested = []
+    actor_by_id = {str(actor["id"]): actor for actor in actors}
+    for member in normalized:
+        actor_id = member["actor_id"]
+        payload: dict[str, Any] = {"rest_type": "short_rest"}
+        if member["arcane_recovery"]:
+            payload["arcane_recovery"] = member["arcane_recovery"]
+        result = await client.domain(
+            "character_state_change",
+            {
+                "character_id": actor_id,
+                "action": "rest",
+                "payload": payload,
+                "expected_revision": actor_by_id[actor_id]["revision"],
+                "idempotency_key": _mutation_key(run_id, "short-rest-actor", actor_id),
+            },
+        )
+        if result.get("status") != "committed":
+            raise RuntimeError(f"short rest for {actor_id} did not commit")
+        rested.append(result)
+    campaign = await _campaign(client, campaign_id)
+    committed = await client.domain(
+        "continuity_commit",
+        {
+            "campaign_id": campaign_id,
+            "payload": {
+                "event": {
+                    "summary": reason.strip(),
+                    "event_type": "short_rest",
+                    "audience_scope": "party",
+                    "payload": {
+                        "member_ids": actor_ids,
+                        "duration_minutes": duration_minutes,
+                        "clock_set": clock_set is not None,
+                    },
+                },
+                "actor_knowledge": [
+                    {
+                        "actor_id": actor_id,
+                        "knowledge_key": (
+                            f"playthrough.{_token(run_id)}.{_token(actor_id)}.short_rest"
+                        ),
+                        "proposition": reason.strip(),
+                        "disclosure_scope": "owner",
+                    }
+                    for actor_id in actor_ids
+                ],
+                "snapshot": {"label": f"Full playthrough short rest: {reason.strip()}"},
+                "branch_id": str(branch["id"]),
+            },
+            "expected_revision": campaign["revision"],
+            "idempotency_key": _mutation_key(run_id, "short-rest-continuity", reason),
+        },
+    )
+    synced = await _manifest_mutation(
+        client,
+        campaign_id=campaign_id,
+        action="sync",
+        run_id=run_id,
+        identity="short-rest-sync",
+    )
+    return {
+        "member_ids": actor_ids,
+        "clock_set": clock_set,
+        "clock_advanced": clock_advanced,
+        "rests": rested,
+        "continuity": committed,
+        "sync": synced,
+    }
+
+
 async def _award_experience(
     client: ExposureClient,
     *,
@@ -2009,6 +2177,19 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     source_ref=args.source_ref_json,
                     actor_id=args.stand_actor_id,
                     knowledge_actor_ids=args.knowledge_actor_id,
+                )
+            elif args.action == "short-rest":
+                if phase != "play":
+                    raise RuntimeError("short-rest requires the play phase")
+                await client.load("play.characters")
+                report["result"] = await _short_rest(
+                    client,
+                    campaign_id=args.campaign_id,
+                    run_id=args.run_id,
+                    members=args.rest_member_json,
+                    start_clock=args.rest_start_clock_json,
+                    duration_minutes=args.rest_duration_minutes,
+                    reason=args.rest_reason,
                 )
             elif args.action == "award-xp":
                 if phase != "play":
