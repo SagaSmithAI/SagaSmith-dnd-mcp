@@ -201,6 +201,7 @@ def _participant_config(
     *,
     surprise_by_actor: dict[str, bool],
     hostiles_hidden: bool = True,
+    visible_to_actor_ids_by_hostile: dict[str, list[str]] | None = None,
 ) -> list[dict[str, Any]]:
     if len(party_ids) > 10 or len(hostile_ids) > 10:
         raise ValueError("default encounter layout supports at most 10 PCs and 10 hostiles")
@@ -232,6 +233,11 @@ def _participant_config(
             "position": {"x": hostile_positions[index][0], "y": hostile_positions[index][1]},
             "disposition": "hostile",
             "hidden": hostiles_hidden and not bool(surprise_by_actor.get(actor_id, False)),
+            "visible_to_actor_ids": (
+                list(dict(visible_to_actor_ids_by_hostile or {}).get(actor_id) or [])
+                if hostiles_hidden and not bool(surprise_by_actor.get(actor_id, False))
+                else None
+            ),
             "surprised": bool(surprise_by_actor.get(actor_id, False)),
             "death_saves": False,
         }
@@ -606,6 +612,7 @@ async def _start(
             required_weapon_ids=args.required_hostile_weapon_id,
         )
     passive_perception: dict[str, int] = {}
+    visible_to_actor_ids_by_hostile: dict[str, list[str]] = {}
     if args.no_surprise and args.surprise_check_report is not None:
         raise ValueError("--no-surprise cannot be combined with --surprise-check-report")
     if args.no_surprise:
@@ -639,6 +646,15 @@ async def _start(
             party_ids=party_ids,
             hostile_ids=all_hostile_ids,
         )
+        visible_to_actor_ids_by_hostile = {
+            hostile_id: [
+                actor_id
+                for actor_id in party_ids
+                if passive_perception[actor_id]
+                >= int(dict(surprise_basis["stealth_totals"])[hostile_id])
+            ]
+            for hostile_id in all_hostile_ids
+        }
     started = await client.domain(
         "combat_start",
         {
@@ -649,6 +665,7 @@ async def _start(
                 all_hostile_ids,
                 surprise_by_actor=surprise,
                 hostiles_hidden=args.hostiles_hidden or not args.no_surprise,
+                visible_to_actor_ids_by_hostile=visible_to_actor_ids_by_hostile,
             ),
             "participant_manifest": _participant_manifest(
                 hostile_ids,
@@ -688,6 +705,7 @@ async def _start(
         "play_exposure": opened_play,
         "surprise_basis": surprise_basis,
         "passive_perception": passive_perception,
+        "visible_to_actor_ids_by_hostile": visible_to_actor_ids_by_hostile,
         "surprise": surprise,
         "start": started,
         "combat_exposure": opened_combat,

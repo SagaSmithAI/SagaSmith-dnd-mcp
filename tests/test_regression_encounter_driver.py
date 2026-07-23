@@ -311,6 +311,25 @@ def test_default_ambush_layout_keeps_two_goblins_thirty_feet_away() -> None:
     assert warned_by_actor["goblin-1"]["hidden"] is True
 
 
+def test_hidden_hostile_visibility_preserves_each_observer_detection() -> None:
+    config = _participant_config(
+        ["pc-1", "pc-2"],
+        ["ruffian-1", "ruffian-2"],
+        surprise_by_actor={},
+        hostiles_hidden=True,
+        visible_to_actor_ids_by_hostile={
+            "ruffian-1": ["pc-1", "pc-2"],
+            "ruffian-2": [],
+        },
+    )
+    by_actor = {item["actor_id"]: item for item in config}
+
+    assert by_actor["ruffian-1"]["hidden"] is True
+    assert by_actor["ruffian-1"]["visible_to_actor_ids"] == ["pc-1", "pc-2"]
+    assert by_actor["ruffian-2"]["hidden"] is True
+    assert by_actor["ruffian-2"]["visible_to_actor_ids"] == []
+
+
 def test_source_six_hostile_layout_keeps_every_actor_on_a_unique_space() -> None:
     party_ids = [f"pc-{index}" for index in range(1, 6)]
     hostile_ids = [f"goblin-{index}" for index in range(1, 7)]
