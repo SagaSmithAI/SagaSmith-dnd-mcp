@@ -170,6 +170,9 @@ def test_failed_module_refresh_restores_its_entry_phase() -> None:
 
 def test_narrative_npc_driver_round_trips_lobby_and_registers_manifest() -> None:
     source_ref = {
+        "purpose": "Create a source-bound narrative NPC",
+        "asset_path": "module.pdf",
+        "asset_sha256": "b" * 64,
         "module_id": "module-1",
         "scene_id": "scene-1",
         "chunk_id": "chunk-1",
@@ -253,12 +256,24 @@ def test_narrative_npc_driver_round_trips_lobby_and_registers_manifest() -> None
                 assert self.phase == "lobby"
                 assert arguments["mode"] == "narrative_npc"
                 assert arguments["payload"]["source_ref"] == source_ref
+                canonical_source_ref = {
+                    key: deepcopy(source_ref[key])
+                    for key in (
+                        "module_id",
+                        "scene_id",
+                        "chunk_id",
+                        "page_start",
+                        "page_end",
+                        "heading_path",
+                        "content_sha256",
+                    )
+                }
                 return {
                     "character": deepcopy(self.actor),
                     "narrative_npc": {
                         "combat_eligible": False,
                         "combat_statblock": "not_imported",
-                        "source_ref": deepcopy(source_ref),
+                        "source_ref": canonical_source_ref,
                     },
                 }
             if tool_id == "character_query":

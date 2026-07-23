@@ -1703,13 +1703,25 @@ async def _prepare_narrative_npc(
     )
     actor = dict(created.get("character") or {})
     provenance = dict(created.get("narrative_npc") or {})
+    canonical_source_ref = {
+        key: deepcopy(exact_ref[key])
+        for key in (
+            "module_id",
+            "scene_id",
+            "chunk_id",
+            "page_start",
+            "page_end",
+            "heading_path",
+            "content_sha256",
+        )
+    }
     if (
         actor.get("campaign_id") != campaign_id
         or actor.get("character_type") != "npc"
         or actor.get("name") != normalized_name
         or provenance.get("combat_eligible") is not False
         or provenance.get("combat_statblock") != "not_imported"
-        or dict(provenance.get("source_ref") or {}) != exact_ref
+        or dict(provenance.get("source_ref") or {}) != canonical_source_ref
     ):
         raise RuntimeError("source-bound narrative NPC creation verification failed")
     status_tags = set(
