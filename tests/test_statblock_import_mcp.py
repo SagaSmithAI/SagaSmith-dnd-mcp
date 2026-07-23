@@ -177,7 +177,7 @@ def test_imported_rule_source_creates_a_source_bound_combat_actor(tmp_path: Path
 
         assert replay == created
         assert created["source"]["id"] == ingested["source_id"]
-        assert created["source"]["chunk_ids"]
+        assert len(created["source"]["chunk_ids"]) >= 2
         assert created["statblock"] == {
             "challenge_rating": "0",
             "experience_points": 10,
@@ -205,6 +205,9 @@ def test_imported_rule_source_creates_a_source_bound_combat_actor(tmp_path: Path
                     "character_type": "npc",
                     "variant": {
                         "source_ref": f"rule-chunk:{created['source']['chunk_ids'][0]}",
+                        "source_refs": [
+                            f"rule-chunk:{created['source']['chunk_ids'][1]}"
+                        ],
                         "creature_type": "undead",
                         "current_hit_points": 1,
                         "armor_class": 12,
@@ -232,8 +235,11 @@ def test_imported_rule_source_creates_a_source_bound_combat_actor(tmp_path: Path
         assert "Variant source: rule-chunk:" in (
             variant_actor["notes"]["profile"]["dm_notes"]
         )
-        assert variant["variant_evidence"]["kind"] == "rule-chunk"
-        assert variant["variant_evidence"]["source_id"] == ingested["source_id"]
+        assert variant["variant_evidence"]["kind"] == "multiple"
+        assert len(variant["variant_evidence"]["sources"]) == 2
+        assert {
+            item["source_id"] for item in variant["variant_evidence"]["sources"]
+        } == {ingested["source_id"]}
 
     asyncio.run(exercise())
 

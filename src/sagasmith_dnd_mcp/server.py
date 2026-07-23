@@ -1018,57 +1018,98 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         campaign_id: str,
         variant: dict[str, Any] | None,
     ) -> dict[str, Any] | None:
-        """Resolve a variant citation instead of trusting a free-form source label."""
+        """Resolve every variant citation instead of trusting free-form source labels."""
         if variant is None:
             return None
         if not isinstance(variant, dict):
             raise ValueError("statblock variant must be an object")
+        source_refs = []
         source_ref = str(variant.get("source_ref") or "").strip()
-        kind, separator, identifier = source_ref.partition(":")
-        if not separator or not identifier:
-            raise ValueError("statblock variant source_ref must identify a managed source")
-        if kind == "module-chunk":
-            expanded = modules.expand(identifier)
-            if str(expanded.get("campaign_id") or "") != campaign_id:
-                raise ValueError("statblock variant module chunk does not belong to campaign")
-            return {
-                "source_ref": source_ref,
-                "kind": kind,
-                "id": identifier,
-                "module_id": expanded["module"]["id"],
-                "scene_id": expanded["scene"]["id"],
-                "page_start": expanded.get("page_start"),
-                "page_end": expanded.get("page_end"),
-            }
-        if kind == "module-review":
-            review = modules.get_content_review(campaign_id, identifier)
-            return {
-                "source_ref": source_ref,
-                "kind": kind,
-                "id": identifier,
-                "module_id": review["module_id"],
-                "scene_id": review["scene_id"],
-                "evidence": deepcopy(review.get("evidence") or {}),
-            }
-        if kind == "rule-chunk":
-            expanded = rules.expand(identifier)
-            source = rules.source(str(expanded["source"]["id"]))
-            campaign_edition = str(campaigns.get(campaign_id).settings.get("edition") or "2024")
-            if str(source.get("system_id") or "") != "dnd5e":
-                raise ValueError("statblock variant rule chunk must belong to D&D")
-            if str(source.get("edition") or "") != campaign_edition:
-                raise ValueError("statblock variant rule chunk edition does not match campaign")
-            return {
-                "source_ref": source_ref,
-                "kind": kind,
-                "id": identifier,
-                "source_id": source["id"],
-                "source_key": source["source_key"],
-                "checksum": source["checksum"],
-            }
-        raise ValueError(
-            "statblock variant source_ref must use module-chunk, module-review, or rule-chunk"
-        )
+        if source_ref:
+            source_refs.append(source_ref)
+        additional_source_refs = variant.get("source_refs", [])
+        if not isinstance(additional_source_refs, list):
+            raise ValueError("statblock variant source_refs must be a list")
+        source_refs.extend(str(item).strip() for item in additional_source_refs)
+        if any(not item for item in source_refs) or not source_refs:
+            raise ValueError(
+                "statblock variant source_ref or source_refs must identify managed sources"
+            )
+        if len(source_refs) != len(set(source_refs)):
+            raise ValueError("statblock variant source refs must be unique")
+
+        def resolve(source: str) -> dict[str, Any]:
+            kind, separator, identifier = source.partition(":")
+            if not separator or not identifier:
+                raise ValueError(
+                    "statblock variant source refs must identify managed sources"
+                )
+            if kind == "module-chunk":
+                expanded = modules.expand(identifier)
+                if str(expanded.get("campaign_id") or "") != campaign_id:
+                    raise ValueError(
+                        "statblock variant module chunk does not belong to campaign"
+                    )
+                return {
+                    "source_ref": source,
+                    "kind": kind,
+                    "id": identifier,
+                    "module_id": expanded["module"]["id"],
+                    "scene_id": expanded["scene"]["id"],
+                    "page_start": expanded.get("page_start"),
+                    "page_end": expanded.get("page_end"),
+                }
+            if kind == "module-review":
+                review = modules.get_content_review(campaign_id, identifier)
+                return {
+                    "source_ref": source,
+                    "kind": kind,
+                    "id": identifier,
+                    "module_id": review["module_id"],
+                    "scene_id": review["scene_id"],
+                    "evidence": deepcopy(review.get("evidence") or {}),
+                }
+            if kind == "rule-chunk":
+                expanded = rules.expand(identifier)
+                rule_source = rules.source(str(expanded["source"]["id"]))
+                campaign_edition = str(
+                    campaigns.get(campaign_id).settings.get("edition") or "2024"
+                )
+                if str(rule_source.get("system_id") or "") != "dnd5e":
+                    raise ValueError("statblock variant rule chunk must belong to D&D")
+                if str(rule_source.get("edition") or "") != campaign_edition:
+                    raise ValueError(
+                        "statblock variant rule chunk edition does not match campaign"
+                    )
+                return {
+                    "source_ref": source,
+                    "kind": kind,
+                    "id": identifier,
+                    "source_id": rule_source["id"],
+                    "source_key": rule_source["source_key"],
+                    "checksum": rule_source["checksum"],
+                }
+            raise ValueError(
+                "statblock variant source refs must use module-chunk, "
+                "module-review, or rule-chunk"
+            )
+
+        sources = [resolve(item) for item in source_refs]
+        if len(sources) == 1:
+            return sources[0]
+        return {
+            "kind": "multiple",
+            "source_refs": source_refs,
+            "sources": sources,
+        }
+
+    def statblock_variant_source_label(variant: dict[str, Any]) -> str:
+        source_refs = []
+        source_ref = str(variant.get("source_ref") or "").strip()
+        if source_ref:
+            source_refs.append(source_ref)
+        source_refs.extend(str(item).strip() for item in variant.get("source_refs", []))
+        return ", ".join(source_refs)
 
     def combat_view(campaign_id: str, principal_id: str) -> dict[str, Any] | None:
         campaign = campaigns.get(campaign_id)
@@ -15244,9 +15285,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 f"page={evidence.get('page')}; asset_checksum={evidence.get('asset_checksum')})."
             )
             if variant is not None:
-                changed_fields = ", ".join(sorted(set(variant) - {"source_ref"})) or "none"
+                changed_fields = (
+                    ", ".join(
+                        sorted(set(variant) - {"source_ref", "source_refs"})
+                    )
+                    or "none"
+                )
                 provenance += (
-                    f"\nVariant source: {variant['source_ref']}; applied fields: "
+                    f"\nVariant source: {statblock_variant_source_label(variant)}; "
+                    "applied fields: "
                     f"{changed_fields}."
                 )
             if statblock_warnings:
@@ -15367,9 +15414,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 f"(source_id={source_id}; chunks={','.join(selected_chunk_ids)})."
             )
             if variant is not None:
-                changed_fields = ", ".join(sorted(set(variant) - {"source_ref"})) or "none"
+                changed_fields = (
+                    ", ".join(
+                        sorted(set(variant) - {"source_ref", "source_refs"})
+                    )
+                    or "none"
+                )
                 provenance += (
-                    f"\nVariant source: {variant['source_ref']}; applied fields: "
+                    f"\nVariant source: {statblock_variant_source_label(variant)}; "
+                    "applied fields: "
                     f"{changed_fields}."
                 )
             if statblock_warnings:
