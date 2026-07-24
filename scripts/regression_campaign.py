@@ -111,6 +111,15 @@ def _arguments() -> argparse.Namespace:
         help="Number of source-identical actors to create for prepare-rule-statblock",
     )
     parser.add_argument(
+        "--defer-checkpoint",
+        action="store_true",
+        help=(
+            "For main-timeline prepare-statblock actions, persist the actor without "
+            "creating an actor-local snapshot so a later public checkpoint can seal "
+            "the complete scene preparation batch"
+        ),
+    )
+    parser.add_argument(
         "--source-path", type=Path, help="Rule statblock source to stage and ingest"
     )
     parser.add_argument("--source-id", help="Already-ingested rule statblock source")
@@ -1772,6 +1781,10 @@ async def _prepare_statblock(args: argparse.Namespace) -> dict[str, Any]:
 
     if bool(args.review_id) == bool(args.candidate_id):
         raise ValueError("prepare-statblock requires exactly one of --review-id or --candidate-id")
+    if args.defer_checkpoint and args.isolate_branch:
+        raise ValueError(
+            "prepare-statblock cannot defer the checkpoint on an isolated branch"
+        )
     variant = None
     variant_path = None
     if args.statblock_variant is not None:
@@ -2063,46 +2076,56 @@ async def _prepare_statblock(args: argparse.Namespace) -> dict[str, Any]:
                     {"view": "get", "payload": {"campaign_id": args.campaign_id}},
                 )
             )
-            snapshot_label = f"Prepared source-bound actor: {args.actor_name}"
-            snapshots = _facade_value(
-                await client.domain(
-                    "snapshot_query",
-                    {"campaign_id": args.campaign_id, "view": "list"},
+            snapshot: dict[str, Any] | None = None
+            verified: dict[str, Any] | None = None
+            if not args.defer_checkpoint:
+                snapshot_label = f"Prepared source-bound actor: {args.actor_name}"
+                snapshots = _facade_value(
+                    await client.domain(
+                        "snapshot_query",
+                        {"campaign_id": args.campaign_id, "view": "list"},
+                    )
                 )
-            )
-            snapshot = next(
-                (
-                    item
-                    for item in snapshots
-                    if item.get("id") == branch_after.get("head_snapshot_id")
-                    and item.get("label") == snapshot_label
-                ),
-                None,
-            )
-            if snapshot is None:
-                snapshot = await client.domain(
-                    "snapshot_create",
-                    {
-                        "campaign_id": args.campaign_id,
-                        "label": snapshot_label,
-                        "expected_revision": campaign_after["revision"],
-                        "expected_head_snapshot_id": (branch_after.get("head_snapshot_id") or ""),
-                        "idempotency_key": (
-                            f"{token}-prepared-actor-snapshot-r{campaign_after['revision']}"
-                        ),
-                    },
+                snapshot = next(
+                    (
+                        item
+                        for item in snapshots
+                        if item.get("id") == branch_after.get("head_snapshot_id")
+                        and item.get("label") == snapshot_label
+                    ),
+                    None,
                 )
-            verified = _facade_value(
-                await client.domain(
-                    "snapshot_query",
-                    {
-                        "campaign_id": args.campaign_id,
-                        "view": "verify",
-                        "payload": {"slot": snapshot["slot"]},
-                    },
+                if snapshot is None:
+                    snapshot = await client.domain(
+                        "snapshot_create",
+                        {
+                            "campaign_id": args.campaign_id,
+                            "label": snapshot_label,
+                            "expected_revision": campaign_after["revision"],
+                            "expected_head_snapshot_id": (
+                                branch_after.get("head_snapshot_id") or ""
+                            ),
+                            "idempotency_key": (
+                                f"{token}-prepared-actor-snapshot-"
+                                f"r{campaign_after['revision']}"
+                            ),
+                        },
+                    )
+                verified = _facade_value(
+                    await client.domain(
+                        "snapshot_query",
+                        {
+                            "campaign_id": args.campaign_id,
+                            "view": "verify",
+                            "payload": {"slot": snapshot["slot"]},
+                        },
+                    )
                 )
-            )
             if args.isolate_branch:
+                if snapshot is None:
+                    raise RuntimeError(
+                        "isolated reviewed actor preparation requires a checkpoint"
+                    )
                 campaign_working_play = _facade_value(
                     await client.core(
                         "campaign_query",
@@ -4647,6 +4670,8 @@ async def _structured_combat(args: argparse.Namespace) -> dict[str, Any]:
 def main() -> int:
     _configure_utf8_streams(sys.stdout, sys.stderr)
     args = _arguments()
+    if args.defer_checkpoint and args.action != "prepare-statblock":
+        raise ValueError("--defer-checkpoint is only supported by prepare-statblock")
     operation = {
         "audit": _audit,
         "discover-scenes": _discover_scenes,

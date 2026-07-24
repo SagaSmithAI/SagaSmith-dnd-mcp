@@ -3,7 +3,9 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import sys
 from copy import deepcopy
+from pathlib import Path
 
 import pytest
 from sagasmith_dnd.character_schema import default_character_sheet
@@ -72,6 +74,34 @@ def _manifest_source_ref() -> dict:
         "chunk_id": "chunk-1",
         "excerpt": "The hostage is released.",
     }
+
+
+def test_playthrough_parser_accepts_deferred_scene_checkpoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "regression_playthrough.py",
+            "--home",
+            str(tmp_path),
+            "--campaign-id",
+            "campaign",
+            "--output",
+            str(tmp_path / "report.json"),
+            "--defer-checkpoint",
+        ],
+    )
+
+    assert regression_playthrough._arguments().defer_checkpoint is True
+
+
+def test_playthrough_rejects_deferred_checkpoint_for_key_rest() -> None:
+    args = argparse.Namespace(defer_checkpoint=True, action="long-rest")
+
+    with pytest.raises(ValueError, match="unsupported for long-rest"):
+        asyncio.run(regression_playthrough._run(args))
 
 
 def test_advance_scene_identity_supports_exact_retry_and_later_revisit() -> None:
@@ -256,7 +286,10 @@ def test_failed_module_refresh_restores_its_entry_phase() -> None:
     assert client.loaded[-1] == ("play.scene_control", "play.scene")
 
 
-def test_narrative_npc_driver_round_trips_lobby_and_registers_manifest() -> None:
+@pytest.mark.parametrize("defer_checkpoint", [False, True])
+def test_narrative_npc_driver_round_trips_lobby_and_registers_manifest(
+    defer_checkpoint: bool,
+) -> None:
     source_ref = {
         "purpose": "Create a source-bound narrative NPC",
         "asset_path": "module.pdf",
@@ -295,6 +328,7 @@ def test_narrative_npc_driver_round_trips_lobby_and_registers_manifest() -> None
                     }
                 },
             }
+            self.snapshot_calls = 0
 
         async def open(self, campaign_id: str) -> None:
             assert campaign_id == "campaign-1"
@@ -382,6 +416,7 @@ def test_narrative_npc_driver_round_trips_lobby_and_registers_manifest() -> None
                     "campaign_revision": self.revision,
                 }
             if tool_id == "snapshot_create":
+                self.snapshot_calls += 1
                 assert arguments["label"] == "Narrative NPC prepared: Qelline Alderleaf"
                 self.revision += 1
                 return {"id": "snapshot-new", "slot": 7}
@@ -407,6 +442,7 @@ def test_narrative_npc_driver_round_trips_lobby_and_registers_manifest() -> None
             summary="Qelline hosts the party and can introduce her son Carp.",
             faction="Phandalin",
             relationship="helpful host",
+            defer_checkpoint=defer_checkpoint,
         )
     )
 
@@ -415,7 +451,11 @@ def test_narrative_npc_driver_round_trips_lobby_and_registers_manifest() -> None
     assert result["narrative_npc"]["combat_eligible"] is False
     assert client.manifest["npcs"][0]["actor_id"] == "npc-1"
     assert "combat_statblock=not_imported" in client.manifest["npcs"][0]["notes"]
-    assert result["checkpoint"]["verification"]["valid"] is True
+    assert client.snapshot_calls == (0 if defer_checkpoint else 1)
+    if defer_checkpoint:
+        assert result["checkpoint"] is None
+    else:
+        assert result["checkpoint"]["verification"]["valid"] is True
 
 
 def test_shared_consumable_driver_keeps_roll_item_and_healing_in_one_transition() -> None:
@@ -502,6 +542,7 @@ def test_source_loot_driver_uses_one_public_atomic_campaign_transition() -> None
         def __init__(self) -> None:
             self.revision = 4
             self.tools: list[str] = []
+            self.continuity_payload: dict = {}
 
         async def core(self, tool_id: str, arguments: dict):
             assert tool_id == "campaign_query"
@@ -541,6 +582,7 @@ def test_source_loot_driver_uses_one_public_atomic_campaign_transition() -> None
             if tool_id == "branch_query":
                 return [{"id": "branch-1", "is_current": True}]
             if tool_id == "continuity_commit":
+                self.continuity_payload = deepcopy(arguments["payload"])
                 assert len(arguments["payload"]["actor_knowledge"]) == 2
                 return {"event": {"id": "event-1"}, "snapshot": {"slot": 7}}
             if tool_id == "playthrough_manifest":
@@ -570,6 +612,7 @@ def test_source_loot_driver_uses_one_public_atomic_campaign_transition() -> None
             reason="The party recovered the treasure.",
             knowledge_actor_ids=["actor-1", "actor-2"],
             source_scene_id="source-scene-1",
+            defer_checkpoint=True,
         )
     )
 
@@ -577,9 +620,12 @@ def test_source_loot_driver_uses_one_public_atomic_campaign_transition() -> None
     assert client.tools.count("campaign_change") == 1
     assert result["knowledge_actor_ids"] == ["actor-1", "actor-2"]
     assert result["scene"]["source_scene_id"] == "source-scene-1"
+    assert "snapshot" not in client.continuity_payload
 
 
+@pytest.mark.parametrize("defer_checkpoint", [False, True])
 def test_source_item_driver_validates_provenance_hydrates_and_equips(
+    defer_checkpoint: bool,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     source_ref = {
@@ -665,7 +711,11 @@ def test_source_item_driver_validates_provenance_hydrates_and_equips(
                 return {"character": deepcopy(self.actor)}
             raise AssertionError((tool_id, arguments))
 
+    checkpoint_calls = 0
+
     async def checkpoint(*_args, **_kwargs):
+        nonlocal checkpoint_calls
+        checkpoint_calls += 1
         return {"snapshot": {"slot": 12}, "verification": {"valid": True}}
 
     monkeypatch.setattr(regression_playthrough, "_checkpoint", checkpoint)
@@ -683,6 +733,7 @@ def test_source_item_driver_validates_provenance_hydrates_and_equips(
             equip_slot="main_hand",
             reason="Iarno wields the source-declared staff.",
             checkpoint_label="Area 12 staff ready",
+            defer_checkpoint=defer_checkpoint,
         )
     )
 
@@ -691,10 +742,16 @@ def test_source_item_driver_validates_provenance_hydrates_and_equips(
     assert result["actor"]["armor_class"] == 13
     assert result["item"]["equipped_slot"] == "main_hand"
     assert result["item"]["mechanics"]["spellcasting"]["spells"][0]["card"]["rule_refs"]
-    assert result["checkpoint"]["verification"]["valid"] is True
+    assert checkpoint_calls == (0 if defer_checkpoint else 1)
+    if defer_checkpoint:
+        assert result["checkpoint"] is None
+    else:
+        assert result["checkpoint"]["verification"]["valid"] is True
 
 
+@pytest.mark.parametrize("defer_checkpoint", [False, True])
 def test_source_item_transfer_driver_uses_atomic_character_to_party_public_tool(
+    defer_checkpoint: bool,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     source_ref = {
@@ -758,7 +815,11 @@ def test_source_item_transfer_driver_uses_atomic_character_to_party_public_tool(
                 }
             raise AssertionError((tool_id, arguments))
 
+    checkpoint_calls = 0
+
     async def checkpoint(*_args, **_kwargs):
+        nonlocal checkpoint_calls
+        checkpoint_calls += 1
         return {"snapshot": {"slot": 13}, "verification": {"valid": True}}
 
     monkeypatch.setattr(regression_playthrough, "_checkpoint", checkpoint)
@@ -777,6 +838,7 @@ def test_source_item_transfer_driver_uses_atomic_character_to_party_public_tool(
             quantity=None,
             reason="The party secured the surrendered mage's staff.",
             checkpoint_label="Staff secured",
+            defer_checkpoint=defer_checkpoint,
         )
     )
 
@@ -785,7 +847,11 @@ def test_source_item_transfer_driver_uses_atomic_character_to_party_public_tool(
     assert client.transfer_arguments["payload"]["expected_campaign_revision"] == 20
     assert client.transfer_arguments["payload"]["expected_character_revision"] == 4
     assert result["transfer"]["item"]["id"] == "staff-of-defense"
-    assert result["checkpoint"]["verification"]["valid"] is True
+    assert checkpoint_calls == (0 if defer_checkpoint else 1)
+    if defer_checkpoint:
+        assert result["checkpoint"] is None
+    else:
+        assert result["checkpoint"]["verification"]["valid"] is True
 
 
 def test_source_currency_spend_driver_uses_one_public_atomic_campaign_transition() -> None:
@@ -1804,7 +1870,10 @@ def test_failed_route_is_preserved_when_branching_from_verified_snapshot() -> No
     assert result["checkpoint"]["snapshot"]["slot"] == 61
 
 
-def test_source_cited_check_persists_result_and_explicit_knowledge() -> None:
+@pytest.mark.parametrize("defer_checkpoint", [False, True])
+def test_source_cited_check_persists_result_and_explicit_knowledge(
+    defer_checkpoint: bool,
+) -> None:
     source_ref = {
         "module_id": "module-1",
         "scene_id": "scene-1",
@@ -1899,8 +1968,17 @@ def test_source_cited_check_persists_result_and_explicit_knowledge() -> None:
                 assert arguments["idempotency_key"] == _mutation_key(
                     "run-1", "continuity", expected_identity
                 )
+                if defer_checkpoint:
+                    assert "snapshot" not in arguments["payload"]
+                else:
+                    assert arguments["payload"]["snapshot"]["label"].startswith(
+                        "Full playthrough check:"
+                    )
                 self.revision += 1
-                return {"event": {"id": "event-1"}, "snapshot": {"slot": 3}}
+                return {
+                    "event": {"id": "event-1"},
+                    **({} if defer_checkpoint else {"snapshot": {"slot": 3}}),
+                }
             if tool_id == "playthrough_manifest":
                 assert arguments["action"] == "sync"
                 assert arguments["idempotency_key"] == _mutation_key(
@@ -1927,6 +2005,7 @@ def test_source_cited_check_persists_result_and_explicit_knowledge() -> None:
             knowledge_actor_ids=["actor-2"],
             success_knowledge="The trail shows twelve goblins and two captives.",
             failure_knowledge="The trail's traffic remains unclear.",
+            defer_checkpoint=defer_checkpoint,
         )
     )
 
@@ -2458,7 +2537,10 @@ def test_short_rest_identity_separates_later_rest_choices() -> None:
     )
 
 
-def test_source_bound_time_advance_commits_clock_knowledge_and_snapshot() -> None:
+@pytest.mark.parametrize("defer_checkpoint", [False, True])
+def test_source_bound_time_advance_commits_clock_knowledge_and_snapshot(
+    defer_checkpoint: bool,
+) -> None:
     source_ref = {
         "module_id": "module-1",
         "scene_id": "scene-1",
@@ -2527,9 +2609,17 @@ def test_source_bound_time_advance_commits_clock_knowledge_and_snapshot() -> Non
                     "actor-1",
                     "npc-1",
                 ]
-                assert payload["snapshot"]["label"].startswith("Full playthrough time advance:")
+                if defer_checkpoint:
+                    assert "snapshot" not in payload
+                else:
+                    assert payload["snapshot"]["label"].startswith(
+                        "Full playthrough time advance:"
+                    )
                 self.revision += 1
-                return {"event": {"id": "event-1"}, "snapshot": {"slot": 5}}
+                return {
+                    "event": {"id": "event-1"},
+                    **({} if defer_checkpoint else {"snapshot": {"slot": 5}}),
+                }
             if tool_id == "playthrough_manifest":
                 assert arguments["action"] == "sync"
                 self.revision += 1
@@ -2552,12 +2642,16 @@ def test_source_bound_time_advance_commits_clock_knowledge_and_snapshot() -> Non
             reason="The party traveled with Sildar and arrived late in the day.",
             start_clock=None,
             knowledge_actor_ids=["actor-1", "npc-1"],
+            defer_checkpoint=defer_checkpoint,
         )
     )
 
     assert result["after"]["hour"] == 17
     assert result["knowledge_actor_ids"] == ["actor-1", "npc-1"]
-    assert result["continuity"]["snapshot"]["slot"] == 5
+    if defer_checkpoint:
+        assert "snapshot" not in result["continuity"]
+    else:
+        assert result["continuity"]["snapshot"]["slot"] == 5
 
 
 def test_play_activity_records_structured_effect_and_random_receipt() -> None:
@@ -3021,6 +3115,7 @@ def test_source_cited_automatic_event_does_not_roll() -> None:
             knowledge_actor_ids=["actor-1", "actor-2"],
             progress_percent=65,
             source_scene_id="source-scene-1",
+            defer_checkpoint=True,
         )
     )
 
@@ -3032,6 +3127,7 @@ def test_source_cited_automatic_event_does_not_roll() -> None:
     )
     assert "character_check" not in client.tools
     assert "dnd_dice_roll" not in client.tools
+    assert "snapshot" not in client.continuity_payload
 
 
 def test_record_event_preserves_prior_scene_events_in_same_run() -> None:
@@ -3114,7 +3210,10 @@ def test_record_event_preserves_prior_scene_events_in_same_run() -> None:
     }
 
 
-def test_record_outcome_commits_facts_then_syncs_manifest_and_checkpoint() -> None:
+@pytest.mark.parametrize("defer_checkpoint", [False, True])
+def test_record_outcome_commits_facts_then_syncs_manifest_and_checkpoint(
+    defer_checkpoint: bool,
+) -> None:
     source_ref = {
         "module_id": "module-1",
         "scene_id": "source-scene-1",
@@ -3285,10 +3384,14 @@ def test_record_outcome_commits_facts_then_syncs_manifest_and_checkpoint() -> No
             objective="Escort the hostage to safety.",
             progress_percent=100,
             source_scene_id="source-scene-1",
+            defer_checkpoint=defer_checkpoint,
         )
     )
 
-    assert result["checkpoint"]["verification"]["valid"] is True
+    if defer_checkpoint:
+        assert result["checkpoint"] is None
+    else:
+        assert result["checkpoint"]["verification"]["valid"] is True
     assert result["scene"]["source_scene_id"] == "source-scene-1"
     assert client.continuity_payload["event"]["payload"]["source_scene_id"] == (
         "source-scene-1"

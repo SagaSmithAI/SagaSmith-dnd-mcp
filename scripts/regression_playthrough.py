@@ -23,6 +23,19 @@ from sagasmith_dnd.playthrough import validate_playthrough_manifest
 
 from scripts.regression_modules import PRINCIPAL_ID, ExposureClient, _token
 
+DEFERRED_CHECKPOINT_ACTIONS = frozenset(
+    {
+        "advance-time",
+        "resolve-check",
+        "record-event",
+        "record-outcome",
+        "prepare-narrative-npc",
+        "provision-source-item",
+        "transfer-source-item",
+        "acquire-loot",
+    }
+)
+
 
 def _arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -88,6 +101,14 @@ def _arguments() -> argparse.Namespace:
         help="Expand every module-search hit into its complete indexed chunk",
     )
     parser.add_argument("--checkpoint-label", default="")
+    parser.add_argument(
+        "--defer-checkpoint",
+        action="store_true",
+        help=(
+            "For supported scene-batch actions, persist without an action-local "
+            "snapshot; use the public checkpoint action after the complete scene batch"
+        ),
+    )
     parser.add_argument("--scene-id")
     parser.add_argument(
         "--source-scene-id",
@@ -1402,6 +1423,7 @@ async def _resolve_check(
     knowledge_actor_ids: list[str],
     success_knowledge: str,
     failure_knowledge: str,
+    defer_checkpoint: bool = False,
 ) -> dict[str, Any]:
     if not all((scene_id, location_key, source_excerpt, actor_id, kind, ability)):
         raise ValueError(
@@ -1543,55 +1565,59 @@ async def _resolve_check(
     )
     recipients = list(dict.fromkeys([actor_id, *knowledge_actor_ids]))
     campaign = await _campaign(client, campaign_id)
+    continuity_payload = {
+        "event": {
+            "summary": (
+                f"{actor['name']} {'succeeded' if success else 'failed'} on "
+                f"the source-cited {kind} check at {location_key}."
+            ),
+            "event_type": "ability_check",
+            "audience_scope": "party",
+            "payload": {
+                "scene_id": scene_id,
+                "location_key": location_key,
+                "kind": kind,
+                "ability": ability,
+                "dc": dc,
+                "advantage": advantage,
+                "disadvantage": disadvantage,
+                "success": success,
+                "source_excerpt": source_excerpt,
+                "source_ref": exact_ref,
+            },
+        },
+        "actor_knowledge": [
+            {
+                "actor_id": recipient,
+                "knowledge_key": _check_knowledge_key(
+                    run_id,
+                    scene_id,
+                    location_key,
+                    kind,
+                    ability,
+                    actor_id,
+                    dc,
+                    proficient,
+                    advantage,
+                    disadvantage,
+                    exact_ref,
+                ),
+                "proposition": proposition,
+                "disclosure_scope": "owner",
+            }
+            for recipient in recipients
+        ],
+        "branch_id": str(branch["id"]),
+    }
+    if not defer_checkpoint:
+        continuity_payload["snapshot"] = {
+            "label": f"Full playthrough check: {kind} at {location_key}"
+        }
     committed = await client.domain(
         "continuity_commit",
         {
             "campaign_id": campaign_id,
-            "payload": {
-                "event": {
-                    "summary": (
-                        f"{actor['name']} {'succeeded' if success else 'failed'} on "
-                        f"the source-cited {kind} check at {location_key}."
-                    ),
-                    "event_type": "ability_check",
-                    "audience_scope": "party",
-                    "payload": {
-                        "scene_id": scene_id,
-                        "location_key": location_key,
-                        "kind": kind,
-                        "ability": ability,
-                        "dc": dc,
-                        "advantage": advantage,
-                        "disadvantage": disadvantage,
-                        "success": success,
-                        "source_excerpt": source_excerpt,
-                        "source_ref": exact_ref,
-                    },
-                },
-                "actor_knowledge": [
-                    {
-                        "actor_id": recipient,
-                        "knowledge_key": _check_knowledge_key(
-                            run_id,
-                            scene_id,
-                            location_key,
-                            kind,
-                            ability,
-                            actor_id,
-                            dc,
-                            proficient,
-                            advantage,
-                            disadvantage,
-                            exact_ref,
-                        ),
-                        "proposition": proposition,
-                        "disclosure_scope": "owner",
-                    }
-                    for recipient in recipients
-                ],
-                "snapshot": {"label": (f"Full playthrough check: {kind} at {location_key}")},
-                "branch_id": str(branch["id"]),
-            },
+            "payload": continuity_payload,
             "expected_revision": campaign["revision"],
             "idempotency_key": _mutation_key(
                 run_id, "continuity", check_identity
@@ -1637,6 +1663,7 @@ async def _record_event(
     progress_percent: int | None,
     audience_scope: str = "party",
     source_scene_id: str = "",
+    defer_checkpoint: bool = False,
 ) -> dict[str, Any]:
     if not all((scene_id, location_key, source_excerpt, event_type, summary)):
         raise ValueError("record-event requires scene, location, excerpt, event type, and summary")
@@ -1718,35 +1745,41 @@ async def _record_event(
     if branch is None:
         raise RuntimeError("campaign has no current branch")
     campaign = await _campaign(client, campaign_id)
+    continuity_payload = {
+        "event": {
+            "summary": summary.strip(),
+            "event_type": event_type,
+            "audience_scope": audience_scope,
+            "payload": {
+                "scene_id": scene_id,
+                "source_scene_id": cited_scene_id,
+                "location_key": location_key,
+                "source_excerpt": source_excerpt,
+                "source_ref": exact_ref,
+            },
+        },
+        "actor_knowledge": [
+            {
+                "actor_id": actor_id,
+                "knowledge_key": (
+                    f"playthrough.{_token(run_id)}.{_token(event_identity)}"
+                ),
+                "proposition": knowledge.strip(),
+                "disclosure_scope": "owner",
+            }
+            for actor_id in list(dict.fromkeys(knowledge_actor_ids))
+        ],
+        "branch_id": str(branch["id"]),
+    }
+    if not defer_checkpoint:
+        continuity_payload["snapshot"] = {
+            "label": f"Full playthrough event: {summary.strip()}"
+        }
     committed = await client.domain(
         "continuity_commit",
         {
             "campaign_id": campaign_id,
-            "payload": {
-                "event": {
-                    "summary": summary.strip(),
-                    "event_type": event_type,
-                    "audience_scope": audience_scope,
-                    "payload": {
-                        "scene_id": scene_id,
-                        "source_scene_id": cited_scene_id,
-                        "location_key": location_key,
-                        "source_excerpt": source_excerpt,
-                        "source_ref": exact_ref,
-                    },
-                },
-                "actor_knowledge": [
-                    {
-                        "actor_id": actor_id,
-                        "knowledge_key": (f"playthrough.{_token(run_id)}.{_token(event_identity)}"),
-                        "proposition": knowledge.strip(),
-                        "disclosure_scope": "owner",
-                    }
-                    for actor_id in list(dict.fromkeys(knowledge_actor_ids))
-                ],
-                "snapshot": {"label": f"Full playthrough event: {summary.strip()}"},
-                "branch_id": str(branch["id"]),
-            },
+            "payload": continuity_payload,
             "expected_revision": campaign["revision"],
             "idempotency_key": _mutation_key(run_id, "continuity-event", event_identity),
         },
@@ -1810,6 +1843,7 @@ async def _prepare_narrative_npc(
     summary: str,
     faction: str,
     relationship: str,
+    defer_checkpoint: bool = False,
 ) -> dict[str, Any]:
     normalized_name = name.strip()
     normalized_role = role.strip()
@@ -1985,11 +2019,15 @@ async def _prepare_narrative_npc(
         identity=f"narrative-npc-register:{actor['id']}",
         payload={"manifest": manifest},
     )
-    checkpoint = await _checkpoint(
-        client,
-        campaign_id=campaign_id,
-        run_id=run_id,
-        label=f"Narrative NPC prepared: {normalized_name}",
+    checkpoint = (
+        None
+        if defer_checkpoint
+        else await _checkpoint(
+            client,
+            campaign_id=campaign_id,
+            run_id=run_id,
+            label=f"Narrative NPC prepared: {normalized_name}",
+        )
     )
     return {
         "actor": verified_actor,
@@ -2028,6 +2066,7 @@ async def _record_outcome(
     progress_percent: int | None,
     audience_scope: str = "party",
     source_scene_id: str = "",
+    defer_checkpoint: bool = False,
 ) -> dict[str, Any]:
     if not all(
         (
@@ -2225,11 +2264,15 @@ async def _record_outcome(
         identity=f"record-outcome-replace:{outcome_id}",
         payload={"manifest": manifest},
     )
-    checkpoint = await _checkpoint(
-        client,
-        campaign_id=campaign_id,
-        run_id=run_id,
-        label=f"Full playthrough outcome: {outcome_id.strip()}",
+    checkpoint = (
+        None
+        if defer_checkpoint
+        else await _checkpoint(
+            client,
+            campaign_id=campaign_id,
+            run_id=run_id,
+            label=f"Full playthrough outcome: {outcome_id.strip()}",
+        )
     )
     return {
         "outcome_id": outcome_id.strip(),
@@ -3111,6 +3154,7 @@ async def _advance_time(
     reason: str,
     start_clock: dict[str, Any] | None,
     knowledge_actor_ids: list[str],
+    defer_checkpoint: bool = False,
 ) -> dict[str, Any]:
     normalized_reason = reason.strip()
     if (
@@ -3201,41 +3245,45 @@ async def _advance_time(
     ):
         raise RuntimeError("campaign clock did not advance by the requested duration")
     campaign = await _campaign(client, campaign_id)
+    continuity_payload = {
+        "event": {
+            "summary": normalized_reason,
+            "event_type": "time_advanced",
+            "audience_scope": "party",
+            "payload": {
+                "scene_id": scene_id,
+                "period": period,
+                "count": count,
+                "elapsed_minutes": expected_minutes,
+                "world_time_before": before,
+                "world_time_after": after,
+                "source_excerpt": source_excerpt,
+                "source_ref": exact_ref,
+            },
+        },
+        "actor_knowledge": [
+            {
+                "actor_id": str(actor["id"]),
+                "knowledge_key": (
+                    f"playthrough.{_token(run_id)}.{_token(scene_id)}."
+                    f"time.{_token(identity)}"
+                ),
+                "proposition": normalized_reason,
+                "disclosure_scope": "owner",
+            }
+            for actor in actors
+        ],
+        "branch_id": branch_id,
+    }
+    if not defer_checkpoint:
+        continuity_payload["snapshot"] = {
+            "label": f"Full playthrough time advance: {normalized_reason}"
+        }
     committed = await client.domain(
         "continuity_commit",
         {
             "campaign_id": campaign_id,
-            "payload": {
-                "event": {
-                    "summary": normalized_reason,
-                    "event_type": "time_advanced",
-                    "audience_scope": "party",
-                    "payload": {
-                        "scene_id": scene_id,
-                        "period": period,
-                        "count": count,
-                        "elapsed_minutes": expected_minutes,
-                        "world_time_before": before,
-                        "world_time_after": after,
-                        "source_excerpt": source_excerpt,
-                        "source_ref": exact_ref,
-                    },
-                },
-                "actor_knowledge": [
-                    {
-                        "actor_id": str(actor["id"]),
-                        "knowledge_key": (
-                            f"playthrough.{_token(run_id)}.{_token(scene_id)}."
-                            f"time.{_token(identity)}"
-                        ),
-                        "proposition": normalized_reason,
-                        "disclosure_scope": "owner",
-                    }
-                    for actor in actors
-                ],
-                "snapshot": {"label": f"Full playthrough time advance: {normalized_reason}"},
-                "branch_id": branch_id,
-            },
+            "payload": continuity_payload,
             "expected_revision": campaign["revision"],
             "idempotency_key": _mutation_key(run_id, "advance-time-continuity", identity),
         },
@@ -3403,6 +3451,7 @@ async def _provision_source_item(
     equip_slot: str,
     reason: str,
     checkpoint_label: str,
+    defer_checkpoint: bool = False,
 ) -> dict[str, Any]:
     normalized_actor_id = actor_id.strip()
     normalized_scene_id = source_scene_id.strip()
@@ -3527,14 +3576,19 @@ async def _provision_source_item(
             if str(entry.get("id") or "") == item_id
         )
 
-    checkpoint = await _checkpoint(
-        client,
-        campaign_id=campaign_id,
-        run_id=run_id,
-        label=(
-            checkpoint_label.strip()
-            or f"Full playthrough source item: {requested_item['name']} — {normalized_reason}"
-        ),
+    checkpoint = (
+        None
+        if defer_checkpoint
+        else await _checkpoint(
+            client,
+            campaign_id=campaign_id,
+            run_id=run_id,
+            label=(
+                checkpoint_label.strip()
+                or f"Full playthrough source item: {requested_item['name']} — "
+                f"{normalized_reason}"
+            ),
+        )
     )
     return {
         "actor": {
@@ -3568,6 +3622,7 @@ async def _transfer_source_item_to_party(
     quantity: int | None,
     reason: str,
     checkpoint_label: str,
+    defer_checkpoint: bool = False,
 ) -> dict[str, Any]:
     normalized_character_id = character_id.strip()
     normalized_item_id = item_id.strip()
@@ -3683,14 +3738,18 @@ async def _transfer_source_item_to_party(
         if str(dict(transferred.get("item") or {}).get("id") or "") != normalized_item_id:
             raise RuntimeError("source item transfer returned a different item")
 
-    checkpoint = await _checkpoint(
-        client,
-        campaign_id=campaign_id,
-        run_id=run_id,
-        label=(
-            checkpoint_label.strip()
-            or f"Full playthrough source item transferred: {normalized_item_id}"
-        ),
+    checkpoint = (
+        None
+        if defer_checkpoint
+        else await _checkpoint(
+            client,
+            campaign_id=campaign_id,
+            run_id=run_id,
+            label=(
+                checkpoint_label.strip()
+                or f"Full playthrough source item transferred: {normalized_item_id}"
+            ),
+        )
     )
     return {
         "character_id": normalized_character_id,
@@ -3719,6 +3778,7 @@ async def _acquire_source_loot(
     reason: str,
     knowledge_actor_ids: list[str],
     source_scene_id: str = "",
+    defer_checkpoint: bool = False,
 ) -> dict[str, Any]:
     normalized_acquisition_id = acquisition_id.strip()
     normalized_reason = reason.strip()
@@ -3833,39 +3893,43 @@ async def _acquire_source_loot(
     if branch is None:
         raise RuntimeError("campaign has no current branch")
     campaign = await _campaign(client, campaign_id)
+    continuity_payload = {
+        "event": {
+            "summary": normalized_reason,
+            "event_type": "loot_acquired",
+            "audience_scope": "party",
+            "payload": {
+                "scene_id": scene_id,
+                "location_key": location_key,
+                "acquisition_id": normalized_acquisition_id,
+                "coins": deepcopy(coins),
+                "item_ids": [str(item.get("id") or "") for item in items],
+                "source_excerpt": source_excerpt.strip(),
+                "source_ref": exact_ref,
+            },
+        },
+        "actor_knowledge": [
+            {
+                "actor_id": actor_id,
+                "knowledge_key": (
+                    f"playthrough.{_token(run_id)}.loot.{_token(normalized_acquisition_id)}"
+                ),
+                "proposition": normalized_reason,
+                "disclosure_scope": "owner",
+            }
+            for actor_id in recipients
+        ],
+        "branch_id": str(branch["id"]),
+    }
+    if not defer_checkpoint:
+        continuity_payload["snapshot"] = {
+            "label": f"Full playthrough loot: {normalized_acquisition_id}"
+        }
     committed = await client.domain(
         "continuity_commit",
         {
             "campaign_id": campaign_id,
-            "payload": {
-                "event": {
-                    "summary": normalized_reason,
-                    "event_type": "loot_acquired",
-                    "audience_scope": "party",
-                    "payload": {
-                        "scene_id": scene_id,
-                        "location_key": location_key,
-                        "acquisition_id": normalized_acquisition_id,
-                        "coins": deepcopy(coins),
-                        "item_ids": [str(item.get("id") or "") for item in items],
-                        "source_excerpt": source_excerpt.strip(),
-                        "source_ref": exact_ref,
-                    },
-                },
-                "actor_knowledge": [
-                    {
-                        "actor_id": actor_id,
-                        "knowledge_key": (
-                            f"playthrough.{_token(run_id)}.loot.{_token(normalized_acquisition_id)}"
-                        ),
-                        "proposition": normalized_reason,
-                        "disclosure_scope": "owner",
-                    }
-                    for actor_id in recipients
-                ],
-                "snapshot": {"label": f"Full playthrough loot: {normalized_acquisition_id}"},
-                "branch_id": str(branch["id"]),
-            },
+            "payload": continuity_payload,
             "expected_revision": campaign["revision"],
             "idempotency_key": _mutation_key(run_id, "loot-continuity", normalized_acquisition_id),
         },
@@ -5516,6 +5580,11 @@ async def _restore_phase_after_failed_lobby_action(
 
 
 async def _run(args: argparse.Namespace) -> dict[str, Any]:
+    if args.defer_checkpoint and args.action not in DEFERRED_CHECKPOINT_ACTIONS:
+        supported = ", ".join(sorted(DEFERRED_CHECKPOINT_ACTIONS))
+        raise ValueError(
+            f"--defer-checkpoint is unsupported for {args.action}; supported: {supported}"
+        )
     server = _server_parameters(args)
     report: dict[str, Any] = {
         "action": args.action,
@@ -5576,6 +5645,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                         summary=args.narrative_npc_summary,
                         faction=args.narrative_npc_faction,
                         relationship=args.narrative_npc_relationship,
+                        defer_checkpoint=args.defer_checkpoint,
                     )
                 except Exception:
                     await _restore_phase_after_failed_lobby_action(
@@ -5686,6 +5756,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     reason=args.time_reason,
                     start_clock=args.time_start_clock_json,
                     knowledge_actor_ids=args.knowledge_actor_id,
+                    defer_checkpoint=args.defer_checkpoint,
                 )
             elif args.action == "resolve-check":
                 if phase != "play":
@@ -5709,6 +5780,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     knowledge_actor_ids=args.knowledge_actor_id,
                     success_knowledge=args.success_knowledge,
                     failure_knowledge=args.failure_knowledge,
+                    defer_checkpoint=args.defer_checkpoint,
                 )
             elif args.action == "record-event":
                 if phase != "play":
@@ -5728,6 +5800,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     progress_percent=args.progress_percent,
                     audience_scope=args.event_audience_scope,
                     source_scene_id=args.source_scene_id,
+                    defer_checkpoint=args.defer_checkpoint,
                 )
             elif args.action == "record-outcome":
                 if phase != "play":
@@ -5754,6 +5827,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     progress_percent=args.progress_percent,
                     audience_scope=args.event_audience_scope,
                     source_scene_id=args.source_scene_id,
+                    defer_checkpoint=args.defer_checkpoint,
                 )
             elif args.action == "apply-damage":
                 if phase != "play":
@@ -5861,6 +5935,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     equip_slot=args.item_equip_slot,
                     reason=args.item_reason,
                     checkpoint_label=args.checkpoint_label,
+                    defer_checkpoint=args.defer_checkpoint,
                 )
             elif args.action == "transfer-source-item":
                 if phase != "play":
@@ -5879,6 +5954,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     quantity=args.transfer_item_quantity,
                     reason=args.transfer_reason,
                     checkpoint_label=args.checkpoint_label,
+                    defer_checkpoint=args.defer_checkpoint,
                 )
             elif args.action == "acquire-loot":
                 if phase != "play":
@@ -5897,6 +5973,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     reason=args.loot_reason,
                     knowledge_actor_ids=args.knowledge_actor_id,
                     source_scene_id=args.source_scene_id,
+                    defer_checkpoint=args.defer_checkpoint,
                 )
             elif args.action == "spend-coins":
                 if phase != "play":

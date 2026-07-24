@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import argparse
+import asyncio
 import hashlib
 import io
 import json
@@ -15,6 +17,7 @@ from scripts.regression_campaign import (
     _expanded_source_ref,
     _load_json_object,
     _load_review_override,
+    _prepare_statblock,
     _statblock_creation_key,
     _validate_noncombat_scene,
 )
@@ -80,6 +83,39 @@ def test_prepare_statblock_accepts_an_npc_actor_type(
     )
 
     assert _arguments().actor_type == "npc"
+
+
+def test_prepare_statblock_accepts_deferred_main_timeline_checkpoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "regression_campaign.py",
+            "--home",
+            str(tmp_path),
+            "--campaign-id",
+            "campaign",
+            "--output",
+            str(tmp_path / "report.json"),
+            "--defer-checkpoint",
+        ],
+    )
+
+    assert _arguments().defer_checkpoint is True
+
+
+def test_prepare_statblock_rejects_deferred_isolated_branch() -> None:
+    args = argparse.Namespace(
+        review_id="review-1",
+        candidate_id=None,
+        defer_checkpoint=True,
+        isolate_branch=True,
+    )
+
+    with pytest.raises(ValueError, match="cannot defer.*isolated branch"):
+        asyncio.run(_prepare_statblock(args))
 
 
 def test_statblock_creation_key_scopes_repeated_source_actors_by_identity() -> None:
