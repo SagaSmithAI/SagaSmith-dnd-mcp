@@ -303,6 +303,7 @@ def test_text_module_spellcaster_ocr_hydrates_source_bound_spells(
 
         actor = created["character"]
         assert actor["sheet"]["spellcasting"]["ability"] == "intelligence"
+        assert actor["sheet"]["spellcasting"]["class_lists"] == ["wizard"]
         assert actor["sheet"]["spellcasting"]["spell_slots"] == {
             "1": {
                 "label": "Level 1 spell slots",

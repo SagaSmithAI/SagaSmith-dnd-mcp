@@ -154,6 +154,7 @@ from sagasmith_dnd.random_stream import (
     use_random_stream,
 )
 from sagasmith_dnd.rule_engine import (
+    ResolutionContext,
     RuleCompilationError,
     apply_rule_event,
     compile_mechanics,
@@ -178,14 +179,20 @@ from sagasmith_dnd.spell_resolution import (
     spell_attack_count,
 )
 from sagasmith_dnd.spells import (
+    CORE_MAGIC_ITEM_LAST_CHARGE_MECHANIC_ID,
+    CORE_MAGIC_ITEM_RECHARGE_MECHANIC_ID,
     available_shield_attack_defenses,
     available_shield_magic_missile_defenses,
+    consume_magic_item_spell_cast,
     consume_readied_spell,
     consume_shield_reaction,
     consume_spell_cast,
     is_core_magic_missile_spell,
     is_core_shield_spell,
+    magic_item_spell_card,
+    recharge_magic_item_charges,
     replace_prepared_spells,
+    resolve_magic_item_last_charge,
     validate_magic_missile_allocations,
     validate_spell_grant,
 )
@@ -6187,6 +6194,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         cast_level: int | None = None,
         ritual: bool = False,
         component_ruling: dict[str, Any] | None = None,
+        source_item_id: str | None = None,
         choice_id: str | None = None,
         principal_id: str = "system:local",
         expected_revision: int | None = None,
@@ -6205,6 +6213,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "cast_level": cast_level,
             "ritual": ritual,
             "component_ruling": component_ruling or {},
+            "source_item_id": source_item_id,
             "choice_id": choice_id,
             "target_allocations": target_allocations,
             "declaration": declaration or {},
@@ -6221,14 +6230,26 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 f"expected {expected_revision}, found {campaign.revision}"
             )
         current = characters.get(actor_id)
-        spell_entry = next(
-            item
-            for item in current.sheet.get("content", {}).get("spells", [])
-            if item.get("id") == spell_id
+        spell_entry = (
+            magic_item_spell_card(
+                current.sheet,
+                source_item_id=source_item_id,
+                spell_id=spell_id,
+            )
+            if source_item_id
+            else next(
+                item
+                for item in current.sheet.get("content", {}).get("spells", [])
+                if item.get("id") == spell_id
+            )
         )
         magic_missile = is_core_magic_missile_spell(spell_entry)
         structured_resolution = (
-            source_spell_resolution(current.sheet, spell_id)
+            (
+                deepcopy(dict(spell_entry["resolution"]))
+                if source_item_id
+                else source_spell_resolution(current.sheet, spell_id)
+            )
             if isinstance(spell_entry.get("resolution"), dict)
             else None
         )
@@ -6289,16 +6310,38 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             component_ruling,
             principal_id,
         )
-        applied = consume_spell_cast(
-            current.sheet,
-            spell_id=spell_id,
-            cast_level=cast_level,
-            ritual=ritual,
-            component_ruling=component_ruling,
-            rules=effective_rule_context(
-                campaign_id,
-                facts={"actor_id": actor_id, "spell_id": spell_id, "cast_level": cast_level},
-            ),
+        rules = effective_rule_context(
+            campaign_id,
+            facts={
+                "actor_id": actor_id,
+                "spell_id": spell_id,
+                "cast_level": cast_level,
+                "source_item_id": source_item_id,
+            },
+        )
+        applied = (
+            consume_magic_item_spell_cast(
+                current.sheet,
+                source_item_id=source_item_id,
+                spell_id=spell_id,
+                cast_level=cast_level,
+                ritual=ritual,
+                rules=rules,
+            )
+            if source_item_id
+            else consume_spell_cast(
+                current.sheet,
+                spell_id=spell_id,
+                cast_level=cast_level,
+                ritual=ritual,
+                component_ruling=component_ruling,
+                rules=rules,
+            )
+        )
+        applied = settle_magic_item_last_charge(
+            applied,
+            source_item_id=source_item_id,
+            rules=rules,
         )
         if applied.get("status") in {"pending_choice", "pending_ruling"}:
             return {
@@ -6367,7 +6410,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             encounter,
             actor_id_value=actor_id,
             action="cast",
-            payload={"spell_id": spell_id, "cast_level": cast_level, "ritual": ritual},
+            payload={
+                "spell_id": spell_id,
+                "cast_level": cast_level,
+                "ritual": ritual,
+                "source_item_id": source_item_id,
+            },
             payment=payment,
         )
         apply_cast_visibility_ruling(
@@ -6394,6 +6442,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             payment=payment,
             casting_time=normalized_casting_time,
             spent_slot=spent_slot,
+            source_item_id=source_item_id,
         )
         resolved_cast_level = int(applied.get("cast_level", cast_level or spell_level) or 0)
         if structured_resolution is not None:
@@ -6906,7 +6955,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 )
             ],
             expected_campaign_revision=campaign.revision,
-            operation="combat.spell.cast",
+            operation=(
+                "combat.magic_item.spell.cast"
+                if source_item_id
+                else "combat.spell.cast"
+            ),
             actor=principal_id,
             branch_id=resolved_branch_id,
             idempotency_key=idempotency_key,
@@ -6920,7 +6973,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             ],
         )
         response = {
-            "status": "pending_ruling",
+            "status": (
+                "committed" if applied.get("automatic_effect") else "pending_ruling"
+            ),
             "result": {key: value for key, value in applied.items() if key != "sheet"},
             "combat": next_encounter,
             "campaign_revision": mutation_revision(campaign_id),
@@ -9232,6 +9287,69 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
 
     @mcp.tool()
+    def character_inventory_recharge(
+        character_id: str,
+        item_id: str,
+        trigger: str,
+        principal_id: str = "system:local",
+        expected_revision: int | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Roll and apply one source-declared magic-item charge recovery."""
+        current = characters.get(character_id)
+        require_character_control(current, principal_id)
+        require_outside_active_combat(current, "magic item recharge")
+        if current.campaign_id is None:
+            raise ValueError("magic item recharge requires a campaign-bound character")
+        source_item = next(
+            (
+                item
+                for item in current.sheet.get("inventory", {}).get("items", [])
+                if str(item.get("id") or "") == item_id
+            ),
+            None,
+        )
+        if source_item is None or source_item.get("kind") != "magic_item":
+            raise ValueError("item_id is not a magic item on this actor card")
+        charge_rules = dict(
+            dict(source_item.get("mechanics") or {}).get("charge_rules") or {}
+        )
+        formula = str(charge_rules.get("recovery_formula") or "")
+        if not formula:
+            raise ValueError("magic item has no source-declared charge recovery")
+        dice = asdict(roll(formula))
+        applied = recharge_magic_item_charges(
+            current.sheet,
+            source_item_id=item_id,
+            trigger=trigger,
+            rolled_total=int(dice["total"]),
+        )
+        receipts = core_receipts(
+            effective_rule_context(current.campaign_id),
+            [CORE_MAGIC_ITEM_RECHARGE_MECHANIC_ID],
+            "character.inventory.magic_item.recharge",
+        )
+        return update_sheet(
+            character_id,
+            applied["sheet"],
+            operation="character.inventory.magic_item.recharge",
+            principal_id=principal_id,
+            expected_revision=expected_revision,
+            idempotency_key=idempotency_key,
+            payload={"item_id": item_id, "trigger": trigger},
+            response_extra={
+                "recharge": {
+                    key: value
+                    for key, value in applied.items()
+                    if key not in {"sheet", "rule_receipts"}
+                }
+                | {"roll": dice},
+                "rule_receipts": receipts,
+            },
+            rule_receipts=receipts,
+        )
+
+    @mcp.tool()
     def character_ammunition_consume(
         character_id: str,
         weapon_id: str,
@@ -10109,6 +10227,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         cast_level: int | None = None,
         ritual: bool = False,
         component_ruling: dict[str, Any] | None = None,
+        source_item_id: str | None = None,
         principal_id: str = "system:local",
         expected_revision: int | None = None,
         idempotency_key: str | None = None,
@@ -10128,25 +10247,44 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "cast_level": cast_level,
             "ritual": ritual,
             "component_ruling": component_ruling or {},
+            "source_item_id": source_item_id,
         }
         scope = f"character-cast:{current.campaign_id}:{branch_id}:{principal_id}"
         replay = replay_idempotent(scope, idempotency_key, payload)
         if replay is not None:
             return replay
-        applied = consume_spell_cast(
-            current.sheet,
-            spell_id=spell_id,
-            cast_level=cast_level,
-            ritual=ritual,
-            component_ruling=component_ruling,
-            rules=effective_rule_context(
-                current.campaign_id,
-                facts={
-                    "actor_id": character_id,
-                    "spell_id": spell_id,
-                    "cast_level": cast_level,
-                },
-            ),
+        rules = effective_rule_context(
+            current.campaign_id,
+            facts={
+                "actor_id": character_id,
+                "spell_id": spell_id,
+                "cast_level": cast_level,
+                "source_item_id": source_item_id,
+            },
+        )
+        applied = (
+            consume_magic_item_spell_cast(
+                current.sheet,
+                source_item_id=source_item_id,
+                spell_id=spell_id,
+                cast_level=cast_level,
+                ritual=ritual,
+                rules=rules,
+            )
+            if source_item_id
+            else consume_spell_cast(
+                current.sheet,
+                spell_id=spell_id,
+                cast_level=cast_level,
+                ritual=ritual,
+                component_ruling=component_ruling,
+                rules=rules,
+            )
+        )
+        applied = settle_magic_item_last_charge(
+            applied,
+            source_item_id=source_item_id,
+            rules=rules,
         )
         if applied.get("status") in {"pending_choice", "pending_ruling"}:
             return {
@@ -10164,14 +10302,20 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     expected_revision=expected_revision,
                 )
             ],
-            operation="character.spell.cast",
+            operation=(
+                "character.magic_item.spell.cast"
+                if source_item_id
+                else "character.spell.cast"
+            ),
             actor=principal_id,
             branch_id=branch_id,
             idempotency_key=idempotency_key,
             rule_receipts=list(applied.get("rule_receipts") or []),
         )
         response = {
-            "status": "pending_ruling",
+            "status": (
+                "committed" if applied.get("automatic_effect") else "pending_ruling"
+            ),
             "result": {key: value for key, value in applied.items() if key != "sheet"},
             "character": character_view(characters.get(character_id)),
         }
@@ -14252,6 +14396,137 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         }
         return validate_character_sheet(sheet), warnings
 
+    def hydrate_magic_item_spell_artifacts(
+        campaign_id: str,
+        item: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Bind declared magic-item spell ids to exact active catalog cards."""
+        hydrated = deepcopy(item)
+        mechanics = deepcopy(dict(hydrated.get("mechanics") or {}))
+        spellcasting = mechanics.get("spellcasting")
+        if spellcasting is None:
+            return hydrated
+        if hydrated.get("kind") != "magic_item":
+            raise ValueError("item spellcasting is supported only for kind=magic_item")
+        if not str(hydrated.get("source_key") or "").strip():
+            raise ValueError("magic item spellcasting requires a source_key")
+        if not isinstance(spellcasting, dict):
+            raise ValueError("magic item mechanics.spellcasting must be an object")
+        allowed_spellcasting = {
+            "requires_attunement",
+            "requires_class_spell_list",
+            "components_required",
+            "spells",
+        }
+        unexpected = sorted(set(spellcasting) - allowed_spellcasting)
+        if unexpected:
+            raise ValueError(
+                f"magic item spellcasting has unsupported fields: {unexpected}"
+            )
+        raw_spells = spellcasting.get("spells")
+        if not isinstance(raw_spells, list) or not raw_spells:
+            raise ValueError("magic item spellcasting requires at least one spell")
+        available = available_content_artifacts(campaign_id, kind="spell")
+        resolved: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for index, specification in enumerate(raw_spells):
+            if not isinstance(specification, dict):
+                raise ValueError(f"magic item spellcasting.spells[{index}] must be an object")
+            allowed_specification = {"artifact_id", "charge_cost", "casting_time"}
+            unknown = sorted(set(specification) - allowed_specification)
+            if unknown:
+                raise ValueError(
+                    f"magic item spellcasting.spells[{index}] has unsupported fields: "
+                    f"{unknown}"
+                )
+            artifact_id = str(specification.get("artifact_id") or "").strip()
+            if not artifact_id or artifact_id in seen:
+                raise ValueError("magic item spell artifact ids must be present and unique")
+            seen.add(artifact_id)
+            charge_cost = specification.get("charge_cost")
+            if (
+                isinstance(charge_cost, bool)
+                or not isinstance(charge_cost, int)
+                or charge_cost <= 0
+            ):
+                raise ValueError("magic item spell charge_cost must be a positive integer")
+            matches = [entry for entry in available if str(entry[2].get("id")) == artifact_id]
+            if len(matches) != 1:
+                raise ValueError(
+                    f"magic item spell artifact must resolve exactly once: {artifact_id}"
+                )
+            pack_id, version, artifact = matches[0]
+            card = deepcopy(dict(artifact.get("card") or {}))
+            card.update(
+                {
+                    "id": artifact_id,
+                    "pack_id": pack_id,
+                    "pack_version": version,
+                    "rule_refs": list(artifact.get("rule_refs") or []),
+                    "mechanic_refs": list(artifact.get("mechanic_refs") or []),
+                }
+            )
+            casting_time = str(specification.get("casting_time") or "").strip()
+            resolved.append(
+                {
+                    "artifact_id": artifact_id,
+                    "charge_cost": charge_cost,
+                    **({"casting_time": casting_time} if casting_time else {}),
+                    "card": card,
+                }
+            )
+        charges = dict(hydrated.get("charges") or {})
+        maximum = charges.get("max")
+        if isinstance(maximum, bool) or not isinstance(maximum, int) or maximum <= 0:
+            raise ValueError("magic item spellcasting requires a positive charges.max")
+        if max(item["charge_cost"] for item in resolved) > maximum:
+            raise ValueError("magic item spell charge_cost exceeds charges.max")
+        mechanics["spellcasting"] = {
+            "requires_attunement": bool(spellcasting.get("requires_attunement")),
+            "requires_class_spell_list": bool(
+                spellcasting.get("requires_class_spell_list")
+            ),
+            "components_required": bool(
+                spellcasting.get("components_required", True)
+            ),
+            "spells": resolved,
+        }
+        hydrated["mechanics"] = mechanics
+        return hydrated
+
+    def settle_magic_item_last_charge(
+        applied: dict[str, Any],
+        *,
+        source_item_id: str | None,
+        rules: ResolutionContext,
+    ) -> dict[str, Any]:
+        """Resolve a source-bound last-charge destruction check in the same mutation."""
+        if not source_item_id or not applied.get("last_charge_rule"):
+            return applied
+        last_charge_rule = dict(applied["last_charge_rule"])
+        dice = asdict(roll(str(last_charge_rule["formula"])))
+        resolution = resolve_magic_item_last_charge(
+            applied["sheet"],
+            source_item_id=source_item_id,
+            rolled_total=int(dice["total"]),
+        )
+        result = dict(applied)
+        result["sheet"] = resolution["sheet"]
+        result["last_charge_resolution"] = {
+            key: value
+            for key, value in resolution.items()
+            if key not in {"sheet", "rule_receipts"}
+        } | {"roll": dice}
+        result["rule_receipts"] = [
+            *list(applied.get("rule_receipts") or []),
+            *core_receipts(
+                rules,
+                [CORE_MAGIC_ITEM_LAST_CHARGE_MECHANIC_ID],
+                "spell.magic_item.last_charge",
+            ),
+        ]
+        return result
+
     def level_advancement_content_context(
         campaign_id: str,
         sheet: dict[str, Any],
@@ -16651,7 +16926,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     @mcp.tool()
     def inventory_change(
         owner: Literal["character", "party"],
-        action: Literal["add", "update", "remove", "equip", "consume_ammunition"],
+        action: Literal[
+            "add",
+            "update",
+            "remove",
+            "equip",
+            "recharge",
+            "consume_ammunition",
+        ],
         owner_id: str,
         payload: dict[str, Any] | None = None,
         principal_id: str = "system:local",
@@ -16664,9 +16946,23 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             raise ValueError("party inventory supports only add and remove")
         if owner == "character":
             if action == "add":
+                current = characters.get(owner_id)
+                item = required(data, "item")
+                if (
+                    isinstance(item, dict)
+                    and dict(item.get("mechanics") or {}).get("spellcasting") is not None
+                ):
+                    if current.campaign_id is None:
+                        raise ValueError(
+                            "magic item spell hydration requires a campaign-bound character"
+                        )
+                    item = hydrate_magic_item_spell_artifacts(
+                        current.campaign_id,
+                        item,
+                    )
                 result = character_inventory_add(
                     owner_id,
-                    required(data, "item"),
+                    item,
                     principal_id,
                     expected_revision,
                     idempotency_key,
@@ -16694,6 +16990,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     owner_id,
                     required(data, "item_id"),
                     required(data, "slot"),
+                    principal_id,
+                    expected_revision,
+                    idempotency_key,
+                )
+            elif action == "recharge":
+                result = character_inventory_recharge(
+                    owner_id,
+                    required(data, "item_id"),
+                    required(data, "trigger"),
                     principal_id,
                     expected_revision,
                     idempotency_key,
@@ -16958,6 +17263,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 data.get("cast_level"),
                 data.get("ritual", False),
                 data.get("component_ruling"),
+                data.get("source_item_id"),
                 principal_id,
                 expected_revision,
                 idempotency_key,
@@ -18451,6 +18757,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         "character_inventory_update",
         "character_inventory_remove",
         "character_inventory_equip",
+        "character_inventory_recharge",
         "character_ammunition_consume",
         "character_inventory_transfer",
         "character_effect_add",
