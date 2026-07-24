@@ -1803,6 +1803,7 @@ def test_level_advancement_exhausts_public_follow_up_and_restores_play(
                                     "artifact_id": "feature-jack",
                                     "name": "Jack of All Trades",
                                     "selection_requirements": {},
+                                    "grant_level": 2,
                                 }
                             ],
                             "subclass_options": [],
@@ -1841,7 +1842,13 @@ def test_level_advancement_exhausts_public_follow_up_and_restores_play(
             if tool_id == "character_content_apply":
                 artifact_id = arguments["artifact_id"]
                 if artifact_id == "feature-jack":
-                    self.actor["sheet"]["content"]["features"].append({"id": artifact_id})
+                    assert arguments["selection"] == {"grant_level": 2}
+                    self.actor["sheet"]["content"]["features"].append(
+                        {
+                            "id": artifact_id,
+                            "advancement_grants": [{"level": 2}],
+                        }
+                    )
                 else:
                     assert arguments["selection"] == {
                         "source_class": "Bard",
@@ -1910,7 +1917,9 @@ def test_level_advancement_exhausts_public_follow_up_and_restores_play(
 
     assert client.phase == "play"
     assert result["actor"]["sheet"]["progression"]["level"] == 2
-    assert result["applied_features"] == [{"artifact_id": "feature-jack", "selection": {}}]
+    assert result["applied_features"] == [
+        {"artifact_id": "feature-jack", "selection": {"grant_level": 2}}
+    ]
     assert result["applied_spells"] == ["spell-heroism"]
     if defer_checkpoint:
         assert result["checkpoint"] is None

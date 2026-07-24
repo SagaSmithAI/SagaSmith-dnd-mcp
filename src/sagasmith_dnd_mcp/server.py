@@ -10587,6 +10587,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 context["feature_options"]
                 or context["subclass_options"]
                 or any(int(value) for value in applied["spell_choices"].values())
+                or applied["spellcasting"].get("mode") in {"prepared", "spellbook"}
             ),
         }
         result = {key: value for key, value in applied.items() if key != "sheet"}
@@ -15142,7 +15143,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     }
                 )
         feature_records = list(sheet.get("content", {}).get("features", []))
-        present_features = {str(item.get("id") or "") for item in feature_records}
+        present_features = {
+            str(item.get("id") or ""): item for item in feature_records if item.get("id")
+        }
         for feature in feature_records:
             artifact_id = str(feature.get("id") or "")
             if not artifact_id or not feature.get("pack_id") or not feature.get("pack_version"):
@@ -15183,7 +15186,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             minimum_level = int(card.get("minimum_level", 1) or 1)
             if declared_class.casefold() != class_name.casefold() or minimum_level > new_level:
                 continue
-            if kind == "feature" and artifact_id not in present_features:
+            repeatable_levels = {
+                int(value)
+                for value in card.get("repeatable_selection_levels", [])
+                if int(value) > 0
+            }
+            repeat_due = new_level in repeatable_levels
+            if kind == "feature" and (artifact_id not in present_features or repeat_due):
                 declared_subclass = str(card.get("subclass_name") or "")
                 if declared_subclass and declared_subclass.casefold() != subclass_name.casefold():
                     continue
@@ -15197,6 +15206,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         "selection_requirements": deepcopy(
                             dict(card.get("selection_requirements") or {})
                         ),
+                        "grant_level": new_level if repeat_due else None,
                         "pack_id": pack_id,
                         "pack_version": version,
                         "rule_refs": list(artifact.get("rule_refs") or []),
@@ -15295,6 +15305,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "class_name": str(card.get("class_name") or ""),
                     "subclass_name": str(card.get("subclass_name") or ""),
                     "minimum_level": int(card.get("minimum_level", 1) or 1),
+                    "unlock_levels": [
+                        int(value) for value in card.get("unlock_levels", [])
+                    ],
+                    "repeatable_selection_levels": [
+                        int(value)
+                        for value in card.get("repeatable_selection_levels", [])
+                    ],
                     **requirements,
                 }
             elif artifact_kind == "species":
@@ -16120,8 +16137,33 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             sheet["progression"]["species"] = selected_species
         elif kind in {"feature", "activity"}:
             section = "features" if kind == "feature" else "activities"
-            if any(item.get("id") == artifact_id for item in sheet["content"][section]):
+            existing_content = next(
+                (
+                    item
+                    for item in sheet["content"][section]
+                    if item.get("id") == artifact_id
+                ),
+                None,
+            )
+            grant_level = int(selection.get("grant_level", 0) or 0)
+            repeatable_levels = {
+                int(value)
+                for value in card.get("repeatable_selection_levels", [])
+                if int(value) > 0
+            }
+            if kind == "feature" and not grant_level and repeatable_levels:
+                grant_level = int(card.get("minimum_level", 1) or 1)
+            if existing_content is not None and (
+                kind != "feature" or grant_level not in repeatable_levels
+            ):
                 raise ValueError(f"content {kind} is already present")
+            if grant_level and grant_level not in repeatable_levels:
+                raise ValueError("feature grant_level is not a repeatable selection level")
+            if existing_content is not None and any(
+                int(item.get("level", 0) or 0) == grant_level
+                for item in existing_content.get("advancement_grants", [])
+            ):
+                raise ValueError("feature selection is already recorded for this level")
             if kind == "feature":
                 declared_class = str(card.get("class_name") or "").strip()
                 declared_subclass = str(card.get("subclass_name") or "").strip()
@@ -16140,6 +16182,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     raise ValueError(
                         f"{declared_class} must reach level {minimum_level} for this feature"
                     )
+                if target is not None and grant_level > int(target.get("level", 0) or 0):
+                    raise ValueError("feature grant_level exceeds the actor's class level")
                 if declared_subclass and (
                     target is None
                     or str(target.get("subclass") or "").casefold() != declared_subclass.casefold()
@@ -16148,56 +16192,137 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 requirements = dict(card.get("selection_requirements") or {})
                 choice_field = str(requirements.get("field") or "")
                 if choice_field:
-                    selected = selection.get(choice_field)
-                    if int(requirements.get("count", 1) or 1) == 1 and not isinstance(
-                        selected, list
-                    ):
-                        selected_values = [str(selected or "").strip()]
-                    else:
-                        selected_values = _validated_distinct_choices(
-                            selected,
-                            count=int(requirements.get("count", 1) or 1),
-                            label=f"feature {choice_field}",
-                        )
-                    if any(not item for item in selected_values):
-                        raise ValueError(f"feature {choice_field} choice is required")
-                    options = {str(item).casefold() for item in requirements.get("options", [])}
-                    if options and any(item.casefold() not in options for item in selected_values):
-                        raise ValueError("feature choice is not one of the allowed options")
-                    if requirements.get("requires_existing_proficiency"):
-                        for item in selected_values:
-                            skill = sheet["skills"].get(item.casefold())
-                            if requirements.get("skills_only") and skill is None:
+                    if requirements.get("kind") == "ability_score_increase":
+                        selected_increases = selection.get(choice_field)
+                        if not isinstance(selected_increases, dict) or not selected_increases:
+                            raise ValueError(
+                                "feature ability_score_increases must be a non-empty object"
+                            )
+                        normalized_increases: dict[str, int] = {}
+                        for ability, amount in selected_increases.items():
+                            normalized_ability = str(ability).strip().casefold()
+                            if normalized_ability not in sheet["abilities"]:
                                 raise ValueError(
-                                    "feature expertise choice must be an existing skill"
-                                )
-                            tool_known = item.casefold() in {
-                                value.casefold()
-                                for value in sheet["traits"]["proficiencies"]["tools"]
-                            }
-                            if not tool_known and (
-                                skill is None or skill.get("proficiency") == "none"
-                            ):
-                                raise ValueError(
-                                    "feature expertise choice requires an existing proficiency"
-                                )
-                            if skill is not None:
-                                skill["proficiency"] = "expertise"
-                    if requirements.get("grants_skill_proficiency"):
-                        for item in selected_values:
-                            skill = sheet["skills"].get(item.casefold())
-                            if skill is None:
-                                raise ValueError(
-                                    "feature proficiency choice must be an existing skill"
+                                    "feature ability score increase names an unknown ability"
                                 )
                             if (
-                                requirements.get("requires_untrained_skill")
-                                and skill.get("proficiency") != "none"
+                                isinstance(amount, bool)
+                                or not isinstance(amount, int)
+                                or amount <= 0
                             ):
                                 raise ValueError(
-                                    "feature proficiency choice must be an untrained skill"
+                                    "feature ability score increases must be positive integers"
                                 )
-                            skill["proficiency"] = "proficient"
+                            normalized_increases[normalized_ability] = amount
+                        distribution = sorted(normalized_increases.values(), reverse=True)
+                        allowed = [
+                            sorted(
+                                [int(amount) for amount in distribution_option],
+                                reverse=True,
+                            )
+                            for distribution_option in requirements.get(
+                                "allowed_distributions", []
+                            )
+                        ]
+                        if distribution not in allowed:
+                            raise ValueError(
+                                "feature ability score increases do not match an allowed "
+                                "distribution"
+                            )
+                        maximum_score = int(requirements.get("maximum_score", 20) or 20)
+                        previous_constitution = int(
+                            sheet["abilities"]["constitution"]["score"]
+                        )
+                        for ability, amount in normalized_increases.items():
+                            old_score = int(sheet["abilities"][ability]["score"])
+                            if old_score + amount > maximum_score:
+                                raise ValueError(
+                                    "feature ability score increase exceeds its maximum"
+                                )
+                            sheet["abilities"][ability]["score"] = old_score + amount
+                        sheet = apply_constitution_score_hit_point_change(
+                            sheet,
+                            previous_score=previous_constitution,
+                            new_score=int(sheet["abilities"]["constitution"]["score"]),
+                            source=(
+                                f"{declared_class} level {grant_level}: "
+                                "Ability Score Improvement"
+                            ),
+                        )
+                    else:
+                        selected = selection.get(choice_field)
+                        if int(requirements.get("count", 1) or 1) == 1 and not isinstance(
+                            selected, list
+                        ):
+                            selected_values = [str(selected or "").strip()]
+                        else:
+                            selected_values = _validated_distinct_choices(
+                                selected,
+                                count=int(requirements.get("count", 1) or 1),
+                                label=f"feature {choice_field}",
+                            )
+                        if any(not item for item in selected_values):
+                            raise ValueError(f"feature {choice_field} choice is required")
+                        options = {
+                            str(item).casefold() for item in requirements.get("options", [])
+                        }
+                        if options and any(
+                            item.casefold() not in options for item in selected_values
+                        ):
+                            raise ValueError("feature choice is not one of the allowed options")
+                        if requirements.get("requires_existing_proficiency"):
+                            for item in selected_values:
+                                skill = sheet["skills"].get(item.casefold())
+                                if requirements.get("skills_only") and skill is None:
+                                    raise ValueError(
+                                        "feature expertise choice must be an existing skill"
+                                    )
+                                tool_key = item.casefold()
+                                tool_known = tool_key in {
+                                    value.casefold()
+                                    for value in sheet["traits"]["proficiencies"]["tools"]
+                                }
+                                tool_expertise = {
+                                    value.casefold()
+                                    for value in sheet["traits"]["proficiencies"][
+                                        "tool_expertise"
+                                    ]
+                                }
+                                if not tool_known and (
+                                    skill is None or skill.get("proficiency") == "none"
+                                ):
+                                    raise ValueError(
+                                        "feature expertise choice requires an existing "
+                                        "proficiency"
+                                    )
+                                if requirements.get("requires_new_expertise") and (
+                                    (skill is not None and skill.get("proficiency") == "expertise")
+                                    or (tool_known and tool_key in tool_expertise)
+                                ):
+                                    raise ValueError(
+                                        "feature expertise choice already has expertise"
+                                    )
+                                if skill is not None:
+                                    skill["proficiency"] = "expertise"
+                                elif tool_known:
+                                    sheet["traits"]["proficiencies"][
+                                        "tool_expertise"
+                                    ].append(item)
+                        if requirements.get("grants_skill_proficiency"):
+                            for item in selected_values:
+                                skill = sheet["skills"].get(item.casefold())
+                                if skill is None:
+                                    raise ValueError(
+                                        "feature proficiency choice must be an existing skill"
+                                    )
+                                if (
+                                    requirements.get("requires_untrained_skill")
+                                    and skill.get("proficiency") != "none"
+                                ):
+                                    raise ValueError(
+                                        "feature proficiency choice must be an untrained skill"
+                                    )
+                                skill["proficiency"] = "proficient"
                 mechanical_grants = dict(card.get("mechanical_grants") or {})
                 armor = sheet["traits"]["proficiencies"]["armor"]
                 sheet["traits"]["proficiencies"]["armor"] = list(
@@ -16227,14 +16352,42 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "class_name",
                     "subclass_name",
                     "minimum_level",
+                    "unlock_levels",
+                    "repeatable_selection_levels",
                     "selection_requirements",
                     "mechanical_grants",
                 ):
                     card.pop(metadata_key, None)
-                if selection:
-                    card["choices"] = {**dict(card.get("choices") or {}), **selection}
-            card.update(provenance)
-            sheet["content"][section].append(card)
+                recorded_selection = {
+                    key: value for key, value in selection.items() if key != "grant_level"
+                }
+                grant_record = {
+                    "level": grant_level,
+                    "choices": deepcopy(recorded_selection),
+                    "pack_id": pack_id,
+                    "pack_version": version,
+                    "rule_refs": list(artifact.get("rule_refs") or []),
+                }
+                if existing_content is not None:
+                    current_record = next(
+                        item
+                        for item in sheet["content"][section]
+                        if item.get("id") == artifact_id
+                    )
+                    current_record.setdefault("advancement_grants", []).append(grant_record)
+                else:
+                    if recorded_selection:
+                        card["choices"] = {
+                            **dict(card.get("choices") or {}),
+                            **recorded_selection,
+                        }
+                    if grant_level:
+                        card["advancement_grants"] = [grant_record]
+                    card.update(provenance)
+                    sheet["content"][section].append(card)
+            else:
+                card.update(provenance)
+                sheet["content"][section].append(card)
         else:
             return {
                 "status": "pending_ruling",

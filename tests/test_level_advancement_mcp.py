@@ -99,6 +99,181 @@ def _cleric_sheet() -> dict:
     return sheet
 
 
+def _fighter_sheet() -> dict:
+    sheet = default_character_sheet()
+    sheet["progression"]["level"] = 3
+    sheet["progression"]["classes"] = [
+        {"name": "Fighter", "level": 3, "subclass": "Champion", "hit_die": 10}
+    ]
+    sheet["abilities"]["strength"]["score"] = 15
+    sheet["abilities"]["constitution"]["score"] = 13
+    sheet["combat"]["hp"] = {"value": 20, "max": 24, "temp": 0}
+    sheet["combat"]["hit_dice"] = {
+        "d10": {
+            "label": "d10",
+            "value": 3,
+            "max": 3,
+            "recovers_on": "long_rest",
+            "source_key": "Fighter",
+        }
+    }
+    sheet["combat"]["hp_progression"] = [
+        {
+            "level": level,
+            "method": "manual" if level == 1 else "fixed",
+            "value": 8,
+            "source": f"Fighter level {level}",
+        }
+        for level in range(1, 4)
+    ]
+    return sheet
+
+
+def test_ability_score_improvement_is_applied_and_repeats_at_later_unlocks(
+    tmp_path: Path,
+) -> None:
+    workspace = Path(__file__).resolve().parents[2]
+    config = McpConfig(
+        home=tmp_path / "home",
+        database_url=None,
+        chroma_url=None,
+        chroma_path_override=None,
+        dnd_skills_dir=workspace / "SagaSmith-dnd-skills",
+        modulegen_skills_dir=workspace / "SagaSmith-module-gen-skills",
+        auto_seed_rules=True,
+    )
+
+    async def exercise() -> None:
+        server = create_server(config)
+        campaign = await _call(
+            server,
+            "campaign_create",
+            {"name": "Repeated ASI", "edition": "2014", "idempotency_key": "campaign"},
+        )
+        actor = await _call(
+            server,
+            "character_create_from",
+            {
+                "mode": "direct",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "name": "Ari",
+                    "sheet": _fighter_sheet(),
+                },
+                "idempotency_key": "actor",
+            },
+        )
+
+        level_four = await _call(
+            server,
+            "character_state_change",
+            {
+                "character_id": actor["id"],
+                "action": "level_advance",
+                "payload": {
+                    "class_name": "Fighter",
+                    "hp_method": "fixed",
+                    "reason": "milestone",
+                    "source_ref": "module:chapter-1",
+                },
+                "expected_revision": actor["revision"],
+                "idempotency_key": "level-4",
+            },
+        )
+        asi_id = "dnd5e.content.srd2014.feature.fighter-ability-score-improvement"
+        first_offer = next(
+            item
+            for item in level_four["advancement"]["follow_up"]["feature_artifacts"]
+            if item["artifact_id"] == asi_id
+        )
+        assert first_offer["grant_level"] == 4
+        first_asi = await _call(
+            server,
+            "character_content_apply",
+            {
+                "character_id": actor["id"],
+                "artifact_id": asi_id,
+                "selection": {
+                    "grant_level": 4,
+                    "ability_score_increases": {"strength": 1, "constitution": 1},
+                },
+                "expected_revision": level_four["character"]["revision"],
+                "idempotency_key": "asi-4",
+            },
+        )
+        assert first_asi["sheet"]["abilities"]["strength"]["score"] == 16
+        assert first_asi["sheet"]["abilities"]["constitution"]["score"] == 14
+        assert first_asi["sheet"]["combat"]["hp"] == {"value": 24, "max": 35, "temp": 0}
+        feature = next(
+            item for item in first_asi["sheet"]["content"]["features"] if item["id"] == asi_id
+        )
+        assert [item["level"] for item in feature["advancement_grants"]] == [4]
+
+        current = first_asi
+        for level in (5, 6):
+            current = await _call(
+                server,
+                "character_state_change",
+                {
+                    "character_id": actor["id"],
+                    "action": "level_advance",
+                    "payload": {
+                        "class_name": "Fighter",
+                        "hp_method": "fixed",
+                        "reason": "milestone",
+                        "source_ref": f"module:chapter-{level - 2}",
+                    },
+                    "expected_revision": current["revision"]
+                    if "revision" in current
+                    else current["character"]["revision"],
+                    "idempotency_key": f"level-{level}",
+                },
+            )
+        repeat_offer = next(
+            item
+            for item in current["advancement"]["follow_up"]["feature_artifacts"]
+            if item["artifact_id"] == asi_id
+        )
+        assert repeat_offer["grant_level"] == 6
+        second_asi = await _call(
+            server,
+            "character_content_apply",
+            {
+                "character_id": actor["id"],
+                "artifact_id": asi_id,
+                "selection": {
+                    "grant_level": 6,
+                    "ability_score_increases": {"strength": 2},
+                },
+                "expected_revision": current["character"]["revision"],
+                "idempotency_key": "asi-6",
+            },
+        )
+        assert second_asi["sheet"]["abilities"]["strength"]["score"] == 18
+        feature = next(
+            item for item in second_asi["sheet"]["content"]["features"] if item["id"] == asi_id
+        )
+        assert [item["level"] for item in feature["advancement_grants"]] == [4, 6]
+
+        with pytest.raises(Exception, match="already recorded"):
+            await _call(
+                server,
+                "character_content_apply",
+                {
+                    "character_id": actor["id"],
+                    "artifact_id": asi_id,
+                    "selection": {
+                        "grant_level": 6,
+                        "ability_score_increases": {"dexterity": 2},
+                    },
+                    "expected_revision": second_asi["revision"],
+                    "idempotency_key": "duplicate-asi-6",
+                },
+            )
+
+    asyncio.run(exercise())
+
+
 def test_lobby_level_advance_is_source_bound_and_reports_catalog_follow_up(
     tmp_path: Path,
 ) -> None:

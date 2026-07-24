@@ -5746,12 +5746,15 @@ async def _advance_level(
     applied_features: list[dict[str, Any]] = []
     for artifact_id, feature in sorted(required_features.items()):
         requirements = dict(feature.get("selection_requirements") or {})
-        selection = feature_selections.get(artifact_id, {})
+        selection = deepcopy(feature_selections.get(artifact_id, {}))
         choice_field = str(requirements.get("field") or "")
         if choice_field and choice_field not in selection:
             raise ValueError(
                 f"level feature {artifact_id} requires an explicit {choice_field} choice"
             )
+        grant_level = int(feature.get("grant_level", 0) or 0)
+        if grant_level:
+            selection["grant_level"] = grant_level
         applied = _facade_value(
             await client.domain(
                 "character_content_apply",
@@ -5891,6 +5894,21 @@ async def _advance_level(
     }
     if not set(required_features).issubset(verified_features):
         raise RuntimeError("level advancement verification found missing feature artifacts")
+    verified_feature_records = {
+        str(item.get("id") or ""): item
+        for item in dict(verified_sheet.get("content") or {}).get("features", [])
+    }
+    for artifact_id, feature in required_features.items():
+        grant_level = int(feature.get("grant_level", 0) or 0)
+        if grant_level and not any(
+            int(item.get("level", 0) or 0) == grant_level
+            for item in verified_feature_records[artifact_id].get(
+                "advancement_grants", []
+            )
+        ):
+            raise RuntimeError(
+                "level advancement verification found a missing repeatable feature grant"
+            )
     verified_spells = {
         str(item.get("id") or "")
         for item in dict(verified_sheet.get("content") or {}).get("spells", [])
