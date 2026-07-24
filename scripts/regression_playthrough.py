@@ -494,6 +494,25 @@ def _manifest_payload_identity(manifest: dict[str, Any]) -> str:
     return _token(serialized, length=24)
 
 
+def _short_rest_identity(
+    members: list[dict[str, Any]],
+    *,
+    duration_minutes: int,
+    reason: str,
+) -> str:
+    serialized = json.dumps(
+        {
+            "members": members,
+            "duration_minutes": duration_minutes,
+            "reason": reason.strip(),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return _token(serialized, length=24)
+
+
 def _check_knowledge_key(
     run_id: str,
     scene_id: str,
@@ -2549,6 +2568,11 @@ async def _short_rest(
     actor_ids = [item["actor_id"] for item in normalized]
     if len(actor_ids) != len(set(actor_ids)):
         raise ValueError("short-rest member actor ids must be unique")
+    rest_identity = _short_rest_identity(
+        normalized,
+        duration_minutes=duration_minutes,
+        reason=reason,
+    )
     actors = []
     for actor_id in actor_ids:
         actor = await client.domain(
@@ -2604,7 +2628,9 @@ async def _short_rest(
                 },
                 "branch_id": str(branch["id"]),
                 "expected_revision": campaign["revision"],
-                "idempotency_key": _mutation_key(run_id, "short-rest-clock-set", reason),
+                "idempotency_key": _mutation_key(
+                    run_id, "short-rest-clock-set", rest_identity
+                ),
             },
         )
     elif start_clock is not None:
@@ -2619,7 +2645,7 @@ async def _short_rest(
             "branch_id": str(branch["id"]),
             "expected_revision": campaign["revision"],
             "idempotency_key": _mutation_key(
-                run_id, "short-rest-clock-advance", str(duration_minutes)
+                run_id, "short-rest-clock-advance", rest_identity
             ),
         },
     )
@@ -2639,7 +2665,9 @@ async def _short_rest(
                 "action": "rest",
                 "payload": payload,
                 "expected_revision": actor_by_id[actor_id]["revision"],
-                "idempotency_key": _mutation_key(run_id, "short-rest-actor", actor_id),
+                "idempotency_key": _mutation_key(
+                    run_id, "short-rest-actor", f"{rest_identity}:{actor_id}"
+                ),
             },
         )
         if result.get("status") != "committed":
@@ -2666,7 +2694,8 @@ async def _short_rest(
                     {
                         "actor_id": actor_id,
                         "knowledge_key": (
-                            f"playthrough.{_token(run_id)}.{_token(actor_id)}.short_rest"
+                            f"playthrough.{_token(run_id)}.{_token(actor_id)}."
+                            f"short_rest.{rest_identity}"
                         ),
                         "proposition": reason.strip(),
                         "disclosure_scope": "owner",
@@ -2677,7 +2706,9 @@ async def _short_rest(
                 "branch_id": str(branch["id"]),
             },
             "expected_revision": campaign["revision"],
-            "idempotency_key": _mutation_key(run_id, "short-rest-continuity", reason),
+            "idempotency_key": _mutation_key(
+                run_id, "short-rest-continuity", rest_identity
+            ),
         },
     )
     synced = await _manifest_mutation(
@@ -2685,7 +2716,7 @@ async def _short_rest(
         campaign_id=campaign_id,
         action="sync",
         run_id=run_id,
-        identity="short-rest-sync",
+        identity=f"short-rest-sync:{rest_identity}",
     )
     return {
         "member_ids": actor_ids,

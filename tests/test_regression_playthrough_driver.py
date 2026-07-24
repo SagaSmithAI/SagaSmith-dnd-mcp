@@ -45,6 +45,7 @@ from scripts.regression_playthrough import (
     _restore_phase_after_failed_refresh,
     _scene_progress_percent,
     _short_rest,
+    _short_rest_identity,
     _spend_source_currency,
     _spend_source_item,
     _stand_after_source_event,
@@ -2001,6 +2002,10 @@ def test_short_rest_advances_clock_and_applies_only_explicit_resource_choices() 
         def __init__(self) -> None:
             self.revision = 5
             self.world_time: dict = {}
+            self.keys: dict[str, list[str]] = {}
+
+        def remember(self, kind: str, key: str) -> None:
+            self.keys.setdefault(kind, []).append(key)
 
         async def core(self, tool_id: str, arguments: dict):
             assert tool_id == "campaign_query"
@@ -2031,6 +2036,7 @@ def test_short_rest_advances_clock_and_applies_only_explicit_resource_choices() 
             if tool_id == "branch_query":
                 return [{"id": "branch-1", "is_current": True}]
             if tool_id == "campaign_change" and arguments["action"] == "clock_set":
+                self.remember("clock_set", arguments["idempotency_key"])
                 assert arguments["payload"]["day"] == 1
                 self.world_time = {
                     "day": 1,
@@ -2042,6 +2048,7 @@ def test_short_rest_advances_clock_and_applies_only_explicit_resource_choices() 
                 self.revision += 1
                 return {"world_time": self.world_time}
             if tool_id == "campaign_change" and arguments["action"] == "clock_advance":
+                self.remember("clock_advance", arguments["idempotency_key"])
                 assert arguments["payload"] == {"period": "minute", "count": 60}
                 self.world_time = {
                     **self.world_time,
@@ -2051,6 +2058,7 @@ def test_short_rest_advances_clock_and_applies_only_explicit_resource_choices() 
                 self.revision += 1
                 return {"world_time": self.world_time}
             if tool_id == "character_state_change":
+                self.remember("actor", arguments["idempotency_key"])
                 assert arguments["action"] == "rest"
                 if arguments["character_id"] == "fighter":
                     assert arguments["payload"]["hit_dice_spends"] == [
@@ -2068,19 +2076,22 @@ def test_short_rest_advances_clock_and_applies_only_explicit_resource_choices() 
                     "character": {"id": arguments["character_id"]},
                 }
             if tool_id == "continuity_commit":
+                self.remember("continuity", arguments["idempotency_key"])
                 assert arguments["payload"]["event"]["payload"]["duration_minutes"] == 60
                 self.revision += 1
                 return {"event": {"id": "event-1"}, "snapshot": {"slot": 4}}
             if tool_id == "playthrough_manifest":
+                self.remember("sync", arguments["idempotency_key"])
                 return {
                     "manifest": {"status": "in_progress"},
                     "campaign_revision": self.revision,
                 }
             raise AssertionError((tool_id, arguments))
 
+    client = Client()
     result = asyncio.run(
         _short_rest(
-            Client(),
+            client,
             campaign_id="campaign-1",
             run_id="run-1",
             members=[
@@ -2099,6 +2110,71 @@ def test_short_rest_advances_clock_and_applies_only_explicit_resource_choices() 
     assert result["member_ids"] == ["fighter", "wizard"]
     assert result["clock_advanced"]["world_time"]["hour"] == 15
     assert len(result["rests"]) == 2
+    normalized = [
+        {
+            "actor_id": "fighter",
+            "arcane_recovery": {},
+            "hit_dice_spends": [{"key": "fighter:d10", "count": 1}],
+        },
+        {
+            "actor_id": "wizard",
+            "arcane_recovery": {"1": 1},
+            "hit_dice_spends": [],
+        },
+    ]
+    identity = _short_rest_identity(
+        normalized,
+        duration_minutes=60,
+        reason="The party regrouped outside the flooded passage.",
+    )
+    assert client.keys["clock_set"] == [
+        _mutation_key("run-1", "short-rest-clock-set", identity)
+    ]
+    assert client.keys["clock_advance"] == [
+        _mutation_key("run-1", "short-rest-clock-advance", identity)
+    ]
+    assert client.keys["actor"] == [
+        _mutation_key("run-1", "short-rest-actor", f"{identity}:fighter"),
+        _mutation_key("run-1", "short-rest-actor", f"{identity}:wizard"),
+    ]
+    assert client.keys["continuity"] == [
+        _mutation_key("run-1", "short-rest-continuity", identity)
+    ]
+    assert client.keys["sync"] == [
+        _mutation_key("run-1", "sync", f"short-rest-sync:{identity}")
+    ]
+
+
+def test_short_rest_identity_separates_later_rest_choices() -> None:
+    members = [
+        {
+            "actor_id": "fighter",
+            "arcane_recovery": {},
+            "hit_dice_spends": [{"key": "d10", "count": 1}],
+        }
+    ]
+    first = _short_rest_identity(
+        members,
+        duration_minutes=60,
+        reason="First rest.",
+    )
+    assert first == _short_rest_identity(
+        deepcopy(members),
+        duration_minutes=60,
+        reason="First rest.",
+    )
+    assert first != _short_rest_identity(
+        members,
+        duration_minutes=60,
+        reason="Later rest.",
+    )
+    changed = deepcopy(members)
+    changed[0]["hit_dice_spends"][0]["count"] = 2
+    assert first != _short_rest_identity(
+        changed,
+        duration_minutes=60,
+        reason="First rest.",
+    )
 
 
 def test_source_bound_time_advance_commits_clock_knowledge_and_snapshot() -> None:
