@@ -177,3 +177,80 @@ def test_combat_join_queues_actor_until_next_round(tmp_path: Path) -> None:
         assert status["combatant_state_is_current"] is False
 
     asyncio.run(exercise())
+
+
+def test_combat_end_accepts_source_surrender_outcome(tmp_path: Path) -> None:
+    config = McpConfig(
+        home=tmp_path / "home",
+        database_url=None,
+        chroma_url=None,
+        chroma_path_override=None,
+        dnd_skills_dir=tmp_path / "dnd",
+        modulegen_skills_dir=tmp_path / "modulegen",
+        auto_seed_rules=False,
+    )
+
+    async def exercise() -> None:
+        server = create_server(config)
+        campaign = await _call(
+            server,
+            "campaign_create",
+            {
+                "name": "Source surrender",
+                "edition": "2014",
+                "idempotency_key": "surrender-campaign",
+            },
+        )
+        actor = await _call(
+            server,
+            "character_create",
+            {
+                "campaign_id": campaign["id"],
+                "name": "Source Hostile",
+                "sheet": default_character_sheet(),
+                "idempotency_key": "surrender-actor",
+            },
+        )
+        campaign = await _call(server, "campaign_get", {"campaign_id": campaign["id"]})
+        phase = await _call(
+            server,
+            "game_phase",
+            {
+                "campaign_id": campaign["id"],
+                "action": "set",
+                "tool_profile": "play",
+                "expected_revision": campaign["revision"],
+                "idempotency_key": "surrender-play",
+            },
+        )
+        started = await _call(
+            server,
+            "combat_start",
+            {
+                "campaign_id": campaign["id"],
+                "participant_ids": [actor["id"]],
+                "expected_revision": phase["campaign_revision"],
+                "idempotency_key": "surrender-start",
+            },
+        )
+        ended = await _call(
+            server,
+            "combat_end",
+            {
+                "campaign_id": campaign["id"],
+                "outcome": {
+                    "status": "surrender",
+                    "summary": (
+                        "The source-designated hostile surrendered at the authored "
+                        "hit-point threshold."
+                    ),
+                },
+                "expected_revision": started["campaign_revision"],
+                "idempotency_key": "surrender-end",
+            },
+        )
+
+        assert ended["outcome"]["status"] == "surrender"
+        assert ended["combat"]["outcome"] == ended["outcome"]
+
+    asyncio.run(exercise())

@@ -15,8 +15,11 @@ from scripts.regression_encounter import (
     _preferred_multiattack_option_id,
     _roll_total,
     _should_stand,
+    _source_declared_surprise,
     _source_departure_patch,
+    _source_opening_casts,
     _source_outcome,
+    _source_surrender_outcome,
     _source_truce_outcome,
     _surprise_from_check_report,
     _surprise_from_hostile_stealth_totals,
@@ -74,6 +77,13 @@ def test_party_spell_tactics_prioritize_recovery_then_supported_offense() -> Non
         )
         is None
     )
+    actors["evil-mage"] = _spell_actor(MAGIC_MISSILE_ID)
+    assert _choose_party_spell(
+        "evil-mage",
+        party_ids=["cleric", "wizard", "ally"],
+        actors=actors,
+        living_targets=["wizard"],
+    ) == (MAGIC_MISSILE_ID, "wizard")
 
 
 def test_party_tactics_do_not_target_unobserved_hidden_combatants() -> None:
@@ -228,6 +238,70 @@ def test_source_hostage_truce_requires_a_living_leader_and_resolved_party() -> N
             truce_after_defeated=2,
             truce_actor_alive=True,
             unresolved_party=True,
+        )
+        is None
+    )
+
+
+def test_source_declared_surprise_marks_only_cited_participants() -> None:
+    surprise, basis = _source_declared_surprise(
+        party_ids=["pc-1", "pc-2"],
+        hostile_ids=["iarno"],
+        surprised_actor_ids=["iarno"],
+        source_excerpt=(
+            "If the characters approach this room through the secret passage "
+            "from area 7, they can surprise the leader."
+        ),
+    )
+
+    assert surprise == {"pc-1": False, "pc-2": False, "iarno": True}
+    assert basis["mode"] == "source_declared_surprise"
+    assert basis["surprised_actor_ids"] == ["iarno"]
+
+
+def test_source_opening_item_casts_preserve_authored_order_and_evidence() -> None:
+    casts = _source_opening_casts(
+        [
+            {
+                "actor_id": "iarno",
+                "spell_id": "mage-armor",
+                "source_item_id": "staff-of-defense",
+                "source_excerpt": "If threatened, Iarno uses his staff to cast mage armor.",
+            },
+            {
+                "actor_id": "iarno",
+                "spell_id": "shield",
+                "source_item_id": "staff-of-defense",
+                "source_excerpt": "Iarno uses the shield power of his staff.",
+            },
+        ],
+        participant_ids=["pc-1", "iarno"],
+    )
+
+    assert [item["sequence"] for item in casts] == [1, 2]
+    assert [item["spell_id"] for item in casts] == ["mage-armor", "shield"]
+    assert all(item["source_item_id"] == "staff-of-defense" for item in casts)
+
+
+def test_source_surrender_requires_threshold_life_no_escape_and_resolved_party() -> None:
+    assert _source_surrender_outcome(
+        actor_hit_points=8,
+        surrender_at_hp=8,
+        actor_alive=True,
+        no_escape=True,
+        unresolved_party=False,
+    ) == (
+        "surrender",
+        "The source-designated hostile surrendered at 8 hit points "
+        "(threshold 8) with no avenue of escape.",
+    )
+    assert (
+        _source_surrender_outcome(
+            actor_hit_points=8,
+            surrender_at_hp=8,
+            actor_alive=True,
+            no_escape=False,
+            unresolved_party=False,
         )
         is None
     )

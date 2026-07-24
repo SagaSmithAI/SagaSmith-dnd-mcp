@@ -12487,6 +12487,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             if status not in {
                 "defeat",
                 "interrupted",
+                "surrender",
                 "truce",
                 "victory",
                 "withdrawal",

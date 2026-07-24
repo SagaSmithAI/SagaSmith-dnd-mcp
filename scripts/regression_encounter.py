@@ -54,6 +54,7 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--additional-hostile-label", default="Additional source hostiles")
     parser.add_argument("--additional-hostile-source-excerpt", default="")
     parser.add_argument("--surprise-check-report", type=Path)
+    parser.add_argument("--source-surprised-actor-id", action="append", default=[])
     parser.add_argument(
         "--no-surprise",
         action="store_true",
@@ -81,6 +82,24 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--truce-after-defeated", type=int, default=0)
     parser.add_argument("--truce-actor-id", default="")
     parser.add_argument("--truce-source-excerpt", default="")
+    parser.add_argument(
+        "--source-opening-cast-json",
+        action="append",
+        type=json.loads,
+        default=[],
+        help=(
+            "Source-cited opening cast with actor_id, spell_id, source_item_id, "
+            "and source_excerpt; repeat to preserve an authored sequence"
+        ),
+    )
+    parser.add_argument("--surrender-actor-id", default="")
+    parser.add_argument("--surrender-at-hp", type=int, default=0)
+    parser.add_argument("--surrender-source-excerpt", default="")
+    parser.add_argument(
+        "--surrender-no-escape",
+        action="store_true",
+        help="Confirm the source surrender condition's no-escape predicate",
+    )
     parser.add_argument("--max-turns", type=int, default=200)
     parser.add_argument("--checkpoint-label", default="Encounter complete")
     return parser.parse_args()
@@ -292,6 +311,36 @@ def _surprise_from_check_report(
     }
 
 
+def _source_declared_surprise(
+    *,
+    party_ids: list[str],
+    hostile_ids: list[str],
+    surprised_actor_ids: list[str],
+    source_excerpt: str,
+) -> tuple[dict[str, bool], dict[str, Any]]:
+    participants = [*party_ids, *hostile_ids]
+    normalized = [str(item).strip() for item in surprised_actor_ids]
+    if (
+        not normalized
+        or any(not item for item in normalized)
+        or len(normalized) != len(set(normalized))
+        or not set(normalized) <= set(participants)
+        or not source_excerpt.strip()
+    ):
+        raise ValueError(
+            "source-declared surprise requires unique participant actor ids "
+            "and an exact source excerpt"
+        )
+    return (
+        {actor_id: actor_id in normalized for actor_id in participants},
+        {
+            "mode": "source_declared_surprise",
+            "surprised_actor_ids": normalized,
+            "source_excerpt": source_excerpt.strip(),
+        },
+    )
+
+
 def _surprise_from_hostile_stealth_totals(
     *,
     party_ids: list[str],
@@ -312,6 +361,51 @@ def _surprise_from_hostile_stealth_totals(
     }
     surprise.update({actor_id: False for actor_id in hostile_ids})
     return surprise
+
+
+def _source_opening_casts(
+    values: list[dict[str, Any]],
+    *,
+    participant_ids: list[str],
+) -> list[dict[str, Any]]:
+    allowed = {
+        "actor_id",
+        "spell_id",
+        "source_item_id",
+        "source_excerpt",
+        "declaration",
+    }
+    normalized: list[dict[str, Any]] = []
+    for index, raw in enumerate(values):
+        if not isinstance(raw, dict):
+            raise ValueError(f"source opening cast {index} must be an object")
+        unknown = set(raw) - allowed
+        if unknown:
+            raise ValueError(
+                f"source opening cast {index} has unsupported fields: "
+                f"{', '.join(sorted(unknown))}"
+            )
+        cast = {
+            key: str(raw.get(key) or "").strip()
+            for key in ("actor_id", "spell_id", "source_item_id", "source_excerpt")
+        }
+        if (
+            not all(cast.values())
+            or cast["actor_id"] not in participant_ids
+            or (
+                "declaration" in raw
+                and raw["declaration"] is not None
+                and not isinstance(raw["declaration"], dict)
+            )
+        ):
+            raise ValueError(
+                f"source opening cast {index} requires a participant actor, spell, "
+                "source item, exact excerpt, and optional object declaration"
+            )
+        cast["declaration"] = dict(raw.get("declaration") or {})
+        cast["sequence"] = index + 1
+        normalized.append(cast)
+    return normalized
 
 
 async def _campaign(client: ExposureClient, campaign_id: str) -> dict[str, Any]:
@@ -613,8 +707,18 @@ async def _start(
         )
     passive_perception: dict[str, int] = {}
     visible_to_actor_ids_by_hostile: dict[str, list[str]] = {}
-    if args.no_surprise and args.surprise_check_report is not None:
-        raise ValueError("--no-surprise cannot be combined with --surprise-check-report")
+    surprise_modes = sum(
+        (
+            bool(args.no_surprise),
+            args.surprise_check_report is not None,
+            bool(args.source_surprised_actor_id),
+        )
+    )
+    if surprise_modes > 1:
+        raise ValueError(
+            "--no-surprise, --surprise-check-report, and "
+            "--source-surprised-actor-id are mutually exclusive"
+        )
     if args.no_surprise:
         surprise = {actor_id: False for actor_id in [*party_ids, *all_hostile_ids]}
         surprise_basis = {
@@ -630,6 +734,14 @@ async def _start(
             location_key=args.location_key,
             party_ids=party_ids,
             hostile_ids=all_hostile_ids,
+        )
+        expected_revision = campaign["revision"]
+    elif args.source_surprised_actor_id:
+        surprise, surprise_basis = _source_declared_surprise(
+            party_ids=party_ids,
+            hostile_ids=all_hostile_ids,
+            surprised_actor_ids=args.source_surprised_actor_id,
+            source_excerpt=str(args.source_excerpt or ""),
         )
         expected_revision = campaign["revision"]
     else:
@@ -707,6 +819,10 @@ async def _start(
         "passive_perception": passive_perception,
         "visible_to_actor_ids_by_hostile": visible_to_actor_ids_by_hostile,
         "surprise": surprise,
+        "source_opening_casts": _source_opening_casts(
+            args.source_opening_cast_json,
+            participant_ids=[*party_ids, *all_hostile_ids],
+        ),
         "start": started,
         "combat_exposure": opened_combat,
         "combat": status,
@@ -746,9 +862,9 @@ def _choose_party_spell(
     living_targets: list[str],
     leveled_spell_available: bool = True,
 ) -> tuple[str, str] | None:
-    """Choose a supported level-1 spell with an explicit auditable target."""
+    """Choose a supported level-1 combat spell with an explicit auditable target."""
 
-    if actor_id not in party_ids or not leveled_spell_available:
+    if not leveled_spell_available:
         return None
     actor = actors[actor_id]
     spells = {
@@ -762,16 +878,17 @@ def _choose_party_spell(
     )
     if int(dict(slot).get("value", 0) or 0) <= 0:
         return None
-    downed_allies = [
-        ally_id
-        for ally_id in party_ids
-        if ally_id != actor_id
-        and _hit_points(actors[ally_id]) == 0
-        and "dead" not in _conditions(actors[ally_id])
-    ]
-    downed_allies.sort(key=lambda item: "stable" in _conditions(actors[item]))
-    if HEALING_WORD_ID in spells and downed_allies:
-        return HEALING_WORD_ID, downed_allies[0]
+    if actor_id in party_ids:
+        downed_allies = [
+            ally_id
+            for ally_id in party_ids
+            if ally_id != actor_id
+            and _hit_points(actors[ally_id]) == 0
+            and "dead" not in _conditions(actors[ally_id])
+        ]
+        downed_allies.sort(key=lambda item: "stable" in _conditions(actors[item]))
+        if HEALING_WORD_ID in spells and downed_allies:
+            return HEALING_WORD_ID, downed_allies[0]
     if MAGIC_MISSILE_ID in spells and living_targets:
         return MAGIC_MISSILE_ID, living_targets[0]
     if GUIDING_BOLT_ID in spells and living_targets:
@@ -925,6 +1042,29 @@ def _source_truce_outcome(
             "truce",
             f"After {defeated_hostiles} source-defined hostiles were defeated, "
             "the source-designated leader invoked the hostage truce.",
+        )
+    return None
+
+
+def _source_surrender_outcome(
+    *,
+    actor_hit_points: int,
+    surrender_at_hp: int,
+    actor_alive: bool,
+    no_escape: bool,
+    unresolved_party: bool,
+) -> tuple[str, str] | None:
+    if (
+        surrender_at_hp > 0
+        and 0 < actor_hit_points <= surrender_at_hp
+        and actor_alive
+        and no_escape
+        and not unresolved_party
+    ):
+        return (
+            "surrender",
+            f"The source-designated hostile surrendered at {actor_hit_points} hit points "
+            f"(threshold {surrender_at_hp}) with no avenue of escape.",
         )
     return None
 
@@ -1107,6 +1247,26 @@ async def _auto_run(
             "source truce actor must be an encounter hostile and require "
             "--truce-source-excerpt"
         )
+    opening_casts = _source_opening_casts(
+        args.source_opening_cast_json,
+        participant_ids=[*party_ids, *hostile_ids],
+    )
+    surrender_configured = bool(
+        args.surrender_actor_id
+        or args.surrender_at_hp
+        or args.surrender_source_excerpt
+        or args.surrender_no_escape
+    )
+    if surrender_configured and (
+        args.surrender_actor_id not in hostile_ids
+        or args.surrender_at_hp <= 0
+        or not str(args.surrender_source_excerpt or "").strip()
+        or not args.surrender_no_escape
+    ):
+        raise ValueError(
+            "source surrender requires a hostile actor, positive HP threshold, "
+            "exact source excerpt, and --surrender-no-escape"
+        )
     initial_combat = await client.domain(
         "combat_query",
         {"campaign_id": args.campaign_id, "view": "status"},
@@ -1147,6 +1307,7 @@ async def _auto_run(
             },
         )
     turns: list[dict[str, Any]] = []
+    completed_opening_casts: set[int] = set()
     fled_hostile_ids: set[str] = set()
     if args.flee_on_start_actor_id:
         campaign = await _campaign(client, args.campaign_id)
@@ -1204,16 +1365,30 @@ async def _auto_run(
             and not _conditions(actors[actor_id]) & {"dead", "stable"}
         ]
         party_down = all(_hit_points(actors[actor_id]) <= 0 for actor_id in party_ids)
-        outcome = _source_truce_outcome(
-            defeated_hostiles=len(defeated_hostiles),
-            truce_after_defeated=args.truce_after_defeated,
-            truce_actor_alive=bool(
-                args.truce_actor_id
-                and _hit_points(actors[args.truce_actor_id]) > 0
-                and "dead" not in _conditions(actors[args.truce_actor_id])
-            ),
-            unresolved_party=bool(unresolved_party),
+        outcome = (
+            _source_surrender_outcome(
+                actor_hit_points=_hit_points(actors[args.surrender_actor_id]),
+                surrender_at_hp=args.surrender_at_hp,
+                actor_alive=(
+                    "dead" not in _conditions(actors[args.surrender_actor_id])
+                ),
+                no_escape=args.surrender_no_escape,
+                unresolved_party=bool(unresolved_party),
+            )
+            if surrender_configured
+            else None
         )
+        if outcome is None:
+            outcome = _source_truce_outcome(
+                defeated_hostiles=len(defeated_hostiles),
+                truce_after_defeated=args.truce_after_defeated,
+                truce_actor_alive=bool(
+                    args.truce_actor_id
+                    and _hit_points(actors[args.truce_actor_id]) > 0
+                    and "dead" not in _conditions(actors[args.truce_actor_id])
+                ),
+                unresolved_party=bool(unresolved_party),
+            )
         if outcome is None:
             outcome = _source_outcome(
                 defeated_hostiles=len(defeated_hostiles),
@@ -1356,6 +1531,54 @@ async def _auto_run(
                     "result": stood,
                 }
             )
+            continue
+        opening_cast = next(
+            (
+                item
+                for item in opening_casts
+                if int(item["sequence"]) not in completed_opening_casts
+                and item["actor_id"] == actor_id
+            ),
+            None,
+        )
+        if opening_cast is not None and "cast" in available_actions:
+            campaign = await _campaign(client, args.campaign_id)
+            cast_arguments: dict[str, Any] = {
+                "campaign_id": args.campaign_id,
+                "actor_id": actor_id,
+                "spell_id": opening_cast["spell_id"],
+                "source_item_id": opening_cast["source_item_id"],
+                "branch_id": branch["id"],
+                "expected_revision": campaign["revision"],
+                "idempotency_key": (
+                    "encounter-source-opening-cast-"
+                    + _token(
+                        f"{args.run_id}:{opening_cast['sequence']}:"
+                        f"{actor_id}:{opening_cast['spell_id']}",
+                        length=24,
+                    )
+                ),
+            }
+            if opening_cast["declaration"]:
+                cast_arguments["declaration"] = opening_cast["declaration"]
+            cast = await client.domain("combat_cast_spell", cast_arguments)
+            if cast.get("status") != "committed":
+                raise RuntimeError(
+                    "source opening item spell did not commit through structured settlement"
+                )
+            completed_opening_casts.add(int(opening_cast["sequence"]))
+            turns.append(
+                {
+                    "sequence": sequence,
+                    "kind": "source_opening_item_spell",
+                    "actor_id": actor_id,
+                    "spell_id": opening_cast["spell_id"],
+                    "source_item_id": opening_cast["source_item_id"],
+                    "source_excerpt": opening_cast["source_excerpt"],
+                    "result": cast,
+                }
+            )
+            await _end_turn(client, args, str(branch["id"]), actor_id, sequence)
             continue
         if (
             flee_triggered
@@ -1656,6 +1879,18 @@ async def _auto_run(
                 "source_excerpt": str(args.truce_source_excerpt or "").strip(),
             }
             if args.truce_actor_id
+            else None
+        ),
+        "source_opening_casts": opening_casts,
+        "completed_opening_cast_sequences": sorted(completed_opening_casts),
+        "surrender": (
+            {
+                "actor_id": args.surrender_actor_id,
+                "at_or_below_hit_points": args.surrender_at_hp,
+                "no_escape": args.surrender_no_escape,
+                "source_excerpt": str(args.surrender_source_excerpt or "").strip(),
+            }
+            if surrender_configured
             else None
         ),
         "outcome": ended,
