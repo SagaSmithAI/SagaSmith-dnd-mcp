@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 from pathlib import Path
 
@@ -110,15 +109,12 @@ def test_source_bound_loot_is_atomic_idempotent_and_branch_audited(tmp_path: Pat
         )
         chunk_id = search[0]["id"]
         expanded = await _call(server, "module_expand", {"chunk_id": chunk_id})
+        assert expanded["source_ref"]["module_id"] == ingested["module_id"]
+        assert expanded["source_ref"]["scene_id"] == expanded["scene"]["id"]
+        assert expanded["source_ref"]["chunk_id"] == chunk_id
+        assert expanded["source_ref"]["content_sha256"] == expanded["content_sha256"]
         source_ref = json.dumps(
-            {
-                "module_id": ingested["module_id"],
-                "scene_id": expanded["scene"]["id"],
-                "chunk_id": chunk_id,
-                "content_sha256": hashlib.sha256(
-                    expanded["content"].encode("utf-8")
-                ).hexdigest(),
-            },
+            expanded["source_ref"],
             sort_keys=True,
             separators=(",", ":"),
         )

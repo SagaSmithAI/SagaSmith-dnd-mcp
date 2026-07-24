@@ -1045,6 +1045,16 @@ def test_query_source_searches_and_expands_only_public_mcp_results() -> None:
                 return {
                     "chunk_id": "chunk-1",
                     "content": "A captured character is taken to the eating cave.",
+                    "content_sha256": "a" * 64,
+                    "source_ref": {
+                        "module_id": "module-1",
+                        "scene_id": "scene-1",
+                        "chunk_id": "chunk-1",
+                        "page_start": 8,
+                        "page_end": 8,
+                        "heading_path": ["Eating Cave"],
+                        "content_sha256": "a" * 64,
+                    },
                 }
             raise AssertionError((tool_id, arguments))
 
@@ -1061,6 +1071,7 @@ def test_query_source_searches_and_expands_only_public_mcp_results() -> None:
 
     assert result["query"] == "captured defeated characters"
     assert result["expanded_chunks"][0]["chunk_id"] == "chunk-1"
+    assert result["expanded_chunks"][0]["source_ref"]["content_sha256"] == "a" * 64
     assert client.calls == [
         (
             "module_search",
