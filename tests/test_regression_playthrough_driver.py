@@ -2015,6 +2015,14 @@ def test_short_rest_advances_clock_and_applies_only_explicit_resource_choices() 
         async def domain(self, tool_id: str, arguments: dict):
             if tool_id == "character_query":
                 actor_id = arguments["payload"]["character_id"]
+                if arguments["view"] == "rest":
+                    if actor_id == "fighter":
+                        assert arguments["payload"]["hit_dice_spends"] == [
+                            {"key": "fighter:d10", "count": 1}
+                        ]
+                    if actor_id == "wizard":
+                        assert arguments["payload"]["arcane_recovery"] == {"1": 1}
+                    return {"ready": True, "character_id": actor_id}
                 return {
                     "id": actor_id,
                     "campaign_id": "campaign-1",

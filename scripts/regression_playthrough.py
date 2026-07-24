@@ -2558,6 +2558,25 @@ async def _short_rest(
         if actor.get("campaign_id") != campaign_id:
             raise ValueError("every short-rest actor must belong to the campaign")
         actors.append(actor)
+    member_by_id = {item["actor_id"]: item for item in normalized}
+    for actor in actors:
+        member = member_by_id[str(actor["id"])]
+        preflight = await client.domain(
+            "character_query",
+            {
+                "view": "rest",
+                "payload": {
+                    "character_id": str(actor["id"]),
+                    "rest_type": "short_rest",
+                    "hit_dice_spends": member["hit_dice_spends"],
+                    "arcane_recovery": member["arcane_recovery"],
+                },
+            },
+        )
+        if preflight.get("ready") is not True:
+            raise RuntimeError(
+                f"short rest preflight for {actor['id']} has unresolved rule choices"
+            )
     branches = await client.domain(
         "branch_query",
         {"campaign_id": campaign_id, "view": "list"},

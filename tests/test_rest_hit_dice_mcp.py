@@ -120,6 +120,78 @@ def test_short_rest_rolls_requested_hit_dice_inside_the_mcp(tmp_path: Path) -> N
     asyncio.run(exercise())
 
 
+def test_short_rest_query_preflights_choices_without_mutation(tmp_path: Path) -> None:
+    async def exercise() -> None:
+        server = create_server(_config(tmp_path))
+        campaign = await _call(
+            server,
+            "campaign_create",
+            {"name": "Rest preflight", "edition": "2014", "idempotency_key": "campaign"},
+        )
+        actor = await _call(
+            server,
+            "character_create_from",
+            {
+                "mode": "direct",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "name": "Resting Fighter",
+                    "sheet": _resting_sheet(),
+                },
+                "idempotency_key": "actor",
+            },
+        )
+        before_campaign = await _call(
+            server,
+            "campaign_query",
+            {"view": "get", "payload": {"campaign_id": campaign["id"]}},
+        )
+
+        with pytest.raises(Exception, match="hit die is not recorded"):
+            await _call(
+                server,
+                "character_query",
+                {
+                    "view": "rest",
+                    "payload": {
+                        "character_id": actor["id"],
+                        "rest_type": "short_rest",
+                        "hit_dice_spends": [{"key": "d10", "count": 1}],
+                    },
+                },
+            )
+        ready = await _call(
+            server,
+            "character_query",
+            {
+                "view": "rest",
+                "payload": {
+                    "character_id": actor["id"],
+                    "rest_type": "short_rest",
+                    "hit_dice_spends": [{"key": "fighter:d10", "count": 1}],
+                },
+            },
+        )
+        assert ready["ready"] is True
+        assert ready["hit_dice_spends"] == [{"key": "fighter:d10", "count": 1}]
+
+        after_campaign = await _call(
+            server,
+            "campaign_query",
+            {"view": "get", "payload": {"campaign_id": campaign["id"]}},
+        )
+        after_actor = await _call(
+            server,
+            "character_query",
+            {"view": "get", "payload": {"character_id": actor["id"]}},
+        )
+        assert after_campaign["revision"] == before_campaign["revision"]
+        assert after_actor["revision"] == actor["revision"]
+        assert after_actor["sheet"]["combat"]["hit_dice"]["fighter:d10"]["value"] == 2
+
+    asyncio.run(exercise())
+
+
 def test_short_rest_atomically_applies_arcane_recovery_choice(tmp_path: Path) -> None:
     async def exercise() -> None:
         server = create_server(_config(tmp_path))

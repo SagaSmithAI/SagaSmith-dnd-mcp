@@ -135,6 +135,8 @@ from sagasmith_dnd.lifecycle import (
     record_rest_completion,
     recover_stable_creature,
     stand_outside_combat,
+    validate_arcane_recovery_choice,
+    validate_rest_hit_dice_requests,
 )
 from sagasmith_dnd.module_profile import DndModuleProfile
 from sagasmith_dnd.playthrough import validate_playthrough_manifest
@@ -16043,7 +16045,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
 
     @mcp.tool()
     def character_query(
-        view: Literal["get", "list", "library", "document"] = "list",
+        view: Literal["get", "list", "library", "document", "rest"] = "list",
         payload: dict[str, Any] | None = None,
         principal_id: str = "system:local",
     ) -> dict[str, Any]:
@@ -16051,6 +16053,62 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         data = facade_payload(payload)
         if view == "get":
             result = character_get(required(data, "character_id"), principal_id)
+        elif view == "rest":
+            character_id = str(required(data, "character_id"))
+            current = characters.get(character_id)
+            require_character_control(current, principal_id)
+            require_outside_active_combat(current, "rest preflight")
+            if current.campaign_id is None:
+                raise ValueError("rest preflight requires a campaign-bound character")
+            campaign = campaigns.get(current.campaign_id)
+            if bool(dict(dict(campaign.state or {}).get("combat") or {}).get("active")):
+                raise CombatEngineError("rest is not allowed while combat is active")
+            rest_type = str(data.get("rest_type") or "").strip().lower().replace("-", "_")
+            if rest_type != "short_rest":
+                raise CombatEngineError(
+                    "character rest preflight currently requires rest_type=short_rest"
+                )
+            hp = int(
+                dict(current.sheet.get("combat", {}).get("hp") or {}).get("value", 0) or 0
+            )
+            conditions = {
+                str(item).casefold() for item in current.sheet.get("conditions", [])
+            }
+            if hp <= 0 or "dead" in conditions:
+                raise CombatEngineError(
+                    "a creature at 0 hit points or dead cannot benefit from a rest"
+                )
+            hit_dice = validate_rest_hit_dice_requests(
+                current.sheet, data.get("hit_dice_spends")
+            )
+            world_day = int(
+                dict(dict(campaign.state or {}).get("world_time") or {}).get("day", 0)
+                or 0
+            )
+            arcane_recovery = validate_arcane_recovery_choice(
+                current.sheet,
+                data.get("arcane_recovery"),
+                world_day=world_day,
+            )
+            rest_rules = effective_rule_context(
+                current.campaign_id,
+                facts={"actor_id": current.id, "rest_type": rest_type},
+            )
+            before_rules = apply_rule_event(current.sheet, "rest.before", rest_rules)
+            result = {
+                "ready": before_rules.status == "committed",
+                "character_id": current.id,
+                "character_revision": current.revision,
+                "campaign_id": current.campaign_id,
+                "rest_type": rest_type,
+                "world_day": world_day,
+                "hit_dice_spends": [
+                    {"key": key, "count": count} for key, count in hit_dice
+                ],
+                "arcane_recovery": arcane_recovery,
+                "pending": list(before_rules.pending),
+                "ruleset_fingerprint": rest_rules.fingerprint,
+            }
         elif view == "library":
             result = character_library_list(data.get("character_type"), principal_id)
         elif view == "document":
