@@ -2291,6 +2291,160 @@ async def _prepare_statblock(args: argparse.Namespace) -> dict[str, Any]:
             }
 
 
+async def _statblock_preparation_context(
+    client: CampaignMcp,
+    campaign_id: str,
+) -> dict[str, str]:
+    phase_payload = await client.core(
+        "game_phase",
+        {"campaign_id": campaign_id, "action": "get"},
+    )
+    phase = str(_facade_value(phase_payload)["tool_profile"])
+    await client.open()
+    await client.load(*_phase_groups(phase))
+    branches = _facade_value(
+        await client.domain(
+            "branch_query",
+            {"campaign_id": campaign_id, "view": "list"},
+        )
+    )
+    current_branch = next((item for item in branches if item.get("is_current")), None)
+    if current_branch is None:
+        raise RuntimeError("campaign has no current branch")
+    return {
+        "phase": phase,
+        "branch_id": str(current_branch["id"]),
+    }
+
+
+async def _restore_statblock_preparation_context(
+    client: CampaignMcp,
+    *,
+    campaign_id: str,
+    original: dict[str, str],
+    token: str,
+) -> dict[str, Any]:
+    original_phase = str(original["phase"])
+    original_branch_id = str(original["branch_id"])
+    if original_phase == "combat":
+        raise RuntimeError("cannot restore a statblock preparation into combat")
+    current = await _statblock_preparation_context(client, campaign_id)
+    phase_changes: list[dict[str, Any]] = []
+    checkout = None
+    if current["branch_id"] != original_branch_id:
+        if current["phase"] != "lobby":
+            if current["phase"] == "combat":
+                raise RuntimeError("failed statblock preparation entered combat")
+            campaign = _facade_value(
+                await client.core(
+                    "campaign_query",
+                    {"view": "get", "payload": {"campaign_id": campaign_id}},
+                )
+            )
+            entered_lobby = _facade_value(
+                await client.core(
+                    "game_phase",
+                    {
+                        "campaign_id": campaign_id,
+                        "action": "set",
+                        "tool_profile": "lobby",
+                        "expected_revision": campaign["revision"],
+                        "branch_id": current["branch_id"],
+                        "idempotency_key": _phase_transition_key(
+                            token,
+                            "failure-enter-lobby",
+                            campaign,
+                        ),
+                    },
+                )
+            )
+            phase_changes.append(entered_lobby)
+        await client.open()
+        await client.load("lobby.campaign")
+        campaign = _facade_value(
+            await client.core(
+                "campaign_query",
+                {"view": "get", "payload": {"campaign_id": campaign_id}},
+            )
+        )
+        checkout = _facade_value(
+            await client.domain(
+                "branch_change",
+                {
+                    "campaign_id": campaign_id,
+                    "action": "checkout",
+                    "payload": {"branch_id": original_branch_id},
+                    "expected_revision": campaign["revision"],
+                    "expected_branch_id": current["branch_id"],
+                    "idempotency_key": (
+                        f"{token}-failure-return-"
+                        f"{_idempotency_token(original_branch_id).lower()}"
+                    ),
+                },
+            )
+        )
+        current = {"phase": "lobby", "branch_id": original_branch_id}
+
+    if current["phase"] != original_phase:
+        if current["phase"] == "combat":
+            raise RuntimeError("failed statblock preparation entered combat")
+        campaign = _facade_value(
+            await client.core(
+                "campaign_query",
+                {"view": "get", "payload": {"campaign_id": campaign_id}},
+            )
+        )
+        restored = _facade_value(
+            await client.core(
+                "game_phase",
+                {
+                    "campaign_id": campaign_id,
+                    "action": "set",
+                    "tool_profile": original_phase,
+                    "expected_revision": campaign["revision"],
+                    "branch_id": original_branch_id,
+                    "idempotency_key": _phase_transition_key(
+                        token,
+                        f"failure-restore-{original_phase}",
+                        campaign,
+                    ),
+                },
+            )
+        )
+        phase_changes.append(restored)
+    return {
+        "original": dict(original),
+        "checkout": checkout,
+        "phase_changes": phase_changes,
+    }
+
+
+async def _prepare_statblock_with_recovery(args: argparse.Namespace) -> dict[str, Any]:
+    token = _idempotency_token(args.run_id)
+    async with stdio_client(_server_parameters(args)) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            initial_client = CampaignMcp(session, args.campaign_id)
+            original = await _statblock_preparation_context(
+                initial_client,
+                args.campaign_id,
+            )
+    try:
+        return await _prepare_statblock(args)
+    except BaseException:
+        async with stdio_client(_server_parameters(args)) as (read, write):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                recovery_client = CampaignMcp(session, args.campaign_id)
+                await _restore_statblock_preparation_context(
+                    recovery_client,
+                    campaign_id=args.campaign_id,
+                    original=original,
+                    token=token,
+                )
+        raise
+
+
 async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
     """Ingest one strict SRD statblock and create source-identical encounter actors."""
 
@@ -4678,7 +4832,7 @@ def main() -> int:
         "walk-scenes": _walk_scenes,
         "restore-regression": _restore_regression,
         "relock-core": _relock_core,
-        "prepare-statblock": _prepare_statblock,
+        "prepare-statblock": _prepare_statblock_with_recovery,
         "prepare-rule-statblock": _prepare_rule_statblock,
         "prepare-core-wizard": _prepare_core_wizard,
         "noncombat-check": _noncombat_check,

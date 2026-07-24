@@ -18,6 +18,7 @@ from scripts.regression_campaign import (
     _load_json_object,
     _load_review_override,
     _prepare_statblock,
+    _restore_statblock_preparation_context,
     _statblock_creation_key,
     _validate_noncombat_scene,
 )
@@ -116,6 +117,61 @@ def test_prepare_statblock_rejects_deferred_isolated_branch() -> None:
 
     with pytest.raises(ValueError, match="cannot defer.*isolated branch"):
         asyncio.run(_prepare_statblock(args))
+
+
+def test_failed_statblock_preparation_restores_original_play_phase() -> None:
+    class Client:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict]] = []
+            self.loaded: list[tuple[str, ...]] = []
+
+        async def open(self) -> None:
+            self.calls.append(("open", {}))
+
+        async def load(self, *group_ids: str) -> None:
+            self.loaded.append(group_ids)
+
+        async def core(self, tool_id: str, arguments: dict):
+            self.calls.append((tool_id, arguments))
+            if tool_id == "game_phase" and arguments["action"] == "get":
+                return {"tool_profile": "lobby"}
+            if tool_id == "campaign_query":
+                return {"id": "campaign-1", "revision": 12}
+            if tool_id == "game_phase" and arguments["action"] == "set":
+                assert arguments["tool_profile"] == "play"
+                assert arguments["branch_id"] == "branch-1"
+                assert arguments["expected_revision"] == 12
+                return {"tool_profile": "play", "campaign_revision": 13}
+            raise AssertionError((tool_id, arguments))
+
+        async def domain(self, tool_id: str, arguments: dict):
+            self.calls.append((tool_id, arguments))
+            if tool_id == "branch_query":
+                return [{"id": "branch-1", "is_current": True}]
+            raise AssertionError((tool_id, arguments))
+
+    client = Client()
+    result = asyncio.run(
+        _restore_statblock_preparation_context(
+            client,
+            campaign_id="campaign-1",
+            original={"phase": "play", "branch_id": "branch-1"},
+            token="prepare-token",
+        )
+    )
+
+    assert result["checkout"] is None
+    assert result["phase_changes"] == [
+        {"tool_profile": "play", "campaign_revision": 13}
+    ]
+    phase_set = next(
+        arguments
+        for tool_id, arguments in client.calls
+        if tool_id == "game_phase" and arguments["action"] == "set"
+    )
+    assert phase_set["idempotency_key"].startswith(
+        "prepare-token-failure-restore-play-"
+    )
 
 
 def test_statblock_creation_key_scopes_repeated_source_actors_by_identity() -> None:
