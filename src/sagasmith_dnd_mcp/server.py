@@ -59,6 +59,7 @@ from sagasmith_dnd.character_schema import (
     add_inventory_item,
     add_memory,
     adjust_wallet,
+    attune_inventory_item,
     consume_weapon_ammunition,
     default_character_notes,
     default_character_sheet,
@@ -130,6 +131,7 @@ from sagasmith_dnd.engine import resolve_check, roll
 from sagasmith_dnd.lifecycle import (
     advance_effect_durations,
     advance_world_effect_durations,
+    allows_trance_rest,
     apply_rest,
     initialize_source_state,
     knock_prone_outside_combat,
@@ -137,7 +139,9 @@ from sagasmith_dnd.lifecycle import (
     recover_stable_creature,
     stand_outside_combat,
     validate_arcane_recovery_choice,
+    validate_rest_activity_minutes,
     validate_rest_hit_dice_requests,
+    validate_rest_schedule,
 )
 from sagasmith_dnd.module_profile import DndModuleProfile
 from sagasmith_dnd.playthrough import validate_playthrough_manifest
@@ -233,6 +237,61 @@ _SOURCE_EVIDENCE_TRANSLATION = str.maketrans(
         "\u201d": '"',
         "\u2013": "-",
         "\u2014": "-",
+    }
+)
+
+SUPPORTED_FEATURE_SELECTION_KINDS = frozenset(
+    {
+        "",
+        "ability_score_increase",
+        "bonus_cantrip",
+        "favored_enemy",
+        "known_spell_grants",
+        "mystic_arcanum",
+        "signature_spells",
+        "spell_mastery",
+    }
+)
+SUPPORTED_FEATURE_SELECTION_REQUIREMENT_FIELDS = frozenset(
+    {
+        "allowed_distributions",
+        "at_will_spells",
+        "choice_uniqueness_scope",
+        "count",
+        "creature_type_options",
+        "eligible_class",
+        "field",
+        "grants_skill_proficiency",
+        "humanoid_race_count",
+        "kind",
+        "language_if_spoken",
+        "maximum_score",
+        "maximum_spell_level",
+        "option_prerequisites",
+        "options",
+        "replacement_study_minutes",
+        "required_spell_levels",
+        "requires_existing_proficiency",
+        "requires_new_choice",
+        "requires_new_expertise",
+        "requires_spellbook",
+        "requires_untrained_skill",
+        "skills_only",
+        "source_class",
+        "spell_level",
+    }
+)
+SUPPORTED_FEATURE_OPTION_PREREQUISITE_FIELDS = frozenset(
+    {"minimum_level", "required_cantrip", "required_pact_boon"}
+)
+SUPPORTED_FEATURE_MECHANICAL_GRANTS = frozenset(
+    {
+        "armor_proficiencies",
+        "hp_per_class_level",
+        "languages",
+        "resources",
+        "unarmored_base",
+        "unarmored_formula",
     }
 )
 
@@ -837,9 +896,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             resolved_rules = rules_context
             if resolved_rules is rules_context_unset:
                 resolved_rules = (
-                    effective_rule_context(character.campaign_id)
-                    if character.campaign_id
-                    else None
+                    effective_rule_context(character.campaign_id) if character.campaign_id else None
                 )
             value["derived"] = derive_character_sheet(value["sheet"], rules=resolved_rules)
         except RulesetUnavailableError as error:
@@ -932,9 +989,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     def narrative_only_actor(character: Any) -> bool:
         tags = {
             str(item).strip().casefold()
-            for item in dict(character.sheet.get("adventure_state") or {}).get(
-                "status_tags", []
-            )
+            for item in dict(character.sheet.get("adventure_state") or {}).get("status_tags", [])
         }
         return "narrative_only" in tags
 
@@ -989,9 +1044,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         for attack in attacks:
             attack_id = str(attack.get("item_id") or "")
             attack_name = str(attack.get("name") or attack_id or "Weapon")
-            properties = {
-                str(item).strip().casefold() for item in attack.get("properties", [])
-            }
+            properties = {str(item).strip().casefold() for item in attack.get("properties", [])}
             if (
                 str(attack.get("attack_type") or "melee").casefold() == "ranged"
                 and int(dict(attack.get("range_ft") or {}).get("normal", 0) or 0) <= 0
@@ -1003,9 +1056,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             ):
                 manual_rulings.append(f"{attack_name}: thrown weapon range is missing")
             ammunition_id = str(attack.get("ammunition_item_id") or "")
-            if ammunition_id and int(
-                dict(inventory_items.get(ammunition_id) or {}).get("quantity", 0) or 0
-            ) <= 0:
+            if (
+                ammunition_id
+                and int(dict(inventory_items.get(ammunition_id) or {}).get("quantity", 0) or 0) <= 0
+            ):
                 unavailable_attack_ids.append(attack_id)
 
         spells_by_id = {
@@ -1017,7 +1071,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         for spell_id in prepared_spells:
             spell = spells_by_id.get(str(spell_id))
             if spell is not None and (
-                is_core_magic_missile_spell(spell) or is_core_shield_spell(spell)
+                is_core_magic_missile_spell(spell)
+                or is_core_shield_spell(spell)
                 or (
                     isinstance(spell.get("resolution"), dict)
                     and SPELL_RESOLUTION_MECHANIC_ID
@@ -1081,15 +1136,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         def resolve(source: str) -> dict[str, Any]:
             kind, separator, identifier = source.partition(":")
             if not separator or not identifier:
-                raise ValueError(
-                    "statblock variant source refs must identify managed sources"
-                )
+                raise ValueError("statblock variant source refs must identify managed sources")
             if kind == "module-chunk":
                 expanded = modules.expand(identifier)
                 if str(expanded.get("campaign_id") or "") != campaign_id:
-                    raise ValueError(
-                        "statblock variant module chunk does not belong to campaign"
-                    )
+                    raise ValueError("statblock variant module chunk does not belong to campaign")
                 return {
                     "source_ref": source,
                     "kind": kind,
@@ -1112,15 +1163,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             if kind == "rule-chunk":
                 expanded = rules.expand(identifier)
                 rule_source = rules.source(str(expanded["source"]["id"]))
-                campaign_edition = str(
-                    campaigns.get(campaign_id).settings.get("edition") or "2024"
-                )
+                campaign_edition = str(campaigns.get(campaign_id).settings.get("edition") or "2024")
                 if str(rule_source.get("system_id") or "") != "dnd5e":
                     raise ValueError("statblock variant rule chunk must belong to D&D")
                 if str(rule_source.get("edition") or "") != campaign_edition:
-                    raise ValueError(
-                        "statblock variant rule chunk edition does not match campaign"
-                    )
+                    raise ValueError("statblock variant rule chunk edition does not match campaign")
                 return {
                     "source_ref": source,
                     "kind": kind,
@@ -1130,8 +1177,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "checksum": rule_source["checksum"],
                 }
             raise ValueError(
-                "statblock variant source refs must use module-chunk, "
-                "module-review, or rule-chunk"
+                "statblock variant source refs must use module-chunk, module-review, or rule-chunk"
             )
 
         sources = [resolve(item) for item in source_refs]
@@ -1401,9 +1447,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         for combatant in encounter.get("combatants", []):
             if combatant.get("actor_id") == actor_id:
                 combatant["conditions"] = list(sheet.get("conditions") or [])
-                if "turned" not in {
-                    str(item).casefold() for item in combatant["conditions"]
-                }:
+                if "turned" not in {str(item).casefold() for item in combatant["conditions"]}:
                     combatant.pop("turned", None)
                 return
 
@@ -1412,20 +1456,17 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     ) -> None:
         """Reveal a hidden attacker to the creature it attacked, hit or miss."""
         attacker = next(
-            item
-            for item in encounter.get("combatants", [])
-            if item.get("actor_id") == attacker_id
+            item for item in encounter.get("combatants", []) if item.get("actor_id") == attacker_id
         )
         attacker["hidden"] = False
         current_visibility = attacker.get("visible_to_actor_ids")
         if current_visibility is None:
             return
-        visible_to = {
-            str(item) for item in list(current_visibility or [])
-        } | {attacker_id, target_id}
-        participant_ids = {
-            str(item.get("actor_id")) for item in encounter.get("combatants", [])
+        visible_to = {str(item) for item in list(current_visibility or [])} | {
+            attacker_id,
+            target_id,
         }
+        participant_ids = {str(item.get("actor_id")) for item in encounter.get("combatants", [])}
         attacker["visible_to_actor_ids"] = (
             None if participant_ids <= visible_to else sorted(visible_to)
         )
@@ -1440,9 +1481,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     ) -> None:
         """Apply a DM-owned observer matrix when perceivable casting breaks hiding."""
         caster = next(
-            item
-            for item in encounter.get("combatants", [])
-            if item.get("actor_id") == actor_id
+            item for item in encounter.get("combatants", []) if item.get("actor_id") == actor_id
         )
         if not caster.get("hidden", False):
             return
@@ -1453,9 +1492,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         if not (components.get("verbal") or components.get("somatic") or source_unknown):
             return
-        visible_to = {
-            str(item) for item in list(caster.get("visible_to_actor_ids") or [])
-        }
+        visible_to = {str(item) for item in list(caster.get("visible_to_actor_ids") or [])}
         observers = {
             str(item.get("actor_id"))
             for item in encounter.get("combatants", [])
@@ -1511,9 +1548,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "casting_perception must adjudicate every observer that cannot see the caster"
             )
         visible_to.update(
-            observer_id
-            for observer_id, entry in normalized.items()
-            if entry["perceived"]
+            observer_id for observer_id, entry in normalized.items() if entry["perceived"]
         )
         all_other_ids = {
             str(item.get("actor_id"))
@@ -1909,8 +1944,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if caster is None:
             raise CombatEngineError("spell caster is not in this encounter")
         range_ft = int(
-            dict(dict(spell.get("definition") or {}).get("range") or {}).get("normal_ft", 0)
-            or 0
+            dict(dict(spell.get("definition") or {}).get("range") or {}).get("normal_ft", 0) or 0
         )
         distance_to_origin = combat_distance(caster.get("position"), origin)
         if distance_to_origin is None or range_ft <= 0:
@@ -1918,10 +1952,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if distance_to_origin > range_ft:
             raise CombatEngineError("area spell origin is outside range")
         radius = int(
-            dict(dict(resolution.get("targeting") or {}).get("area") or {}).get(
-                "radius_ft", 0
-            )
-            or 0
+            dict(dict(resolution.get("targeting") or {}).get("area") or {}).get("radius_ft", 0) or 0
         )
         affected: dict[str, dict[str, Any]] = {}
         for target_id, combatant in combatants.items():
@@ -2339,11 +2370,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         campaign_id: str | None = None,
     ) -> dict[str, Any]:
         stream = active_random_stream()
-        if (
-            stream is not None
-            and stream.draw_count > 0
-            and not stream.has_unpersisted_draws
-        ):
+        if stream is not None and stream.draw_count > 0 and not stream.has_unpersisted_draws:
             response = deepcopy(response)
             response.setdefault("random_stream_receipt", stream.receipt())
         if key:
@@ -3352,11 +3379,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             item_ids.append(item_id)
             normalized_items.append(
                 deepcopy(
-                    next(
-                        entry
-                        for entry in sheet["inventory"]["items"]
-                        if entry["id"] == item_id
-                    )
+                    next(entry for entry in sheet["inventory"]["items"] if entry["id"] == item_id)
                 )
             )
 
@@ -4045,9 +4068,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if any(char.campaign_id != campaign_id for char in participants):
             raise ValueError("all participants must belong to the campaign")
         narrative_only_ids = [
-            str(character.id)
-            for character in participants
-            if narrative_only_actor(character)
+            str(character.id) for character in participants if narrative_only_actor(character)
         ]
         if narrative_only_ids:
             raise CombatEngineError(
@@ -4084,8 +4105,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 unknown_condition_fields = set(raw_condition) - allowed_condition_fields
                 if unknown_condition_fields:
                     raise ValueError(
-                        "unsupported source condition fields: "
-                        f"{sorted(unknown_condition_fields)}"
+                        f"unsupported source condition fields: {sorted(unknown_condition_fields)}"
                     )
                 condition = str(raw_condition.get("condition") or "").strip().casefold()
                 duration = str(raw_condition.get("duration") or "encounter").strip().casefold()
@@ -4127,37 +4147,21 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     source_ref["module_id"]
                 ):
                     raise ValueError("source condition module_id does not match its chunk")
-                if str(dict(expanded.get("scene") or {}).get("id")) != str(
-                    source_ref["scene_id"]
-                ):
+                if str(dict(expanded.get("scene") or {}).get("id")) != str(source_ref["scene_id"]):
                     raise ValueError("source condition scene_id does not match its chunk")
                 if str(source_ref["scene_id"]) != str(resolved_scene_id):
-                    raise ValueError(
-                        "source condition scene_id does not match the encounter scene"
-                    )
+                    raise ValueError("source condition scene_id does not match the encounter scene")
                 chunk_content = str(expanded.get("content") or "")
-                chunk_content_sha256 = hashlib.sha256(
-                    chunk_content.encode("utf-8")
-                ).hexdigest()
+                chunk_content_sha256 = hashlib.sha256(chunk_content.encode("utf-8")).hexdigest()
                 if str(source_ref["content_sha256"]).casefold() != chunk_content_sha256:
-                    raise ValueError(
-                        "source condition content_sha256 does not match its chunk"
-                    )
+                    raise ValueError("source condition content_sha256 does not match its chunk")
                 cited_page_range = (
-                    None
-                    if source_ref["page_start"] is None
-                    else int(source_ref["page_start"]),
-                    None
-                    if source_ref["page_end"] is None
-                    else int(source_ref["page_end"]),
+                    None if source_ref["page_start"] is None else int(source_ref["page_start"]),
+                    None if source_ref["page_end"] is None else int(source_ref["page_end"]),
                 )
                 expanded_page_range = (
-                    None
-                    if expanded.get("page_start") is None
-                    else int(expanded["page_start"]),
-                    None
-                    if expanded.get("page_end") is None
-                    else int(expanded["page_end"]),
+                    None if expanded.get("page_start") is None else int(expanded["page_start"]),
+                    None if expanded.get("page_end") is None else int(expanded["page_end"]),
                 )
                 if cited_page_range != expanded_page_range:
                     raise ValueError("source condition page range does not match its chunk")
@@ -4167,13 +4171,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     raise ValueError("source condition heading_path does not match its chunk")
                 normalized_excerpt = " ".join(excerpt.split())
                 if normalized_excerpt not in " ".join(chunk_content.split()):
-                    raise ValueError(
-                        "source condition excerpt is not contained in its cited chunk"
-                    )
+                    raise ValueError("source condition excerpt is not contained in its cited chunk")
                 actor = source_condition_characters[actor_id_value]
-                sheet = source_condition_sheets.setdefault(
-                    actor_id_value, deepcopy(actor.sheet)
-                )
+                sheet = source_condition_sheets.setdefault(actor_id_value, deepcopy(actor.sheet))
                 existing_conditions = {
                     str(item).strip().casefold() for item in sheet.get("conditions", [])
                 }
@@ -4235,9 +4235,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     sheet,
                     rules=effective_rule_context(campaign_id),
                 ),
-                notes=validate_character_notes(
-                    source_condition_characters[actor_id_value].notes
-                ),
+                notes=validate_character_notes(source_condition_characters[actor_id_value].notes),
                 expected_revision=source_condition_characters[actor_id_value].revision,
             )
             for actor_id_value, sheet in source_condition_sheets.items()
@@ -4406,14 +4404,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         actions = available_actions(encounter, actor_id)
         actor = combat_actor_snapshot(actor_id)
         hit_points = int(dict(actor.get("derived", {}).get("hit_points") or {}).get("value", 0))
-        conditions = {
-            str(item).casefold()
-            for item in actor.get("sheet", {}).get("conditions", [])
-        }
+        conditions = {str(item).casefold() for item in actor.get("sheet", {}).get("conditions", [])}
         current = current_combatant(encounter)
-        death_save_used = bool(
-            dict(combatant.get("turn_flags") or {}).get("death_save_used")
-        )
+        death_save_used = bool(dict(combatant.get("turn_flags") or {}).get("death_save_used"))
         if (
             current is not None
             and current.get("actor_id") == actor_id
@@ -4521,12 +4514,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         spell_resolution: dict[str, Any] | None = None
         if spell_resolution_id:
             spell_resolution = deepcopy(
-                dict(
-                    dict(encounter.get("spell_resolutions") or {}).get(
-                        spell_resolution_id
-                    )
-                    or {}
-                )
+                dict(dict(encounter.get("spell_resolutions") or {}).get(spell_resolution_id) or {})
             )
             if (
                 spell_resolution.get("kind") != "spell_attack"
@@ -5937,13 +5925,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             movement_boundary_ids.append("dnd5e.core.activity.turn_undead")
         if destination is not None:
             movement_boundary_ids.append("dnd5e.core.movement.occupied_destination")
-        difficult_cells = set(
-            dict(encounter.get("battle_map") or {}).get("difficult_cells") or []
-        )
+        difficult_cells = set(dict(encounter.get("battle_map") or {}).get("difficult_cells") or [])
         route_points = list(path or ([] if destination is None else [destination]))
         if any(
-            isinstance(point, dict)
-            and f"{point.get('x')},{point.get('y')}" in difficult_cells
+            isinstance(point, dict) and f"{point.get('x')},{point.get('y')}" in difficult_cells
             for point in route_points
         ):
             movement_boundary_ids.append("dnd5e.core.movement.difficult_terrain")
@@ -6103,13 +6088,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if normalized_action == "ready":
             boundary_ids.append("dnd5e.core.ready.action")
         acting_combatant = next(
-            item
-            for item in encounter.get("combatants", [])
-            if item.get("actor_id") == actor_id
+            item for item in encounter.get("combatants", []) if item.get("actor_id") == actor_id
         )
-        if "turned" in {
-            str(item).casefold() for item in acting_combatant.get("conditions", [])
-        }:
+        if "turned" in {str(item).casefold() for item in acting_combatant.get("conditions", [])}:
             boundary_ids.append("dnd5e.core.activity.turn_undead")
         action_receipts = core_receipts(
             effective_rule_context(campaign_id),
@@ -6410,6 +6391,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         spell_id: str,
         cast_level: int | None = None,
         ritual: bool = False,
+        signature_free_cast: bool = False,
         component_ruling: dict[str, Any] | None = None,
         source_item_id: str | None = None,
         choice_id: str | None = None,
@@ -6429,6 +6411,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "spell_id": spell_id,
             "cast_level": cast_level,
             "ritual": ritual,
+            "signature_free_cast": signature_free_cast,
             "component_ruling": component_ruling or {},
             "source_item_id": source_item_id,
             "choice_id": choice_id,
@@ -6440,6 +6423,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         replay = replay_idempotent(scope, idempotency_key, payload)
         if replay is not None:
             return combat_response(campaign_id, principal_id, replay)
+        if source_item_id and signature_free_cast:
+            raise CombatEngineError("a magic item spell cannot use a Signature Spell free cast")
         campaign, encounter = active_encounter(campaign_id)
         if campaign.revision != expected_revision:
             raise ValueError(
@@ -6551,6 +6536,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 spell_id=spell_id,
                 cast_level=cast_level,
                 ritual=ritual,
+                signature_free_cast=signature_free_cast,
                 component_ruling=component_ruling,
                 rules=rules,
             )
@@ -6753,9 +6739,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 return combat_response(
                     campaign_id,
                     principal_id,
-                    remember_idempotent(
-                        scope, idempotency_key, payload, response, campaign_id
-                    ),
+                    remember_idempotent(scope, idempotency_key, payload, response, campaign_id),
                 )
 
             if structured_kind == "healing":
@@ -6781,8 +6765,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         dict(derived_caster.get("spellcasting") or {}).get("ability") or ""
                     )
                     ability_modifier = int(
-                        dict(derived_caster.get("ability_modifiers") or {}).get(ability, 0)
-                        or 0
+                        dict(derived_caster.get("ability_modifiers") or {}).get(ability, 0) or 0
                     )
                 rolled_amount = max(0, int(dice["total"]) + ability_modifier)
                 healed = apply_healing_to_sheet(
@@ -6843,9 +6826,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 return combat_response(
                     campaign_id,
                     principal_id,
-                    remember_idempotent(
-                        scope, idempotency_key, payload, response, campaign_id
-                    ),
+                    remember_idempotent(scope, idempotency_key, payload, response, campaign_id),
                 )
 
             assert structured_kind == "saving_throw" and structured_target is not None
@@ -6875,9 +6856,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             for target_context in target_contexts:
                 target_id = str(target_context["target_id"])
                 target_record = characters.get(target_id)
-                target_sheet = deepcopy(
-                    final_sheets.get(target_id, target_record.sheet)
-                )
+                target_sheet = deepcopy(final_sheets.get(target_id, target_record.sheet))
                 target_actor = combat_actor_snapshot(target_id)
                 target_actor["sheet"] = target_sheet
                 target_actor["derived"] = derive_character_sheet(target_sheet)
@@ -6905,9 +6884,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 resolution_receipts.extend(saved.get("rule_receipts") or [])
                 if saved["success"]:
                     damage_amount = (
-                        int(damage_roll["total"]) // 2
-                        if save_spec.get("success") == "half"
-                        else 0
+                        int(damage_roll["total"]) // 2 if save_spec.get("success") == "half" else 0
                     )
                 else:
                     damage_amount = int(damage_roll["total"])
@@ -6933,9 +6910,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         damaged.get("concentration"),
                         next_revision=campaign.revision + 1,
                     )
-                    damage_result = {
-                        key: item for key, item in damaged.items() if key != "sheet"
-                    }
+                    damage_result = {key: item for key, item in damaged.items() if key != "sheet"}
                 else:
                     final_sheets.setdefault(target_id, target_sheet)
                 if not saved["success"] and save_spec.get("on_failed_save_ruling"):
@@ -7172,11 +7147,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 )
             ],
             expected_campaign_revision=campaign.revision,
-            operation=(
-                "combat.magic_item.spell.cast"
-                if source_item_id
-                else "combat.spell.cast"
-            ),
+            operation=("combat.magic_item.spell.cast" if source_item_id else "combat.spell.cast"),
             actor=principal_id,
             branch_id=resolved_branch_id,
             idempotency_key=idempotency_key,
@@ -7190,9 +7161,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             ],
         )
         response = {
-            "status": (
-                "committed" if applied.get("automatic_effect") else "pending_ruling"
-            ),
+            "status": ("committed" if applied.get("automatic_effect") else "pending_ruling"),
             "result": {key: value for key, value in applied.items() if key != "sheet"},
             "combat": next_encounter,
             "campaign_revision": mutation_revision(campaign_id),
@@ -7770,10 +7739,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         "Turn Undead requires each undead target's battle-map position",
                         missing=(f"turn_undead_target_position:{target_id}",),
                     )
-                distance = max(
-                    abs(int(source_position["x"]) - int(target_position["x"])),
-                    abs(int(source_position["y"]) - int(target_position["y"])),
-                ) * 5
+                distance = (
+                    max(
+                        abs(int(source_position["x"]) - int(target_position["x"])),
+                        abs(int(source_position["y"]) - int(target_position["y"])),
+                    )
+                    * 5
+                )
                 if distance <= 30:
                     eligible[target_id] = {"record": target, "distance_ft": distance}
             normalized_perception: dict[str, dict[str, Any]] = {}
@@ -7859,9 +7831,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 raise CombatEngineError("resolve the earlier pending save or choice first")
         else:
             require_no_blocking_pending(encounter)
-        engine_owned_special = (
-            activity_id == "dnd5e.content.srd2014.feature.fighter-action-surge"
-        )
+        engine_owned_special = activity_id == "dnd5e.content.srd2014.feature.fighter-action-surge"
         if (
             activation_type == "special"
             and not engine_owned_special
@@ -9187,11 +9157,16 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "edition": edition,
             "core_pack": locked or None,
             "available_core_pack": available,
-            "conversion_required": bool(locked and available and locked != {
-                "id": available["id"],
-                "version": available["version"],
-                "fingerprint": available["fingerprint"],
-            }),
+            "conversion_required": bool(
+                locked
+                and available
+                and locked
+                != {
+                    "id": available["id"],
+                    "version": available["version"],
+                    "fingerprint": available["fingerprint"],
+                }
+            ),
         }
 
     @mcp.tool()
@@ -9566,6 +9541,17 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         current = characters.get(character_id)
         require_character_control(current, principal_id)
         require_outside_active_combat(current, "inventory changes")
+        campaign = campaigns.get(current.campaign_id) if current.campaign_id else None
+        phase = (
+            str(dict(campaign.state or {}).get("game_phase") or PROFILE_LOBBY)
+            if campaign is not None
+            else PROFILE_LOBBY
+        )
+        if item.get("attunement") == "attuned" and phase != PROFILE_LOBBY:
+            raise CombatEngineError(
+                "an item can enter Play as required, but attunement must be "
+                "completed through a short rest"
+            )
         sheet, item_id = add_inventory_item(current.sheet, item)
         return update_sheet(
             character_id,
@@ -9591,6 +9577,29 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         current = characters.get(character_id)
         require_character_control(current, principal_id)
         require_outside_active_combat(current, "inventory changes")
+        if "attunement" in patch:
+            campaign = campaigns.get(current.campaign_id) if current.campaign_id else None
+            phase = (
+                str(dict(campaign.state or {}).get("game_phase") or PROFILE_LOBBY)
+                if campaign is not None
+                else PROFILE_LOBBY
+            )
+            current_item = next(
+                (
+                    item
+                    for item in current.sheet.get("inventory", {}).get("items", [])
+                    if str(item.get("id") or "") == item_id
+                ),
+                None,
+            )
+            if (
+                phase != PROFILE_LOBBY
+                and current_item is not None
+                and patch["attunement"] != current_item.get("attunement")
+            ):
+                raise CombatEngineError(
+                    "attunement cannot be patched during Play; use a short rest"
+                )
         return update_sheet(
             character_id,
             update_inventory_item(current.sheet, item_id, patch),
@@ -9674,9 +9683,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         if source_item is None or source_item.get("kind") != "magic_item":
             raise ValueError("item_id is not a magic item on this actor card")
-        charge_rules = dict(
-            dict(source_item.get("mechanics") or {}).get("charge_rules") or {}
-        )
+        charge_rules = dict(dict(source_item.get("mechanics") or {}).get("charge_rules") or {})
         formula = str(charge_rules.get("recovery_formula") or "")
         if not formula:
             raise ValueError("magic item has no source-declared charge recovery")
@@ -9868,6 +9875,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         hit_dice_spends: list[dict[str, Any]] | None = None,
         hit_dice_recovery: dict[str, int] | None = None,
         arcane_recovery: dict[str, int] | None = None,
+        attune_item_id: str | None = None,
+        rest_activity_minutes: dict[str, int] | None = None,
+        rest_schedule: dict[str, int] | None = None,
+        started_elapsed_minutes: int | None = None,
         food_and_drink: bool = False,
         principal_id: str = "system:local",
         expected_revision: int | None = None,
@@ -9902,6 +9913,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "hit_dice_spends": hit_dice_spends or [],
             "hit_dice_recovery": hit_dice_recovery or {},
             "arcane_recovery": arcane_recovery or {},
+            "attune_item_id": attune_item_id,
+            "rest_activity_minutes": rest_activity_minutes or {},
+            "rest_schedule": rest_schedule,
+            "started_elapsed_minutes": started_elapsed_minutes,
             "food_and_drink": food_and_drink,
         }
         branch_id = require_current_branch(current.campaign_id, None)
@@ -9911,6 +9926,27 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             return replay
         if current.revision != expected_revision:
             raise ValueError(f"character revision conflict: {character_id}")
+        world_time = dict(dict(campaign.state or {}).get("world_time") or {})
+        completed_elapsed_minutes = world_time.get("elapsed_minutes")
+        if (
+            started_elapsed_minutes is None
+            or isinstance(started_elapsed_minutes, bool)
+            or not isinstance(started_elapsed_minutes, int)
+        ):
+            raise CombatEngineError(
+                "short rest requires started_elapsed_minutes from the campaign clock"
+            )
+        if isinstance(completed_elapsed_minutes, bool) or not isinstance(
+            completed_elapsed_minutes, int
+        ):
+            raise CombatEngineError("short rest requires a current campaign clock")
+        timed_sheet = record_rest_completion(
+            current.sheet,
+            rest_type=normalized_rest_type,
+            started_elapsed_minutes=started_elapsed_minutes,
+            completed_elapsed_minutes=completed_elapsed_minutes,
+            rest_schedule=rest_schedule,
+        )
         hp = int(dict(current.sheet.get("combat", {}).get("hp") or {}).get("value", 0) or 0)
         conditions = {str(item).casefold() for item in current.sheet.get("conditions", [])}
         if hp <= 0 or "dead" in conditions:
@@ -9920,11 +9956,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             facts={"actor_id": character_id, "rest_type": normalized_rest_type},
         )
         applied = apply_rest(
-            current.sheet,
+            timed_sheet,
             rest_type=normalized_rest_type,
             hit_dice_spends=hit_dice_spends,
             hit_dice_recovery=hit_dice_recovery,
             arcane_recovery=arcane_recovery,
+            rest_activity_minutes=rest_activity_minutes,
             food_and_drink=food_and_drink,
             rules=rest_rules,
             world_day=int(
@@ -9949,6 +9986,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 response,
                 campaign_id=current.campaign_id,
             )
+        if attune_item_id:
+            applied["sheet"] = attune_inventory_item(
+                applied["sheet"],
+                str(attune_item_id),
+            )
+            applied["attuned_item_id"] = str(attune_item_id)
         preparation_result = None
         if prepared_spell_ids is not None:
             preparation_result = replace_prepared_spells(
@@ -10188,9 +10231,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 {"source_ref": normalized_ref},
             )
         except (LookupError, NoResultFound) as exc:
-            raise ValueError(
-                "source state source_ref must identify managed sources"
-            ) from exc
+            raise ValueError("source state source_ref must identify managed sources") from exc
         applied = initialize_source_state(current.sheet, state=state)
         result = {key: value for key, value in applied.items() if key != "sheet"}
         return update_sheet(
@@ -10238,9 +10279,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 raise ValueError(f"members[{index}] has unsupported fields: {unknown}")
             if not character_id:
                 raise ValueError(f"members[{index}].character_id is required")
-            if isinstance(character_revision, bool) or not isinstance(
-                character_revision, int
-            ):
+            if isinstance(character_revision, bool) or not isinstance(character_revision, int):
                 raise ValueError(f"members[{index}].expected_revision is required")
             normalized_members.append(
                 {
@@ -10256,9 +10295,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "members": normalized_members,
             "branch_id": resolved_branch_id,
         }
-        scope = (
-            f"campaign-stable-recovery:{campaign_id}:{resolved_branch_id}:{principal_id}"
-        )
+        scope = f"campaign-stable-recovery:{campaign_id}:{resolved_branch_id}:{principal_id}"
         replay = replay_idempotent(scope, idempotency_key, request_payload)
         if replay is not None:
             return replay
@@ -10287,12 +10324,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 raise ValueError(f"character revision conflict: {current.id}")
             recover_stable_creature(current.sheet, recovery_hours=1)
 
-        recovery_rolls = {
-            character_id: asdict(roll("1d4")) for character_id in member_ids
-        }
+        recovery_rolls = {character_id: asdict(roll("1d4")) for character_id in member_ids}
         recovery_hours = {
-            character_id: int(recovery_rolls[character_id]["total"])
-            for character_id in member_ids
+            character_id: int(recovery_rolls[character_id]["total"]) for character_id in member_ids
         }
         elapsed_hours = max(recovery_hours.values())
         elapsed = int(current_clock.get("elapsed_minutes", 0) or 0) + elapsed_hours * 60
@@ -10351,9 +10385,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 character_expired.extend(duration_result["expired"])
             member = member_by_id.get(current.id)
             if member is not None:
-                applied = recover_stable_creature(
-                    sheet, recovery_hours=recovery_hours[current.id]
-                )
+                applied = recover_stable_creature(sheet, recovery_hours=recovery_hours[current.id])
                 sheet = applied["sheet"]
                 recoveries[current.id] = {
                     "status": applied["status"],
@@ -10382,9 +10414,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         sheet=validate_character_sheet(sheet),
                         notes=validate_character_notes(current.notes),
                         expected_revision=(
-                            member["expected_revision"]
-                            if member is not None
-                            else current.revision
+                            member["expected_revision"] if member is not None else current.revision
                         ),
                     )
                 )
@@ -10548,10 +10578,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "character_id": character_id,
             **mutation_payload,
         }
-        scope = (
-            f"character-write:{current.campaign_id}:{branch_id}:"
-            f"{principal_id}:{character_id}"
-        )
+        scope = f"character-write:{current.campaign_id}:{branch_id}:{principal_id}:{character_id}"
         replay = replay_idempotent(scope, idempotency_key, request_payload)
         if replay is not None:
             return replay
@@ -10560,9 +10587,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         old_level = int(current.sheet.get("progression", {}).get("level", 0) or 0)
         experience_before = experience_status(current.sheet)
         if advancement_mode == "xp" and not experience_before["eligible"]:
-            raise CombatEngineError(
-                "character has not reached the XP threshold for the next level"
-            )
+            raise CombatEngineError("character has not reached the XP threshold for the next level")
         context = level_advancement_content_context(
             current.campaign_id,
             current.sheet,
@@ -10680,19 +10705,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         maximum_spell_level = max(
             [
                 int(level)
-                for level, resource in dict(
-                    spellcasting.get("spell_slots") or {}
-                ).items()
+                for level, resource in dict(spellcasting.get("spell_slots") or {}).items()
                 if int(dict(resource).get("max", 0) or 0) > 0
             ]
-            + [
-                int(
-                    dict(spellcasting.get("pact_magic") or {}).get(
-                        "slot_level", 0
-                    )
-                    or 0
-                )
-            ]
+            + [int(dict(spellcasting.get("pact_magic") or {}).get("slot_level", 0) or 0)]
         )
         follow_up = {
             "feature_artifacts": context["feature_options"],
@@ -10700,25 +10716,19 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "spell_choices": preview["spell_choices"],
             "prepared_spell_event": (
                 "level_up"
-                if preview["spellcasting"].get("mode")
-                in {"prepared", "spellbook"}
+                if preview["spellcasting"].get("mode") in {"prepared", "spellbook"}
                 else None
             ),
         }
         follow_up["complete"] = not (
             follow_up["feature_artifacts"]
             or follow_up["subclass_options"]
-            or any(
-                int(value)
-                for value in dict(follow_up["spell_choices"]).values()
-            )
+            or any(int(value) for value in dict(follow_up["spell_choices"]).values())
             or follow_up["prepared_spell_event"]
         )
         return {
             "status": (
-                "ready"
-                if advancement_mode != "xp" or experience["eligible"]
-                else "ineligible"
+                "ready" if advancement_mode != "xp" or experience["eligible"] else "ineligible"
             ),
             "character_id": current.id,
             "character_revision": current.revision,
@@ -10745,6 +10755,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         spell_id: str,
         cast_level: int | None = None,
         ritual: bool = False,
+        signature_free_cast: bool = False,
         component_ruling: dict[str, Any] | None = None,
         source_item_id: str | None = None,
         principal_id: str = "system:local",
@@ -10765,6 +10776,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "spell_id": spell_id,
             "cast_level": cast_level,
             "ritual": ritual,
+            "signature_free_cast": signature_free_cast,
             "component_ruling": component_ruling or {},
             "source_item_id": source_item_id,
         }
@@ -10772,6 +10784,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         replay = replay_idempotent(scope, idempotency_key, payload)
         if replay is not None:
             return replay
+        if source_item_id and signature_free_cast:
+            raise CombatEngineError("a magic item spell cannot use a Signature Spell free cast")
         rules = effective_rule_context(
             current.campaign_id,
             facts={
@@ -10796,6 +10810,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 spell_id=spell_id,
                 cast_level=cast_level,
                 ritual=ritual,
+                signature_free_cast=signature_free_cast,
                 component_ruling=component_ruling,
                 rules=rules,
             )
@@ -10822,9 +10837,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 )
             ],
             operation=(
-                "character.magic_item.spell.cast"
-                if source_item_id
-                else "character.spell.cast"
+                "character.magic_item.spell.cast" if source_item_id else "character.spell.cast"
             ),
             actor=principal_id,
             branch_id=branch_id,
@@ -10832,9 +10845,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             rule_receipts=list(applied.get("rule_receipts") or []),
         )
         response = {
-            "status": (
-                "committed" if applied.get("automatic_effect") else "pending_ruling"
-            ),
+            "status": ("committed" if applied.get("automatic_effect") else "pending_ruling"),
             "result": {key: value for key, value in applied.items() if key != "sheet"},
             "character": character_view(characters.get(character_id)),
         }
@@ -10861,8 +10872,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         resolved_branch_id = require_current_branch(campaign_id, branch_id)
         if isinstance(duration_minutes, bool) or not isinstance(duration_minutes, int):
             raise ValueError("duration_minutes must be an integer")
-        if duration_minutes < 480:
-            raise CombatEngineError("a long rest requires at least 480 minutes")
+        if duration_minutes < 240:
+            raise CombatEngineError(
+                "a long rest requires at least 480 minutes, or 240 minutes "
+                "for a creature with the source-granted Trance feature"
+            )
         if not isinstance(members, list) or not members:
             raise ValueError("party rest requires at least one member")
         allowed_member_fields = {
@@ -10870,6 +10884,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "expected_revision",
             "prepared_spell_ids",
             "hit_dice_recovery",
+            "rest_activity_minutes",
+            "rest_schedule",
             "food_and_drink",
         }
         normalized_members: list[dict[str, Any]] = []
@@ -10886,18 +10902,32 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             character_revision = raw_member.get("expected_revision")
             if isinstance(character_revision, bool) or not isinstance(character_revision, int):
                 raise ValueError(f"members[{index}].expected_revision is required")
+            current_member = characters.get(character_id)
+            if current_member.campaign_id != campaign_id:
+                raise ValueError(f"party rest actor is not in this campaign: {character_id}")
             prepared_ids = raw_member.get("prepared_spell_ids")
             if prepared_ids is not None and not isinstance(prepared_ids, list):
                 raise ValueError(f"members[{index}].prepared_spell_ids must be an array")
             recovery = raw_member.get("hit_dice_recovery")
             if recovery is not None and not isinstance(recovery, dict):
                 raise ValueError(f"members[{index}].hit_dice_recovery must be an object")
+            rest_activities = validate_rest_activity_minutes(
+                raw_member.get("rest_activity_minutes")
+            )
+            rest_schedule = validate_rest_schedule(
+                rest_type="long_rest",
+                duration_minutes=duration_minutes,
+                rest_schedule=raw_member.get("rest_schedule"),
+                allows_trance=allows_trance_rest(current_member.sheet),
+            )
             normalized_members.append(
                 {
                     "character_id": character_id,
                     "expected_revision": character_revision,
                     "prepared_spell_ids": prepared_ids,
                     "hit_dice_recovery": recovery,
+                    "rest_activity_minutes": rest_activities,
+                    "rest_schedule": rest_schedule,
                     "food_and_drink": bool(raw_member.get("food_and_drink", False)),
                 }
             )
@@ -10949,6 +10979,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 rest_type="long_rest",
                 started_elapsed_minutes=started_elapsed,
                 completed_elapsed_minutes=completed_elapsed,
+                rest_schedule=member["rest_schedule"],
             )
 
         effect_steps = {
@@ -11010,6 +11041,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     sheet,
                     rest_type="long_rest",
                     hit_dice_recovery=member["hit_dice_recovery"],
+                    rest_activity_minutes=member["rest_activity_minutes"],
                     food_and_drink=member["food_and_drink"],
                     rules=rest_rules,
                     world_day=completed_clock["day"],
@@ -11023,6 +11055,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     rest_type="long_rest",
                     started_elapsed_minutes=started_elapsed,
                     completed_elapsed_minutes=completed_elapsed,
+                    rest_schedule=member["rest_schedule"],
                 )
                 preparation_result = None
                 if member["prepared_spell_ids"] is not None:
@@ -11033,9 +11066,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     )
                     sheet = preparation_result["sheet"]
                     preparations[current.id] = {
-                        key: value
-                        for key, value in preparation_result.items()
-                        if key != "sheet"
+                        key: value for key, value in preparation_result.items() if key != "sheet"
                     }
                 recovered[current.id] = {
                     key: value
@@ -11130,9 +11161,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         replay = replay_idempotent(scope, idempotency_key, payload)
         if replay is not None:
             return replay
-        preserve_life = str(activity_id).endswith(
-            "life-domain-channel-divinity-preserve-life"
-        )
+        preserve_life = str(activity_id).endswith("life-domain-channel-divinity-preserve-life")
         if preserve_life:
             if not is_dm(current.campaign_id, principal_id):
                 raise PermissionError("Preserve Life multi-actor settlement requires the DM")
@@ -11207,9 +11236,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             except ActivityError as exc:
                 raise ValueError(str(exc)) from exc
             settled_inputs = {
-                target_id: (
-                    applied["sheet"] if target_id == character_id else target.sheet
-                )
+                target_id: (applied["sheet"] if target_id == character_id else target.sheet)
                 for target_id, target in target_records.items()
             }
             settled = resolve_preserve_life_to_sheets(
@@ -11268,8 +11295,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 },
                 "character": character_view(characters.get(character_id)),
                 "targets": [
-                    character_view(characters.get(target_id))
-                    for target_id in target_records
+                    character_view(characters.get(target_id)) for target_id in target_records
                 ],
             }
             return remember_idempotent(
@@ -11595,10 +11621,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "assignments": assignments,
         }
         branch_id = require_current_branch(current.campaign_id, None)
-        scope = (
-            f"character-write:{current.campaign_id}:{branch_id}:"
-            f"{principal_id}:{character_id}"
-        )
+        scope = f"character-write:{current.campaign_id}:{branch_id}:{principal_id}:{character_id}"
         request_payload = {
             "operation": operation,
             "character_id": character_id,
@@ -12758,9 +12781,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 reason = str(departure.get("reason") or "").strip()
                 if not reason:
                     raise ValueError("combatant_departure requires a source or DM ruling reason")
-                destination = str(
-                    departure.get("destination_location_key") or ""
-                ).strip()
+                destination = str(departure.get("destination_location_key") or "").strip()
                 combatant = next(
                     item
                     for item in next_encounter["combatants"]
@@ -12794,9 +12815,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             if not str(visibility.get("reason") or "").strip():
                 raise ValueError("combatant_visibility requires a DM ruling reason")
             if "hidden" not in visibility and "visible_to_actor_ids" not in visibility:
-                raise ValueError(
-                    "combatant_visibility must change hidden or visible_to_actor_ids"
-                )
+                raise ValueError("combatant_visibility must change hidden or visible_to_actor_ids")
             if "hidden" in visibility and not isinstance(visibility["hidden"], bool):
                 raise ValueError("combatant_visibility hidden must be boolean")
             visible_to = visibility.get("visible_to_actor_ids")
@@ -12923,10 +12942,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             actor = characters.get(str(combatant["actor_id"]))
             sheet = deepcopy(actor.sheet)
             for source_condition in combat.get("source_conditions", []):
-                if (
-                    str(source_condition.get("actor_id") or "") != actor.id
-                    or not source_condition.get("added_by_encounter", False)
-                ):
+                if str(
+                    source_condition.get("actor_id") or ""
+                ) != actor.id or not source_condition.get("added_by_encounter", False):
                     continue
                 condition = str(source_condition.get("condition") or "").casefold()
                 sheet["conditions"] = [
@@ -13044,9 +13062,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         result["skill_manifest"] = {
             "current": current_manifest,
             "latest_event": latest_manifest,
-            "drift": (
-                latest_manifest != current_manifest if latest_manifest is not None else None
-            ),
+            "drift": (latest_manifest != current_manifest if latest_manifest is not None else None),
         }
         latest_slot = result["snapshots"]["latest_slot"]
         recap = snapshots.get(campaign_id, latest_slot).get("recap") if latest_slot else None
@@ -13079,9 +13095,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         raw_knowledge = data.get("actor_knowledge") or []
         if not isinstance(raw_event, dict):
             raise ValueError("payload.event must be an object")
-        if not isinstance(raw_facts, list) or not all(
-            isinstance(item, dict) for item in raw_facts
-        ):
+        if not isinstance(raw_facts, list) or not all(isinstance(item, dict) for item in raw_facts):
             raise ValueError("payload.facts must be a list of objects")
         if not isinstance(raw_knowledge, list) or not all(
             isinstance(item, dict) for item in raw_knowledge
@@ -13090,9 +13104,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         event_data = dict(raw_event)
         facts_data = [dict(item) for item in raw_facts]
         knowledge_data = [dict(item) for item in raw_knowledge]
-        snapshot_data = (
-            dict(data["snapshot"]) if data.get("snapshot") is not None else None
-        )
+        snapshot_data = dict(data["snapshot"]) if data.get("snapshot") is not None else None
         if event_data.get("audience_scope") == "actor" and not knowledge_data:
             raise ValueError("actor-scoped continuity events require actor_knowledge writes")
         branch_id = require_current_branch(campaign_id, data.get("branch_id"))
@@ -13142,9 +13154,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     fact.get("valid_to"), f"facts[{index}].valid_to"
                 )
         for index, item in enumerate(knowledge_data):
-            if str(item.get("action", "add")) == "revise" and item.get(
-                "expected_revision_id"
-            ) is None:
+            if (
+                str(item.get("action", "add")) == "revise"
+                and item.get("expected_revision_id") is None
+            ):
                 raise ValueError(
                     "payload.actor_knowledge"
                     f"[{index}].expected_revision_id is required for revisions"
@@ -13725,11 +13738,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         """Recover review-only statblock candidates from imported text chunks."""
         access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
         module = next(
-            (
-                item
-                for item in modules.list(campaign_id)
-                if str(item.get("id")) == module_id
-            ),
+            (item for item in modules.list(campaign_id) if str(item.get("id")) == module_id),
             None,
         )
         if module is None:
@@ -14840,9 +14849,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         "mechanic_refs": list(artifact.get("mechanic_refs") or []),
                     }
                 )
-                action_description = str(
-                    specification.get("action_description") or ""
-                ).strip()
+                action_description = str(specification.get("action_description") or "").strip()
                 if action_description and isinstance(card.get("resolution"), dict):
                     card = overlay_spell_attack_card(card, action_description)
             elif len(exact) > 1:
@@ -14851,9 +14858,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 )
                 continue
             else:
-                action_description = str(
-                    specification.get("action_description") or ""
-                ).strip()
+                action_description = str(specification.get("action_description") or "").strip()
                 if not action_description:
                     warnings.append(
                         f"{name}: no active spell artifact or complete statblock action exists"
@@ -14870,11 +14875,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     action_description,
                 )
                 normal_range = int(range_match.group(1)) if range_match else 0
-                long_range = (
-                    int(range_match.group(2) or 0)
-                    if range_match
-                    else 0
-                )
+                long_range = int(range_match.group(2) or 0) if range_match else 0
                 card = {
                     "id": f"{source_key}.spell.{slug}",
                     "source_key": source_key,
@@ -14969,9 +14970,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         }
         unexpected = sorted(set(spellcasting) - allowed_spellcasting)
         if unexpected:
-            raise ValueError(
-                f"magic item spellcasting has unsupported fields: {unexpected}"
-            )
+            raise ValueError(f"magic item spellcasting has unsupported fields: {unexpected}")
         raw_spells = spellcasting.get("spells")
         if not isinstance(raw_spells, list) or not raw_spells:
             raise ValueError("magic item spellcasting requires at least one spell")
@@ -14985,8 +14984,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             unknown = sorted(set(specification) - allowed_specification)
             if unknown:
                 raise ValueError(
-                    f"magic item spellcasting.spells[{index}] has unsupported fields: "
-                    f"{unknown}"
+                    f"magic item spellcasting.spells[{index}] has unsupported fields: {unknown}"
                 )
             artifact_id = str(specification.get("artifact_id") or "").strip()
             if not artifact_id or artifact_id in seen:
@@ -15032,12 +15030,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             raise ValueError("magic item spell charge_cost exceeds charges.max")
         mechanics["spellcasting"] = {
             "requires_attunement": bool(spellcasting.get("requires_attunement")),
-            "requires_class_spell_list": bool(
-                spellcasting.get("requires_class_spell_list")
-            ),
-            "components_required": bool(
-                spellcasting.get("components_required", True)
-            ),
+            "requires_class_spell_list": bool(spellcasting.get("requires_class_spell_list")),
+            "components_required": bool(spellcasting.get("components_required", True)),
             "spells": resolved,
         }
         hydrated["mechanics"] = mechanics
@@ -15062,9 +15056,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         result = dict(applied)
         result["sheet"] = resolution["sheet"]
         result["last_charge_resolution"] = {
-            key: value
-            for key, value in resolution.items()
-            if key not in {"sheet", "rule_receipts"}
+            key: value for key, value in resolution.items() if key not in {"sheet", "rule_receipts"}
         } | {"roll": dice}
         result["rule_receipts"] = [
             *list(applied.get("rule_receipts") or []),
@@ -15103,22 +15095,16 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             version = str(record.get("pack_version") or "")
             if not artifact_id or not pack_id or not version:
                 raise ValueError(
-                    "recorded subclass content must include artifact id, pack id, "
-                    "and pack version"
+                    "recorded subclass content must include artifact id, pack id, and pack version"
                 )
             try:
                 pack = rule_packs.get_version(pack_id, version)
             except LookupError as error:
                 raise RulesetUnavailableError(
-                    f"recorded subclass content pack is unavailable: "
-                    f"{pack_id}@{version}"
+                    f"recorded subclass content pack is unavailable: {pack_id}@{version}"
                 ) from error
             artifact = next(
-                (
-                    item
-                    for item in pack.artifacts
-                    if str(item.get("id") or "") == artifact_id
-                ),
+                (item for item in pack.artifacts if str(item.get("id") or "") == artifact_id),
                 None,
             )
             if artifact is None:
@@ -15136,21 +15122,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 item
                 for item in sheet.get("content", {}).get("selections", [])
                 if str(item.get("kind") or "") == "subclass"
-                and str(item.get("name") or "").casefold()
-                == subclass_name.casefold()
+                and str(item.get("name") or "").casefold() == subclass_name.casefold()
             ),
             None,
         )
         if recorded_subclass is not None:
             subclass_card = exact_recorded_card(recorded_subclass)
             assert subclass_card is not None
-            if (
-                str(subclass_card.get("class_name") or "").casefold()
-                != class_name.casefold()
-            ):
-                raise ValueError(
-                    "recorded subclass does not belong to the advanced class"
-                )
+            if str(subclass_card.get("class_name") or "").casefold() != class_name.casefold():
+                raise ValueError("recorded subclass does not belong to the advanced class")
             grant_sources.append(
                 (
                     subclass_name,
@@ -15158,23 +15138,18 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 )
             )
         for feature_record in sheet.get("content", {}).get("features", []):
-            if not feature_record.get("pack_id") or not feature_record.get(
-                "pack_version"
-            ):
+            if not feature_record.get("pack_id") or not feature_record.get("pack_version"):
                 continue
             feature_card = exact_recorded_card(feature_record, required=False)
             if feature_card is None:
                 continue
             if (
-                str(feature_card.get("class_name") or "").casefold()
-                != class_name.casefold()
+                str(feature_card.get("class_name") or "").casefold() != class_name.casefold()
                 or str(feature_card.get("subclass_name") or "").casefold()
                 != subclass_name.casefold()
             ):
                 continue
-            spell_options = dict(
-                feature_card.get("always_prepared_spell_options") or {}
-            )
+            spell_options = dict(feature_card.get("always_prepared_spell_options") or {})
             if not spell_options:
                 continue
             choices = dict(feature_record.get("choices") or {})
@@ -15184,9 +15159,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     choices = dict(grants[-1].get("choices") or {})
             option = str(choices.get("option") or "")
             if option not in spell_options:
-                raise ValueError(
-                    "recorded subclass spell option is missing or unavailable"
-                )
+                raise ValueError("recorded subclass spell option is missing or unavailable")
             grant_sources.append((subclass_name, list(spell_options[option])))
 
         candidates = available_content_artifacts(campaign_id, branch_id=branch_id)
@@ -15204,17 +15177,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         item
                         for item in candidates
                         if item[2].get("kind") == "spell"
-                        and str(
-                            dict(item[2].get("card") or {}).get("name") or ""
-                        ).casefold()
+                        and str(dict(item[2].get("card") or {}).get("name") or "").casefold()
                         == spell_name.casefold()
                     ),
                     None,
                 )
                 if match is None:
                     raise RulesetUnavailableError(
-                        f"subclass spell is unavailable at level "
-                        f"{class_level}: {spell_name}"
+                        f"subclass spell is unavailable at level {class_level}: {spell_name}"
                     )
                 spell_pack_id, spell_version, spell_artifact = match
                 spell_id = str(spell_artifact["id"])
@@ -15228,10 +15198,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     None,
                 )
                 was_always_prepared = bool(
-                    spell_card
-                    and dict(spell_card.get("access") or {}).get(
-                        "always_prepared"
-                    )
+                    spell_card and dict(spell_card.get("access") or {}).get("always_prepared")
                 )
                 if spell_card is None:
                     spell_card = deepcopy(dict(spell_artifact.get("card") or {}))
@@ -15250,9 +15217,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     pack_id=spell_pack_id,
                     pack_version=spell_version,
                     rule_refs=list(spell_artifact.get("rule_refs") or []),
-                    mechanic_refs=list(
-                        spell_artifact.get("mechanic_refs") or []
-                    ),
+                    mechanic_refs=list(spell_artifact.get("mechanic_refs") or []),
                 )
                 if not was_always_prepared:
                     unlocked.append(
@@ -15393,12 +15358,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             }
             repeat_due = new_level in repeatable_levels
             if kind == "feature" and (artifact_id not in present_features or repeat_due):
+                if str(card.get("name") or "").casefold() == "unarmored defense" and any(
+                    str(item.get("name") or "").casefold() == "unarmored defense"
+                    for item in feature_records
+                ):
+                    continue
                 declared_subclass = str(card.get("subclass_name") or "")
                 if declared_subclass and declared_subclass.casefold() != subclass_name.casefold():
                     continue
-                requirements_by_level = dict(
-                    card.get("selection_requirements_by_level") or {}
-                )
+                requirements_by_level = dict(card.get("selection_requirements_by_level") or {})
                 selection_requirements = deepcopy(
                     dict(
                         requirements_by_level.get(str(new_level))
@@ -15419,12 +15387,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         "pack_version": version,
                         "rule_refs": list(artifact.get("rule_refs") or []),
                         "_provides_resources": list(
-                            dict(
-                                dict(card.get("mechanical_grants") or {}).get(
-                                    "resources"
-                                )
-                                or {}
-                            )
+                            dict(dict(card.get("mechanical_grants") or {}).get("resources") or {})
                         ),
                         "_requires_resource": str(card.get("resource_key") or ""),
                     }
@@ -15449,9 +15412,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 item["artifact_id"],
             ),
         )
-        provided_resources = {
-            str(key) for key in dict(sheet.get("resources") or {})
-        }
+        provided_resources = {str(key) for key in dict(sheet.get("resources") or {})}
         while pending_features:
             pending_providers = {
                 str(resource_key)
@@ -15553,12 +15514,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "class_name": str(card.get("class_name") or ""),
                     "subclass_name": str(card.get("subclass_name") or ""),
                     "minimum_level": int(card.get("minimum_level", 1) or 1),
-                    "unlock_levels": [
-                        int(value) for value in card.get("unlock_levels", [])
-                    ],
+                    "unlock_levels": [int(value) for value in card.get("unlock_levels", [])],
                     "repeatable_selection_levels": [
-                        int(value)
-                        for value in card.get("repeatable_selection_levels", [])
+                        int(value) for value in card.get("repeatable_selection_levels", [])
                     ],
                     "selection_requirements_by_level": deepcopy(
                         dict(card.get("selection_requirements_by_level") or {})
@@ -15667,9 +15625,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if not source_item_id:
             raise ValueError("spellbook copy requires source_item_id")
         source_inventory = (
-            next_state["party"]["inventory"]
-            if source_owner == "party"
-            else sheet["inventory"]
+            next_state["party"]["inventory"] if source_owner == "party" else sheet["inventory"]
         )
         source_item = next(
             (
@@ -15693,8 +15649,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             raise ValueError("requested spell is not recorded in the source spellbook")
 
         feature_ids = {
-            str(feature.get("id") or "")
-            for feature in sheet.get("content", {}).get("features", [])
+            str(feature.get("id") or "") for feature in sheet.get("content", {}).get("features", [])
         }
         normalized_school = school.strip().casefold().split(" ", 1)[0]
         rule_facts = {
@@ -15724,8 +15679,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         core_boundaries = ["dnd5e.core.spell.spellbook_copy"]
         if (
             normalized_school == "evocation"
-            and "dnd5e.content.srd2014.feature.school-of-evocation-evocation-savant"
-            in feature_ids
+            and "dnd5e.content.srd2014.feature.school-of-evocation-evocation-savant" in feature_ids
         ):
             cost_percent -= 50
             time_percent -= 50
@@ -15832,9 +15786,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         sheet=validate_character_sheet(updated_sheet),
                         notes=validate_character_notes(character.notes),
                         expected_revision=(
-                            expected_revision
-                            if character.id == current.id
-                            else character.revision
+                            expected_revision if character.id == current.id else character.revision
                         ),
                     )
                 )
@@ -15932,6 +15884,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         spellbook_copy: dict[str, Any] | None = None
         subclass_spell_grants: list[dict[str, Any]] = []
         feature_spell_grants: list[dict[str, Any]] = []
+        replacing_feature_selection = False
         requested_method = str(selection.get("method") or "").strip().casefold()
         operation = (
             "character.spellbook.copy"
@@ -15999,10 +15952,22 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     mechanic_refs=list(spell_artifact.get("mechanic_refs") or []),
                 )
                 sheet["content"]["spells"].append(spell_card)
-            spell_card.setdefault("access", {})["known"] = True
-            spell_card["access"]["prepared"] = False
+            access = spell_card.setdefault("access", {})
+            if method in {"known", "mystic_arcanum"}:
+                access["known"] = True
+            if created:
+                access["prepared"] = False
             if at_will:
-                spell_card["access"]["at_will"] = True
+                at_will_source = f"{method}:{source_key}"
+                access["at_will_sources"] = list(
+                    dict.fromkeys(
+                        [
+                            *list(access.get("at_will_sources") or []),
+                            at_will_source,
+                        ]
+                    )
+                )
+                access["at_will"] = True
             feature_spell_grants.append(
                 {
                     "artifact_id": spell_id,
@@ -16014,6 +15979,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 }
             )
             return spell_card
+
         if kind == "spell":
             if any(item.get("id") == artifact_id for item in sheet["content"]["spells"]):
                 raise ValueError("content spell is already present")
@@ -16223,9 +16189,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 sheet["skills"][skill_key]["proficiency"] = "proficient"
         elif kind == "species":
             selected_species = str(card.get("name") or artifact_id)
-            constitution_score_before = int(
-                sheet["abilities"]["constitution"]["score"]
-            )
+            constitution_score_before = int(sheet["abilities"]["constitution"]["score"])
             base_species = str(card.get("base_species") or selected_species)
             existing_species = str(sheet["progression"].get("species") or "")
             if existing_species and existing_species.casefold() not in {
@@ -16309,14 +16273,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     previous_score=constitution_score_before,
                     new_score=int(sheet["abilities"]["constitution"]["score"]),
                     source=f"{selected_species}: Constitution ability score increase",
+                    adjust_current=True,
                 )
             if not hp_includes_grants:
                 hp_per_level = int(grants.get("hp_per_level", 0) or 0)
                 if hp_per_level:
                     features = [
-                        item
-                        for item in grants.get("features", [])
-                        if isinstance(item, dict)
+                        item for item in grants.get("features", []) if isinstance(item, dict)
                     ]
                     hp_feature = next(
                         (
@@ -16337,6 +16300,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         sheet,
                         amount=hp_per_level,
                         source=hp_source,
+                        adjust_current=True,
                     )
             if grants.get("size"):
                 sheet["traits"]["size"] = str(grants["size"])
@@ -16439,11 +16403,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         elif kind in {"feature", "activity"}:
             section = "features" if kind == "feature" else "activities"
             existing_content = next(
-                (
-                    item
-                    for item in sheet["content"][section]
-                    if item.get("id") == artifact_id
-                ),
+                (item for item in sheet["content"][section] if item.get("id") == artifact_id),
                 None,
             )
             grant_level = int(selection.get("grant_level", 0) or 0)
@@ -16454,8 +16414,23 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             }
             if kind == "feature" and not grant_level and repeatable_levels:
                 grant_level = int(card.get("minimum_level", 1) or 1)
+            initial_requirements = dict(
+                dict(card.get("selection_requirements_by_level") or {}).get(str(grant_level))
+                or card.get("selection_requirements")
+                or {}
+            )
+            replacement_study_minutes = int(
+                initial_requirements.get("replacement_study_minutes", 0) or 0
+            )
+            replacing_feature_selection = bool(
+                existing_content is not None
+                and kind == "feature"
+                and replacement_study_minutes
+                and selection.get("replace_existing") is True
+            )
             if existing_content is not None and (
-                kind != "feature" or grant_level not in repeatable_levels
+                not replacing_feature_selection
+                and (kind != "feature" or grant_level not in repeatable_levels)
             ):
                 raise ValueError(f"content {kind} is already present")
             if grant_level and grant_level not in repeatable_levels:
@@ -16490,14 +16465,75 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     or str(target.get("subclass") or "").casefold() != declared_subclass.casefold()
                 ):
                     raise ValueError("feature subclass is not selected on this actor card")
-                requirements = dict(
-                    dict(card.get("selection_requirements_by_level") or {}).get(
-                        str(grant_level)
-                    )
-                    or card.get("selection_requirements")
-                    or {}
+                requirements = initial_requirements
+                selection_kind = str(requirements.get("kind") or "")
+                unsupported_requirement_fields = (
+                    set(requirements) - SUPPORTED_FEATURE_SELECTION_REQUIREMENT_FIELDS
                 )
+                if unsupported_requirement_fields:
+                    raise RulesetUnavailableError(
+                        "feature selection requirements are not executable: "
+                        f"{sorted(unsupported_requirement_fields)}"
+                    )
+                unsupported_prerequisite_fields = {
+                    field
+                    for prerequisite in dict(
+                        requirements.get("option_prerequisites") or {}
+                    ).values()
+                    for field in dict(prerequisite)
+                    if field not in SUPPORTED_FEATURE_OPTION_PREREQUISITE_FIELDS
+                }
+                if unsupported_prerequisite_fields:
+                    raise RulesetUnavailableError(
+                        "feature option prerequisites are not executable: "
+                        f"{sorted(unsupported_prerequisite_fields)}"
+                    )
+                if selection_kind not in SUPPORTED_FEATURE_SELECTION_KINDS:
+                    raise RulesetUnavailableError(
+                        f"feature selection kind is not executable: {selection_kind}"
+                    )
                 choice_field = str(requirements.get("field") or "")
+                allowed_selection_fields = {"grant_level"}
+                if choice_field:
+                    allowed_selection_fields.add(choice_field)
+                if int(dict(card.get("mechanical_grants") or {}).get("hp_per_class_level", 0) or 0):
+                    allowed_selection_fields.add("initial_setup_full_hp")
+                if replacing_feature_selection:
+                    allowed_selection_fields.update(
+                        {
+                            "replace_existing",
+                            "study_started_elapsed_minutes",
+                        }
+                    )
+                unsupported_selection_fields = set(selection) - allowed_selection_fields
+                if unsupported_selection_fields:
+                    raise ValueError(
+                        "feature selection has unsupported fields: "
+                        f"{sorted(unsupported_selection_fields)}"
+                    )
+                if replacing_feature_selection:
+                    if phase != PROFILE_PLAY:
+                        raise CombatEngineError(
+                            "feature selection replacement is available only during play"
+                        )
+                    study_started = selection.get("study_started_elapsed_minutes")
+                    if isinstance(study_started, bool) or not isinstance(study_started, int):
+                        raise CombatEngineError(
+                            "feature replacement requires study_started_elapsed_minutes"
+                        )
+                    current_elapsed = dict(dict(campaign.state or {}).get("world_time") or {}).get(
+                        "elapsed_minutes"
+                    )
+                    if isinstance(current_elapsed, bool) or not isinstance(current_elapsed, int):
+                        raise CombatEngineError("feature replacement requires the campaign clock")
+                    if (
+                        study_started < 0
+                        or current_elapsed - study_started < replacement_study_minutes
+                    ):
+                        raise CombatEngineError(
+                            "feature replacement has not completed its required "
+                            f"{replacement_study_minutes} minutes of study"
+                        )
                 if choice_field:
                     if requirements.get("kind") == "ability_score_increase":
                         selected_increases = selection.get(choice_field)
@@ -16527,9 +16563,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                                 [int(amount) for amount in distribution_option],
                                 reverse=True,
                             )
-                            for distribution_option in requirements.get(
-                                "allowed_distributions", []
-                            )
+                            for distribution_option in requirements.get("allowed_distributions", [])
                         ]
                         if distribution not in allowed:
                             raise ValueError(
@@ -16537,9 +16571,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                                 "distribution"
                             )
                         maximum_score = int(requirements.get("maximum_score", 20) or 20)
-                        previous_constitution = int(
-                            sheet["abilities"]["constitution"]["score"]
-                        )
+                        previous_constitution = int(sheet["abilities"]["constitution"]["score"])
                         for ability, amount in normalized_increases.items():
                             old_score = int(sheet["abilities"][ability]["score"])
                             if old_score + amount > maximum_score:
@@ -16552,19 +16584,25 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                             previous_score=previous_constitution,
                             new_score=int(sheet["abilities"]["constitution"]["score"]),
                             source=(
-                                f"{declared_class} level {grant_level}: "
-                                "Ability Score Improvement"
+                                f"{declared_class} level {grant_level}: Ability Score Improvement"
                             ),
                         )
                     elif requirements.get("kind") == "favored_enemy":
                         favored_enemy = selection.get(choice_field)
                         if not isinstance(favored_enemy, dict):
+                            raise ValueError("feature favored_enemy must be a structured object")
+                        unexpected_enemy_fields = set(favored_enemy) - {
+                            "creature_type",
+                            "humanoid_races",
+                            "enemy_speaks_language",
+                            "language",
+                        }
+                        if unexpected_enemy_fields:
                             raise ValueError(
-                                "feature favored_enemy must be a structured object"
+                                "feature favored_enemy has unsupported fields: "
+                                f"{sorted(unexpected_enemy_fields)}"
                             )
-                        creature_type = str(
-                            favored_enemy.get("creature_type") or ""
-                        ).strip()
+                        creature_type = str(favored_enemy.get("creature_type") or "").strip()
                         humanoid_races = _validated_distinct_choices(
                             favored_enemy.get("humanoid_races"),
                             count=(
@@ -16576,29 +16614,37 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         )
                         creature_options = {
                             str(item).casefold()
-                            for item in requirements.get(
-                                "creature_type_options", []
-                            )
+                            for item in requirements.get("creature_type_options", [])
                         }
                         if creature_type.casefold() == "humanoid":
                             if not humanoid_races:
-                                raise ValueError(
-                                    "humanoid favored enemy requires two races"
-                                )
+                                raise ValueError("humanoid favored enemy requires two races")
                         elif creature_type.casefold() not in creature_options:
-                            raise ValueError(
-                                "favored enemy creature_type is not an allowed option"
-                            )
+                            raise ValueError("favored enemy creature_type is not an allowed option")
                         language = str(favored_enemy.get("language") or "").strip()
-                        if requirements.get("requires_language") and not language:
+                        speaks_language = favored_enemy.get("enemy_speaks_language")
+                        if requirements.get("language_if_spoken") and not isinstance(
+                            speaks_language, bool
+                        ):
                             raise ValueError(
-                                "favored enemy requires its associated language"
+                                "favored enemy must explicitly record whether it speaks a language"
                             )
+                        if speaks_language and not language:
+                            raise ValueError("favored enemy requires its associated language")
+                        if not speaks_language and language:
+                            raise ValueError(
+                                "favored enemy language must be empty when the enemy speaks none"
+                            )
+                        if language:
+                            known_languages = {
+                                str(item).casefold() for item in sheet["traits"]["languages"]
+                            }
+                            if language.casefold() in known_languages:
+                                raise ValueError("favored enemy language is already known")
+                            sheet["traits"]["languages"].append(language)
                         normalized_enemy = (
                             "humanoid:"
-                            + ",".join(
-                                sorted(item.casefold() for item in humanoid_races)
-                            )
+                            + ",".join(sorted(item.casefold() for item in humanoid_races))
                             if creature_type.casefold() == "humanoid"
                             else creature_type.casefold()
                         )
@@ -16608,36 +16654,29 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                                 dict(existing_content.get("choices") or {}),
                                 *[
                                     dict(item.get("choices") or {})
-                                    for item in existing_content.get(
-                                        "advancement_grants", []
-                                    )
+                                    for item in existing_content.get("advancement_grants", [])
                                 ],
                             ]
                             for prior in prior_choices:
                                 value = prior.get(choice_field)
                                 if not isinstance(value, dict):
                                     continue
-                                prior_type = str(
-                                    value.get("creature_type") or ""
-                                ).casefold()
+                                prior_type = str(value.get("creature_type") or "").casefold()
                                 if prior_type == "humanoid":
                                     prior_races = [
                                         str(item).casefold()
                                         for item in value.get("humanoid_races", [])
                                     ]
-                                    prior_enemies.add(
-                                        "humanoid:" + ",".join(sorted(prior_races))
-                                    )
+                                    prior_enemies.add("humanoid:" + ",".join(sorted(prior_races)))
                                 elif prior_type:
                                     prior_enemies.add(prior_type)
                         if normalized_enemy in prior_enemies:
-                            raise ValueError(
-                                "favored enemy choice was already selected"
-                            )
+                            raise ValueError("favored enemy choice was already selected")
                     elif requirements.get("kind") in {
                         "known_spell_grants",
                         "mystic_arcanum",
                         "spell_mastery",
+                        "signature_spells",
                     }:
                         spell_ids = _validated_distinct_choices(
                             selection.get(choice_field),
@@ -16656,24 +16695,20 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                                 None,
                             )
                             if spell_match is None:
-                                raise ValueError(
-                                    "feature spell artifact is unavailable"
-                                )
+                                raise ValueError("feature spell artifact is unavailable")
                             spell_matches.append(spell_match)
                         spell_levels = [
                             int(dict(item[2].get("card") or {}).get("level", 0) or 0)
                             for item in spell_matches
                         ]
-                        eligible_class = str(
-                            requirements.get("eligible_class") or ""
-                        ).casefold()
+                        eligible_class = str(requirements.get("eligible_class") or "").casefold()
                         if eligible_class and eligible_class != "any":
                             for spell_match in spell_matches:
                                 eligible_classes = {
                                     str(item).casefold()
-                                    for item in dict(
-                                        spell_match[2].get("card") or {}
-                                    ).get("classes", [])
+                                    for item in dict(spell_match[2].get("card") or {}).get(
+                                        "classes", []
+                                    )
                                 }
                                 if eligible_class not in eligible_classes:
                                     raise ValueError(
@@ -16685,32 +16720,25 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                                 [
                                     int(level)
                                     for level, resource in dict(
-                                        sheet["spellcasting"].get("spell_slots")
-                                        or {}
+                                        sheet["spellcasting"].get("spell_slots") or {}
                                     ).items()
                                     if int(dict(resource).get("max", 0) or 0) > 0
                                 ]
                                 + [
                                     int(
-                                        dict(
-                                            sheet["spellcasting"].get("pact_magic")
-                                            or {}
-                                        ).get("slot_level", 0)
+                                        dict(sheet["spellcasting"].get("pact_magic") or {}).get(
+                                            "slot_level", 0
+                                        )
                                         or 0
                                     )
                                 ]
                             )
-                            if any(
-                                level > maximum_spell_level
-                                for level in spell_levels
-                            ):
+                            if any(level > maximum_spell_level for level in spell_levels):
                                 raise ValueError(
-                                    "feature spell exceeds the actor's available "
-                                    "spell level"
+                                    "feature spell exceeds the actor's available spell level"
                                 )
                             source_class = str(
-                                requirements.get("source_class")
-                                or declared_class
+                                requirements.get("source_class") or declared_class
                             ).title()
                             for spell_match in spell_matches:
                                 materialize_feature_spell(
@@ -16719,52 +16747,82 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                                     source_key=source_class,
                                 )
                         elif feature_kind == "mystic_arcanum":
-                            required_level = int(
-                                requirements.get("spell_level", 0) or 0
-                            )
+                            required_level = int(requirements.get("spell_level", 0) or 0)
                             if spell_levels != [required_level]:
-                                raise ValueError(
-                                    "Mystic Arcanum requires the exact spell level"
-                                )
+                                raise ValueError("Mystic Arcanum requires the exact spell level")
                             spell_card = materialize_feature_spell(
                                 spell_matches[0],
                                 method="mystic_arcanum",
                                 source_key="Warlock",
                             )
-                            resource_key = (
-                                f"mystic_arcanum:{spell_matches[0][2]['id']}"
-                            )
+                            resource_key = f"mystic_arcanum:{spell_matches[0][2]['id']}"
                             sheet["resources"][resource_key] = {
                                 "label": (
-                                    f"Mystic Arcanum: "
-                                    f"{spell_card.get('name') or spell_ids[0]}"
+                                    f"Mystic Arcanum: {spell_card.get('name') or spell_ids[0]}"
                                 ),
                                 "value": 1,
                                 "max": 1,
                                 "recovers_on": "long_rest",
                                 "source_key": "Warlock",
                             }
-                        else:
+                        elif feature_kind == "spell_mastery":
                             required_levels = sorted(
                                 int(value)
-                                for value in requirements.get(
-                                    "required_spell_levels", []
-                                )
+                                for value in requirements.get("required_spell_levels", [])
                             )
                             if sorted(spell_levels) != required_levels:
                                 raise ValueError(
-                                    "Spell Mastery requires one 1st-level and one "
-                                    "2nd-level spell"
+                                    "Spell Mastery requires one 1st-level and one 2nd-level spell"
                                 )
                             spellbook_ids = set(
-                                sheet["spellcasting"]["spellbook"].get(
-                                    "spell_ids", []
-                                )
+                                sheet["spellcasting"]["spellbook"].get("spell_ids", [])
                             )
                             if not set(spell_ids).issubset(spellbook_ids):
-                                raise ValueError(
-                                    "Spell Mastery choices must be in the spellbook"
-                                )
+                                raise ValueError("Spell Mastery choices must be in the spellbook")
+                            if replacing_feature_selection:
+                                previous_spell_ids = [
+                                    str(item)
+                                    for item in dict(existing_content.get("choices") or {}).get(
+                                        choice_field, []
+                                    )
+                                ]
+                                if set(previous_spell_ids) == set(spell_ids):
+                                    raise ValueError(
+                                        "Spell Mastery replacement must exchange "
+                                        "at least one selected spell"
+                                    )
+                                mastery_source = "spell_mastery:Wizard"
+                                for previous_spell_id in set(previous_spell_ids) - set(spell_ids):
+                                    previous_spell = next(
+                                        (
+                                            item
+                                            for item in sheet["content"]["spells"]
+                                            if str(item.get("id") or "") == previous_spell_id
+                                        ),
+                                        None,
+                                    )
+                                    if previous_spell is None:
+                                        raise ValueError(
+                                            "recorded Spell Mastery choice is "
+                                            "missing from the actor card"
+                                        )
+                                    previous_access = previous_spell.setdefault("access", {})
+                                    sources = [
+                                        str(item)
+                                        for item in previous_access.get("at_will_sources", [])
+                                        if str(item) != mastery_source
+                                    ]
+                                    previous_access["at_will_sources"] = sources
+                                    if sources:
+                                        previous_access["at_will"] = True
+                                    elif (
+                                        str(
+                                            dict(previous_spell.get("grant") or {}).get("method")
+                                            or ""
+                                        )
+                                        != "eldritch_invocation"
+                                    ):
+                                        previous_access["at_will"] = False
                             for spell_match in spell_matches:
                                 materialize_feature_spell(
                                     spell_match,
@@ -16773,27 +16831,53 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                                     at_will=True,
                                     allow_existing=True,
                                 )
+                        else:
+                            required_levels = sorted(
+                                int(value)
+                                for value in requirements.get("required_spell_levels", [])
+                            )
+                            if sorted(spell_levels) != required_levels:
+                                raise ValueError("Signature Spells requires two 3rd-level spells")
+                            spellbook_ids = set(
+                                sheet["spellcasting"]["spellbook"].get("spell_ids", [])
+                            )
+                            if not set(spell_ids).issubset(spellbook_ids):
+                                raise ValueError("Signature Spell choices must be in the spellbook")
+                            for spell_match in spell_matches:
+                                spell_card = materialize_feature_spell(
+                                    spell_match,
+                                    method="signature_spells",
+                                    source_key="Wizard",
+                                    allow_existing=True,
+                                )
+                                access = spell_card.setdefault("access", {})
+                                access["always_prepared"] = True
+                                access["prepared"] = True
+                                spell_id = str(spell_match[2]["id"])
+                                sheet["resources"][f"signature_spell:{spell_id}"] = {
+                                    "label": (
+                                        f"Signature Spell: {spell_card.get('name') or spell_id}"
+                                    ),
+                                    "value": 1,
+                                    "max": 1,
+                                    "unlimited": False,
+                                    "recovers_on": "short_rest",
+                                    "source_key": "Wizard",
+                                }
                     elif requirements.get("kind") == "bonus_cantrip":
-                        spell_artifact_id = str(
-                            selection.get(choice_field) or ""
-                        ).strip()
+                        spell_artifact_id = str(selection.get(choice_field) or "").strip()
                         spell_match = next(
                             (
                                 item
                                 for item in candidates
-                                if str(item[2].get("id") or "")
-                                == spell_artifact_id
+                                if str(item[2].get("id") or "") == spell_artifact_id
                             ),
                             None,
                         )
                         if spell_match is None:
-                            raise ValueError(
-                                "bonus cantrip spell_artifact_id is unavailable"
-                            )
+                            raise ValueError("bonus cantrip spell_artifact_id is unavailable")
                         spell_pack_id, spell_version, spell_artifact = spell_match
-                        spell_card = deepcopy(
-                            dict(spell_artifact.get("card") or {})
-                        )
+                        spell_card = deepcopy(dict(spell_artifact.get("card") or {}))
                         eligible_class = str(
                             requirements.get("eligible_class") or declared_class
                         ).casefold()
@@ -16802,14 +16886,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                             or int(spell_card.get("level", -1))
                             != int(requirements.get("spell_level", 0) or 0)
                             or eligible_class
-                            not in {
-                                str(item).casefold()
-                                for item in spell_card.get("classes", [])
-                            }
+                            not in {str(item).casefold() for item in spell_card.get("classes", [])}
                         ):
-                            raise ValueError(
-                                "bonus cantrip does not meet its class and level rule"
-                            )
+                            raise ValueError("bonus cantrip does not meet its class and level rule")
                         if any(
                             item.get("id") == spell_artifact_id
                             for item in sheet["content"]["spells"]
@@ -16827,12 +16906,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                             id=spell_artifact_id,
                             pack_id=spell_pack_id,
                             pack_version=spell_version,
-                            rule_refs=list(
-                                spell_artifact.get("rule_refs") or []
-                            ),
-                            mechanic_refs=list(
-                                spell_artifact.get("mechanic_refs") or []
-                            ),
+                            rule_refs=list(spell_artifact.get("rule_refs") or []),
+                            mechanic_refs=list(spell_artifact.get("mechanic_refs") or []),
                         )
                         sheet["content"]["spells"].append(spell_card)
                     else:
@@ -16849,98 +16924,83 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                             )
                         if any(not item for item in selected_values):
                             raise ValueError(f"feature {choice_field} choice is required")
-                        options = {
-                            str(item).casefold() for item in requirements.get("options", [])
-                        }
+                        options = {str(item).casefold() for item in requirements.get("options", [])}
                         if options and any(
                             item.casefold() not in options for item in selected_values
                         ):
                             raise ValueError("feature choice is not one of the allowed options")
                         if requirements.get("requires_new_choice"):
+                            uniqueness_scope = str(
+                                requirements.get("choice_uniqueness_scope") or artifact_id
+                            )
                             prior_values: set[str] = set()
                             for prior_feature in sheet["content"]["features"]:
                                 prior_choice_sets = [
                                     dict(prior_feature.get("choices") or {}),
                                     *[
                                         dict(item.get("choices") or {})
-                                        for item in prior_feature.get(
-                                            "advancement_grants", []
-                                        )
+                                        for item in prior_feature.get("advancement_grants", [])
                                     ],
                                 ]
                                 for prior_choices in prior_choice_sets:
+                                    recorded_scope = str(
+                                        prior_choices.get("_choice_uniqueness_scope") or ""
+                                    )
+                                    if recorded_scope:
+                                        same_scope = recorded_scope == uniqueness_scope
+                                    elif uniqueness_scope == "fighting_style":
+                                        same_scope = str(
+                                            prior_feature.get("name") or ""
+                                        ).casefold() in {
+                                            "fighting style",
+                                            "additional fighting style",
+                                        }
+                                    else:
+                                        same_scope = (
+                                            str(prior_feature.get("id") or "") == artifact_id
+                                        )
+                                    if not same_scope:
+                                        continue
                                     prior_value = prior_choices.get(choice_field)
                                     if isinstance(prior_value, list):
                                         prior_values.update(
-                                            str(item).casefold()
-                                            for item in prior_value
+                                            str(item).casefold() for item in prior_value
                                         )
                                     elif prior_value is not None:
-                                        prior_values.add(
-                                            str(prior_value).casefold()
-                                        )
-                            if any(
-                                item.casefold() in prior_values
-                                for item in selected_values
+                                        prior_values.add(str(prior_value).casefold())
+                            if any(item.casefold() in prior_values for item in selected_values):
+                                raise ValueError("feature choice was already selected")
+                        option_prerequisites = dict(requirements.get("option_prerequisites") or {})
+                        at_will_spells = dict(requirements.get("at_will_spells") or {})
+                        for selected_value in selected_values:
+                            prerequisite = dict(option_prerequisites.get(selected_value) or {})
+                            if target is not None and int(target.get("level", 0) or 0) < int(
+                                prerequisite.get("minimum_level", 0) or 0
                             ):
                                 raise ValueError(
-                                    "feature choice was already selected"
+                                    "eldritch invocation level prerequisite is not met"
                                 )
-                        option_prerequisites = dict(
-                            requirements.get("option_prerequisites") or {}
-                        )
-                        at_will_spells = dict(
-                            requirements.get("at_will_spells") or {}
-                        )
-                        for selected_value in selected_values:
-                            prerequisite = dict(
-                                option_prerequisites.get(selected_value) or {}
-                            )
-                            if target is not None and int(
-                                target.get("level", 0) or 0
-                            ) < int(prerequisite.get("minimum_level", 0) or 0):
-                                raise ValueError(
-                                    "eldritch invocation level prerequisite is "
-                                    "not met"
-                                )
-                            required_pact = str(
-                                prerequisite.get("required_pact_boon") or ""
-                            )
+                            required_pact = str(prerequisite.get("required_pact_boon") or "")
                             if required_pact and not any(
                                 required_pact.casefold()
                                 == str(
-                                    dict(feature.get("choices") or {}).get(
-                                        "option"
-                                    )
-                                    or ""
+                                    dict(feature.get("choices") or {}).get("option") or ""
                                 ).casefold()
                                 for feature in sheet["content"]["features"]
                             ):
-                                raise ValueError(
-                                    "eldritch invocation pact prerequisite is "
-                                    "not met"
-                                )
-                            required_cantrip = str(
-                                prerequisite.get("required_cantrip") or ""
-                            )
+                                raise ValueError("eldritch invocation pact prerequisite is not met")
+                            required_cantrip = str(prerequisite.get("required_cantrip") or "")
                             if required_cantrip and not any(
                                 int(spell.get("level", -1)) == 0
                                 and str(spell.get("name") or "").casefold()
                                 == required_cantrip.casefold()
-                                and bool(
-                                    dict(spell.get("access") or {}).get(
-                                        "known"
-                                    )
-                                )
+                                and bool(dict(spell.get("access") or {}).get("known"))
                                 for spell in sheet["content"]["spells"]
                             ):
                                 raise ValueError(
-                                    "eldritch invocation cantrip prerequisite is "
-                                    "not met"
+                                    "eldritch invocation cantrip prerequisite is not met"
                                 )
-                            at_will_spell = str(
-                                at_will_spells.get(selected_value) or ""
-                            )
+                            at_will_spell = str(at_will_spells.get(selected_value) or "")
                             if at_will_spell:
                                 at_will_match = next(
                                     (
@@ -16948,10 +17008,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                                         for item in candidates
                                         if item[2].get("kind") == "spell"
                                         and str(
-                                            dict(
-                                                item[2].get("card") or {}
-                                            ).get("name")
-                                            or ""
+                                            dict(item[2].get("card") or {}).get("name") or ""
                                         ).casefold()
                                         == at_will_spell.casefold()
                                     ),
@@ -16983,16 +17040,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                                 }
                                 tool_expertise = {
                                     value.casefold()
-                                    for value in sheet["traits"]["proficiencies"][
-                                        "tool_expertise"
-                                    ]
+                                    for value in sheet["traits"]["proficiencies"]["tool_expertise"]
                                 }
                                 if not tool_known and (
                                     skill is None or skill.get("proficiency") == "none"
                                 ):
                                     raise ValueError(
-                                        "feature expertise choice requires an existing "
-                                        "proficiency"
+                                        "feature expertise choice requires an existing proficiency"
                                     )
                                 if requirements.get("requires_new_expertise") and (
                                     (skill is not None and skill.get("proficiency") == "expertise")
@@ -17004,9 +17058,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                                 if skill is not None:
                                     skill["proficiency"] = "expertise"
                                 elif tool_known:
-                                    sheet["traits"]["proficiencies"][
-                                        "tool_expertise"
-                                    ].append(item)
+                                    sheet["traits"]["proficiencies"]["tool_expertise"].append(item)
                         if requirements.get("grants_skill_proficiency"):
                             for item in selected_values:
                                 skill = sheet["skills"].get(item.casefold())
@@ -17023,12 +17075,110 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                                     )
                                 skill["proficiency"] = "proficient"
                 mechanical_grants = dict(card.get("mechanical_grants") or {})
-                armor = sheet["traits"]["proficiencies"]["armor"]
-                sheet["traits"]["proficiencies"]["armor"] = list(
-                    dict.fromkeys(
-                        [*armor, *list(mechanical_grants.get("armor_proficiencies") or [])]
+                unsupported_grants = set(mechanical_grants) - SUPPORTED_FEATURE_MECHANICAL_GRANTS
+                if unsupported_grants:
+                    raise RulesetUnavailableError(
+                        "feature mechanical grants are not executable: "
+                        f"{sorted(unsupported_grants)}"
                     )
-                )
+                hp_per_class_level = int(mechanical_grants.get("hp_per_class_level", 0) or 0)
+                if hp_per_class_level:
+                    initial_setup_full_hp = selection.get("initial_setup_full_hp", False)
+                    if not isinstance(initial_setup_full_hp, bool):
+                        raise ValueError("initial_setup_full_hp must be a boolean")
+                    if initial_setup_full_hp:
+                        hp_before_grant = dict(sheet.get("combat", {}).get("hp") or {})
+                        if phase != PROFILE_LOBBY:
+                            raise CombatEngineError(
+                                "initial_setup_full_hp is available only in lobby setup"
+                            )
+                        if int(hp_before_grant.get("value", 0) or 0) != int(
+                            hp_before_grant.get("max", 0) or 0
+                        ):
+                            raise CombatEngineError(
+                                "initial_setup_full_hp requires a character at "
+                                "its pre-grant hit point maximum"
+                            )
+                    source_class = str(card.get("class_name") or "").strip()
+                    source_level = next(
+                        (
+                            int(item.get("level", 0) or 0)
+                            for item in sheet["progression"]["classes"]
+                            if str(item.get("name") or "").casefold() == source_class.casefold()
+                        ),
+                        0,
+                    )
+                    if not source_class or source_level < 1:
+                        raise ValueError(
+                            "feature per-class-level hit points require its recorded class"
+                        )
+                    sheet = apply_per_level_hit_point_bonus(
+                        sheet,
+                        amount=hp_per_class_level,
+                        source=f"{card.get('name')}: {source_class} class levels",
+                        adjust_current=initial_setup_full_hp,
+                    )
+                unarmored_base = int(mechanical_grants.get("unarmored_base", 0) or 0)
+                if unarmored_base:
+                    sheet, _ = add_effect(
+                        sheet,
+                        {
+                            "name": str(card.get("name") or "Unarmored AC"),
+                            "kind": "feature",
+                            "source": artifact_id,
+                            "duration": {"period": "manual", "remaining": 0},
+                            "changes": [
+                                {
+                                    "path": "combat.ac.unarmored_base",
+                                    "mode": "override",
+                                    "value": unarmored_base,
+                                }
+                            ],
+                            "description": (
+                                "Class feature alternate AC calculation while not wearing armor."
+                            ),
+                        },
+                    )
+                unarmored_formula = dict(mechanical_grants.get("unarmored_formula") or {})
+                if unarmored_formula:
+                    if any(
+                        change.get("path") == "combat.ac.unarmored_formula"
+                        for effect in sheet.get("effects", [])
+                        if bool(effect.get("active", True))
+                        for change in effect.get("changes", [])
+                    ):
+                        raise ValueError(
+                            "a multiclass character that already has Unarmored "
+                            "Defense cannot gain it again"
+                        )
+                    sheet, _ = add_effect(
+                        sheet,
+                        {
+                            "name": str(card.get("name") or "Unarmored Defense"),
+                            "kind": "feature",
+                            "source": artifact_id,
+                            "duration": {"period": "manual", "remaining": 0},
+                            "changes": [
+                                {
+                                    "path": "combat.ac.unarmored_formula",
+                                    "mode": "override",
+                                    "value": unarmored_formula,
+                                }
+                            ],
+                            "description": (
+                                "Class feature alternate AC calculation while "
+                                "its armor and shield conditions are met."
+                            ),
+                        },
+                    )
+                armor = sheet["traits"]["proficiencies"]["armor"]
+                for proficiency in mechanical_grants.get("armor_proficiencies") or []:
+                    if str(proficiency).casefold() not in {str(item).casefold() for item in armor}:
+                        armor.append(proficiency)
+                languages = sheet["traits"]["languages"]
+                for language in mechanical_grants.get("languages") or []:
+                    if str(language).casefold() not in {str(item).casefold() for item in languages}:
+                        languages.append(language)
                 for resource_key, resource in dict(
                     mechanical_grants.get("resources") or {}
                 ).items():
@@ -17036,12 +17186,17 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     if not normalized_key:
                         raise ValueError("feature resource grant has an empty key")
                     existing = sheet["resources"].get(normalized_key)
-                    if existing is not None and existing != resource:
+                    if (
+                        existing is not None
+                        and existing != resource
+                        and normalized_key != "channel_divinity"
+                    ):
                         raise ValueError(
                             f"feature resource grant conflicts with existing resource: "
                             f"{normalized_key}"
                         )
-                    sheet["resources"][normalized_key] = deepcopy(dict(resource))
+                    if existing is None:
+                        sheet["resources"][normalized_key] = deepcopy(dict(resource))
                 resource_key = str(card.get("resource_key") or "")
                 if resource_key and resource_key not in sheet["resources"]:
                     raise ValueError(
@@ -17061,7 +17216,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 ):
                     card.pop(metadata_key, None)
                 recorded_selection = {
-                    key: value for key, value in selection.items() if key != "grant_level"
+                    key: value
+                    for key, value in selection.items()
+                    if key
+                    not in {
+                        "grant_level",
+                        "replace_existing",
+                        "study_started_elapsed_minutes",
+                    }
                 }
                 grant_record = {
                     "level": grant_level,
@@ -17070,11 +17232,35 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "pack_version": version,
                     "rule_refs": list(artifact.get("rule_refs") or []),
                 }
-                if existing_content is not None:
+                if replacing_feature_selection:
                     current_record = next(
-                        item
-                        for item in sheet["content"][section]
-                        if item.get("id") == artifact_id
+                        item for item in sheet["content"][section] if item.get("id") == artifact_id
+                    )
+                    previous_choices = dict(current_record.get("choices") or {})
+                    replacement_history = list(previous_choices.get("_replacement_history") or [])
+                    current_elapsed = int(
+                        dict(dict(campaign.state or {}).get("world_time") or {})["elapsed_minutes"]
+                    )
+                    replacement_history.append(
+                        {
+                            "previous_spell_artifact_ids": list(
+                                previous_choices.get(choice_field) or []
+                            ),
+                            "study_started_elapsed_minutes": int(
+                                selection["study_started_elapsed_minutes"]
+                            ),
+                            "study_completed_elapsed_minutes": current_elapsed,
+                            "study_minutes": current_elapsed
+                            - int(selection["study_started_elapsed_minutes"]),
+                        }
+                    )
+                    current_record["choices"] = {
+                        **recorded_selection,
+                        "_replacement_history": replacement_history,
+                    }
+                elif existing_content is not None:
+                    current_record = next(
+                        item for item in sheet["content"][section] if item.get("id") == artifact_id
                     )
                     current_record.setdefault("advancement_grants", []).append(grant_record)
                 else:
@@ -17087,9 +17273,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         card["advancement_grants"] = [grant_record]
                     card.update(provenance)
                     sheet["content"][section].append(card)
-                if artifact.get("kind") == "feature" and dict(
-                    artifact.get("card") or {}
-                ).get("always_prepared_spell_options"):
+                if artifact.get("kind") == "feature" and dict(artifact.get("card") or {}).get(
+                    "always_prepared_spell_options"
+                ):
                     subclass_spell_grants = refresh_level_unlocked_subclass_spells(
                         current.campaign_id,
                         sheet,
@@ -17137,10 +17323,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 expected_revision=expected_revision,
                 idempotency_key=idempotency_key,
             )
-        if phase != PROFILE_LOBBY:
-            raise CombatEngineError(
-                "content grants belong to lobby setup or level advancement"
-            )
+        if phase != PROFILE_LOBBY and not replacing_feature_selection:
+            raise CombatEngineError("content grants belong to lobby setup or level advancement")
         return update_sheet(
             character_id,
             sheet,
@@ -17416,9 +17600,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 {"count": len(discovered), "documents": discovered},
             )
         if action == "stage":
-            staged = rule_document_stage(
-                campaign_id, required(data, "source_path"), principal_id
-            )
+            staged = rule_document_stage(campaign_id, required(data, "source_path"), principal_id)
             artifact = staged["artifact"]
             result = rule_import_job_create(
                 campaign_id,
@@ -17809,13 +17991,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             if membership.role in {"owner", "dm"}:
                 rules_context = effective_rule_context(campaign_id)
                 result = [
-                    character_view(character, rules_context=rules_context)
-                    for character in selected
+                    character_view(character, rules_context=rules_context) for character in selected
                 ]
             else:
-                result = [
-                    visible_character_view(character, principal_id) for character in selected
-                ]
+                result = [visible_character_view(character, principal_id) for character in selected]
         elif view == "advancement":
             result = character_level_advancement_plan(
                 str(required(data, "character_id")),
@@ -17837,27 +18016,34 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 raise CombatEngineError(
                     "character rest preflight currently requires rest_type=short_rest"
                 )
-            hp = int(
-                dict(current.sheet.get("combat", {}).get("hp") or {}).get("value", 0) or 0
-            )
-            conditions = {
-                str(item).casefold() for item in current.sheet.get("conditions", [])
-            }
+            hp = int(dict(current.sheet.get("combat", {}).get("hp") or {}).get("value", 0) or 0)
+            conditions = {str(item).casefold() for item in current.sheet.get("conditions", [])}
             if hp <= 0 or "dead" in conditions:
                 raise CombatEngineError(
                     "a creature at 0 hit points or dead cannot benefit from a rest"
                 )
-            hit_dice = validate_rest_hit_dice_requests(
-                current.sheet, data.get("hit_dice_spends")
-            )
+            hit_dice = validate_rest_hit_dice_requests(current.sheet, data.get("hit_dice_spends"))
             world_day = int(
-                dict(dict(campaign.state or {}).get("world_time") or {}).get("day", 0)
-                or 0
+                dict(dict(campaign.state or {}).get("world_time") or {}).get("day", 0) or 0
             )
             arcane_recovery = validate_arcane_recovery_choice(
                 current.sheet,
                 data.get("arcane_recovery"),
                 world_day=world_day,
+            )
+            rest_activity_minutes = validate_rest_activity_minutes(
+                data.get("rest_activity_minutes")
+            )
+            attune_item_id = str(data.get("attune_item_id") or "").strip() or None
+            if attune_item_id is not None:
+                attune_inventory_item(current.sheet, attune_item_id)
+            duration_minutes = data.get("duration_minutes")
+            if isinstance(duration_minutes, bool) or not isinstance(duration_minutes, int):
+                raise CombatEngineError("short rest preflight requires duration_minutes")
+            rest_schedule = validate_rest_schedule(
+                rest_type=rest_type,
+                duration_minutes=duration_minutes,
+                rest_schedule=data.get("rest_schedule"),
             )
             rest_rules = effective_rule_context(
                 current.campaign_id,
@@ -17871,10 +18057,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "campaign_id": current.campaign_id,
                 "rest_type": rest_type,
                 "world_day": world_day,
-                "hit_dice_spends": [
-                    {"key": key, "count": count} for key, count in hit_dice
-                ],
+                "hit_dice_spends": [{"key": key, "count": count} for key, count in hit_dice],
                 "arcane_recovery": arcane_recovery,
+                "attune_item_id": attune_item_id,
+                "rest_activity_minutes": rest_activity_minutes,
+                "rest_schedule": rest_schedule,
                 "pending": list(before_rules.pending),
                 "ruleset_fingerprint": rest_rules.fingerprint,
             }
@@ -17900,9 +18087,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             result = {
                 **inspection,
                 "artifact": {
-                    key: value
-                    for key, value in staged.items()
-                    if key not in {"path", "staged"}
+                    key: value for key, value in staged.items() if key not in {"path", "staged"}
                 },
                 "workflow": {
                     "next": (
@@ -17953,9 +18138,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             role = str(required(data, "role")).strip()
             summary = str(required(data, "summary")).strip()
             source_ref = data.get("source_ref")
-            source_excerpt = " ".join(
-                str(required(data, "source_excerpt")).split()
-            ).strip()
+            source_excerpt = " ".join(str(required(data, "source_excerpt")).split()).strip()
             if not name or len(name) > 200:
                 raise ValueError("narrative NPC name must contain 1 to 200 characters")
             if not role or len(role) > 500:
@@ -17963,9 +18146,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             if not summary or len(summary) > 2000:
                 raise ValueError("narrative NPC summary must contain 1 to 2000 characters")
             if len(source_excerpt) < 8 or len(source_excerpt) > 2000:
-                raise ValueError(
-                    "narrative NPC source_excerpt must contain 8 to 2000 characters"
-                )
+                raise ValueError("narrative NPC source_excerpt must contain 8 to 2000 characters")
             if not isinstance(source_ref, dict):
                 raise ValueError("narrative NPC source_ref must be an object")
             required_source_fields = {
@@ -17988,8 +18169,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 for field in ("module_id", "scene_id", "chunk_id", "content_sha256")
             ):
                 raise ValueError(
-                    "narrative NPC source_ref identifiers and content_sha256 "
-                    "must not be empty"
+                    "narrative NPC source_ref identifiers and content_sha256 must not be empty"
                 )
             heading_path = source_ref.get("heading_path")
             if (
@@ -18017,8 +18197,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             if dict(campaign.state or {}).get("game_phase", PROFILE_LOBBY) != PROFILE_LOBBY:
                 raise CombatEngineError("narrative NPCs can be created only in lobby")
             active_modules = dict(
-                dict(dict(campaign.state or {}).get("module_imports") or {}).get("active")
-                or {}
+                dict(dict(campaign.state or {}).get("module_imports") or {}).get("active") or {}
             )
             active_module_ids = {
                 str(dict(item).get("module_id") or "")
@@ -18031,21 +18210,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             expanded = modules.expand(str(source_ref["chunk_id"]))
             if str(expanded.get("campaign_id")) != campaign_id:
                 raise ValueError("narrative NPC source_ref chunk does not belong to the campaign")
-            if str(dict(expanded.get("module") or {}).get("id")) != str(
-                source_ref["module_id"]
-            ):
+            if str(dict(expanded.get("module") or {}).get("id")) != str(source_ref["module_id"]):
                 raise ValueError("narrative NPC source_ref module_id does not match its chunk")
             expanded_scene = dict(expanded.get("scene") or {})
             if str(expanded_scene.get("id")) != str(source_ref["scene_id"]):
                 raise ValueError("narrative NPC source_ref scene_id does not match its chunk")
             chunk_content = str(expanded.get("content") or "")
-            chunk_content_sha256 = hashlib.sha256(
-                chunk_content.encode("utf-8")
-            ).hexdigest()
+            chunk_content_sha256 = hashlib.sha256(chunk_content.encode("utf-8")).hexdigest()
             if str(source_ref["content_sha256"]).casefold() != chunk_content_sha256:
-                raise ValueError(
-                    "narrative NPC source_ref content_sha256 does not match its chunk"
-                )
+                raise ValueError("narrative NPC source_ref content_sha256 does not match its chunk")
             expanded_page_start = int(expanded.get("page_start") or 1)
             expanded_page_end = int(expanded.get("page_end") or expanded_page_start)
             if expanded_page_start != page_start or expanded_page_end != page_end:
@@ -18053,9 +18226,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             if [str(item) for item in list(expanded.get("heading_path") or [])] != [
                 str(item) for item in heading_path
             ]:
-                raise ValueError(
-                    "narrative NPC source_ref heading_path does not match its chunk"
-                )
+                raise ValueError("narrative NPC source_ref heading_path does not match its chunk")
             normalized_content = _normalize_source_evidence_text(chunk_content)
             if _normalize_source_evidence_text(source_excerpt) not in normalized_content:
                 raise ValueError("narrative NPC source_excerpt is not present in its chunk")
@@ -18085,14 +18256,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             ]
             notes = default_character_notes()
             notes["profile"]["summary"] = role
-            notes["profile"]["dm_notes"] = (
-                "sagasmith:narrative-npc-source:"
-                + json.dumps(
-                    evidence,
-                    ensure_ascii=False,
-                    sort_keys=True,
-                    separators=(",", ":"),
-                )
+            notes["profile"]["dm_notes"] = "sagasmith:narrative-npc-source:" + json.dumps(
+                evidence,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
             )
             character = character_create(
                 name,
@@ -18185,10 +18353,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             )
             if variant is not None:
                 changed_fields = (
-                    ", ".join(
-                        sorted(set(variant) - {"source_ref", "source_refs"})
-                    )
-                    or "none"
+                    ", ".join(sorted(set(variant) - {"source_ref", "source_refs"})) or "none"
                 )
                 provenance += (
                     f"\nVariant source: {statblock_variant_source_label(variant)}; "
@@ -18317,10 +18482,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             )
             if variant is not None:
                 changed_fields = (
-                    ", ".join(
-                        sorted(set(variant) - {"source_ref", "source_refs"})
-                    )
-                    or "none"
+                    ", ".join(sorted(set(variant) - {"source_ref", "source_refs"})) or "none"
                 )
                 provenance += (
                     f"\nVariant source: {statblock_variant_source_label(variant)}; "
@@ -18674,14 +18836,18 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             result = character_rest(
                 character_id,
                 required(data, "rest_type"),
-                data.get("prepared_spell_ids"),
-                data.get("hit_dice_spends"),
-                data.get("hit_dice_recovery"),
-                data.get("arcane_recovery"),
-                data.get("food_and_drink", False),
-                principal_id,
-                expected_revision,
-                idempotency_key,
+                prepared_spell_ids=data.get("prepared_spell_ids"),
+                hit_dice_spends=data.get("hit_dice_spends"),
+                hit_dice_recovery=data.get("hit_dice_recovery"),
+                arcane_recovery=data.get("arcane_recovery"),
+                attune_item_id=data.get("attune_item_id"),
+                rest_activity_minutes=data.get("rest_activity_minutes"),
+                rest_schedule=data.get("rest_schedule"),
+                started_elapsed_minutes=data.get("started_elapsed_minutes"),
+                food_and_drink=data.get("food_and_drink", False),
+                principal_id=principal_id,
+                expected_revision=expected_revision,
+                idempotency_key=idempotency_key,
             )
         elif action == "level_advance":
             unexpected = set(data) - {"class_name", "hp_method", "reason", "source_ref"}
@@ -18763,15 +18929,16 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         data = facade_payload(payload)
         if action == "cast_spell":
             result = character_cast_spell(
-                character_id,
-                required(data, "spell_id"),
-                data.get("cast_level"),
-                data.get("ritual", False),
-                data.get("component_ruling"),
-                data.get("source_item_id"),
-                principal_id,
-                expected_revision,
-                idempotency_key,
+                character_id=character_id,
+                spell_id=required(data, "spell_id"),
+                cast_level=data.get("cast_level"),
+                ritual=data.get("ritual", False),
+                signature_free_cast=data.get("signature_free_cast", False),
+                component_ruling=data.get("component_ruling"),
+                source_item_id=data.get("source_item_id"),
+                principal_id=principal_id,
+                expected_revision=expected_revision,
+                idempotency_key=idempotency_key,
             )
         else:
             result = character_use_activity(
@@ -19017,9 +19184,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         def actor_projection(member: dict[str, Any]) -> dict[str, Any]:
             actor = characters.get(str(member["actor_id"]))
             if actor.campaign_id != campaign_id:
-                raise ValueError(
-                    f"playthrough actor {actor.id!r} does not belong to this campaign"
-                )
+                raise ValueError(f"playthrough actor {actor.id!r} does not belong to this campaign")
             sheet = validate_character_sheet(actor.sheet)
             progression = dict(sheet["progression"])
             hp = dict(sheet["combat"]["hp"])
@@ -19052,9 +19217,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "conditions": sorted(conditions),
                 },
                 "resources": resources,
-                "equipment": sorted(
-                    str(item["id"]) for item in sheet["inventory"]["items"]
-                ),
+                "equipment": sorted(str(item["id"]) for item in sheet["inventory"]["items"]),
                 "knowledge_scope_actor_id": actor.id,
             }
 
@@ -19063,9 +19226,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         for item in manifest["npcs"]:
             actor = characters.get(str(item["actor_id"]))
             if actor.campaign_id != campaign_id:
-                raise ValueError(
-                    f"playthrough NPC {actor.id!r} does not belong to this campaign"
-                )
+                raise ValueError(f"playthrough NPC {actor.id!r} does not belong to this campaign")
             conditions = {str(value) for value in actor.sheet.get("conditions") or []}
             tracked_npcs.append(
                 {
@@ -19158,19 +19319,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         branch_id: str,
     ) -> list[dict[str, Any]]:
         condition = next(
-            (
-                item
-                for item in manifest["ending"]["conditions"]
-                if item["id"] == condition_id
-            ),
+            (item for item in manifest["ending"]["conditions"] if item["id"] == condition_id),
             None,
         )
         if condition is None:
             raise LookupError(f"unknown ending condition: {condition_id}")
         campaign = campaigns.get(campaign_id)
-        actor_cards = {
-            item.id: asdict(item) for item in characters.list(campaign_id=campaign_id)
-        }
+        actor_cards = {item.id: asdict(item) for item in characters.list(campaign_id=campaign_id)}
         facts = {
             item.fact_key: asdict(item)
             for item in memories.list(
@@ -19305,9 +19460,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 next_manifest = validate_playthrough_manifest(required(data, "manifest"))
                 immutable = ("run_id", "campaign_line_id")
                 if any(next_manifest[key] != current_manifest[key] for key in immutable):
-                    raise ValueError(
-                        "extend_modules cannot change run_id or campaign_line_id"
-                    )
+                    raise ValueError("extend_modules cannot change run_id or campaign_line_id")
                 current_module_ids = set(current_manifest["module_ids"])
                 next_module_ids = set(next_manifest["module_ids"])
                 if not current_module_ids < next_module_ids:
@@ -19315,8 +19468,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         "extend_modules must retain every module and add at least one module"
                     )
                 known_module_ids = {
-                    str(item["id"])
-                    for item in modules.list(campaign_id, include_retired=True)
+                    str(item["id"]) for item in modules.list(campaign_id, include_retired=True)
                 }
                 missing = sorted(next_module_ids - known_module_ids)
                 if missing:
@@ -19352,9 +19504,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         next_state = validate_party_state(
             {
                 **deepcopy(campaign.state),
-                "playthrough_manifest": validate_playthrough_manifest(
-                    persisted_manifest
-                ),
+                "playthrough_manifest": validate_playthrough_manifest(persisted_manifest),
             }
         )
         StateMutationService(storage.database).replace(
@@ -19553,7 +19703,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 importance=(
                     int(data["importance"])
                     if data.get("importance") is not None
-                    else current.importance if current else 3
+                    else current.importance
+                    if current
+                    else 3
                 ),
                 disclosure_scope=data.get("disclosure_scope"),
             )
@@ -19570,9 +19722,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     if action == "supersede" and not data.get("content")
                     else str(required(data, "content"))
                 ),
-                metadata=(
-                    dict(data["metadata"]) if data.get("metadata") is not None else None
-                ),
+                metadata=(dict(data["metadata"]) if data.get("metadata") is not None else None),
                 branch_id=resolved_branch_id,
                 expected_revision_id=expected_revision_id,
                 status="superseded" if action == "supersede" else data.get("status"),
@@ -20196,8 +20346,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         elif exposure_changed and request is not None:
             await request[1].send_tool_list_changed()
         exposure_status = exposures.status(exposure)
-        if isinstance(result, (list, tuple)) and result and all(
-            hasattr(item, "type") for item in result
+        if (
+            isinstance(result, (list, tuple))
+            and result
+            and all(hasattr(item, "type") for item in result)
         ):
             decoded_text: list[Any] = []
             forwarded_content: list[Any] = []

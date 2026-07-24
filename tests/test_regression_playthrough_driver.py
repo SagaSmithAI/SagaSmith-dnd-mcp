@@ -189,9 +189,7 @@ def test_advance_scene_identity_supports_exact_retry_and_later_revisit() -> None
     client = Client()
     asyncio.run(advance(client))
     asyncio.run(advance(client))
-    first_key, retry_key = [
-        item["idempotency_key"] for item in client.replace_calls
-    ]
+    first_key, retry_key = [item["idempotency_key"] for item in client.replace_calls]
     assert first_key == retry_key
     assert (
         client.replace_calls[0]["payload"]["manifest"]
@@ -340,11 +338,7 @@ def test_narrative_npc_driver_round_trips_lobby_and_registers_manifest(
                 "campaign_id": "campaign-1",
                 "character_type": "npc",
                 "name": "Qelline Alderleaf",
-                "sheet": {
-                    "adventure_state": {
-                        "status_tags": ["narrative_only", "source_bound"]
-                    }
-                },
+                "sheet": {"adventure_state": {"status_tags": ["narrative_only", "source_bound"]}},
             }
             self.snapshot_calls = 0
 
@@ -379,9 +373,7 @@ def test_narrative_npc_driver_round_trips_lobby_and_registers_manifest(
                 return {
                     "module_id": "module-1",
                     "scene_id": "scene-1",
-                    "content": (
-                        "Qelline Alderleaf is a pragmatic farmer and can introduce Carp."
-                    ),
+                    "content": ("Qelline Alderleaf is a pragmatic farmer and can introduce Carp."),
                     "spatial": {"locations": [{"key": "alderleaf-farm"}]},
                 }
             if tool_id == "branch_query":
@@ -466,9 +458,7 @@ def test_narrative_npc_driver_round_trips_lobby_and_registers_manifest(
             initial_phase="play",
             scene_id="scene-1",
             location_key="alderleaf-farm",
-            source_excerpt=(
-                "Qelline Alderleaf is a pragmatic farmer and can introduce Carp."
-            ),
+            source_excerpt=("Qelline Alderleaf is a pragmatic farmer and can introduce Carp."),
             source_ref=source_ref,
             name="Qelline Alderleaf",
             role="Pragmatic farmer and local guide.",
@@ -1272,8 +1262,7 @@ def test_source_table_roll_is_public_replayable_and_deferred() -> None:
             scene_id="scene-1",
             location_key="triboar-trail",
             source_excerpt=(
-                "Check for encounters once during the day and once at night "
-                "by rolling a d20."
+                "Check for encounters once during the day and once at night by rolling a d20."
             ),
             source_ref=source_ref,
             roll_id="travel-day-1-daylight",
@@ -1351,12 +1340,8 @@ def test_stable_party_recovery_uses_one_public_campaign_transition() -> None:
     )
     assert client.keys == {
         "recovery": _mutation_key("run-1", "stable-recovery", identity),
-        "continuity": _mutation_key(
-            "run-1", "stable-recovery-continuity", identity
-        ),
-        "sync": _mutation_key(
-            "run-1", "sync", f"stable-recovery-sync:{identity}"
-        ),
+        "continuity": _mutation_key("run-1", "stable-recovery-continuity", identity),
+        "sync": _mutation_key("run-1", "sync", f"stable-recovery-sync:{identity}"),
     }
 
 
@@ -1560,9 +1545,7 @@ def test_replacement_join_preserves_predecessor_and_only_hands_off_explicit_know
                 }
             if tool_id == "character_query":
                 actor_id = arguments["payload"]["character_id"]
-                return deepcopy(
-                    predecessor if actor_id == "predecessor" else replacement
-                )
+                return deepcopy(predecessor if actor_id == "predecessor" else replacement)
             if tool_id == "branch_query":
                 return [
                     {
@@ -2544,9 +2527,7 @@ def test_check_identity_separates_same_scene_checks_by_location_dc_and_source() 
 
     assert identity != _check_identity(**{**base, "location_key": "5-slave-pens"})
     assert identity != _check_identity(**{**base, "dc": 22})
-    assert identity != _check_identity(
-        **{**base, "source_ref": {"chunk_id": "slave-pens-lock"}}
-    )
+    assert identity != _check_identity(**{**base, "source_ref": {"chunk_id": "slave-pens-lock"}})
     assert identity != _check_identity(**{**base, "proficient": False})
 
 
@@ -2867,12 +2848,8 @@ def test_source_event_stand_uses_validated_public_character_action(
     )
     assert client.keys == {
         "stand": _mutation_key("run-1", "source-event-stand", identity),
-        "continuity": _mutation_key(
-            "run-1", "source-event-stand-continuity", identity
-        ),
-        "sync": _mutation_key(
-            "run-1", "sync", f"source-event-stand-sync:{identity}"
-        ),
+        "continuity": _mutation_key("run-1", "source-event-stand-continuity", identity),
+        "sync": _mutation_key("run-1", "sync", f"source-event-stand-sync:{identity}"),
     }
 
 
@@ -2980,9 +2957,7 @@ def test_source_state_initialization_uses_cited_public_action_without_fake_damag
     )
     assert client.keys == {
         "source_state": _mutation_key("run-1", "source-state", identity),
-        "continuity": _mutation_key(
-            "run-1", "source-state-continuity", identity
-        ),
+        "continuity": _mutation_key("run-1", "source-state-continuity", identity),
         "sync": _mutation_key("run-1", "sync", f"source-state-sync:{identity}"),
     }
 
@@ -3036,10 +3011,17 @@ def test_short_rest_advances_clock_and_applies_only_explicit_resource_choices() 
             if tool_id == "character_query":
                 actor_id = arguments["payload"]["character_id"]
                 if arguments["view"] == "rest":
+                    assert arguments["payload"]["duration_minutes"] == 60
+                    assert arguments["payload"]["rest_schedule"] == {
+                        "sleep_minutes": 0,
+                        "light_activity_minutes": 60,
+                        "strenuous_activity_minutes": 0,
+                    }
                     if actor_id == "fighter":
                         assert arguments["payload"]["hit_dice_spends"] == [
                             {"key": "fighter:d10", "count": 1}
                         ]
+                        assert arguments["payload"]["rest_activity_minutes"] == {"meditation": 30}
                     if actor_id == "wizard":
                         assert arguments["payload"]["arcane_recovery"] == {"1": 1}
                     return {"ready": True, "character_id": actor_id}
@@ -3075,12 +3057,20 @@ def test_short_rest_advances_clock_and_applies_only_explicit_resource_choices() 
             if tool_id == "character_state_change":
                 self.remember("actor", arguments["idempotency_key"])
                 assert arguments["action"] == "rest"
+                assert arguments["payload"]["started_elapsed_minutes"] == 840
+                assert arguments["payload"]["rest_schedule"] == {
+                    "sleep_minutes": 0,
+                    "light_activity_minutes": 60,
+                    "strenuous_activity_minutes": 0,
+                }
                 if arguments["character_id"] == "fighter":
                     assert arguments["payload"]["hit_dice_spends"] == [
                         {"key": "fighter:d10", "count": 1}
                     ]
+                    assert arguments["payload"]["rest_activity_minutes"] == {"meditation": 30}
                 else:
                     assert "hit_dice_spends" not in arguments["payload"]
+                    assert "rest_activity_minutes" not in arguments["payload"]
                 if arguments["character_id"] == "wizard":
                     assert arguments["payload"]["arcane_recovery"] == {"1": 1}
                 else:
@@ -3113,6 +3103,7 @@ def test_short_rest_advances_clock_and_applies_only_explicit_resource_choices() 
                 {
                     "actor_id": "fighter",
                     "hit_dice_spends": [{"key": "fighter:d10", "count": 1}],
+                    "rest_activity_minutes": {"meditation": 30},
                 },
                 {"actor_id": "wizard", "arcane_recovery": {"1": 1}},
             ],
@@ -3130,11 +3121,23 @@ def test_short_rest_advances_clock_and_applies_only_explicit_resource_choices() 
             "actor_id": "fighter",
             "arcane_recovery": {},
             "hit_dice_spends": [{"key": "fighter:d10", "count": 1}],
+            "rest_activity_minutes": {"meditation": 30},
+            "rest_schedule": {
+                "sleep_minutes": 0,
+                "light_activity_minutes": 60,
+                "strenuous_activity_minutes": 0,
+            },
         },
         {
             "actor_id": "wizard",
             "arcane_recovery": {"1": 1},
             "hit_dice_spends": [],
+            "rest_activity_minutes": {},
+            "rest_schedule": {
+                "sleep_minutes": 0,
+                "light_activity_minutes": 60,
+                "strenuous_activity_minutes": 0,
+            },
         },
     ]
     identity = _short_rest_identity(
@@ -3142,9 +3145,7 @@ def test_short_rest_advances_clock_and_applies_only_explicit_resource_choices() 
         duration_minutes=60,
         reason="The party regrouped outside the flooded passage.",
     )
-    assert client.keys["clock_set"] == [
-        _mutation_key("run-1", "short-rest-clock-set", identity)
-    ]
+    assert client.keys["clock_set"] == [_mutation_key("run-1", "short-rest-clock-set", identity)]
     assert client.keys["clock_advance"] == [
         _mutation_key("run-1", "short-rest-clock-advance", identity)
     ]
@@ -3152,12 +3153,8 @@ def test_short_rest_advances_clock_and_applies_only_explicit_resource_choices() 
         _mutation_key("run-1", "short-rest-actor", f"{identity}:fighter"),
         _mutation_key("run-1", "short-rest-actor", f"{identity}:wizard"),
     ]
-    assert client.keys["continuity"] == [
-        _mutation_key("run-1", "short-rest-continuity", identity)
-    ]
-    assert client.keys["sync"] == [
-        _mutation_key("run-1", "sync", f"short-rest-sync:{identity}")
-    ]
+    assert client.keys["continuity"] == [_mutation_key("run-1", "short-rest-continuity", identity)]
+    assert client.keys["sync"] == [_mutation_key("run-1", "sync", f"short-rest-sync:{identity}")]
 
 
 def test_short_rest_identity_separates_later_rest_choices() -> None:
@@ -3267,9 +3264,7 @@ def test_source_bound_time_advance_commits_clock_knowledge_and_snapshot(
                 if defer_checkpoint:
                     assert "snapshot" not in payload
                 else:
-                    assert payload["snapshot"]["label"].startswith(
-                        "Full playthrough time advance:"
-                    )
+                    assert payload["snapshot"]["label"].startswith("Full playthrough time advance:")
                 self.revision += 1
                 return {
                     "event": {"id": "event-1"},
@@ -3501,11 +3496,22 @@ def test_long_rest_uses_atomic_party_rest_and_unique_occurrence_knowledge() -> N
                         "character_id": "fighter",
                         "expected_revision": 2,
                         "food_and_drink": True,
+                        "rest_activity_minutes": {"meditation": 30},
+                        "rest_schedule": {
+                            "sleep_minutes": 360,
+                            "light_activity_minutes": 120,
+                            "strenuous_activity_minutes": 0,
+                        },
                     },
                     {
                         "character_id": "cleric",
                         "expected_revision": 2,
                         "food_and_drink": False,
+                        "rest_schedule": {
+                            "sleep_minutes": 360,
+                            "light_activity_minutes": 120,
+                            "strenuous_activity_minutes": 0,
+                        },
                         "prepared_spell_ids": ["cure-wounds"],
                     },
                 ]
@@ -3526,8 +3532,7 @@ def test_long_rest_uses_atomic_party_rest_and_unique_occurrence_knowledge() -> N
                 assert event["event_type"] == "long_rest"
                 assert event["payload"]["duration_minutes"] == 480
                 self.knowledge_keys.extend(
-                    item["knowledge_key"]
-                    for item in arguments["payload"]["actor_knowledge"]
+                    item["knowledge_key"] for item in arguments["payload"]["actor_knowledge"]
                 )
                 self.revision += 1
                 return {"event": {"id": "event-1"}, "snapshot": {"slot": 5}}
@@ -3546,7 +3551,11 @@ def test_long_rest_uses_atomic_party_rest_and_unique_occurrence_knowledge() -> N
             campaign_id="campaign-1",
             run_id="run-1",
             members=[
-                {"actor_id": "fighter", "food_and_drink": True},
+                {
+                    "actor_id": "fighter",
+                    "food_and_drink": True,
+                    "rest_activity_minutes": {"meditation": 30},
+                },
                 {"actor_id": "cleric", "prepared_spell_ids": ["cure-wounds"]},
             ],
             start_clock=None,
@@ -3565,7 +3574,11 @@ def test_long_rest_uses_atomic_party_rest_and_unique_occurrence_knowledge() -> N
             campaign_id="campaign-1",
             run_id="run-1",
             members=[
-                {"actor_id": "fighter", "food_and_drink": True},
+                {
+                    "actor_id": "fighter",
+                    "food_and_drink": True,
+                    "rest_activity_minutes": {"meditation": 30},
+                },
                 {"actor_id": "cleric", "prepared_spell_ids": ["cure-wounds"]},
             ],
             start_clock=None,
@@ -3616,9 +3629,7 @@ def test_long_rest_recovers_committed_receipt_without_advancing_time_twice() -> 
                     "last_long_rest_elapsed_minutes": 1440,
                 }
                 if actor_id == "cleric":
-                    sheet["spellcasting"]["preparation"] = {
-                        "selected_spell_ids": ["cure-wounds"]
-                    }
+                    sheet["spellcasting"]["preparation"] = {"selected_spell_ids": ["cure-wounds"]}
                 return {
                     "id": actor_id,
                     "campaign_id": "campaign-1",
@@ -3631,8 +3642,7 @@ def test_long_rest_recovers_committed_receipt_without_advancing_time_twice() -> 
                 self.party_rest_calls += 1
                 self.receipt_key = arguments["idempotency_key"]
                 raise RuntimeError(
-                    "idempotency key reused with a different request: "
-                    f"{self.receipt_key}"
+                    f"idempotency key reused with a different request: {self.receipt_key}"
                 )
             if tool_id == "state_revision":
                 assert arguments == {
@@ -3648,6 +3658,12 @@ def test_long_rest_recovers_committed_receipt_without_advancing_time_twice() -> 
                                 "expected_revision": 2,
                                 "prepared_spell_ids": None,
                                 "hit_dice_recovery": None,
+                                "rest_activity_minutes": {},
+                                "rest_schedule": {
+                                    "sleep_minutes": 360,
+                                    "light_activity_minutes": 120,
+                                    "strenuous_activity_minutes": 0,
+                                },
                                 "food_and_drink": True,
                             },
                             {
@@ -3655,6 +3671,12 @@ def test_long_rest_recovers_committed_receipt_without_advancing_time_twice() -> 
                                 "expected_revision": 2,
                                 "prepared_spell_ids": ["cure-wounds"],
                                 "hit_dice_recovery": None,
+                                "rest_activity_minutes": {},
+                                "rest_schedule": {
+                                    "sleep_minutes": 360,
+                                    "light_activity_minutes": 120,
+                                    "strenuous_activity_minutes": 0,
+                                },
                                 "food_and_drink": False,
                             },
                         ],
@@ -3694,9 +3716,7 @@ def test_long_rest_recovers_committed_receipt_without_advancing_time_twice() -> 
                         "member_ids": ["fighter", "cleric"],
                         "world_time": self.world_time,
                         "campaign_revision": 6,
-                        "preparations": {
-                            "cleric": {"selected_spell_ids": ["cure-wounds"]}
-                        },
+                        "preparations": {"cleric": {"selected_spell_ids": ["cure-wounds"]}},
                     },
                 }
             if tool_id == "continuity_commit":
@@ -3972,9 +3992,7 @@ def test_source_cited_automatic_event_does_not_roll() -> None:
     assert result["knowledge_actor_ids"] == ["actor-1", "actor-2"]
     assert result["scene"]["scene_id"] == "scene-1"
     assert result["scene"]["source_scene_id"] == "source-scene-1"
-    assert client.continuity_payload["event"]["payload"]["source_scene_id"] == (
-        "source-scene-1"
-    )
+    assert client.continuity_payload["event"]["payload"]["source_scene_id"] == ("source-scene-1")
     assert "character_check" not in client.tools
     assert "dnd_dice_roll" not in client.tools
     assert "snapshot" not in client.continuity_payload
@@ -4029,9 +4047,7 @@ def test_record_event_preserves_prior_scene_events_in_same_run() -> None:
             if tool_id == "branch_query":
                 return [{"id": "branch-1", "is_current": True}]
             if tool_id == "continuity_commit":
-                assert arguments["payload"]["actor_knowledge"][0]["cause"] == (
-                    "told_by"
-                )
+                assert arguments["payload"]["actor_knowledge"][0]["cause"] == ("told_by")
                 return {"event": {"id": "event-2"}, "snapshot": {"slot": 5}}
             if tool_id == "playthrough_manifest":
                 return {"manifest": {"status": "in_progress"}, "campaign_revision": 5}
@@ -4156,9 +4172,9 @@ def test_record_outcome_commits_facts_then_syncs_manifest_and_checkpoint(
             if tool_id == "continuity_commit":
                 self.continuity_payload = deepcopy(arguments["payload"])
                 assert "snapshot" not in self.continuity_payload
-                assert {
-                    item["cause"] for item in self.continuity_payload["actor_knowledge"]
-                } == {"witnessed"}
+                assert {item["cause"] for item in self.continuity_payload["actor_knowledge"]} == {
+                    "witnessed"
+                }
                 assert self.continuity_payload["facts"][0]["fact_key"] == ("quest:hostage:status")
                 self.revision += 1
                 return {
@@ -4265,9 +4281,7 @@ def test_record_outcome_commits_facts_then_syncs_manifest_and_checkpoint(
     else:
         assert result["checkpoint"]["verification"]["valid"] is True
     assert result["scene"]["source_scene_id"] == "source-scene-1"
-    assert client.continuity_payload["event"]["payload"]["source_scene_id"] == (
-        "source-scene-1"
-    )
+    assert client.continuity_payload["event"]["payload"]["source_scene_id"] == ("source-scene-1")
     assert client.loaded_groups == [("play.characters",)]
     assert client.replaced_manifest["current"]["objective"] == ("Escort the hostage to safety.")
     assert client.replaced_manifest["world_state"] == {

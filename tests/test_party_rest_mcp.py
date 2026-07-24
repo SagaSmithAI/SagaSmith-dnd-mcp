@@ -7,6 +7,12 @@ from sagasmith_dnd.character_schema import default_character_sheet
 from sagasmith_dnd_mcp.config import McpConfig
 from sagasmith_dnd_mcp.server import create_server
 
+LONG_REST_SCHEDULE = {
+    "sleep_minutes": 360,
+    "light_activity_minutes": 120,
+    "strenuous_activity_minutes": 0,
+}
+
 
 async def _call(server, name: str, arguments: dict):
     _, result = await server.call_tool(name, arguments)
@@ -49,6 +55,16 @@ def _spent_sheet() -> dict:
             "duration": {"period": "hour", "remaining": 5},
         }
     ]
+    sheet["resources"]["ki"] = {
+        "label": "Ki Points",
+        "value": 0,
+        "max": 2,
+        "recovers_on": "short_rest",
+        "recovery_requirements": {
+            "activity_minutes": {"meditation": 30},
+        },
+        "source_key": "Monk",
+    }
     return sheet
 
 
@@ -118,8 +134,17 @@ def test_party_long_rest_advances_once_and_settles_members_atomically(tmp_path: 
             "action": "party_rest",
             "payload": {
                 "members": [
-                    {"character_id": first["id"], "expected_revision": first["revision"]},
-                    {"character_id": second["id"], "expected_revision": second["revision"]},
+                    {
+                        "character_id": first["id"],
+                        "expected_revision": first["revision"],
+                        "rest_activity_minutes": {"meditation": 30},
+                        "rest_schedule": LONG_REST_SCHEDULE,
+                    },
+                    {
+                        "character_id": second["id"],
+                        "expected_revision": second["revision"],
+                        "rest_schedule": LONG_REST_SCHEDULE,
+                    },
                 ]
             },
             "expected_revision": clock["campaign_revision"],
@@ -155,7 +180,7 @@ def test_party_long_rest_advances_once_and_settles_members_atomically(tmp_path: 
         assert receipt["response"] == rested
 
         updated = []
-        for actor in (first, second):
+        for index, actor in enumerate((first, second)):
             current_actor = await _call(
                 server,
                 "character_query",
@@ -175,6 +200,7 @@ def test_party_long_rest_advances_once_and_settles_members_atomically(tmp_path: 
                 "last_long_rest_elapsed_minutes": 1740,
             }
             assert current_actor["sheet"]["effects"][0]["active"] is False
+            assert current_actor["sheet"]["resources"]["ki"]["value"] == (2 if index == 0 else 0)
 
         with pytest.raises(Exception, match="in 24 hours"):
             await _call(
@@ -188,6 +214,7 @@ def test_party_long_rest_advances_once_and_settles_members_atomically(tmp_path: 
                             {
                                 "character_id": updated[0]["id"],
                                 "expected_revision": updated[0]["revision"],
+                                "rest_schedule": LONG_REST_SCHEDULE,
                             }
                         ]
                     },
@@ -202,5 +229,125 @@ def test_party_long_rest_advances_once_and_settles_members_atomically(tmp_path: 
         )
         assert unchanged["state"]["world_time"]["elapsed_minutes"] == 1740
         assert unchanged["revision"] == rested["campaign_revision"]
+
+    asyncio.run(exercise())
+
+
+def test_party_long_rest_honors_source_granted_elf_trance(tmp_path: Path) -> None:
+    async def exercise() -> None:
+        server = create_server(_config(tmp_path))
+        campaign = await _call(
+            server,
+            "campaign_create",
+            {"name": "Trance rest", "edition": "2014", "idempotency_key": "campaign"},
+        )
+        elf_sheet = _spent_sheet()
+        elf_sheet["content"]["features"] = [
+            {
+                "id": "dnd5e.content.srd2014.species-feature.elf-trance",
+                "name": "Trance",
+                "source_key": "Elf",
+                "description": "Four hours of trance grants the benefit of eight hours of sleep.",
+            }
+        ]
+        elf = await _call(
+            server,
+            "character_create_from",
+            {
+                "mode": "direct",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "name": "Elf",
+                    "sheet": elf_sheet,
+                },
+                "idempotency_key": "elf",
+            },
+        )
+        human = await _call(
+            server,
+            "character_create_from",
+            {
+                "mode": "direct",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "name": "Human",
+                    "sheet": _spent_sheet(),
+                },
+                "idempotency_key": "human",
+            },
+        )
+        current = await _call(
+            server,
+            "campaign_query",
+            {"view": "get", "payload": {"campaign_id": campaign["id"]}},
+        )
+        clock = await _call(
+            server,
+            "campaign_change",
+            {
+                "campaign_id": campaign["id"],
+                "action": "clock_set",
+                "payload": {"day": 1, "hour": 0, "minute": 0},
+                "expected_revision": current["revision"],
+                "idempotency_key": "clock",
+            },
+        )
+        schedule = {
+            "sleep_minutes": 0,
+            "trance_minutes": 240,
+            "light_activity_minutes": 0,
+            "strenuous_activity_minutes": 0,
+        }
+        with pytest.raises(Exception, match="at least 480"):
+            await _call(
+                server,
+                "campaign_change",
+                {
+                    "campaign_id": campaign["id"],
+                    "action": "party_rest",
+                    "payload": {
+                        "duration_minutes": 240,
+                        "members": [
+                            {
+                                "character_id": human["id"],
+                                "expected_revision": human["revision"],
+                                "rest_schedule": schedule,
+                            }
+                        ],
+                    },
+                    "expected_revision": clock["campaign_revision"],
+                    "idempotency_key": "human-shortcut",
+                },
+            )
+
+        rested = await _call(
+            server,
+            "campaign_change",
+            {
+                "campaign_id": campaign["id"],
+                "action": "party_rest",
+                "payload": {
+                    "duration_minutes": 240,
+                    "members": [
+                        {
+                            "character_id": elf["id"],
+                            "expected_revision": elf["revision"],
+                            "rest_schedule": schedule,
+                        }
+                    ],
+                },
+                "expected_revision": clock["campaign_revision"],
+                "idempotency_key": "elf-trance",
+            },
+        )
+        assert rested["duration_minutes"] == 240
+        assert rested["world_time"]["elapsed_minutes"] == 240
+        updated = await _call(
+            server,
+            "character_query",
+            {"view": "get", "payload": {"character_id": elf["id"]}},
+        )
+        assert updated["sheet"]["combat"]["hp"]["value"] == 12
+        assert updated["sheet"]["combat"]["rest_history"]["last_long_rest_elapsed_minutes"] == 240
 
     asyncio.run(exercise())

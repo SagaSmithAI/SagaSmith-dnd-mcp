@@ -20,6 +20,7 @@ from typing import Any
 
 from mcp import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
+from sagasmith_dnd.lifecycle import allows_trance_rest
 from sagasmith_dnd.playthrough import validate_playthrough_manifest
 
 from scripts.regression_modules import PRINCIPAL_ID, ExposureClient, _token
@@ -662,17 +663,14 @@ def _validate_recovered_long_rest(
             "last_rest_completed_elapsed_minutes": completed_elapsed,
             "last_long_rest_elapsed_minutes": completed_elapsed,
         }:
-            raise RuntimeError(
-                f"long-rest recovery history does not match for actor {actor_id}"
-            )
+            raise RuntimeError(f"long-rest recovery history does not match for actor {actor_id}")
         prepared_ids = member.get("prepared_spell_ids")
         if prepared_ids is not None:
             spellcasting = dict(dict(actor.get("sheet") or {}).get("spellcasting") or {})
             preparation = dict(spellcasting.get("preparation") or {})
             receipt_preparation = dict(receipt_preparations.get(actor_id) or {})
-            if (
-                receipt_preparation.get("selected_spell_ids")
-                != preparation.get("selected_spell_ids")
+            if receipt_preparation.get("selected_spell_ids") != preparation.get(
+                "selected_spell_ids"
             ):
                 raise RuntimeError(
                     f"long-rest recovery preparations do not match for actor {actor_id}"
@@ -970,20 +968,14 @@ async def _checkpoint(
         snapshot_dag = dict(manifest["snapshot_dag"])
         nodes = list(snapshot_dag.get("nodes") or [])
         projected = next(
-            (
-                item
-                for item in nodes
-                if str(item.get("id") or "") == str(snapshot["id"])
-            ),
+            (item for item in nodes if str(item.get("id") or "") == str(snapshot["id"])),
             None,
         )
         if (
             projected is None
             or str(projected.get("branch_id") or "") != str(current_branch["id"])
-            or str(snapshot_dag.get("active_branch_id") or "")
-            != str(current_branch["id"])
-            or str(snapshot_dag.get("head_snapshot_id") or "")
-            != str(snapshot["id"])
+            or str(snapshot_dag.get("active_branch_id") or "") != str(current_branch["id"])
+            or str(snapshot_dag.get("head_snapshot_id") or "") != str(snapshot["id"])
         ):
             raise RuntimeError("checkpoint is missing from the current manifest Snapshot DAG")
     return {
@@ -1173,12 +1165,9 @@ async def _register_replacement(
         if actor.get("campaign_id") != campaign_id or actor.get("character_type") != "pc":
             raise ValueError(f"{label} must be a PC in this campaign")
     replacement_hp = dict(dict(replacement["sheet"])["combat"]["hp"])
-    replacement_derived_hp = dict(
-        dict(replacement.get("derived") or {}).get("hit_points") or {}
-    )
+    replacement_derived_hp = dict(dict(replacement.get("derived") or {}).get("hit_points") or {})
     replacement_conditions = {
-        str(item).casefold()
-        for item in list(replacement_derived_hp.get("conditions") or [])
+        str(item).casefold() for item in list(replacement_derived_hp.get("conditions") or [])
     }
     if int(replacement_hp.get("value", 0) or 0) <= 0 or "dead" in replacement_conditions:
         raise ValueError("replacement must be a living PC")
@@ -1225,9 +1214,7 @@ async def _register_replacement(
     if replacement_knowledge_before:
         raise ValueError("new replacement must begin with independent empty ActorKnowledge")
 
-    knowledge_prefix = (
-        f"playthrough.{_token(run_id)}.replacement.{_token(replacement_id)}"
-    )
+    knowledge_prefix = f"playthrough.{_token(run_id)}.replacement.{_token(replacement_id)}"
     join_key = f"{knowledge_prefix}.joined"
     handoff_rows = [
         {
@@ -1292,8 +1279,7 @@ async def _register_replacement(
                 "actor_knowledge": actor_knowledge,
                 "snapshot": {
                     "label": (
-                        f"Replacement handoff: {replacement['name']} succeeds "
-                        f"{predecessor['name']}"
+                        f"Replacement handoff: {replacement['name']} succeeds {predecessor['name']}"
                     )
                 },
                 "branch_id": branch_id,
@@ -1322,8 +1308,7 @@ async def _register_replacement(
         campaign_id=campaign_id,
         run_id=run_id,
         label=(
-            f"Full playthrough replacement: {replacement['name']} succeeds "
-            f"{predecessor['name']}"
+            f"Full playthrough replacement: {replacement['name']} succeeds {predecessor['name']}"
         ),
     )
 
@@ -1340,9 +1325,7 @@ async def _register_replacement(
         or []
     )
     expected_keys = {join_key, *(row["knowledge_key"] for row in handoff_rows)}
-    actual_keys = {
-        str(item.get("knowledge_key") or "") for item in replacement_knowledge_after
-    }
+    actual_keys = {str(item.get("knowledge_key") or "") for item in replacement_knowledge_after}
     if actual_keys != expected_keys:
         raise RuntimeError("replacement ActorKnowledge does not match explicit handoff")
     predecessor_knowledge_after = list(
@@ -1833,9 +1816,7 @@ async def _resolve_check(
             "campaign_id": campaign_id,
             "payload": continuity_payload,
             "expected_revision": campaign["revision"],
-            "idempotency_key": _mutation_key(
-                run_id, "continuity", check_identity
-            ),
+            "idempotency_key": _mutation_key(run_id, "continuity", check_identity),
         },
     )
     synced = await _manifest_mutation(
@@ -1914,9 +1895,7 @@ async def _record_event(
         )
     )
     exact_ref = _validate_source_ref(source_scene, source_ref, excerpt=source_excerpt)
-    location_keys = {
-        str(item.get("key") or "") for item in _scene_locations(occurrence_scene)
-    }
+    location_keys = {str(item.get("key") or "") for item in _scene_locations(occurrence_scene)}
     if location_key not in location_keys:
         raise ValueError("record-event location is not present in the scene atlas")
     progress_rows = await client.domain(
@@ -1978,9 +1957,7 @@ async def _record_event(
         "actor_knowledge": [
             {
                 "actor_id": actor_id,
-                "knowledge_key": (
-                    f"playthrough.{_token(run_id)}.{_token(event_identity)}"
-                ),
+                "knowledge_key": (f"playthrough.{_token(run_id)}.{_token(event_identity)}"),
                 "proposition": knowledge.strip(),
                 "cause": knowledge_cause,
                 "disclosure_scope": "owner",
@@ -1990,9 +1967,7 @@ async def _record_event(
         "branch_id": str(branch["id"]),
     }
     if not defer_checkpoint:
-        continuity_payload["snapshot"] = {
-            "label": f"Full playthrough event: {summary.strip()}"
-        }
+        continuity_payload["snapshot"] = {"label": f"Full playthrough event: {summary.strip()}"}
     committed = await client.domain(
         "continuity_commit",
         {
@@ -2139,10 +2114,7 @@ async def _prepare_narrative_npc(
                 "idempotency_key": _mutation_key(
                     run_id,
                     "narrative-npc",
-                    (
-                        f"{normalized_name}:{exact_ref['module_id']}:"
-                        f"{exact_ref['chunk_id']}"
-                    ),
+                    (f"{normalized_name}:{exact_ref['module_id']}:{exact_ref['chunk_id']}"),
                 ),
             },
         )
@@ -2171,10 +2143,7 @@ async def _prepare_narrative_npc(
     ):
         raise RuntimeError("source-bound narrative NPC creation verification failed")
     status_tags = set(
-        dict(dict(actor.get("sheet") or {}).get("adventure_state") or {}).get(
-            "status_tags"
-        )
-        or []
+        dict(dict(actor.get("sheet") or {}).get("adventure_state") or {}).get("status_tags") or []
     )
     if not {"narrative_only", "source_bound"}.issubset(status_tags):
         raise RuntimeError("narrative NPC actor is missing its noncombat provenance tags")
@@ -2601,9 +2570,7 @@ async def _roll_source_table(
     )
     roll_result = _dice_result(rolled)
     random_receipt = dict(
-        rolled.get("random_stream_receipt")
-        or roll_result.get("random_stream_receipt")
-        or {}
+        rolled.get("random_stream_receipt") or roll_result.get("random_stream_receipt") or {}
     )
     progress_rows = await client.domain(
         "module_query",
@@ -2634,9 +2601,7 @@ async def _roll_source_table(
             "progress": _scene_progress_percent(progress_before),
             "state": state,
             "current_location_key": location_key,
-            "expected_state_version": int(
-                (progress_before or {}).get("state_version", 0) or 0
-            ),
+            "expected_state_version": int((progress_before or {}).get("state_version", 0) or 0),
             "idempotency_key": _mutation_key(
                 run_id,
                 "source-roll-progress",
@@ -2951,9 +2916,7 @@ async def _stand_after_source_event(
             "character_id": actor_id,
             "action": "stand",
             "expected_revision": actor["revision"],
-            "idempotency_key": _mutation_key(
-                run_id, "source-event-stand", stand_identity
-            ),
+            "idempotency_key": _mutation_key(run_id, "source-event-stand", stand_identity),
         },
     )
     branches = await client.domain(
@@ -2989,10 +2952,7 @@ async def _stand_after_source_event(
         "actor_knowledge": [
             {
                 "actor_id": recipient,
-                "knowledge_key": (
-                    f"playthrough.{_token(run_id)}.stand."
-                    f"{_token(stand_identity)}"
-                ),
+                "knowledge_key": (f"playthrough.{_token(run_id)}.stand.{_token(stand_identity)}"),
                 "proposition": knowledge,
                 "disclosure_scope": "owner",
             }
@@ -3087,9 +3047,7 @@ async def _initialize_source_state(
         )
     )
     exact_ref = _validate_source_ref(cited_scene, source_ref, excerpt=source_excerpt)
-    if location_key not in {
-        str(item.get("key") or "") for item in _scene_locations(current_scene)
-    }:
+    if location_key not in {str(item.get("key") or "") for item in _scene_locations(current_scene)}:
         raise ValueError("source-state location is not present in the current scene atlas")
     actor = await client.domain(
         "character_query",
@@ -3116,9 +3074,7 @@ async def _initialize_source_state(
                 "reason": reason.strip(),
             },
             "expected_revision": actor["revision"],
-            "idempotency_key": _mutation_key(
-                run_id, "source-state", identity
-            ),
+            "idempotency_key": _mutation_key(run_id, "source-state", identity),
         },
     )
     branches = await client.domain(
@@ -3148,9 +3104,7 @@ async def _initialize_source_state(
         "actor_knowledge": [
             {
                 "actor_id": recipient,
-                "knowledge_key": (
-                    f"playthrough.{_token(run_id)}.source_state.{_token(identity)}"
-                ),
+                "knowledge_key": (f"playthrough.{_token(run_id)}.source_state.{_token(identity)}"),
                 "proposition": reason.strip(),
                 "disclosure_scope": "owner",
             }
@@ -3168,9 +3122,7 @@ async def _initialize_source_state(
             "campaign_id": campaign_id,
             "payload": continuity_payload,
             "expected_revision": campaign["revision"],
-            "idempotency_key": _mutation_key(
-                run_id, "source-state-continuity", identity
-            ),
+            "idempotency_key": _mutation_key(run_id, "source-state-continuity", identity),
         },
     )
     synced = await _manifest_mutation(
@@ -3209,7 +3161,14 @@ async def _short_rest(
         raise ValueError("short-rest requires at least 60 minutes")
     if not members or not reason.strip():
         raise ValueError("short-rest requires members and --rest-reason")
-    allowed_fields = {"actor_id", "arcane_recovery", "hit_dice_spends"}
+    allowed_fields = {
+        "actor_id",
+        "arcane_recovery",
+        "attune_item_id",
+        "hit_dice_spends",
+        "rest_activity_minutes",
+        "rest_schedule",
+    }
     normalized: list[dict[str, Any]] = []
     for index, member in enumerate(members):
         if not isinstance(member, dict):
@@ -3217,16 +3176,22 @@ async def _short_rest(
         unexpected = set(member) - allowed_fields
         actor_id = str(member.get("actor_id") or "")
         arcane_recovery = member.get("arcane_recovery")
+        attune_item_id = str(member.get("attune_item_id") or "").strip() or None
         hit_dice_spends = member.get("hit_dice_spends")
+        rest_activity_minutes = member.get("rest_activity_minutes")
+        rest_schedule = member.get("rest_schedule")
         if (
             unexpected
             or not actor_id
             or (arcane_recovery is not None and not isinstance(arcane_recovery, dict))
             or (hit_dice_spends is not None and not isinstance(hit_dice_spends, list))
+            or (rest_activity_minutes is not None and not isinstance(rest_activity_minutes, dict))
+            or (rest_schedule is not None and not isinstance(rest_schedule, dict))
         ):
             raise ValueError(
                 "short-rest members accept actor_id, optional arcane_recovery, "
-                "and optional hit_dice_spends only"
+                "optional attune_item_id, optional hit_dice_spends, optional "
+                "rest_activity_minutes, and optional rest_schedule only"
             )
         normalized_spends: list[dict[str, Any]] = []
         for spend_index, spend in enumerate(hit_dice_spends or []):
@@ -3248,6 +3213,17 @@ async def _short_rest(
                 "actor_id": actor_id,
                 "arcane_recovery": deepcopy(arcane_recovery or {}),
                 "hit_dice_spends": normalized_spends,
+                "rest_activity_minutes": deepcopy(rest_activity_minutes or {}),
+                "rest_schedule": deepcopy(
+                    rest_schedule
+                    if rest_schedule is not None
+                    else {
+                        "sleep_minutes": 0,
+                        "light_activity_minutes": duration_minutes,
+                        "strenuous_activity_minutes": 0,
+                    }
+                ),
+                **({"attune_item_id": attune_item_id} if attune_item_id is not None else {}),
             }
         )
     actor_ids = [item["actor_id"] for item in normalized]
@@ -3279,6 +3255,10 @@ async def _short_rest(
                     "rest_type": "short_rest",
                     "hit_dice_spends": member["hit_dice_spends"],
                     "arcane_recovery": member["arcane_recovery"],
+                    "attune_item_id": member.get("attune_item_id"),
+                    "rest_activity_minutes": member["rest_activity_minutes"],
+                    "rest_schedule": member["rest_schedule"],
+                    "duration_minutes": duration_minutes,
                 },
             },
         )
@@ -3313,14 +3293,17 @@ async def _short_rest(
                 },
                 "branch_id": str(branch["id"]),
                 "expected_revision": campaign["revision"],
-                "idempotency_key": _mutation_key(
-                    run_id, "short-rest-clock-set", rest_identity
-                ),
+                "idempotency_key": _mutation_key(run_id, "short-rest-clock-set", rest_identity),
             },
         )
     elif start_clock is not None:
         raise ValueError("short-rest start clock must be omitted after the clock is set")
     campaign = await _campaign(client, campaign_id)
+    started_elapsed_minutes = dict(dict(campaign.get("state") or {}).get("world_time") or {}).get(
+        "elapsed_minutes"
+    )
+    if isinstance(started_elapsed_minutes, bool) or not isinstance(started_elapsed_minutes, int):
+        raise RuntimeError("short-rest campaign clock has no elapsed_minutes")
     clock_advanced = await client.domain(
         "campaign_change",
         {
@@ -3329,20 +3312,26 @@ async def _short_rest(
             "payload": {"period": "minute", "count": duration_minutes},
             "branch_id": str(branch["id"]),
             "expected_revision": campaign["revision"],
-            "idempotency_key": _mutation_key(
-                run_id, "short-rest-clock-advance", rest_identity
-            ),
+            "idempotency_key": _mutation_key(run_id, "short-rest-clock-advance", rest_identity),
         },
     )
     rested = []
     actor_by_id = {str(actor["id"]): actor for actor in actors}
     for member in normalized:
         actor_id = member["actor_id"]
-        payload: dict[str, Any] = {"rest_type": "short_rest"}
+        payload: dict[str, Any] = {
+            "rest_type": "short_rest",
+            "started_elapsed_minutes": started_elapsed_minutes,
+            "rest_schedule": member["rest_schedule"],
+        }
         if member["arcane_recovery"]:
             payload["arcane_recovery"] = member["arcane_recovery"]
+        if member.get("attune_item_id"):
+            payload["attune_item_id"] = member["attune_item_id"]
         if member["hit_dice_spends"]:
             payload["hit_dice_spends"] = member["hit_dice_spends"]
+        if member["rest_activity_minutes"]:
+            payload["rest_activity_minutes"] = member["rest_activity_minutes"]
         result = await client.domain(
             "character_state_change",
             {
@@ -3391,9 +3380,7 @@ async def _short_rest(
                 "branch_id": str(branch["id"]),
             },
             "expected_revision": campaign["revision"],
-            "idempotency_key": _mutation_key(
-                run_id, "short-rest-continuity", rest_identity
-            ),
+            "idempotency_key": _mutation_key(run_id, "short-rest-continuity", rest_identity),
         },
     )
     synced = await _manifest_mutation(
@@ -3549,14 +3536,19 @@ async def _long_rest(
     duration_minutes: int,
     reason: str,
 ) -> dict[str, Any]:
-    if duration_minutes < 480:
-        raise ValueError("long-rest requires at least 480 minutes")
+    if duration_minutes < 240:
+        raise ValueError(
+            "long-rest requires at least 480 minutes, or 240 minutes for "
+            "members with the source-granted Trance feature"
+        )
     if not members or not reason.strip():
         raise ValueError("long-rest requires members and --rest-reason")
     allowed_fields = {
         "actor_id",
         "prepared_spell_ids",
         "hit_dice_recovery",
+        "rest_activity_minutes",
+        "rest_schedule",
         "food_and_drink",
     }
     normalized: list[dict[str, Any]] = []
@@ -3569,16 +3561,21 @@ async def _long_rest(
         prepared_ids = member.get("prepared_spell_ids")
         hit_dice_recovery = member.get("hit_dice_recovery")
         food_and_drink = member.get("food_and_drink", False)
+        rest_activity_minutes = member.get("rest_activity_minutes")
+        rest_schedule = member.get("rest_schedule")
         if (
             unexpected
             or not actor_id
             or (prepared_ids is not None and not isinstance(prepared_ids, list))
             or (hit_dice_recovery is not None and not isinstance(hit_dice_recovery, dict))
             or not isinstance(food_and_drink, bool)
+            or (rest_activity_minutes is not None and not isinstance(rest_activity_minutes, dict))
+            or (rest_schedule is not None and not isinstance(rest_schedule, dict))
         ):
             raise ValueError(
                 "long-rest members accept actor_id, optional prepared_spell_ids, "
-                "optional hit_dice_recovery, and optional food_and_drink only"
+                "optional hit_dice_recovery, optional rest_activity_minutes, "
+                "optional rest_schedule, and optional food_and_drink only"
             )
         actor = await client.domain(
             "character_query",
@@ -3587,11 +3584,32 @@ async def _long_rest(
         if actor.get("campaign_id") != campaign_id:
             raise ValueError("every long-rest actor must belong to the campaign")
         actors.append(actor)
+        uses_trance = duration_minutes < 480 and allows_trance_rest(actor["sheet"])
+        if duration_minutes < 480 and not uses_trance:
+            raise ValueError(f"long-rest member {actor_id} requires at least 480 minutes")
+        default_schedule = (
+            {
+                "sleep_minutes": max(duration_minutes - 360, 0),
+                "trance_minutes": 240,
+                "light_activity_minutes": min(max(duration_minutes - 240, 0), 120),
+                "strenuous_activity_minutes": 0,
+            }
+            if uses_trance
+            else {
+                "sleep_minutes": duration_minutes - 120,
+                "light_activity_minutes": 120,
+                "strenuous_activity_minutes": 0,
+            }
+        )
         normalized.append(
             {
                 "actor_id": actor_id,
                 "prepared_spell_ids": (list(prepared_ids) if prepared_ids is not None else None),
                 "hit_dice_recovery": deepcopy(hit_dice_recovery),
+                "rest_activity_minutes": deepcopy(rest_activity_minutes or {}),
+                "rest_schedule": deepcopy(
+                    rest_schedule if rest_schedule is not None else default_schedule
+                ),
                 "food_and_drink": food_and_drink,
             }
         )
@@ -3643,7 +3661,10 @@ async def _long_rest(
             "character_id": member["actor_id"],
             "expected_revision": actor_by_id[member["actor_id"]]["revision"],
             "food_and_drink": member["food_and_drink"],
+            "rest_schedule": member["rest_schedule"],
         }
+        if member["rest_activity_minutes"]:
+            party_member["rest_activity_minutes"] = member["rest_activity_minutes"]
         if member["prepared_spell_ids"] is not None:
             party_member["prepared_spell_ids"] = member["prepared_spell_ids"]
         if member["hit_dice_recovery"] is not None:
@@ -3716,6 +3737,8 @@ async def _long_rest(
                     "expected_revision": revision_row["before_revision"],
                     "prepared_spell_ids": member["prepared_spell_ids"],
                     "hit_dice_recovery": member["hit_dice_recovery"],
+                    "rest_activity_minutes": member["rest_activity_minutes"],
+                    "rest_schedule": member["rest_schedule"],
                     "food_and_drink": member["food_and_drink"],
                 }
             )
@@ -3914,8 +3937,7 @@ async def _advance_time(
             {
                 "actor_id": str(actor["id"]),
                 "knowledge_key": (
-                    f"playthrough.{_token(run_id)}.{_token(scene_id)}."
-                    f"time.{_token(identity)}"
+                    f"playthrough.{_token(run_id)}.{_token(scene_id)}.time.{_token(identity)}"
                 ),
                 "proposition": normalized_reason,
                 "disclosure_scope": "owner",
@@ -4003,9 +4025,7 @@ async def _recover_stable_party(
             },
             "expected_revision": campaign["revision"],
             "branch_id": branch["id"],
-            "idempotency_key": _mutation_key(
-                run_id, "stable-recovery", recovery_identity
-            ),
+            "idempotency_key": _mutation_key(run_id, "stable-recovery", recovery_identity),
         },
     )
     if recovered.get("status") != "recovered":
@@ -4142,15 +4162,11 @@ async def _provision_source_item(
     )
     expected_source_key = f"module-chunk:{exact_ref['chunk_id']}"
     if str(requested_item.get("source_key") or "") != expected_source_key:
-        raise ValueError(
-            "source item source_key must be module-chunk:<source_ref.chunk_id>"
-        )
+        raise ValueError("source item source_key must be module-chunk:<source_ref.chunk_id>")
     charges = requested_item.get("charges")
     if isinstance(charges, dict) and charges:
         if str(charges.get("source_key") or "") != expected_source_key:
-            raise ValueError(
-                "source item charges.source_key must match the cited module chunk"
-            )
+            raise ValueError("source item charges.source_key must match the cited module chunk")
 
     actor = dict(
         _facade_value(
@@ -4237,8 +4253,7 @@ async def _provision_source_item(
             run_id=run_id,
             label=(
                 checkpoint_label.strip()
-                or f"Full playthrough source item: {requested_item['name']} — "
-                f"{normalized_reason}"
+                or f"Full playthrough source item: {requested_item['name']} — {normalized_reason}"
             ),
         )
     )
@@ -4290,8 +4305,7 @@ async def _transfer_source_item_to_party(
         )
     ):
         raise ValueError(
-            "transfer-source-item requires scene, location, excerpt, character, "
-            "item, and reason"
+            "transfer-source-item requires scene, location, excerpt, character, item, and reason"
         )
     if quantity is not None and quantity <= 0:
         raise ValueError("transfer-source-item quantity must be positive")
@@ -4305,9 +4319,7 @@ async def _transfer_source_item_to_party(
         },
     )
     exact_ref = _validate_source_ref(scene, source_ref, excerpt=source_excerpt)
-    if location_key not in {
-        str(item.get("key") or "") for item in _scene_locations(scene)
-    }:
+    if location_key not in {str(item.get("key") or "") for item in _scene_locations(scene)}:
         raise ValueError("transfer-source-item location is not present in the scene atlas")
 
     actor = dict(
@@ -4380,8 +4392,7 @@ async def _transfer_source_item_to_party(
                         "idempotency_key": _mutation_key(
                             run_id,
                             "source-item-transfer",
-                            f"{normalized_character_id}:{normalized_item_id}:"
-                            f"{quantity or 'all'}",
+                            f"{normalized_character_id}:{normalized_item_id}:{quantity or 'all'}",
                         ),
                     },
                 )
@@ -4722,9 +4733,7 @@ async def _spend_source_currency(
                     "rule_ref": normalized_rule_ref,
                 },
                 "expected_revision": campaign["revision"],
-                "idempotency_key": _mutation_key(
-                    run_id, "currency-spend", normalized_spend_id
-                ),
+                "idempotency_key": _mutation_key(run_id, "currency-spend", normalized_spend_id),
             },
         )
         if spent.get("status") != "committed":
@@ -4918,9 +4927,7 @@ async def _spend_source_item(
                     "source_ref": serialized_source_ref,
                 },
                 "expected_revision": campaign["revision"],
-                "idempotency_key": _mutation_key(
-                    run_id, "item-spend", normalized_spend_id
-                ),
+                "idempotency_key": _mutation_key(run_id, "item-spend", normalized_spend_id),
             },
         )
         if spent.get("status") != "committed":
@@ -4954,8 +4961,7 @@ async def _spend_source_item(
             {
                 "actor_id": actor_id,
                 "knowledge_key": (
-                    f"playthrough.{_token(run_id)}.item-spend."
-                    f"{_token(normalized_spend_id)}"
+                    f"playthrough.{_token(run_id)}.item-spend.{_token(normalized_spend_id)}"
                 ),
                 "proposition": normalized_reason,
                 "disclosure_scope": "owner",
@@ -4974,9 +4980,7 @@ async def _spend_source_item(
             "campaign_id": campaign_id,
             "payload": continuity_payload,
             "expected_revision": campaign["revision"],
-            "idempotency_key": _mutation_key(
-                run_id, "item-spend-continuity", normalized_spend_id
-            ),
+            "idempotency_key": _mutation_key(run_id, "item-spend-continuity", normalized_spend_id),
         },
     )
     synced = await _manifest_mutation(
@@ -5475,8 +5479,7 @@ def _level_spell_choice_counts(
         artifact = spell_by_id.get(selection["artifact_id"])
         if artifact is None:
             raise ValueError(
-                f"selected level spell is not in the active catalog: "
-                f"{selection['artifact_id']}"
+                f"selected level spell is not in the active catalog: {selection['artifact_id']}"
             )
         requirements = dict(artifact.get("selection_requirements") or {})
         eligible_classes = {
@@ -5524,8 +5527,7 @@ def _required_level_features(
 ) -> dict[str, dict[str, Any]]:
     """Preserve the server's dependency order while adding catch-up features."""
     required: dict[str, dict[str, Any]] = {
-        str(item["artifact_id"]): dict(item)
-        for item in follow_up.get("feature_artifacts") or []
+        str(item["artifact_id"]): dict(item) for item in follow_up.get("feature_artifacts") or []
     }
     existing_feature_ids = {
         str(item.get("id") or "")
@@ -5533,19 +5535,11 @@ def _required_level_features(
     }
     for item in feature_catalog:
         catalog_requirements = dict(item.get("selection_requirements") or {})
-        by_level = dict(
-            catalog_requirements.get("selection_requirements_by_level") or {}
-        )
-        level_requirements = dict(
-            by_level.get(str(target_level))
-            or catalog_requirements
-        )
+        by_level = dict(catalog_requirements.get("selection_requirements_by_level") or {})
+        level_requirements = dict(by_level.get(str(target_level)) or catalog_requirements)
         artifact_id = str(item.get("id") or "")
         repeatable_levels = {
-            int(value)
-            for value in catalog_requirements.get(
-                "repeatable_selection_levels", []
-            )
+            int(value) for value in catalog_requirements.get("repeatable_selection_levels", [])
         }
         repeat_due = target_level in repeatable_levels
         if (
@@ -5553,8 +5547,7 @@ def _required_level_features(
             and (artifact_id not in existing_feature_ids or repeat_due)
             and str(catalog_requirements.get("class_name") or "").casefold()
             == class_name.casefold()
-            and int(catalog_requirements.get("minimum_level", 1) or 1)
-            <= target_level
+            and int(catalog_requirements.get("minimum_level", 1) or 1) <= target_level
             and (
                 not str(catalog_requirements.get("subclass_name") or "")
                 or str(catalog_requirements.get("subclass_name") or "").casefold()
@@ -5589,8 +5582,7 @@ def _validate_level_feature_completion(
         selection = feature_selections.get(artifact_id, {})
         if choice_field and choice_field not in selection:
             raise ValueError(
-                f"level feature {artifact_id} requires an explicit "
-                f"{choice_field} choice"
+                f"level feature {artifact_id} requires an explicit {choice_field} choice"
             )
 
 
@@ -5658,9 +5650,7 @@ async def _preflight_level_completion(
         if str(item.get("name") or "").casefold() == class_name.casefold()
     )
     planned_subclass = str(
-        (selected_subclass or {}).get("name")
-        or actor_class.get("subclass")
-        or ""
+        (selected_subclass or {}).get("name") or actor_class.get("subclass") or ""
     )
     required_features = _required_level_features(
         follow_up=follow_up,
@@ -5687,20 +5677,14 @@ async def _preflight_level_completion(
     spell_choices = dict(follow_up.get("spell_choices") or {})
     prepared_event = str(follow_up.get("prepared_spell_event") or "")
     spellcasting_plan = dict(plan.get("spellcasting") or {})
-    selected_cantrips, selected_leveled, prepared_additions = (
-        _level_spell_choice_counts(
-            spell_selections,
-            spell_by_id=spell_by_id,
-            class_name=class_name,
-            prepared_event=prepared_event,
-            preparation_mode=str(
-                spellcasting_plan.get("preparation_mode") or "known"
-            ),
-            prepared_spell_ids=prepared_spell_ids,
-            maximum_spell_level=int(
-                spellcasting_plan.get("maximum_spell_level", 0) or 0
-            ),
-        )
+    selected_cantrips, selected_leveled, prepared_additions = _level_spell_choice_counts(
+        spell_selections,
+        spell_by_id=spell_by_id,
+        class_name=class_name,
+        prepared_event=prepared_event,
+        preparation_mode=str(spellcasting_plan.get("preparation_mode") or "known"),
+        prepared_spell_ids=prepared_spell_ids,
+        maximum_spell_level=int(spellcasting_plan.get("maximum_spell_level", 0) or 0),
     )
     required_counts = (
         int(spell_choices.get("cantrips_to_add", 0) or 0),
@@ -5715,13 +5699,10 @@ async def _preflight_level_completion(
         )
     if prepared_event and not prepared_spell_ids:
         raise ValueError(
-            "prepared or spellbook advancement requires an explicit complete "
-            "prepared-spell list"
+            "prepared or spellbook advancement requires an explicit complete prepared-spell list"
         )
     if not prepared_event and prepared_spell_ids:
-        raise ValueError(
-            "this level advancement does not allow a prepared-spell event"
-        )
+        raise ValueError("this level advancement does not allow a prepared-spell event")
     return {
         "plan": plan,
         "follow_up": follow_up,
@@ -5851,10 +5832,7 @@ async def _advance_level(
         {"view": "get", "payload": {"character_id": actor_id}},
     )
     actor_level_before_commit = int(
-        dict(dict(actor.get("sheet") or {}).get("progression") or {}).get(
-            "level", 0
-        )
-        or 0
+        dict(dict(actor.get("sheet") or {}).get("progression") or {}).get("level", 0) or 0
     )
     preflight = None
     if actor_level_before_commit == target_level - 1:
@@ -5893,9 +5871,7 @@ async def _advance_level(
     actor = dict(advanced["character"])
     follow_up = dict(dict(advanced["advancement"]).get("follow_up") or {})
     if preflight is not None and follow_up != preflight["follow_up"]:
-        raise RuntimeError(
-            "level advancement follow-up changed after its revision-bound plan"
-        )
+        raise RuntimeError("level advancement follow-up changed after its revision-bound plan")
 
     subclass_options = list(follow_up.get("subclass_options") or [])
     selected_subclass: dict[str, Any] | None = (
@@ -5906,22 +5882,17 @@ async def _advance_level(
     if subclass_options:
         if selected_subclass is None:
             if not subclass_artifact_id:
-                raise ValueError(
-                    "level advancement requires an explicit subclass artifact"
-                )
+                raise ValueError("level advancement requires an explicit subclass artifact")
             selected_subclass = next(
                 (
                     item
                     for item in subclass_options
-                    if str(item.get("artifact_id") or "")
-                    == subclass_artifact_id
+                    if str(item.get("artifact_id") or "") == subclass_artifact_id
                 ),
                 None,
             )
             if selected_subclass is None:
-                raise ValueError(
-                    "selected subclass is not offered by this level advancement"
-                )
+                raise ValueError("selected subclass is not offered by this level advancement")
         applied = _facade_value(
             await client.domain(
                 "character_content_apply",
@@ -6012,9 +5983,7 @@ async def _advance_level(
         )
         if applied.get("status") == "pending_ruling":
             raise RuntimeError(f"level feature needs DM review: {artifact_id}: {applied['reason']}")
-        feature_spell_grants.extend(
-            deepcopy(list(applied.get("feature_spell_grants") or []))
-        )
+        feature_spell_grants.extend(deepcopy(list(applied.get("feature_spell_grants") or [])))
         actor = dict(applied.get("character") or applied)
         applied_features.append({"artifact_id": artifact_id, "selection": deepcopy(selection)})
 
@@ -6042,9 +6011,7 @@ async def _advance_level(
     required_leveled = int(spell_choices.get("leveled_spells_to_add", 0) or 0)
     prepared_event = str(follow_up.get("prepared_spell_event") or "")
     spellcasting = dict(actor["sheet"].get("spellcasting") or {})
-    preparation_mode = str(
-        dict(spellcasting.get("preparation") or {}).get("mode") or "known"
-    )
+    preparation_mode = str(dict(spellcasting.get("preparation") or {}).get("mode") or "known")
     maximum_spell_level = max(
         (
             int(level)
@@ -6053,16 +6020,14 @@ async def _advance_level(
         ),
         default=0,
     )
-    selected_cantrips, selected_leveled, prepared_additions = (
-        _level_spell_choice_counts(
-            spell_selections,
-            spell_by_id=spell_by_id,
-            class_name=normalized_class,
-            prepared_event=prepared_event,
-            preparation_mode=preparation_mode,
-            prepared_spell_ids=prepared_spell_ids,
-            maximum_spell_level=maximum_spell_level,
-        )
+    selected_cantrips, selected_leveled, prepared_additions = _level_spell_choice_counts(
+        spell_selections,
+        spell_by_id=spell_by_id,
+        class_name=normalized_class,
+        prepared_event=prepared_event,
+        preparation_mode=preparation_mode,
+        prepared_spell_ids=prepared_spell_ids,
+        maximum_spell_level=maximum_spell_level,
     )
     if (selected_cantrips, selected_leveled) != (
         required_cantrips,
@@ -6151,9 +6116,7 @@ async def _advance_level(
         grant_level = int(feature.get("grant_level", 0) or 0)
         if grant_level and not any(
             int(item.get("level", 0) or 0) == grant_level
-            for item in verified_feature_records[artifact_id].get(
-                "advancement_grants", []
-            )
+            for item in verified_feature_records[artifact_id].get("advancement_grants", [])
         ):
             raise RuntimeError(
                 "level advancement verification found a missing repeatable feature grant"
@@ -6164,12 +6127,10 @@ async def _advance_level(
     }
     if not set(applied_spells).issubset(verified_spells):
         raise RuntimeError("level advancement verification found missing spell artifacts")
-    if not {
-        str(item.get("artifact_id") or "") for item in feature_spell_grants
-    }.issubset(verified_spells):
-        raise RuntimeError(
-            "level advancement verification found missing feature-granted spells"
-        )
+    if not {str(item.get("artifact_id") or "") for item in feature_spell_grants}.issubset(
+        verified_spells
+    ):
+        raise RuntimeError("level advancement verification found missing feature-granted spells")
     if prepared_event:
         actual_prepared = set(
             dict(verified_sheet["spellcasting"]["preparation"]).get("selected_spell_ids", [])
@@ -6233,9 +6194,7 @@ async def _advance_level(
         "applied_features": applied_features,
         "applied_spells": applied_spells,
         "feature_spell_grants": feature_spell_grants,
-        "advancement_plan": (
-            deepcopy(preflight["plan"]) if preflight is not None else None
-        ),
+        "advancement_plan": (deepcopy(preflight["plan"]) if preflight is not None else None),
         "prepared_spell_additions": prepared_additions,
         "prepared": prepared,
         "phase_changes": phase_changes,

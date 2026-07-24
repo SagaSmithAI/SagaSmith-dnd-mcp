@@ -202,6 +202,11 @@ def test_2024_prepared_spell_changes_follow_phase_and_long_rest_rules(tmp_path: 
                                 "character_id": ranger["id"],
                                 "expected_revision": ranger["revision"],
                                 "prepared_spell_ids": ["a", "missing"],
+                                "rest_schedule": {
+                                    "sleep_minutes": 360,
+                                    "light_activity_minutes": 120,
+                                    "strenuous_activity_minutes": 0,
+                                },
                             }
                         ]
                     },
@@ -221,6 +226,11 @@ def test_2024_prepared_spell_changes_follow_phase_and_long_rest_rules(tmp_path: 
                             "character_id": ranger["id"],
                             "expected_revision": ranger["revision"],
                             "prepared_spell_ids": ["a", "c"],
+                            "rest_schedule": {
+                                "sleep_minutes": 360,
+                                "light_activity_minutes": 120,
+                                "strenuous_activity_minutes": 0,
+                            },
                         }
                     ]
                 },
@@ -1186,11 +1196,10 @@ def test_combat_sneak_attack_persists_the_once_per_turn_token(
         )
         assert attack["result"]["sneak_attack"]["used"] is True
         status = await call(server, "combat_status", {"campaign_id": campaign["id"]})
-        rogue_state = next(
-            item for item in status["combatants"] if item["actor_id"] == rogue["id"]
-        )
-        assert rogue_state["turn_flags"]["sneak_attack_turn_token"] == (
-            attack["result"]["sneak_attack"]["turn_token"]
+        rogue_state = next(item for item in status["combatants"] if item["actor_id"] == rogue["id"])
+        assert (
+            rogue_state["turn_flags"]["sneak_attack_turn_token"]
+            == (attack["result"]["sneak_attack"]["turn_token"])
         )
         with pytest.raises(Exception, match="already been used"):
             await call(

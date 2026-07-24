@@ -5,10 +5,17 @@ import pytest
 import sagasmith_dnd.progression as progression_module
 from sagasmith_dnd.character_schema import default_character_sheet
 from sagasmith_dnd.core_content import PACK_VERSION as CORE_CONTENT_PACK_VERSION
+from sagasmith_dnd.core_content import build_srd2014_content
 from sagasmith_dnd.engine import roll as engine_roll
 
 from sagasmith_dnd_mcp.config import McpConfig
-from sagasmith_dnd_mcp.server import create_server
+from sagasmith_dnd_mcp.server import (
+    SUPPORTED_FEATURE_MECHANICAL_GRANTS,
+    SUPPORTED_FEATURE_OPTION_PREREQUISITE_FIELDS,
+    SUPPORTED_FEATURE_SELECTION_KINDS,
+    SUPPORTED_FEATURE_SELECTION_REQUIREMENT_FIELDS,
+    create_server,
+)
 
 
 class _SequenceRng:
@@ -27,6 +34,60 @@ async def _call(server, name: str, arguments: dict):
     if isinstance(value, dict) and "action" in value and "result" in value:
         return value["result"]
     return value
+
+
+def test_all_declared_srd_feature_contracts_are_fail_closed_or_supported() -> None:
+    workspace = Path(__file__).resolve().parents[2]
+    _manifest, artifacts = build_srd2014_content(workspace / "SagaSmith-dnd-skills")
+    feature_cards = [
+        dict(artifact.get("card") or {})
+        for artifact in artifacts
+        if artifact.get("kind") == "feature"
+    ]
+    declared_grants = {
+        key for card in feature_cards for key in dict(card.get("mechanical_grants") or {})
+    }
+    declared_kinds = {
+        str(requirements.get("kind") or "")
+        for card in feature_cards
+        for requirements in [
+            dict(card.get("selection_requirements") or {}),
+            *[
+                dict(item)
+                for item in dict(card.get("selection_requirements_by_level") or {}).values()
+            ],
+        ]
+    }
+    declared_requirement_fields = {
+        field
+        for card in feature_cards
+        for requirements in [
+            dict(card.get("selection_requirements") or {}),
+            *[
+                dict(item)
+                for item in dict(card.get("selection_requirements_by_level") or {}).values()
+            ],
+        ]
+        for field in requirements
+    }
+    declared_prerequisite_fields = {
+        field
+        for card in feature_cards
+        for requirements in [
+            dict(card.get("selection_requirements") or {}),
+            *[
+                dict(item)
+                for item in dict(card.get("selection_requirements_by_level") or {}).values()
+            ],
+        ]
+        for prerequisite in dict(requirements.get("option_prerequisites") or {}).values()
+        for field in dict(prerequisite)
+    }
+
+    assert declared_grants <= SUPPORTED_FEATURE_MECHANICAL_GRANTS
+    assert declared_kinds <= SUPPORTED_FEATURE_SELECTION_KINDS
+    assert declared_requirement_fields <= SUPPORTED_FEATURE_SELECTION_REQUIREMENT_FIELDS
+    assert declared_prerequisite_fields <= SUPPORTED_FEATURE_OPTION_PREREQUISITE_FIELDS
 
 
 def _cleric_sheet() -> dict:
@@ -262,9 +323,7 @@ def test_source_choice_repeats_and_off_list_oath_spells_are_enforced(
             },
         )
         sanctuary = next(
-            spell
-            for spell in oath["sheet"]["content"]["spells"]
-            if spell["name"] == "Sanctuary"
+            spell for spell in oath["sheet"]["content"]["spells"] if spell["name"] == "Sanctuary"
         )
         assert sanctuary["access"]["always_prepared"] is True
         assert sanctuary["grant"]["source_key"] == "Oath of Devotion"
@@ -294,14 +353,10 @@ def test_source_choice_repeats_and_off_list_oath_spells_are_enforced(
                 "advancement_grants": [
                     {
                         "level": 3,
-                        "choices": {
-                            "options": ["Careful Spell", "Distant Spell"]
-                        },
+                        "choices": {"options": ["Careful Spell", "Distant Spell"]},
                         "pack_id": "dnd5e.content.srd2014",
                         "pack_version": CORE_CONTENT_PACK_VERSION,
-                        "rule_refs": [
-                            "bundled:srd2014/02_Classes/Sorcerer.md"
-                        ],
+                        "rule_refs": ["bundled:srd2014/02_Classes/Sorcerer.md"],
                     }
                 ],
                 "pack_id": "dnd5e.content.srd2014",
@@ -353,17 +408,13 @@ def test_source_choice_repeats_and_off_list_oath_spells_are_enforced(
             },
         )
         metamagic = next(
-            item
-            for item in repeated["sheet"]["content"]["features"]
-            if item["id"] == metamagic_id
+            item for item in repeated["sheet"]["content"]["features"] if item["id"] == metamagic_id
         )
         assert [item["level"] for item in metamagic["advancement_grants"]] == [
             3,
             10,
         ]
-        assert metamagic["advancement_grants"][-1]["choices"] == {
-            "options": ["Quickened Spell"]
-        }
+        assert metamagic["advancement_grants"][-1]["choices"] == {"options": ["Quickened Spell"]}
 
     asyncio.run(exercise())
 
@@ -446,9 +497,7 @@ def test_feature_granted_spells_and_invocation_prerequisites_are_settled(
                 "idempotency_key": "magical-secrets",
             },
         )
-        assert {
-            item["artifact_id"] for item in secrets["feature_spell_grants"]
-        } == {
+        assert {item["artifact_id"] for item in secrets["feature_spell_grants"]} == {
             "dnd5e.content.srd2014.spell.fireball",
             "dnd5e.content.srd2014.spell.eldritch-blast",
         }
@@ -494,18 +543,19 @@ def test_feature_granted_spells_and_invocation_prerequisites_are_settled(
                 "artifact_id": "dnd5e.content.srd2014.feature.warlock-mystic-arcanum",
                 "selection": {
                     "grant_level": 11,
-                    "spell_artifact_ids": [
-                        "dnd5e.content.srd2014.spell.mass-suggestion"
-                    ],
+                    "spell_artifact_ids": ["dnd5e.content.srd2014.spell.mass-suggestion"],
                 },
                 "expected_revision": warlock["revision"],
                 "idempotency_key": "arcanum",
             },
         )
         arcanum_character = arcanum["character"]
-        assert arcanum_character["sheet"]["resources"][
-            "mystic_arcanum:dnd5e.content.srd2014.spell.mass-suggestion"
-        ]["value"] == 1
+        assert (
+            arcanum_character["sheet"]["resources"][
+                "mystic_arcanum:dnd5e.content.srd2014.spell.mass-suggestion"
+            ]["value"]
+            == 1
+        )
         arcanum_spell = next(
             spell
             for spell in arcanum_character["sheet"]["content"]["spells"]
@@ -558,9 +608,7 @@ def test_feature_granted_spells_and_invocation_prerequisites_are_settled(
                 "character_content_apply",
                 {
                     "character_id": novice["id"],
-                    "artifact_id": (
-                        "dnd5e.content.srd2014.feature.warlock-eldritch-invocations"
-                    ),
+                    "artifact_id": ("dnd5e.content.srd2014.feature.warlock-eldritch-invocations"),
                     "selection": {
                         "grant_level": 2,
                         "options": ["Ascendant Step", "Agonizing Blast"],
@@ -574,9 +622,7 @@ def test_feature_granted_spells_and_invocation_prerequisites_are_settled(
             "character_content_apply",
             {
                 "character_id": novice["id"],
-                "artifact_id": (
-                    "dnd5e.content.srd2014.feature.warlock-eldritch-invocations"
-                ),
+                "artifact_id": ("dnd5e.content.srd2014.feature.warlock-eldritch-invocations"),
                 "selection": {
                     "grant_level": 2,
                     "options": ["Agonizing Blast", "Armor of Shadows"],
@@ -592,7 +638,1133 @@ def test_feature_granted_spells_and_invocation_prerequisites_are_settled(
             if spell["name"] == "Mage Armor"
         )
         assert mage_armor["access"]["at_will"] is True
+        assert mage_armor["access"]["known"] is False
+        assert mage_armor["access"]["prepared"] is False
         assert mage_armor["grant"]["method"] == "eldritch_invocation"
+
+    asyncio.run(exercise())
+
+
+def test_favored_enemy_language_is_conditional_and_materialized(
+    tmp_path: Path,
+) -> None:
+    workspace = Path(__file__).resolve().parents[2]
+    config = McpConfig(
+        home=tmp_path / "home",
+        database_url=None,
+        chroma_url=None,
+        chroma_path_override=None,
+        dnd_skills_dir=workspace / "SagaSmith-dnd-skills",
+        modulegen_skills_dir=workspace / "SagaSmith-module-gen-skills",
+        auto_seed_rules=True,
+    )
+
+    async def exercise() -> None:
+        server = create_server(config)
+        campaign = await _call(
+            server,
+            "campaign_create",
+            {
+                "name": "Favored Enemy",
+                "edition": "2014",
+                "idempotency_key": "campaign",
+            },
+        )
+
+        async def create_ranger(name: str, key: str) -> dict:
+            sheet = default_character_sheet()
+            sheet["progression"].update(
+                {
+                    "level": 1,
+                    "classes": [
+                        {
+                            "name": "Ranger",
+                            "level": 1,
+                            "subclass": "",
+                            "hit_die": 10,
+                        }
+                    ],
+                }
+            )
+            return await _call(
+                server,
+                "character_create_from",
+                {
+                    "mode": "direct",
+                    "payload": {
+                        "campaign_id": campaign["id"],
+                        "name": name,
+                        "sheet": sheet,
+                    },
+                    "idempotency_key": key,
+                },
+            )
+
+        feature_id = "dnd5e.content.srd2014.feature.ranger-favored-enemy"
+        ooze_hunter = await create_ranger("Ooze Hunter", "ooze-hunter")
+        with pytest.raises(Exception, match="explicitly record"):
+            await _call(
+                server,
+                "character_content_apply",
+                {
+                    "character_id": ooze_hunter["id"],
+                    "artifact_id": feature_id,
+                    "selection": {
+                        "favored_enemy": {
+                            "creature_type": "Oozes",
+                            "humanoid_races": [],
+                        }
+                    },
+                    "expected_revision": ooze_hunter["revision"],
+                    "idempotency_key": "missing-language-fact",
+                },
+            )
+        no_language = await _call(
+            server,
+            "character_content_apply",
+            {
+                "character_id": ooze_hunter["id"],
+                "artifact_id": feature_id,
+                "selection": {
+                    "favored_enemy": {
+                        "creature_type": "Oozes",
+                        "humanoid_races": [],
+                        "enemy_speaks_language": False,
+                        "language": "",
+                    }
+                },
+                "expected_revision": ooze_hunter["revision"],
+                "idempotency_key": "oozes",
+            },
+        )
+        assert no_language["sheet"]["traits"]["languages"] == []
+
+        beast_hunter = await create_ranger("Beast Hunter", "beast-hunter")
+        learned = await _call(
+            server,
+            "character_content_apply",
+            {
+                "character_id": beast_hunter["id"],
+                "artifact_id": feature_id,
+                "selection": {
+                    "favored_enemy": {
+                        "creature_type": "Beasts",
+                        "humanoid_races": [],
+                        "enemy_speaks_language": True,
+                        "language": "Sylvan",
+                    }
+                },
+                "expected_revision": beast_hunter["revision"],
+                "idempotency_key": "beasts",
+            },
+        )
+        assert learned["sheet"]["traits"]["languages"] == ["Sylvan"]
+
+    asyncio.run(exercise())
+
+
+def test_draconic_resilience_applies_retroactive_max_hp_and_unarmored_ac(
+    tmp_path: Path,
+) -> None:
+    workspace = Path(__file__).resolve().parents[2]
+    config = McpConfig(
+        home=tmp_path / "home",
+        database_url=None,
+        chroma_url=None,
+        chroma_path_override=None,
+        dnd_skills_dir=workspace / "SagaSmith-dnd-skills",
+        modulegen_skills_dir=workspace / "SagaSmith-module-gen-skills",
+        auto_seed_rules=True,
+    )
+
+    async def exercise() -> None:
+        server = create_server(config)
+        campaign = await _call(
+            server,
+            "campaign_create",
+            {
+                "name": "Draconic Resilience",
+                "edition": "2014",
+                "idempotency_key": "campaign",
+            },
+        )
+        sheet = default_character_sheet()
+        sheet["progression"].update(
+            {
+                "level": 1,
+                "classes": [
+                    {
+                        "name": "Sorcerer",
+                        "level": 1,
+                        "subclass": "Draconic Bloodline",
+                        "hit_die": 6,
+                    }
+                ],
+            }
+        )
+        sheet["combat"]["hp"] = {"value": 6, "max": 6, "temp": 0}
+        actor = await _call(
+            server,
+            "character_create_from",
+            {
+                "mode": "direct",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "name": "Scale",
+                    "sheet": sheet,
+                },
+                "idempotency_key": "actor",
+            },
+        )
+        ancestry = await _call(
+            server,
+            "character_content_apply",
+            {
+                "character_id": actor["id"],
+                "artifact_id": ("dnd5e.content.srd2014.feature.draconic-bloodline-dragon-ancestor"),
+                "selection": {"option": "Red"},
+                "expected_revision": actor["revision"],
+                "idempotency_key": "ancestor",
+            },
+        )
+        assert ancestry["sheet"]["traits"]["languages"] == ["Draconic"]
+
+        applied = await _call(
+            server,
+            "character_content_apply",
+            {
+                "character_id": actor["id"],
+                "artifact_id": (
+                    "dnd5e.content.srd2014.feature.draconic-bloodline-draconic-resilience"
+                ),
+                "selection": {"initial_setup_full_hp": True},
+                "expected_revision": ancestry["revision"],
+                "idempotency_key": "resilience",
+            },
+        )
+
+        assert applied["sheet"]["combat"]["hp"] == {
+            "value": 7,
+            "max": 7,
+            "temp": 0,
+        }
+        assert applied["derived"]["armor_class"] == 13
+        assert applied["derived"]["armor_class_breakdown"]["mode"] == ("unarmored_formula")
+        assert applied["sheet"]["effects"][0]["source"].endswith(
+            "draconic-bloodline-draconic-resilience"
+        )
+
+    asyncio.run(exercise())
+
+
+def test_multiclass_channel_divinity_uses_the_shared_cleric_capacity(
+    tmp_path: Path,
+) -> None:
+    workspace = Path(__file__).resolve().parents[2]
+    config = McpConfig(
+        home=tmp_path / "home",
+        database_url=None,
+        chroma_url=None,
+        chroma_path_override=None,
+        dnd_skills_dir=workspace / "SagaSmith-dnd-skills",
+        modulegen_skills_dir=workspace / "SagaSmith-module-gen-skills",
+        auto_seed_rules=True,
+    )
+
+    async def exercise() -> None:
+        server = create_server(config)
+        campaign = await _call(
+            server,
+            "campaign_create",
+            {
+                "name": "Shared Channel Divinity",
+                "edition": "2014",
+                "idempotency_key": "campaign",
+            },
+        )
+        sheet = default_character_sheet()
+        sheet["progression"].update(
+            {
+                "level": 9,
+                "classes": [
+                    {
+                        "name": "Cleric",
+                        "level": 6,
+                        "subclass": "Life Domain",
+                        "hit_die": 8,
+                    },
+                    {
+                        "name": "Paladin",
+                        "level": 3,
+                        "subclass": "Oath of Devotion",
+                        "hit_die": 10,
+                    },
+                ],
+            }
+        )
+        actor = await _call(
+            server,
+            "character_create_from",
+            {
+                "mode": "direct",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "name": "Shared Faith",
+                    "sheet": sheet,
+                },
+                "idempotency_key": "actor",
+            },
+        )
+        cleric = await _call(
+            server,
+            "character_content_apply",
+            {
+                "character_id": actor["id"],
+                "artifact_id": ("dnd5e.content.srd2014.feature.cleric-channel-divinity"),
+                "selection": {},
+                "expected_revision": actor["revision"],
+                "idempotency_key": "cleric-channel",
+            },
+        )
+        assert cleric["sheet"]["resources"]["channel_divinity"]["max"] == 2
+
+        paladin = await _call(
+            server,
+            "character_content_apply",
+            {
+                "character_id": actor["id"],
+                "artifact_id": ("dnd5e.content.srd2014.feature.oath-of-devotion-channel-divinity"),
+                "selection": {},
+                "expected_revision": cleric["revision"],
+                "idempotency_key": "paladin-channel",
+            },
+        )
+        assert paladin["sheet"]["resources"]["channel_divinity"]["max"] == 2
+        assert [
+            item["name"]
+            for item in paladin["sheet"]["content"]["features"]
+            if item["name"] == "Channel Divinity"
+        ] == ["Channel Divinity", "Channel Divinity"]
+
+    asyncio.run(exercise())
+
+
+def test_extra_attack_materializes_the_fighter_level_count_through_mcp(
+    tmp_path: Path,
+) -> None:
+    workspace = Path(__file__).resolve().parents[2]
+    config = McpConfig(
+        home=tmp_path / "home",
+        database_url=None,
+        chroma_url=None,
+        chroma_path_override=None,
+        dnd_skills_dir=workspace / "SagaSmith-dnd-skills",
+        modulegen_skills_dir=workspace / "SagaSmith-module-gen-skills",
+        auto_seed_rules=True,
+    )
+
+    async def exercise() -> None:
+        server = create_server(config)
+        campaign = await _call(
+            server,
+            "campaign_create",
+            {
+                "name": "Fighter Extra Attack",
+                "edition": "2014",
+                "idempotency_key": "campaign",
+            },
+        )
+        sheet = default_character_sheet()
+        sheet["progression"].update(
+            {
+                "level": 11,
+                "classes": [
+                    {
+                        "name": "Fighter",
+                        "level": 11,
+                        "subclass": "Champion",
+                        "hit_die": 10,
+                    }
+                ],
+            }
+        )
+        actor = await _call(
+            server,
+            "character_create_from",
+            {
+                "mode": "direct",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "name": "Three Strikes",
+                    "sheet": sheet,
+                },
+                "idempotency_key": "actor",
+            },
+        )
+
+        applied = await _call(
+            server,
+            "character_content_apply",
+            {
+                "character_id": actor["id"],
+                "artifact_id": ("dnd5e.content.srd2014.feature.fighter-extra-attack"),
+                "selection": {},
+                "expected_revision": actor["revision"],
+                "idempotency_key": "extra-attack",
+            },
+        )
+
+        assert applied["sheet"]["combat"]["attacks_per_action"] == 3
+        assert applied["derived"]["attacks_per_action"] == 3
+
+    asyncio.run(exercise())
+
+
+def test_multiclass_character_cannot_gain_unarmored_defense_twice(
+    tmp_path: Path,
+) -> None:
+    workspace = Path(__file__).resolve().parents[2]
+    config = McpConfig(
+        home=tmp_path / "home",
+        database_url=None,
+        chroma_url=None,
+        chroma_path_override=None,
+        dnd_skills_dir=workspace / "SagaSmith-dnd-skills",
+        modulegen_skills_dir=workspace / "SagaSmith-module-gen-skills",
+        auto_seed_rules=True,
+    )
+
+    async def exercise() -> None:
+        server = create_server(config)
+        campaign = await _call(
+            server,
+            "campaign_create",
+            {
+                "name": "One Unarmored Defense",
+                "edition": "2014",
+                "idempotency_key": "campaign",
+            },
+        )
+        sheet = default_character_sheet()
+        sheet["progression"].update(
+            {
+                "level": 2,
+                "classes": [
+                    {
+                        "name": "Barbarian",
+                        "level": 1,
+                        "subclass": "",
+                        "hit_die": 12,
+                    },
+                    {
+                        "name": "Monk",
+                        "level": 1,
+                        "subclass": "",
+                        "hit_die": 8,
+                    },
+                ],
+            }
+        )
+        actor = await _call(
+            server,
+            "character_create_from",
+            {
+                "mode": "direct",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "name": "Disciplined Rager",
+                    "sheet": sheet,
+                },
+                "idempotency_key": "actor",
+            },
+        )
+        barbarian = await _call(
+            server,
+            "character_content_apply",
+            {
+                "character_id": actor["id"],
+                "artifact_id": ("dnd5e.content.srd2014.feature.barbarian-unarmored-defense"),
+                "selection": {},
+                "expected_revision": actor["revision"],
+                "idempotency_key": "barbarian-defense",
+            },
+        )
+        with pytest.raises(Exception, match="cannot gain it again"):
+            await _call(
+                server,
+                "character_content_apply",
+                {
+                    "character_id": actor["id"],
+                    "artifact_id": ("dnd5e.content.srd2014.feature.monk-unarmored-defense"),
+                    "selection": {},
+                    "expected_revision": barbarian["revision"],
+                    "idempotency_key": "monk-defense",
+                },
+            )
+
+    asyncio.run(exercise())
+
+
+def test_fighting_style_uniqueness_ignores_unrelated_option_choices(
+    tmp_path: Path,
+) -> None:
+    workspace = Path(__file__).resolve().parents[2]
+    config = McpConfig(
+        home=tmp_path / "home",
+        database_url=None,
+        chroma_url=None,
+        chroma_path_override=None,
+        dnd_skills_dir=workspace / "SagaSmith-dnd-skills",
+        modulegen_skills_dir=workspace / "SagaSmith-module-gen-skills",
+        auto_seed_rules=True,
+    )
+
+    async def exercise() -> None:
+        server = create_server(config)
+        campaign = await _call(
+            server,
+            "campaign_create",
+            {
+                "name": "Scoped Fighting Styles",
+                "edition": "2014",
+                "idempotency_key": "campaign",
+            },
+        )
+        sheet = default_character_sheet()
+        sheet["progression"].update(
+            {
+                "level": 3,
+                "classes": [
+                    {
+                        "name": "Fighter",
+                        "level": 1,
+                        "subclass": "",
+                        "hit_die": 10,
+                    },
+                    {
+                        "name": "Ranger",
+                        "level": 2,
+                        "subclass": "",
+                        "hit_die": 10,
+                    },
+                ],
+            }
+        )
+        sheet["content"]["features"].append(
+            {
+                "id": "unrelated-option",
+                "name": "Unrelated Option",
+                "choices": {"option": "Defense"},
+            }
+        )
+        actor = await _call(
+            server,
+            "character_create_from",
+            {
+                "mode": "direct",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "name": "Versatile Warrior",
+                    "sheet": sheet,
+                },
+                "idempotency_key": "actor",
+            },
+        )
+        fighter = await _call(
+            server,
+            "character_content_apply",
+            {
+                "character_id": actor["id"],
+                "artifact_id": ("dnd5e.content.srd2014.feature.fighter-fighting-style"),
+                "selection": {"option": "Defense"},
+                "expected_revision": actor["revision"],
+                "idempotency_key": "fighter-style",
+            },
+        )
+        selected = next(
+            item
+            for item in fighter["sheet"]["content"]["features"]
+            if item["id"].endswith("fighter-fighting-style")
+        )
+        assert selected["choices"] == {"option": "Defense"}
+
+        with pytest.raises(Exception, match="already selected"):
+            await _call(
+                server,
+                "character_content_apply",
+                {
+                    "character_id": actor["id"],
+                    "artifact_id": ("dnd5e.content.srd2014.feature.ranger-fighting-style"),
+                    "selection": {"option": "Defense"},
+                    "expected_revision": fighter["revision"],
+                    "idempotency_key": "duplicate-style",
+                },
+            )
+
+    asyncio.run(exercise())
+
+
+def test_monk_unarmored_defense_materializes_its_wisdom_formula(
+    tmp_path: Path,
+) -> None:
+    workspace = Path(__file__).resolve().parents[2]
+    config = McpConfig(
+        home=tmp_path / "home",
+        database_url=None,
+        chroma_url=None,
+        chroma_path_override=None,
+        dnd_skills_dir=workspace / "SagaSmith-dnd-skills",
+        modulegen_skills_dir=workspace / "SagaSmith-module-gen-skills",
+        auto_seed_rules=True,
+    )
+
+    async def exercise() -> None:
+        server = create_server(config)
+        campaign = await _call(
+            server,
+            "campaign_create",
+            {
+                "name": "Unarmored Defense",
+                "edition": "2014",
+                "idempotency_key": "campaign",
+            },
+        )
+        sheet = default_character_sheet()
+        sheet["progression"].update(
+            {
+                "level": 1,
+                "classes": [
+                    {
+                        "name": "Monk",
+                        "level": 1,
+                        "subclass": "",
+                        "hit_die": 8,
+                    }
+                ],
+            }
+        )
+        sheet["abilities"]["dexterity"]["score"] = 14
+        sheet["abilities"]["wisdom"]["score"] = 16
+        actor = await _call(
+            server,
+            "character_create_from",
+            {
+                "mode": "direct",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "name": "Still Water",
+                    "sheet": sheet,
+                },
+                "idempotency_key": "actor",
+            },
+        )
+
+        applied = await _call(
+            server,
+            "character_content_apply",
+            {
+                "character_id": actor["id"],
+                "artifact_id": ("dnd5e.content.srd2014.feature.monk-unarmored-defense"),
+                "selection": {},
+                "expected_revision": actor["revision"],
+                "idempotency_key": "unarmored-defense",
+            },
+        )
+
+        assert applied["derived"]["armor_class"] == 15
+        assert applied["derived"]["armor_class_breakdown"]["ability_bonus"] == {
+            "ability": "wisdom",
+            "bonus": 3,
+        }
+        assert applied["sheet"]["effects"][0]["changes"][0]["value"] == {
+            "base": 10,
+            "ability": "wisdom",
+            "allows_shield": False,
+        }
+
+    asyncio.run(exercise())
+
+
+def test_paladin_channel_divinity_is_publicly_materialized_and_rest_bound(
+    tmp_path: Path,
+) -> None:
+    workspace = Path(__file__).resolve().parents[2]
+    config = McpConfig(
+        home=tmp_path / "home",
+        database_url=None,
+        chroma_url=None,
+        chroma_path_override=None,
+        dnd_skills_dir=workspace / "SagaSmith-dnd-skills",
+        modulegen_skills_dir=workspace / "SagaSmith-module-gen-skills",
+        auto_seed_rules=True,
+    )
+
+    async def exercise() -> None:
+        server = create_server(config)
+        campaign = await _call(
+            server,
+            "campaign_create",
+            {
+                "name": "Paladin Channel Divinity",
+                "edition": "2014",
+                "idempotency_key": "campaign",
+            },
+        )
+        sheet = default_character_sheet()
+        sheet["progression"].update(
+            {
+                "level": 3,
+                "classes": [
+                    {
+                        "name": "Paladin",
+                        "level": 3,
+                        "subclass": "Oath of Devotion",
+                        "hit_die": 10,
+                    }
+                ],
+            }
+        )
+        actor = await _call(
+            server,
+            "character_create_from",
+            {
+                "mode": "direct",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "name": "Dawn",
+                    "sheet": sheet,
+                },
+                "idempotency_key": "actor",
+            },
+        )
+
+        applied = await _call(
+            server,
+            "character_content_apply",
+            {
+                "character_id": actor["id"],
+                "artifact_id": ("dnd5e.content.srd2014.feature.oath-of-devotion-channel-divinity"),
+                "selection": {},
+                "expected_revision": actor["revision"],
+                "idempotency_key": "channel-divinity",
+            },
+        )
+
+        assert applied["sheet"]["resources"]["channel_divinity"] == {
+            "label": "Channel Divinity",
+            "value": 1,
+            "max": 1,
+            "recovers_on": "short_rest",
+            "source_key": "Paladin",
+            "slot_level": 0,
+            "unlimited": False,
+        }
+        feature = next(
+            item
+            for item in applied["sheet"]["content"]["features"]
+            if item["id"].endswith("oath-of-devotion-channel-divinity")
+        )
+        assert feature["resource_key"] == "channel_divinity"
+
+    asyncio.run(exercise())
+
+
+def test_signature_spells_are_always_prepared_and_use_explicit_free_resources(
+    tmp_path: Path,
+) -> None:
+    workspace = Path(__file__).resolve().parents[2]
+    config = McpConfig(
+        home=tmp_path / "home",
+        database_url=None,
+        chroma_url=None,
+        chroma_path_override=None,
+        dnd_skills_dir=workspace / "SagaSmith-dnd-skills",
+        modulegen_skills_dir=workspace / "SagaSmith-module-gen-skills",
+        auto_seed_rules=True,
+    )
+
+    async def exercise() -> None:
+        server = create_server(config)
+        campaign = await _call(
+            server,
+            "campaign_create",
+            {
+                "name": "Signature Spells",
+                "edition": "2014",
+                "idempotency_key": "campaign",
+            },
+        )
+        sheet = default_character_sheet()
+        sheet["progression"].update(
+            {
+                "level": 20,
+                "classes": [
+                    {
+                        "name": "Wizard",
+                        "level": 20,
+                        "subclass": "School of Evocation",
+                        "hit_die": 6,
+                    }
+                ],
+            }
+        )
+        sheet["spellcasting"].update(
+            {
+                "ability": "intelligence",
+                "class_lists": ["wizard"],
+                "spell_slots": {
+                    "3": {
+                        "label": "3rd-level slots",
+                        "value": 1,
+                        "max": 3,
+                        "unlimited": False,
+                        "recovers_on": "long_rest",
+                        "source_key": "Wizard",
+                        "slot_level": 3,
+                    }
+                },
+            }
+        )
+        sheet["spellcasting"]["preparation"].update(
+            {
+                "mode": "spellbook",
+                "max_prepared": 25,
+                "changes_on": "long_rest",
+            }
+        )
+        sheet["spellcasting"]["spellbook"]["enabled"] = True
+        actor = await _call(
+            server,
+            "character_create_from",
+            {
+                "mode": "direct",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "name": "Archmage",
+                    "sheet": sheet,
+                },
+                "idempotency_key": "actor",
+            },
+        )
+        spell_ids = [
+            "dnd5e.content.srd2014.spell.fireball",
+            "dnd5e.content.srd2014.spell.counterspell",
+        ]
+        current = actor
+        for index, spell_id in enumerate(spell_ids):
+            current = await _call(
+                server,
+                "character_content_apply",
+                {
+                    "character_id": actor["id"],
+                    "artifact_id": spell_id,
+                    "selection": {
+                        "method": "spellbook",
+                        "source_class": "Wizard",
+                    },
+                    "expected_revision": current["revision"],
+                    "idempotency_key": f"spell-{index}",
+                },
+            )
+
+        applied = await _call(
+            server,
+            "character_content_apply",
+            {
+                "character_id": actor["id"],
+                "artifact_id": ("dnd5e.content.srd2014.feature.wizard-signature-spells"),
+                "selection": {"spell_artifact_ids": spell_ids},
+                "expected_revision": current["revision"],
+                "idempotency_key": "signature",
+            },
+        )
+        applied_character = applied["character"]
+        by_id = {spell["id"]: spell for spell in applied_character["sheet"]["content"]["spells"]}
+        for spell_id in spell_ids:
+            assert by_id[spell_id]["access"]["always_prepared"] is True
+            assert by_id[spell_id]["access"]["prepared"] is True
+            assert (
+                applied_character["sheet"]["resources"][f"signature_spell:{spell_id}"]["value"] == 1
+            )
+
+        cast = await _call(
+            server,
+            "character_cast_spell",
+            {
+                "character_id": actor["id"],
+                "spell_id": spell_ids[0],
+                "cast_level": 3,
+                "signature_free_cast": True,
+                "expected_revision": applied_character["revision"],
+                "idempotency_key": "free-fireball",
+            },
+        )
+        assert cast["payment"]["economy"] == "signature_spell"
+        updated = await _call(
+            server,
+            "character_query",
+            {"view": "get", "payload": {"character_id": actor["id"]}},
+        )
+        assert updated["sheet"]["spellcasting"]["spell_slots"]["3"]["value"] == 1
+        assert updated["sheet"]["resources"][f"signature_spell:{spell_ids[0]}"]["value"] == 0
+
+        with pytest.raises(Exception, match="free use is unavailable"):
+            await _call(
+                server,
+                "character_cast_spell",
+                {
+                    "character_id": actor["id"],
+                    "spell_id": spell_ids[0],
+                    "cast_level": 3,
+                    "signature_free_cast": True,
+                    "expected_revision": updated["revision"],
+                    "idempotency_key": "free-fireball-again",
+                },
+            )
+
+    asyncio.run(exercise())
+
+
+def test_spell_mastery_preserves_existing_preparation_state(
+    tmp_path: Path,
+) -> None:
+    workspace = Path(__file__).resolve().parents[2]
+    config = McpConfig(
+        home=tmp_path / "home",
+        database_url=None,
+        chroma_url=None,
+        chroma_path_override=None,
+        dnd_skills_dir=workspace / "SagaSmith-dnd-skills",
+        modulegen_skills_dir=workspace / "SagaSmith-module-gen-skills",
+        auto_seed_rules=True,
+    )
+
+    async def exercise() -> None:
+        server = create_server(config)
+        campaign = await _call(
+            server,
+            "campaign_create",
+            {
+                "name": "Spell Mastery",
+                "edition": "2014",
+                "idempotency_key": "campaign",
+            },
+        )
+        spell_ids = [
+            "dnd5e.content.srd2014.spell.shield",
+            "dnd5e.content.srd2014.spell.misty-step",
+            "dnd5e.content.srd2014.spell.magic-missile",
+            "dnd5e.content.srd2014.spell.invisibility",
+        ]
+        sheet = default_character_sheet()
+        sheet["progression"].update(
+            {
+                "level": 18,
+                "classes": [
+                    {
+                        "name": "Wizard",
+                        "level": 18,
+                        "subclass": "School of Evocation",
+                        "hit_die": 6,
+                    }
+                ],
+            }
+        )
+        sheet["spellcasting"]["preparation"].update(
+            {
+                "mode": "spellbook",
+                "max_prepared": 23,
+                "changes_on": "long_rest",
+                "selected_spell_ids": [spell_ids[0], spell_ids[2]],
+            }
+        )
+        sheet["spellcasting"]["spellbook"].update({"enabled": True, "spell_ids": spell_ids})
+        sheet["content"]["spells"] = [
+            {
+                "id": spell_ids[0],
+                "name": "Shield",
+                "level": 1,
+                "grant": {
+                    "source_type": "class",
+                    "source_key": "wizard",
+                    "method": "spellbook",
+                },
+                "access": {
+                    "known": False,
+                    "prepared": True,
+                    "in_spellbook": True,
+                },
+            },
+            {
+                "id": spell_ids[1],
+                "name": "Misty Step",
+                "level": 2,
+                "grant": {
+                    "source_type": "class",
+                    "source_key": "wizard",
+                    "method": "spellbook",
+                },
+                "access": {
+                    "known": False,
+                    "prepared": False,
+                    "in_spellbook": True,
+                },
+            },
+            {
+                "id": spell_ids[2],
+                "name": "Magic Missile",
+                "level": 1,
+                "grant": {
+                    "source_type": "class",
+                    "source_key": "wizard",
+                    "method": "spellbook",
+                },
+                "access": {
+                    "known": False,
+                    "prepared": True,
+                    "in_spellbook": True,
+                },
+            },
+            {
+                "id": spell_ids[3],
+                "name": "Invisibility",
+                "level": 2,
+                "grant": {
+                    "source_type": "class",
+                    "source_key": "wizard",
+                    "method": "spellbook",
+                },
+                "access": {
+                    "known": False,
+                    "prepared": False,
+                    "in_spellbook": True,
+                },
+            },
+        ]
+        actor = await _call(
+            server,
+            "character_create_from",
+            {
+                "mode": "direct",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "name": "Master",
+                    "sheet": sheet,
+                },
+                "idempotency_key": "actor",
+            },
+        )
+
+        applied = await _call(
+            server,
+            "character_content_apply",
+            {
+                "character_id": actor["id"],
+                "artifact_id": ("dnd5e.content.srd2014.feature.wizard-spell-mastery"),
+                "selection": {"spell_artifact_ids": spell_ids[:2]},
+                "expected_revision": actor["revision"],
+                "idempotency_key": "mastery",
+            },
+        )
+        by_id = {spell["id"]: spell for spell in applied["character"]["sheet"]["content"]["spells"]}
+        assert by_id[spell_ids[0]]["access"]["prepared"] is True
+        assert by_id[spell_ids[1]]["access"]["prepared"] is False
+        assert all(by_id[spell_id]["access"]["at_will"] for spell_id in spell_ids[:2])
+        assert all(
+            by_id[spell_id]["access"]["at_will_sources"] == ["spell_mastery:Wizard"]
+            for spell_id in spell_ids[:2]
+        )
+        assert all(by_id[spell_id]["access"]["known"] is False for spell_id in spell_ids)
+
+        phase = await _call(
+            server,
+            "game_phase",
+            {
+                "campaign_id": campaign["id"],
+                "action": "set",
+                "tool_profile": "play",
+                "expected_revision": campaign["revision"],
+                "idempotency_key": "play",
+            },
+        )
+        clock = await _call(
+            server,
+            "campaign_change",
+            {
+                "campaign_id": campaign["id"],
+                "action": "clock_set",
+                "payload": {
+                    "day": 1,
+                    "hour": 0,
+                    "minute": 0,
+                    "label": "Study",
+                },
+                "expected_revision": phase["campaign_revision"],
+                "idempotency_key": "clock",
+            },
+        )
+        with pytest.raises(Exception, match="required 480 minutes"):
+            await _call(
+                server,
+                "character_content_apply",
+                {
+                    "character_id": actor["id"],
+                    "artifact_id": ("dnd5e.content.srd2014.feature.wizard-spell-mastery"),
+                    "selection": {
+                        "spell_artifact_ids": spell_ids[2:],
+                        "replace_existing": True,
+                        "study_started_elapsed_minutes": 0,
+                    },
+                    "expected_revision": applied["character"]["revision"],
+                    "idempotency_key": "too-early",
+                },
+            )
+        advanced = await _call(
+            server,
+            "campaign_change",
+            {
+                "campaign_id": campaign["id"],
+                "action": "clock_advance",
+                "payload": {"period": "minute", "count": 480},
+                "expected_revision": clock["campaign_revision"],
+                "idempotency_key": "study",
+            },
+        )
+        replaced = await _call(
+            server,
+            "character_content_apply",
+            {
+                "character_id": actor["id"],
+                "artifact_id": ("dnd5e.content.srd2014.feature.wizard-spell-mastery"),
+                "selection": {
+                    "spell_artifact_ids": spell_ids[2:],
+                    "replace_existing": True,
+                    "study_started_elapsed_minutes": 0,
+                },
+                "expected_revision": applied["character"]["revision"],
+                "idempotency_key": "replace",
+            },
+        )
+        assert advanced["world_time"]["elapsed_minutes"] == 480
+        by_id = {
+            spell["id"]: spell for spell in replaced["character"]["sheet"]["content"]["spells"]
+        }
+        assert all(by_id[spell_id]["access"]["at_will"] is False for spell_id in spell_ids[:2])
+        assert all(by_id[spell_id]["access"]["at_will"] is True for spell_id in spell_ids[2:])
+        mastery = next(
+            item
+            for item in replaced["character"]["sheet"]["content"]["features"]
+            if item["id"].endswith("wizard-spell-mastery")
+        )
+        assert mastery["choices"]["spell_artifact_ids"] == spell_ids[2:]
+        assert mastery["choices"]["_replacement_history"] == [
+            {
+                "previous_spell_artifact_ids": spell_ids[:2],
+                "study_started_elapsed_minutes": 0,
+                "study_completed_elapsed_minutes": 480,
+                "study_minutes": 480,
+            }
+        ]
 
     asyncio.run(exercise())
 
@@ -661,16 +1833,9 @@ def test_level_plan_is_read_only_and_orders_feature_resource_dependencies(
                 },
             },
         )
-        feature_ids = [
-            item["artifact_id"]
-            for item in plan["follow_up"]["feature_artifacts"]
-        ]
-        channel_id = (
-            "dnd5e.content.srd2014.feature.cleric-channel-divinity"
-        )
-        preserve_id = (
-            "dnd5e.content.srd2014.feature.life-domain-channel-divinity-preserve-life"
-        )
+        feature_ids = [item["artifact_id"] for item in plan["follow_up"]["feature_artifacts"]]
+        channel_id = "dnd5e.content.srd2014.feature.cleric-channel-divinity"
+        preserve_id = "dnd5e.content.srd2014.feature.life-domain-channel-divinity-preserve-life"
         assert feature_ids.index(channel_id) < feature_ids.index(preserve_id)
         assert plan["new_level"] == 2
 
@@ -729,12 +1894,8 @@ def test_land_druid_bonus_cantrip_and_non_list_circle_spells_are_materialized(
             "character_content_apply",
             {
                 "character_id": actor["id"],
-                "artifact_id": (
-                    "dnd5e.content.srd2014.feature.circle-of-the-land-bonus-cantrip"
-                ),
-                "selection": {
-                    "spell_artifact_id": "dnd5e.content.srd2014.spell.guidance"
-                },
+                "artifact_id": ("dnd5e.content.srd2014.feature.circle-of-the-land-bonus-cantrip"),
+                "selection": {"spell_artifact_id": "dnd5e.content.srd2014.spell.guidance"},
                 "expected_revision": actor["revision"],
                 "idempotency_key": "bonus-cantrip",
             },
@@ -767,14 +1928,10 @@ def test_land_druid_bonus_cantrip_and_non_list_circle_spells_are_materialized(
                 "idempotency_key": "level-3",
             },
         )
-        unlocked = {
-            item["name"]
-            for item in advanced["advancement"]["subclass_spell_grants"]
-        }
+        unlocked = {item["name"] for item in advanced["advancement"]["subclass_spell_grants"]}
         assert unlocked == {"Mirror Image", "Misty Step"}
         spells = {
-            spell["name"]: spell
-            for spell in advanced["character"]["sheet"]["content"]["spells"]
+            spell["name"]: spell for spell in advanced["character"]["sheet"]["content"]["spells"]
         }
         for name in unlocked:
             assert spells[name]["access"]["always_prepared"] is True
@@ -857,7 +2014,7 @@ def test_ability_score_improvement_is_applied_and_repeats_at_later_unlocks(
         )
         assert first_asi["sheet"]["abilities"]["strength"]["score"] == 16
         assert first_asi["sheet"]["abilities"]["constitution"]["score"] == 14
-        assert first_asi["sheet"]["combat"]["hp"] == {"value": 24, "max": 35, "temp": 0}
+        assert first_asi["sheet"]["combat"]["hp"] == {"value": 20, "max": 35, "temp": 0}
         feature = next(
             item for item in first_asi["sheet"]["content"]["features"] if item["id"] == asi_id
         )
@@ -1015,8 +2172,7 @@ def test_lobby_level_advance_is_source_bound_and_reports_catalog_follow_up(
             {
                 "character_id": actor["id"],
                 "artifact_id": (
-                    "dnd5e.content.srd2014.feature."
-                    "life-domain-channel-divinity-preserve-life"
+                    "dnd5e.content.srd2014.feature.life-domain-channel-divinity-preserve-life"
                 ),
                 "expected_revision": channel["revision"],
                 "idempotency_key": "preserve",
@@ -1064,8 +2220,7 @@ def test_lobby_level_advance_is_source_bound_and_reports_catalog_follow_up(
                 "action": "use_activity",
                 "payload": {
                     "activity_id": (
-                        "dnd5e.content.srd2014.feature."
-                        "life-domain-channel-divinity-preserve-life"
+                        "dnd5e.content.srd2014.feature.life-domain-channel-divinity-preserve-life"
                     ),
                     "declaration": {
                         "allocations": [
@@ -1254,14 +2409,10 @@ def test_level_advance_materializes_new_always_prepared_domain_spells(
             },
         )
 
-        unlocked = {
-            item["name"]
-            for item in level_three["advancement"]["subclass_spell_grants"]
-        }
+        unlocked = {item["name"] for item in level_three["advancement"]["subclass_spell_grants"]}
         assert unlocked == {"Lesser Restoration", "Spiritual Weapon"}
         spells = {
-            spell["name"]: spell
-            for spell in level_three["character"]["sheet"]["content"]["spells"]
+            spell["name"]: spell for spell in level_three["character"]["sheet"]["content"]["spells"]
         }
         assert set(spells) == {
             "Bless",
