@@ -2,6 +2,7 @@ import asyncio
 from pathlib import Path
 
 import pytest
+from mcp.server.fastmcp.exceptions import ToolError
 
 from sagasmith_dnd_mcp.config import McpConfig
 from sagasmith_dnd_mcp.server import create_server
@@ -240,6 +241,69 @@ def test_imported_rule_source_creates_a_source_bound_combat_actor(tmp_path: Path
         assert {
             item["source_id"] for item in variant["variant_evidence"]["sources"]
         } == {ingested["source_id"]}
+
+        downed = await _call(
+            server,
+            "character_create_from",
+            {
+                "mode": "statblock",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "source_id": ingested["source_id"],
+                    "name": "Source-authored Captive",
+                    "character_type": "npc",
+                    "variant": {
+                        "source_ref": f"rule-chunk:{created['source']['chunk_ids'][0]}",
+                        "current_hit_points": 0,
+                    },
+                },
+                "idempotency_key": "actor-source-authored-captive",
+            },
+        )
+        source_state_arguments = {
+            "character_id": downed["character"]["id"],
+            "action": "source_state",
+            "payload": {
+                "state": "stable_unconscious",
+                "source_ref": f"rule-chunk:{created['source']['chunk_ids'][0]}",
+                "reason": "The adventure introduces the captive unconscious and stable.",
+            },
+            "expected_revision": downed["character"]["revision"],
+            "idempotency_key": "source-state-captive",
+        }
+        initialized = await _call(server, "character_state_change", source_state_arguments)
+        replay = await _call(server, "character_state_change", source_state_arguments)
+
+        assert replay == initialized
+        assert initialized["result"] == {
+            "status": "initialized",
+            "source_state": "stable_unconscious",
+        }
+        assert initialized["character"]["sheet"]["combat"]["hp"]["value"] == 0
+        assert initialized["character"]["sheet"]["combat"]["death_saves"] == {
+            "successes": 0,
+            "failures": 0,
+        }
+        assert initialized["character"]["sheet"]["conditions"] == [
+            "prone",
+            "stable",
+            "unconscious",
+        ]
+        assert initialized["source_evidence"]["source_id"] == ingested["source_id"]
+        with pytest.raises(ToolError, match="managed sources"):
+            await _call(
+                server,
+                "character_state_change",
+                {
+                    **source_state_arguments,
+                    "payload": {
+                        **source_state_arguments["payload"],
+                        "source_ref": "rule-chunk:not-managed",
+                    },
+                    "expected_revision": initialized["character"]["revision"],
+                    "idempotency_key": "source-state-unmanaged",
+                },
+            )
 
     asyncio.run(exercise())
 

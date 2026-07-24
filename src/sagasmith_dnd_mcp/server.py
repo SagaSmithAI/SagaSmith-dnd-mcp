@@ -131,6 +131,7 @@ from sagasmith_dnd.lifecycle import (
     advance_effect_durations,
     advance_world_effect_durations,
     apply_rest,
+    initialize_source_state,
     knock_prone_outside_combat,
     record_rest_completion,
     recover_stable_creature,
@@ -198,6 +199,7 @@ from sagasmith_dnd.spells import (
 )
 from sagasmith_dnd.statblocks import apply_statblock_variant, parse_2014_statblock
 from sagasmith_dnd.system import DND5E
+from sqlalchemy.exc import NoResultFound
 
 from sagasmith_dnd_mcp.config import McpConfig
 from sagasmith_dnd_mcp.exposure import Exposure, ExposureError, ExposureRegistry
@@ -10114,6 +10116,57 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             campaign_id=current.campaign_id,
         )
 
+    def character_source_state_initialize(
+        character_id: str,
+        state: str,
+        source_ref: str,
+        reason: str,
+        principal_id: str = "system:local",
+        expected_revision: int | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Initialize a narrow adventure-authored actor state without fake events."""
+        current = characters.get(character_id)
+        require_character_control(current, principal_id)
+        require_outside_active_combat(current, "source-authored state initialization")
+        if current.campaign_id is None:
+            raise ValueError("source-authored state requires a campaign-bound actor")
+        access.require_campaign(current.campaign_id, principal_id, roles={"owner", "dm"})
+        normalized_reason = str(reason).strip()
+        if not normalized_reason or len(normalized_reason) > 1000:
+            raise ValueError("source state reason must contain 1 to 1000 characters")
+        normalized_ref = str(source_ref).strip()
+        try:
+            evidence = statblock_variant_evidence(
+                current.campaign_id,
+                {"source_ref": normalized_ref},
+            )
+        except (LookupError, NoResultFound) as exc:
+            raise ValueError(
+                "source state source_ref must identify managed sources"
+            ) from exc
+        applied = initialize_source_state(current.sheet, state=state)
+        result = {key: value for key, value in applied.items() if key != "sheet"}
+        return update_sheet(
+            character_id,
+            applied["sheet"],
+            operation="character.source_state.initialize",
+            principal_id=principal_id,
+            expected_revision=expected_revision,
+            idempotency_key=idempotency_key,
+            payload={
+                "state": result["source_state"],
+                "source_ref": normalized_ref,
+                "reason": normalized_reason,
+            },
+            response_extra={
+                "result": result,
+                "source_ref": normalized_ref,
+                "source_evidence": evidence,
+                "reason": normalized_reason,
+            },
+        )
+
     def campaign_stable_recovery(
         campaign_id: str,
         members: list[dict[str, Any]],
@@ -17452,6 +17505,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "heal",
             "rest",
             "level_advance",
+            "source_state",
             "stable_recovery",
             "stand",
             "knock_prone",
@@ -17538,6 +17592,16 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 required(data, "hp_method"),
                 required(data, "reason"),
                 required(data, "source_ref"),
+                principal_id,
+                expected_revision,
+                idempotency_key,
+            )
+        elif action == "source_state":
+            result = character_source_state_initialize(
+                character_id,
+                required(data, "state"),
+                required(data, "source_ref"),
+                required(data, "reason"),
                 principal_id,
                 expected_revision,
                 idempotency_key,

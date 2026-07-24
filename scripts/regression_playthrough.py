@@ -29,6 +29,7 @@ DEFERRED_CHECKPOINT_ACTIONS = frozenset(
         "advance-time",
         "roll-source",
         "resolve-check",
+        "initialize-source-state",
         "stand-up",
         "record-event",
         "record-outcome",
@@ -58,6 +59,7 @@ def _arguments() -> argparse.Namespace:
             "record-event",
             "record-outcome",
             "resolve-check",
+            "initialize-source-state",
             "apply-damage",
             "stand-up",
             "use-activity",
@@ -163,6 +165,13 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--damage-knock-prone", action="store_true")
     parser.add_argument("--stand-actor-id", default="")
     parser.add_argument("--stand-reason", default="")
+    parser.add_argument("--source-state-actor-id", default="")
+    parser.add_argument(
+        "--source-state",
+        choices=("stable_unconscious",),
+        default="",
+    )
+    parser.add_argument("--source-state-reason", default="")
     parser.add_argument("--activity-actor-id", default="")
     parser.add_argument("--activity-id", default="")
     parser.add_argument("--activity-declaration-json", type=json.loads)
@@ -696,6 +705,31 @@ def _stand_identity(
             "scene_id": scene_id,
             "location_key": location_key,
             "actor_id": actor_id,
+            "reason": reason.strip(),
+            "source_ref": source_ref,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return _token(serialized, length=24)
+
+
+def _source_state_identity(
+    *,
+    scene_id: str,
+    location_key: str,
+    actor_id: str,
+    state: str,
+    reason: str,
+    source_ref: dict[str, Any],
+) -> str:
+    serialized = json.dumps(
+        {
+            "scene_id": scene_id,
+            "location_key": location_key,
+            "actor_id": actor_id,
+            "state": state,
             "reason": reason.strip(),
             "source_ref": source_ref,
         },
@@ -2995,6 +3029,165 @@ async def _stand_after_source_event(
         },
         "actor": {"id": actor_id, "name": actor["name"]},
         "stand": stood,
+        "knowledge_actor_ids": recipients,
+        "continuity": committed,
+        "sync": synced,
+    }
+
+
+async def _initialize_source_state(
+    client: ExposureClient,
+    *,
+    campaign_id: str,
+    run_id: str,
+    scene_id: str,
+    source_scene_id: str,
+    location_key: str,
+    source_excerpt: str,
+    source_ref: dict[str, Any] | None,
+    actor_id: str,
+    state: str,
+    reason: str,
+    knowledge_actor_ids: list[str],
+    defer_checkpoint: bool,
+) -> dict[str, Any]:
+    if not all(
+        (
+            scene_id,
+            location_key,
+            source_excerpt,
+            actor_id,
+            state,
+            reason.strip(),
+        )
+    ):
+        raise ValueError(
+            "initialize-source-state requires scene, location, source, actor, state, and reason"
+        )
+    current_scene = await client.domain(
+        "module_query",
+        {
+            "campaign_id": campaign_id,
+            "view": "scene",
+            "payload": {"scene_id": scene_id},
+        },
+    )
+    cited_scene_id = source_scene_id or scene_id
+    cited_scene = (
+        current_scene
+        if cited_scene_id == scene_id
+        else await client.domain(
+            "module_query",
+            {
+                "campaign_id": campaign_id,
+                "view": "scene",
+                "payload": {"scene_id": cited_scene_id},
+            },
+        )
+    )
+    exact_ref = _validate_source_ref(cited_scene, source_ref, excerpt=source_excerpt)
+    if location_key not in {
+        str(item.get("key") or "") for item in _scene_locations(current_scene)
+    }:
+        raise ValueError("source-state location is not present in the current scene atlas")
+    actor = await client.domain(
+        "character_query",
+        {"view": "get", "payload": {"character_id": actor_id}},
+    )
+    if actor.get("campaign_id") != campaign_id:
+        raise ValueError("source-state actor does not belong to the campaign")
+    identity = _source_state_identity(
+        scene_id=scene_id,
+        location_key=location_key,
+        actor_id=actor_id,
+        state=state,
+        reason=reason,
+        source_ref=exact_ref,
+    )
+    initialized = await client.domain(
+        "character_state_change",
+        {
+            "character_id": actor_id,
+            "action": "source_state",
+            "payload": {
+                "state": state,
+                "source_ref": f"module-chunk:{exact_ref['chunk_id']}",
+                "reason": reason.strip(),
+            },
+            "expected_revision": actor["revision"],
+            "idempotency_key": _mutation_key(
+                run_id, "source-state", identity
+            ),
+        },
+    )
+    branches = await client.domain(
+        "branch_query",
+        {"campaign_id": campaign_id, "view": "list"},
+    )
+    branch = next((item for item in branches if item.get("is_current")), None)
+    if branch is None:
+        raise RuntimeError("campaign has no current branch")
+    recipients = list(dict.fromkeys(knowledge_actor_ids))
+    campaign = await _campaign(client, campaign_id)
+    continuity_payload: dict[str, Any] = {
+        "event": {
+            "summary": reason.strip(),
+            "event_type": "source_state_initialized",
+            "audience_scope": "dm",
+            "payload": {
+                "scene_id": scene_id,
+                "source_scene_id": cited_scene_id,
+                "location_key": location_key,
+                "actor_id": actor_id,
+                "state": state,
+                "source_excerpt": source_excerpt,
+                "source_ref": exact_ref,
+            },
+        },
+        "actor_knowledge": [
+            {
+                "actor_id": recipient,
+                "knowledge_key": (
+                    f"playthrough.{_token(run_id)}.source_state.{_token(identity)}"
+                ),
+                "proposition": reason.strip(),
+                "disclosure_scope": "owner",
+            }
+            for recipient in recipients
+        ],
+        "branch_id": str(branch["id"]),
+    }
+    if not defer_checkpoint:
+        continuity_payload["snapshot"] = {
+            "label": f"Full playthrough source state: {actor['name']} at {location_key}"
+        }
+    committed = await client.domain(
+        "continuity_commit",
+        {
+            "campaign_id": campaign_id,
+            "payload": continuity_payload,
+            "expected_revision": campaign["revision"],
+            "idempotency_key": _mutation_key(
+                run_id, "source-state-continuity", identity
+            ),
+        },
+    )
+    synced = await _manifest_mutation(
+        client,
+        campaign_id=campaign_id,
+        action="sync",
+        run_id=run_id,
+        identity=f"source-state-sync:{identity}",
+    )
+    return {
+        "scene": {
+            "scene_id": scene_id,
+            "source_scene_id": cited_scene_id,
+            "location_key": location_key,
+            "source_ref": exact_ref,
+        },
+        "actor": {"id": actor_id, "name": actor["name"]},
+        "state": initialized,
         "knowledge_actor_ids": recipients,
         "continuity": committed,
         "sync": synced,
@@ -6345,6 +6538,25 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     half_damage=args.damage_half,
                     knock_prone=args.damage_knock_prone,
                     knowledge_actor_ids=args.knowledge_actor_id,
+                )
+            elif args.action == "initialize-source-state":
+                if phase != "play":
+                    raise RuntimeError("initialize-source-state requires the play phase")
+                await client.load("play.characters")
+                report["result"] = await _initialize_source_state(
+                    client,
+                    campaign_id=args.campaign_id,
+                    run_id=args.run_id,
+                    scene_id=str(args.scene_id or ""),
+                    source_scene_id=args.source_scene_id,
+                    location_key=args.location_key,
+                    source_excerpt=args.source_excerpt,
+                    source_ref=args.source_ref_json,
+                    actor_id=args.source_state_actor_id,
+                    state=args.source_state,
+                    reason=args.source_state_reason,
+                    knowledge_actor_ids=args.knowledge_actor_id,
+                    defer_checkpoint=args.defer_checkpoint,
                 )
             elif args.action == "stand-up":
                 if phase != "play":

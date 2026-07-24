@@ -30,6 +30,7 @@ from scripts.regression_playthrough import (
     _committed_check_result,
     _configure_advancement,
     _extend_manifest_for_module_revision,
+    _initialize_source_state,
     _long_rest,
     _matching_check_progress,
     _mutation_key,
@@ -52,6 +53,7 @@ from scripts.regression_playthrough import (
     _scene_progress_percent,
     _short_rest,
     _short_rest_identity,
+    _source_state_identity,
     _spend_source_currency,
     _spend_source_item,
     _stable_recovery_identity,
@@ -2689,6 +2691,117 @@ def test_source_event_stand_uses_validated_public_character_action(
         "sync": _mutation_key(
             "run-1", "sync", f"source-event-stand-sync:{identity}"
         ),
+    }
+
+
+@pytest.mark.parametrize("defer_checkpoint", [False, True])
+def test_source_state_initialization_uses_cited_public_action_without_fake_damage(
+    defer_checkpoint: bool,
+) -> None:
+    source_ref = {
+        "module_id": "module-1",
+        "scene_id": "scene-1",
+        "chunk_id": "chunk-1",
+        "page_start": 40,
+        "page_end": 41,
+        "heading_path": ["14. KING'S QUARTERS"],
+        "content_sha256": "abc",
+    }
+
+    class Client:
+        def __init__(self) -> None:
+            self.revision = 30
+            self.keys: dict[str, str] = {}
+
+        async def core(self, tool_id: str, arguments: dict):
+            assert tool_id == "campaign_query"
+            return {"result": {"id": "campaign-1", "revision": self.revision}}
+
+        async def domain(self, tool_id: str, arguments: dict):
+            if tool_id == "module_query":
+                return {
+                    "module_id": "module-1",
+                    "scene_id": "scene-1",
+                    "content": "Gundren lies unconscious and stable at 0 hit points.",
+                    "locations": [{"key": "14-king-s-uarters"}],
+                }
+            if tool_id == "character_query":
+                return {
+                    "id": "gundren",
+                    "name": "Gundren Rockseeker",
+                    "campaign_id": "campaign-1",
+                    "revision": 1,
+                }
+            if tool_id == "character_state_change":
+                assert arguments["action"] == "source_state"
+                assert arguments["payload"] == {
+                    "state": "stable_unconscious",
+                    "source_ref": "module-chunk:chunk-1",
+                    "reason": "Gundren begins the scene unconscious and stable.",
+                }
+                self.keys["source_state"] = arguments["idempotency_key"]
+                self.revision += 1
+                return {
+                    "result": {
+                        "status": "initialized",
+                        "source_state": "stable_unconscious",
+                    }
+                }
+            if tool_id == "branch_query":
+                return [{"id": "branch-1", "is_current": True}]
+            if tool_id == "continuity_commit":
+                assert arguments["payload"]["event"]["audience_scope"] == "dm"
+                assert arguments["payload"]["event"]["payload"]["source_ref"] == source_ref
+                assert ("snapshot" in arguments["payload"]) is not defer_checkpoint
+                self.keys["continuity"] = arguments["idempotency_key"]
+                self.revision += 1
+                return {
+                    "event": {"id": "event-1"},
+                    **({} if defer_checkpoint else {"snapshot": {"slot": 4}}),
+                }
+            if tool_id == "playthrough_manifest":
+                self.keys["sync"] = arguments["idempotency_key"]
+                return {
+                    "manifest": {"status": "in_progress"},
+                    "campaign_revision": self.revision,
+                }
+            raise AssertionError((tool_id, arguments))
+
+    client = Client()
+    result = asyncio.run(
+        _initialize_source_state(
+            client,
+            campaign_id="campaign-1",
+            run_id="run-1",
+            scene_id="scene-1",
+            source_scene_id="",
+            location_key="14-king-s-uarters",
+            source_excerpt="Gundren lies unconscious and stable at 0 hit points.",
+            source_ref=source_ref,
+            actor_id="gundren",
+            state="stable_unconscious",
+            reason="Gundren begins the scene unconscious and stable.",
+            knowledge_actor_ids=[],
+            defer_checkpoint=defer_checkpoint,
+        )
+    )
+
+    assert result["state"]["result"]["source_state"] == "stable_unconscious"
+    assert result["knowledge_actor_ids"] == []
+    identity = _source_state_identity(
+        scene_id="scene-1",
+        location_key="14-king-s-uarters",
+        actor_id="gundren",
+        state="stable_unconscious",
+        reason="Gundren begins the scene unconscious and stable.",
+        source_ref=source_ref,
+    )
+    assert client.keys == {
+        "source_state": _mutation_key("run-1", "source-state", identity),
+        "continuity": _mutation_key(
+            "run-1", "source-state-continuity", identity
+        ),
+        "sync": _mutation_key("run-1", "sync", f"source-state-sync:{identity}"),
     }
 
 
