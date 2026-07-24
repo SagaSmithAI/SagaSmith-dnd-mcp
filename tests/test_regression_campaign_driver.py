@@ -15,6 +15,7 @@ from scripts.regression_campaign import (
     _expanded_source_ref,
     _load_json_object,
     _load_review_override,
+    _statblock_creation_key,
     _validate_noncombat_scene,
 )
 
@@ -79,6 +80,23 @@ def test_prepare_statblock_accepts_an_npc_actor_type(
     )
 
     assert _arguments().actor_type == "npc"
+
+
+def test_statblock_creation_key_scopes_repeated_source_actors_by_identity() -> None:
+    common = {
+        "run_id": "full-campaign",
+        "review_id": "bugbear-review",
+        "actor_type": "monster",
+        "variant": None,
+    }
+
+    first = _statblock_creation_key(actor_name="Mosk", **common)
+    repeated = _statblock_creation_key(actor_name="Mosk", **common)
+    second = _statblock_creation_key(actor_name="Area 9 Bugbear 2", **common)
+
+    assert first == repeated
+    assert first != second
+    assert first.startswith("full-campaign-create-statblock-")
 
 
 def test_character_summary_keeps_provenance_for_a_disarmed_module_npc() -> None:

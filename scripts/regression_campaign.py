@@ -242,6 +242,30 @@ def _idempotency_token(run_id: str) -> str:
     return "".join(character if character.isalnum() else "-" for character in run_id)
 
 
+def _statblock_creation_key(
+    *,
+    run_id: str,
+    review_id: str,
+    actor_name: str,
+    actor_type: str,
+    variant: dict[str, Any] | None,
+) -> str:
+    identity = json.dumps(
+        {
+            "run_id": run_id,
+            "review_id": review_id,
+            "actor_name": actor_name,
+            "actor_type": actor_type,
+            "variant": variant,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    identity_token = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
+    return f"{_idempotency_token(run_id)}-create-statblock-{identity_token}"
+
+
 def _phase_transition_key(token: str, action: str, campaign: dict[str, Any]) -> str:
     """Make transient phase writes retryable without replaying a stale state change."""
 
@@ -1979,7 +2003,13 @@ async def _prepare_statblock(args: argparse.Namespace) -> dict[str, Any]:
                             "character_type": args.actor_type,
                             "variant": variant,
                         },
-                        "idempotency_key": f"{token}-create-statblock",
+                        "idempotency_key": _statblock_creation_key(
+                            run_id=args.run_id,
+                            review_id=str(review["id"]),
+                            actor_name=args.actor_name,
+                            actor_type=args.actor_type,
+                            variant=variant,
+                        ),
                     },
                 )
             )
