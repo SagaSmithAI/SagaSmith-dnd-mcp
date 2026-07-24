@@ -54,6 +54,7 @@ from scripts.regression_playthrough import (
     _spend_source_item,
     _stable_recovery_identity,
     _stand_after_source_event,
+    _stand_identity,
     _start_play,
     _transfer_source_item_to_party,
     _use_activity,
@@ -2322,7 +2323,10 @@ def test_source_damage_rolls_then_damages_and_knocks_prone_through_public_tools(
     assert result["knowledge_actor_ids"] == ["actor-1", "actor-2"]
 
 
-def test_source_event_stand_uses_validated_public_character_action() -> None:
+@pytest.mark.parametrize("defer_checkpoint", [False, True])
+def test_source_event_stand_uses_validated_public_character_action(
+    defer_checkpoint: bool,
+) -> None:
     source_ref = {
         "module_id": "module-1",
         "scene_id": "scene-1",
@@ -2334,7 +2338,9 @@ def test_source_event_stand_uses_validated_public_character_action() -> None:
     }
 
     class Client:
-        revision = 20
+        def __init__(self) -> None:
+            self.revision = 20
+            self.keys: dict[str, str] = {}
 
         async def core(self, tool_id: str, arguments: dict):
             assert tool_id == "campaign_query"
@@ -2358,24 +2364,32 @@ def test_source_event_stand_uses_validated_public_character_action() -> None:
             if tool_id == "character_state_change":
                 assert arguments["action"] == "stand"
                 assert arguments["expected_revision"] == 4
+                self.keys["stand"] = arguments["idempotency_key"]
                 self.revision += 1
                 return {"status": "stood", "character": {"revision": 5}}
             if tool_id == "branch_query":
                 return [{"id": "branch-1", "is_current": True}]
             if tool_id == "continuity_commit":
                 assert arguments["payload"]["event"]["payload"]["source_ref"] == source_ref
+                assert ("snapshot" in arguments["payload"]) is not defer_checkpoint
+                self.keys["continuity"] = arguments["idempotency_key"]
                 self.revision += 1
-                return {"event": {"id": "event-1"}, "snapshot": {"slot": 3}}
+                return {
+                    "event": {"id": "event-1"},
+                    **({} if defer_checkpoint else {"snapshot": {"slot": 3}}),
+                }
             if tool_id == "playthrough_manifest":
+                self.keys["sync"] = arguments["idempotency_key"]
                 return {
                     "manifest": {"status": "in_progress"},
                     "campaign_revision": self.revision,
                 }
             raise AssertionError((tool_id, arguments))
 
+    client = Client()
     result = asyncio.run(
         _stand_after_source_event(
-            Client(),
+            client,
             campaign_id="campaign-1",
             run_id="run-1",
             scene_id="scene-1",
@@ -2384,11 +2398,54 @@ def test_source_event_stand_uses_validated_public_character_action() -> None:
             source_ref=source_ref,
             actor_id="actor-1",
             knowledge_actor_ids=["actor-2"],
+            reason="Scout stood after recovering from the source-cited fall.",
+            defer_checkpoint=defer_checkpoint,
         )
     )
 
     assert result["stand"]["status"] == "stood"
     assert result["knowledge_actor_ids"] == ["actor-1", "actor-2"]
+    identity = _stand_identity(
+        scene_id="scene-1",
+        location_key="3-kennel",
+        actor_id="actor-1",
+        reason="Scout stood after recovering from the source-cited fall.",
+        source_ref=source_ref,
+    )
+    assert client.keys == {
+        "stand": _mutation_key("run-1", "source-event-stand", identity),
+        "continuity": _mutation_key(
+            "run-1", "source-event-stand-continuity", identity
+        ),
+        "sync": _mutation_key(
+            "run-1", "sync", f"source-event-stand-sync:{identity}"
+        ),
+    }
+
+
+def test_stand_identity_separates_later_occurrence_for_same_actor_and_scene() -> None:
+    first = _stand_identity(
+        scene_id="scene-1",
+        location_key="room-1",
+        actor_id="actor-1",
+        reason="Actor One stood after the first fall.",
+        source_ref=None,
+    )
+
+    assert first == _stand_identity(
+        scene_id="scene-1",
+        location_key="room-1",
+        actor_id="actor-1",
+        reason="Actor One stood after the first fall.",
+        source_ref=None,
+    )
+    assert first != _stand_identity(
+        scene_id="scene-1",
+        location_key="room-2",
+        actor_id="actor-1",
+        reason="Actor One stood after a later fall.",
+        source_ref=None,
+    )
 
 
 def test_short_rest_advances_clock_and_applies_only_explicit_resource_choices() -> None:

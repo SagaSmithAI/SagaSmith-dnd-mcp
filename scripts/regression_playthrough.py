@@ -27,6 +27,7 @@ DEFERRED_CHECKPOINT_ACTIONS = frozenset(
     {
         "advance-time",
         "resolve-check",
+        "stand-up",
         "record-event",
         "record-outcome",
         "prepare-narrative-npc",
@@ -554,6 +555,29 @@ def _stable_recovery_identity(actor_ids: list[str], reason: str) -> str:
         {
             "actor_ids": actor_ids,
             "reason": reason.strip(),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return _token(serialized, length=24)
+
+
+def _stand_identity(
+    *,
+    scene_id: str,
+    location_key: str,
+    actor_id: str,
+    reason: str,
+    source_ref: dict[str, Any] | None,
+) -> str:
+    serialized = json.dumps(
+        {
+            "scene_id": scene_id,
+            "location_key": location_key,
+            "actor_id": actor_id,
+            "reason": reason.strip(),
+            "source_ref": source_ref,
         },
         ensure_ascii=False,
         sort_keys=True,
@@ -2517,9 +2541,10 @@ async def _stand_after_source_event(
     actor_id: str,
     knowledge_actor_ids: list[str],
     reason: str = "",
+    defer_checkpoint: bool = False,
 ) -> dict[str, Any]:
-    if not all((scene_id, location_key, actor_id)):
-        raise ValueError("stand-up requires scene, location, and actor")
+    if not all((scene_id, location_key, actor_id, reason.strip())):
+        raise ValueError("stand-up requires scene, location, actor, and reason")
     scene = await client.domain(
         "module_query",
         {
@@ -2537,6 +2562,13 @@ async def _stand_after_source_event(
     )
     if location_key not in {str(item.get("key") or "") for item in _scene_locations(scene)}:
         raise ValueError("stand-up location is not present in the scene atlas")
+    stand_identity = _stand_identity(
+        scene_id=scene_id,
+        location_key=location_key,
+        actor_id=actor_id,
+        reason=reason,
+        source_ref=exact_ref,
+    )
     actor = await client.domain(
         "character_query",
         {"view": "get", "payload": {"character_id": actor_id}},
@@ -2550,7 +2582,7 @@ async def _stand_after_source_event(
             "action": "stand",
             "expected_revision": actor["revision"],
             "idempotency_key": _mutation_key(
-                run_id, "source-event-stand", f"{scene_id}:{actor_id}"
+                run_id, "source-event-stand", stand_identity
             ),
         },
     )
@@ -2562,58 +2594,54 @@ async def _stand_after_source_event(
     if branch is None:
         raise RuntimeError("campaign has no current branch")
     recipients = list(dict.fromkeys([actor_id, *knowledge_actor_ids]))
-    event_summary = reason.strip() or (
-        f"{actor['name']} stood after the source-cited Prone result at {location_key}."
-        if exact_ref is not None
-        else f"{actor['name']} stood from Prone at {location_key}."
-    )
-    knowledge = reason.strip() or (
-        f"{actor['name']} recovered from the source-cited fall and stood at {location_key}."
-        if exact_ref is not None
-        else f"{actor['name']} recovered from Prone and stood at {location_key}."
-    )
+    event_summary = reason.strip()
+    knowledge = reason.strip()
     campaign = await _campaign(client, campaign_id)
+    continuity_payload = {
+        "event": {
+            "summary": event_summary,
+            "event_type": "stand",
+            "audience_scope": "party",
+            "payload": {
+                "scene_id": scene_id,
+                "location_key": location_key,
+                "actor_id": actor_id,
+                **(
+                    {
+                        "source_excerpt": source_excerpt,
+                        "source_ref": exact_ref,
+                    }
+                    if exact_ref is not None
+                    else {}
+                ),
+            },
+        },
+        "actor_knowledge": [
+            {
+                "actor_id": recipient,
+                "knowledge_key": (
+                    f"playthrough.{_token(run_id)}.stand."
+                    f"{_token(stand_identity)}"
+                ),
+                "proposition": knowledge,
+                "disclosure_scope": "owner",
+            }
+            for recipient in recipients
+        ],
+        "branch_id": str(branch["id"]),
+    }
+    if not defer_checkpoint:
+        continuity_payload["snapshot"] = {
+            "label": f"Full playthrough stand: {actor['name']} at {location_key}"
+        }
     committed = await client.domain(
         "continuity_commit",
         {
             "campaign_id": campaign_id,
-            "payload": {
-                "event": {
-                    "summary": event_summary,
-                    "event_type": "stand",
-                    "audience_scope": "party",
-                    "payload": {
-                        "scene_id": scene_id,
-                        "location_key": location_key,
-                        "actor_id": actor_id,
-                        **(
-                            {
-                                "source_excerpt": source_excerpt,
-                                "source_ref": exact_ref,
-                            }
-                            if exact_ref is not None
-                            else {}
-                        ),
-                    },
-                },
-                "actor_knowledge": [
-                    {
-                        "actor_id": recipient,
-                        "knowledge_key": (
-                            f"playthrough.{_token(run_id)}.{_token(scene_id)}."
-                            f"{_token(actor_id)}.stand"
-                        ),
-                        "proposition": knowledge,
-                        "disclosure_scope": "owner",
-                    }
-                    for recipient in recipients
-                ],
-                "snapshot": {"label": f"Full playthrough stand: {actor['name']} at {location_key}"},
-                "branch_id": str(branch["id"]),
-            },
+            "payload": continuity_payload,
             "expected_revision": campaign["revision"],
             "idempotency_key": _mutation_key(
-                run_id, "source-event-stand-continuity", f"{scene_id}:{actor_id}"
+                run_id, "source-event-stand-continuity", stand_identity
             ),
         },
     )
@@ -2622,7 +2650,7 @@ async def _stand_after_source_event(
         campaign_id=campaign_id,
         action="sync",
         run_id=run_id,
-        identity=f"source-event-stand-sync:{scene_id}:{actor_id}",
+        identity=f"source-event-stand-sync:{stand_identity}",
     )
     return {
         "scene": {
@@ -5880,6 +5908,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     actor_id=args.stand_actor_id,
                     knowledge_actor_ids=args.knowledge_actor_id,
                     reason=args.stand_reason,
+                    defer_checkpoint=args.defer_checkpoint,
                 )
             elif args.action == "short-rest":
                 if phase != "play":
