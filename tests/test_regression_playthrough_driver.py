@@ -52,6 +52,7 @@ from scripts.regression_playthrough import (
     _short_rest_identity,
     _spend_source_currency,
     _spend_source_item,
+    _stable_recovery_identity,
     _stand_after_source_event,
     _start_play,
     _transfer_source_item_to_party,
@@ -1061,6 +1062,7 @@ def test_stable_party_recovery_uses_one_public_campaign_transition() -> None:
     class Client:
         def __init__(self) -> None:
             self.tools: list[str] = []
+            self.keys: dict[str, str] = {}
 
         async def core(self, tool_id: str, arguments: dict):
             assert tool_id == "campaign_query"
@@ -1081,6 +1083,7 @@ def test_stable_party_recovery_uses_one_public_campaign_transition() -> None:
             if tool_id == "campaign_change":
                 assert arguments["action"] == "stable_recovery"
                 assert len(arguments["payload"]["members"]) == 2
+                self.keys["recovery"] = arguments["idempotency_key"]
                 return {
                     "status": "recovered",
                     "elapsed_hours": 4,
@@ -1089,8 +1092,10 @@ def test_stable_party_recovery_uses_one_public_campaign_transition() -> None:
                 }
             if tool_id == "continuity_commit":
                 assert len(arguments["payload"]["actor_knowledge"]) == 3
+                self.keys["continuity"] = arguments["idempotency_key"]
                 return {"event": {"id": "event-1"}, "snapshot": {"slot": 7}}
             if tool_id == "playthrough_manifest":
+                self.keys["sync"] = arguments["idempotency_key"]
                 return {"manifest": {"status": "in_progress"}, "campaign_revision": 10}
             raise AssertionError((tool_id, arguments))
 
@@ -1108,6 +1113,35 @@ def test_stable_party_recovery_uses_one_public_campaign_transition() -> None:
 
     assert result["recovery"]["elapsed_hours"] == 4
     assert client.tools.count("campaign_change") == 1
+    identity = _stable_recovery_identity(
+        ["actor-1", "actor-2"],
+        "Both stable adventurers recovered while the party waited.",
+    )
+    assert client.keys == {
+        "recovery": _mutation_key("run-1", "stable-recovery", identity),
+        "continuity": _mutation_key(
+            "run-1", "stable-recovery-continuity", identity
+        ),
+        "sync": _mutation_key(
+            "run-1", "sync", f"stable-recovery-sync:{identity}"
+        ),
+    }
+
+
+def test_stable_recovery_identity_separates_later_occurrence_for_same_actor() -> None:
+    first = _stable_recovery_identity(
+        ["actor-1"],
+        "Actor One recovered after the first battle.",
+    )
+
+    assert first == _stable_recovery_identity(
+        ["actor-1"],
+        "Actor One recovered after the first battle.",
+    )
+    assert first != _stable_recovery_identity(
+        ["actor-1"],
+        "Actor One recovered after the later battle.",
+    )
 
 
 def test_module_revision_extension_remaps_current_and_traversed_scenes() -> None:

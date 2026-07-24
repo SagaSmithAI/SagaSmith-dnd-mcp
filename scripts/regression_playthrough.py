@@ -549,6 +549,19 @@ def _short_rest_identity(
     return _token(serialized, length=24)
 
 
+def _stable_recovery_identity(actor_ids: list[str], reason: str) -> str:
+    serialized = json.dumps(
+        {
+            "actor_ids": actor_ids,
+            "reason": reason.strip(),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return _token(serialized, length=24)
+
+
 def _check_knowledge_key(
     run_id: str,
     scene_id: str,
@@ -3320,6 +3333,7 @@ async def _recover_stable_party(
     member_ids = list(dict.fromkeys(actor_ids))
     if not member_ids or len(member_ids) != len(actor_ids) or not reason.strip():
         raise ValueError("recover-stable requires unique actor ids and a non-empty --rest-reason")
+    recovery_identity = _stable_recovery_identity(member_ids, reason)
     actors = []
     for actor_id in member_ids:
         actor = await client.domain(
@@ -3353,7 +3367,9 @@ async def _recover_stable_party(
             },
             "expected_revision": campaign["revision"],
             "branch_id": branch["id"],
-            "idempotency_key": _mutation_key(run_id, "stable-recovery", ":".join(member_ids)),
+            "idempotency_key": _mutation_key(
+                run_id, "stable-recovery", recovery_identity
+            ),
         },
     )
     if recovered.get("status") != "recovered":
@@ -3381,7 +3397,7 @@ async def _recover_stable_party(
                         "actor_id": actor_id,
                         "knowledge_key": (
                             f"playthrough.{_token(run_id)}.stable_recovery."
-                            f"{_token(':'.join(member_ids))}"
+                            f"{_token(recovery_identity)}"
                         ),
                         "proposition": reason.strip(),
                         "disclosure_scope": "owner",
@@ -3393,7 +3409,7 @@ async def _recover_stable_party(
             },
             "expected_revision": campaign["revision"],
             "idempotency_key": _mutation_key(
-                run_id, "stable-recovery-continuity", ":".join(member_ids)
+                run_id, "stable-recovery-continuity", recovery_identity
             ),
         },
     )
@@ -3402,7 +3418,7 @@ async def _recover_stable_party(
         campaign_id=campaign_id,
         action="sync",
         run_id=run_id,
-        identity=f"stable-recovery-sync:{':'.join(member_ids)}",
+        identity=f"stable-recovery-sync:{recovery_identity}",
     )
     return {
         "member_ids": member_ids,
