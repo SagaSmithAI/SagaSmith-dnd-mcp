@@ -26,6 +26,31 @@ GOBLIN_MODULE = (
     "piercing damage.\n"
 )
 
+EVIL_MAGE_MODULE = (
+    "# Appendix B: Monsters\n\n"
+    "## MONSTER DESCRIPTIONS\n\n"
+    "##### EVILMAGE\n\n"
+    "Medium humanoid (human), lawful evil Armor Class 12 "
+    "Hit Points 22 (5d8) Speed 30 ft.\n\n"
+    "##### STR\n\n9 (-1)\n\n"
+    "##### DEX\n\n14 (+2)\n\n"
+    "##### CON\n\n11 (+0)\n\n"
+    "##### INT\n\n17 (+3)\n\n"
+    "##### WIS\n\n12 (+1)\n\n"
+    "##### CHA\n\n"
+    "11 (+0) Saving Throws Int +5, Wis +3 Skills Arcana +5, History +5 "
+    "Senses passive Perception 11 Languages Common, Draconic, Dwarvish, Elvish "
+    "Challenge 1 (200 XP) Spellcasting. The mage is a 4th·level spellcaster "
+    "that uses Intelligence as its spellcasting ability (spell save DC 13; "
+    "+5 to hit with spell attacks). The mage knows the following spells from "
+    "the wizard's spell list: Cantrips (at will): light, mage hand, shocking "
+    "grasp l st Level (4 slots): charm person, magic missile 2nd Level "
+    "(3 slots): hold person, misty step\n\n"
+    "##### ACTIONS\n\n"
+    "Quarterstaff. Melee Weapon Attack: +1 to hit, reach 5 ft., one target. "
+    "Hit: 3 (1d8 - 1) bludgeoning damage.\n"
+)
+
 
 async def _call(server, name: str, arguments: dict):
     called = await server.call_tool(name, arguments)
@@ -162,5 +187,150 @@ def test_text_module_statblock_candidate_can_create_a_source_bound_actor(
         assert {
             item["source_key"] for item in created["character"]["sheet"]["inventory"]["items"]
         } == {f"module-review:{reviewed['review']['id']}"}
+
+    asyncio.run(exercise())
+
+
+def test_text_module_spellcaster_ocr_hydrates_source_bound_spells(
+    tmp_path: Path,
+) -> None:
+    workspace = Path(__file__).resolve().parents[2]
+    config = McpConfig(
+        home=tmp_path / "home",
+        database_url=None,
+        chroma_url=None,
+        chroma_path_override=None,
+        dnd_skills_dir=workspace / "SagaSmith-dnd-skills",
+        modulegen_skills_dir=tmp_path / "modulegen",
+        auto_seed_rules=False,
+    )
+
+    async def exercise() -> None:
+        server = create_server(config)
+        campaign = await _call(
+            server,
+            "campaign_create",
+            {"name": "OCR spellcaster", "edition": "2014", "idempotency_key": "campaign"},
+        )
+        staged = await _call(
+            server,
+            "module_import",
+            {
+                "campaign_id": campaign["id"],
+                "action": "stage",
+                "payload": {
+                    "name": "evil-mage.md",
+                    "content": EVIL_MAGE_MODULE,
+                    "source_key": "evil-mage",
+                    "title": "Evil Mage",
+                },
+                "idempotency_key": "stage",
+            },
+        )
+        job_id = staged["job"]["id"]
+        for action in ("inspect", "validate", "ingest"):
+            ingested = await _call(
+                server,
+                "module_import",
+                {
+                    "campaign_id": campaign["id"],
+                    "action": action,
+                    "payload": {"job_id": job_id},
+                    "idempotency_key": action,
+                },
+            )
+        current = await _call(
+            server,
+            "campaign_query",
+            {"view": "get", "payload": {"campaign_id": campaign["id"]}},
+        )
+        await _call(
+            server,
+            "module_import",
+            {
+                "campaign_id": campaign["id"],
+                "action": "activate",
+                "payload": {"job_id": job_id},
+                "expected_revision": current["revision"],
+                "idempotency_key": "activate",
+            },
+        )
+        candidates = await _call(
+            server,
+            "module_query",
+            {
+                "campaign_id": campaign["id"],
+                "view": "candidates",
+                "payload": {"module_id": ingested["module_id"]},
+            },
+        )
+
+        assert len(candidates) == 1
+        candidate = candidates[0]
+        assert candidate["execution_state"] == "review_ready"
+        assert candidate["validation"]["warnings"] == []
+        assert "4th-level spellcaster" in candidate["normalized_content"]
+        assert "1st level (4 slots)" in candidate["normalized_content"]
+
+        reviewed = await _call(
+            server,
+            "module_content_review",
+            {
+                "campaign_id": campaign["id"],
+                "module_id": ingested["module_id"],
+                "scene_id": candidate["scene_id"],
+                "content_key": "evil-mage",
+                "normalized_content": candidate["normalized_content"],
+                "source_chunk_ids": candidate["source_chunk_ids"],
+                "observation": "Reviewed normalized text against all source chunks.",
+                "idempotency_key": "review-evil-mage",
+            },
+        )
+        created = await _call(
+            server,
+            "character_create_from",
+            {
+                "mode": "module_statblock",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "review_id": reviewed["review"]["id"],
+                    "name": "Iarno Albrek",
+                    "character_type": "npc",
+                },
+                "idempotency_key": "create-iarno",
+            },
+        )
+
+        actor = created["character"]
+        assert actor["sheet"]["spellcasting"]["ability"] == "intelligence"
+        assert actor["sheet"]["spellcasting"]["spell_slots"] == {
+            "1": {
+                "label": "Level 1 spell slots",
+                "value": 4,
+                "max": 4,
+                "recovers_on": "long_rest",
+                "source_key": f"module-review:{reviewed['review']['id']}",
+                "slot_level": 1,
+            },
+            "2": {
+                "label": "Level 2 spell slots",
+                "value": 3,
+                "max": 3,
+                "recovers_on": "long_rest",
+                "source_key": f"module-review:{reviewed['review']['id']}",
+                "slot_level": 2,
+            },
+        }
+        assert {item["name"] for item in actor["sheet"]["content"]["spells"]} == {
+            "Light",
+            "Mage Hand",
+            "Shocking Grasp",
+            "Charm Person",
+            "Magic Missile",
+            "Hold Person",
+            "Misty Step",
+        }
+        assert len(actor["derived"]["spellcasting"]["prepared_spell_ids"]) == 7
+        assert created["statblock"]["warnings"] == []
 
     asyncio.run(exercise())
