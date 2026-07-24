@@ -559,6 +559,64 @@ def _short_rest_identity(
     return _token(serialized, length=24)
 
 
+def _validate_recovered_long_rest(
+    receipt: dict[str, Any],
+    *,
+    campaign: dict[str, Any],
+    actors: list[dict[str, Any]],
+    members: list[dict[str, Any]],
+    duration_minutes: int,
+) -> dict[str, Any]:
+    response = receipt.get("response")
+    if not isinstance(response, dict):
+        raise RuntimeError("long-rest recovery receipt has no response")
+    actor_ids = [str(item["actor_id"]) for item in members]
+    if (
+        response.get("status") != "committed"
+        or response.get("rest_type") != "long_rest"
+        or response.get("duration_minutes") != duration_minutes
+        or response.get("member_ids") != actor_ids
+    ):
+        raise RuntimeError("long-rest recovery receipt does not match the requested rest")
+    campaign_revision = campaign.get("revision")
+    if response.get("campaign_revision") != campaign_revision:
+        raise RuntimeError("long-rest recovery receipt is not the current campaign mutation")
+    current_clock = dict(dict(campaign.get("state") or {}).get("world_time") or {})
+    receipt_clock = response.get("world_time")
+    if not current_clock or receipt_clock != current_clock:
+        raise RuntimeError("long-rest recovery receipt does not match the current world clock")
+    completed_elapsed = current_clock.get("elapsed_minutes")
+    if isinstance(completed_elapsed, bool) or not isinstance(completed_elapsed, int):
+        raise RuntimeError("long-rest recovery requires an elapsed campaign clock")
+    started_elapsed = completed_elapsed - duration_minutes
+    actor_by_id = {str(actor.get("id")): actor for actor in actors}
+    for member in members:
+        actor_id = str(member["actor_id"])
+        actor = actor_by_id.get(actor_id)
+        if actor is None:
+            raise RuntimeError("long-rest recovery is missing a requested actor")
+        combat = dict(dict(actor.get("sheet") or {}).get("combat") or {})
+        history = dict(combat.get("rest_history") or {})
+        if history != {
+            "last_rest_type": "long_rest",
+            "last_rest_started_elapsed_minutes": started_elapsed,
+            "last_rest_completed_elapsed_minutes": completed_elapsed,
+            "last_long_rest_elapsed_minutes": completed_elapsed,
+        }:
+            raise RuntimeError(
+                f"long-rest recovery history does not match for actor {actor_id}"
+            )
+        prepared_ids = member.get("prepared_spell_ids")
+        if prepared_ids is not None:
+            spellcasting = dict(dict(actor.get("sheet") or {}).get("spellcasting") or {})
+            preparation = dict(spellcasting.get("preparation") or {})
+            if preparation.get("selected_spell_ids") != prepared_ids:
+                raise RuntimeError(
+                    f"long-rest recovery preparations do not match for actor {actor_id}"
+                )
+    return deepcopy(response)
+
+
 def _stable_recovery_identity(actor_ids: list[str], reason: str) -> str:
     serialized = json.dumps(
         {
@@ -3108,6 +3166,11 @@ async def _long_rest(
     actor_ids = [item["actor_id"] for item in normalized]
     if len(actor_ids) != len(set(actor_ids)):
         raise ValueError("long-rest member actor ids must be unique")
+    rest_identity = _short_rest_identity(
+        normalized,
+        duration_minutes=duration_minutes,
+        reason=reason,
+    )
     branches = await client.domain(
         "branch_query",
         {"campaign_id": campaign_id, "view": "list"},
@@ -3154,20 +3217,42 @@ async def _long_rest(
         if member["hit_dice_recovery"] is not None:
             party_member["hit_dice_recovery"] = member["hit_dice_recovery"]
         party_members.append(party_member)
-    rested = await client.domain(
-        "campaign_change",
-        {
-            "campaign_id": campaign_id,
-            "action": "party_rest",
-            "payload": {
-                "members": party_members,
-                "duration_minutes": duration_minutes,
+    party_rest_key = _mutation_key(run_id, "long-rest-party", reason)
+    rest_recovered = False
+    try:
+        rested = await client.domain(
+            "campaign_change",
+            {
+                "campaign_id": campaign_id,
+                "action": "party_rest",
+                "payload": {
+                    "members": party_members,
+                    "duration_minutes": duration_minutes,
+                },
+                "branch_id": str(branch["id"]),
+                "expected_revision": campaign["revision"],
+                "idempotency_key": party_rest_key,
             },
-            "branch_id": str(branch["id"]),
-            "expected_revision": campaign["revision"],
-            "idempotency_key": _mutation_key(run_id, "long-rest-party", reason),
-        },
-    )
+        )
+    except Exception as exc:
+        if "idempotency key reused with a different request" not in str(exc):
+            raise
+        receipt = await client.domain(
+            "state_revision",
+            {
+                "campaign_id": campaign_id,
+                "action": "receipt",
+                "payload": {"idempotency_key": party_rest_key},
+            },
+        )
+        rested = _validate_recovered_long_rest(
+            receipt,
+            campaign=campaign,
+            actors=actors,
+            members=normalized,
+            duration_minutes=duration_minutes,
+        )
+        rest_recovered = True
     if rested.get("status") != "committed":
         raise RuntimeError("long rest did not commit")
     campaign = await _campaign(client, campaign_id)
@@ -3191,7 +3276,8 @@ async def _long_rest(
                     {
                         "actor_id": actor_id,
                         "knowledge_key": (
-                            f"playthrough.{_token(run_id)}.{_token(actor_id)}.long_rest"
+                            f"playthrough.{_token(run_id)}.{_token(actor_id)}."
+                            f"long_rest.{rest_identity}"
                         ),
                         "proposition": reason.strip(),
                         "disclosure_scope": "owner",
@@ -3210,12 +3296,13 @@ async def _long_rest(
         campaign_id=campaign_id,
         action="sync",
         run_id=run_id,
-        identity="long-rest-sync",
+        identity=f"long-rest-sync:{rest_identity}",
     )
     return {
         "member_ids": actor_ids,
         "clock_set": clock_set,
         "rest": rested,
+        "rest_recovered": rest_recovered,
         "continuity": committed,
         "sync": synced,
     }

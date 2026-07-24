@@ -3002,10 +3002,12 @@ def test_dm_event_keeps_enemy_knowledge_out_of_party_event_stream() -> None:
     assert result["knowledge_actor_ids"] == ["enemy"]
 
 
-def test_long_rest_uses_atomic_party_rest_and_records_checkpoint() -> None:
+def test_long_rest_uses_atomic_party_rest_and_unique_occurrence_knowledge() -> None:
     class Client:
         def __init__(self) -> None:
             self.revision = 5
+            self.knowledge_keys: list[str] = []
+            self.sync_keys: list[str] = []
             self.world_time = {
                 "day": 1,
                 "hour": 16,
@@ -3066,18 +3068,24 @@ def test_long_rest_uses_atomic_party_rest_and_records_checkpoint() -> None:
                 event = arguments["payload"]["event"]
                 assert event["event_type"] == "long_rest"
                 assert event["payload"]["duration_minutes"] == 480
+                self.knowledge_keys.extend(
+                    item["knowledge_key"]
+                    for item in arguments["payload"]["actor_knowledge"]
+                )
                 self.revision += 1
                 return {"event": {"id": "event-1"}, "snapshot": {"slot": 5}}
             if tool_id == "playthrough_manifest":
+                self.sync_keys.append(arguments["idempotency_key"])
                 return {
                     "manifest": {"status": "in_progress"},
                     "campaign_revision": self.revision,
                 }
             raise AssertionError((tool_id, arguments))
 
+    client = Client()
     result = asyncio.run(
         _long_rest(
-            Client(),
+            client,
             campaign_id="campaign-1",
             run_id="run-1",
             members=[
@@ -3092,6 +3100,130 @@ def test_long_rest_uses_atomic_party_rest_and_records_checkpoint() -> None:
 
     assert result["member_ids"] == ["fighter", "cleric"]
     assert result["rest"]["world_time"]["day"] == 2
+    assert result["continuity"]["snapshot"]["slot"] == 5
+
+    asyncio.run(
+        _long_rest(
+            client,
+            campaign_id="campaign-1",
+            run_id="run-1",
+            members=[
+                {"actor_id": "fighter", "food_and_drink": True},
+                {"actor_id": "cleric", "prepared_spell_ids": ["cure-wounds"]},
+            ],
+            start_clock=None,
+            duration_minutes=480,
+            reason="After the next expedition, the party completed another long rest.",
+        )
+    )
+
+    assert len(client.knowledge_keys) == 4
+    assert len(set(client.knowledge_keys)) == 4
+    assert len(client.sync_keys) == 2
+    assert len(set(client.sync_keys)) == 2
+
+
+def test_long_rest_recovers_committed_receipt_without_advancing_time_twice() -> None:
+    class Client:
+        def __init__(self) -> None:
+            self.revision = 6
+            self.party_rest_calls = 0
+            self.receipt_key = ""
+            self.world_time = {
+                "schema_version": 1,
+                "day": 2,
+                "hour": 0,
+                "minute": 0,
+                "elapsed_minutes": 1440,
+                "label": "Cragmaw Hideout",
+            }
+
+        async def core(self, tool_id: str, arguments: dict):
+            assert tool_id == "campaign_query"
+            return {
+                "result": {
+                    "id": "campaign-1",
+                    "revision": self.revision,
+                    "state": {"game_phase": "play", "world_time": self.world_time},
+                }
+            }
+
+        async def domain(self, tool_id: str, arguments: dict):
+            if tool_id == "character_query":
+                actor_id = arguments["payload"]["character_id"]
+                sheet = default_character_sheet()
+                sheet["combat"]["rest_history"] = {
+                    "last_rest_type": "long_rest",
+                    "last_rest_started_elapsed_minutes": 960,
+                    "last_rest_completed_elapsed_minutes": 1440,
+                    "last_long_rest_elapsed_minutes": 1440,
+                }
+                if actor_id == "cleric":
+                    sheet["spellcasting"]["preparation"] = {
+                        "selected_spell_ids": ["cure-wounds"]
+                    }
+                return {
+                    "id": actor_id,
+                    "campaign_id": "campaign-1",
+                    "revision": 3,
+                    "sheet": sheet,
+                }
+            if tool_id == "branch_query":
+                return [{"id": "branch-1", "is_current": True}]
+            if tool_id == "campaign_change":
+                self.party_rest_calls += 1
+                self.receipt_key = arguments["idempotency_key"]
+                raise RuntimeError(
+                    "idempotency key reused with a different request: "
+                    f"{self.receipt_key}"
+                )
+            if tool_id == "state_revision":
+                assert arguments == {
+                    "campaign_id": "campaign-1",
+                    "action": "receipt",
+                    "payload": {"idempotency_key": self.receipt_key},
+                }
+                return {
+                    "key": self.receipt_key,
+                    "replayed": True,
+                    "response": {
+                        "status": "committed",
+                        "rest_type": "long_rest",
+                        "duration_minutes": 480,
+                        "member_ids": ["fighter", "cleric"],
+                        "world_time": self.world_time,
+                        "campaign_revision": 6,
+                    },
+                }
+            if tool_id == "continuity_commit":
+                self.revision += 1
+                return {"event": {"id": "event-1"}, "snapshot": {"slot": 5}}
+            if tool_id == "playthrough_manifest":
+                return {
+                    "manifest": {"status": "in_progress"},
+                    "campaign_revision": self.revision,
+                }
+            raise AssertionError((tool_id, arguments))
+
+    client = Client()
+    result = asyncio.run(
+        _long_rest(
+            client,
+            campaign_id="campaign-1",
+            run_id="run-1",
+            members=[
+                {"actor_id": "fighter", "food_and_drink": True},
+                {"actor_id": "cleric", "prepared_spell_ids": ["cure-wounds"]},
+            ],
+            start_clock=None,
+            duration_minutes=480,
+            reason="The party completed the already-recorded long rest.",
+        )
+    )
+
+    assert client.party_rest_calls == 1
+    assert client.world_time["elapsed_minutes"] == 1440
+    assert result["rest_recovered"] is True
     assert result["continuity"]["snapshot"]["slot"] == 5
 
 

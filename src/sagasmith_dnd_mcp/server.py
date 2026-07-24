@@ -2360,6 +2360,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "structured_activity_accounting": True,
                 "campaign_effect_timeline": True,
                 "idempotency_crash_recovery": True,
+                "idempotency_receipt_recovery": True,
                 "structured_rulebook_import": True,
                 "source_bound_rule_packs": True,
                 "structured_content_catalog": True,
@@ -12387,6 +12388,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             ]
         return [asdict(item) for item in values]
 
+    def state_idempotency_receipt(
+        campaign_id: str,
+        key: str,
+        principal_id: str = "system:local",
+    ) -> dict[str, Any]:
+        """Read a campaign-owned mutation receipt after a stale-request retry conflict."""
+        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        return asdict(idempotency.receipt(campaign_id, key))
+
     @mcp.tool()
     def state_history(
         campaign_id: str,
@@ -18566,7 +18576,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     @mcp.tool()
     def state_revision(
         campaign_id: str,
-        action: Literal["history", "undo", "redo"],
+        action: Literal["history", "receipt", "undo", "redo"],
         payload: dict[str, Any] | None = None,
         principal_id: str = "system:local",
         idempotency_key: str | None = None,
@@ -18575,6 +18585,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         data = facade_payload(payload)
         if action == "history":
             result = state_history(campaign_id, data.get("limit", 100), principal_id)
+        elif action == "receipt":
+            receipt_key = str(required(data, "idempotency_key")).strip()
+            if not receipt_key:
+                raise ValueError("idempotency_key is required")
+            result = state_idempotency_receipt(
+                campaign_id,
+                receipt_key,
+                principal_id,
+            )
         elif action == "undo":
             result = state_undo(
                 campaign_id, principal_id, data.get("expected_history_sequence"), idempotency_key

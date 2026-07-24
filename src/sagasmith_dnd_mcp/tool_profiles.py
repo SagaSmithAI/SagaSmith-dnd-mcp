@@ -225,6 +225,7 @@ TOOL_GROUPS = (
         "continuity_diagnostics",
         "snapshot_create",
         "snapshot_query",
+        "state_revision",
         "campaign_rules",
         "campaign_core_relock",
         "playthrough_manifest",

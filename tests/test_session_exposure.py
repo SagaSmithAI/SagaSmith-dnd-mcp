@@ -113,6 +113,7 @@ def test_phase_groups_separate_player_reads_from_dm_control() -> None:
     assert GROUP_BY_ID["play.scene_control"].roles == frozenset({"owner", "dm"})
     assert "snapshot_query" not in GROUP_BY_ID["play.scene"].tools
     assert "snapshot_query" in GROUP_BY_ID["play.scene_control"].tools
+    assert "state_revision" in GROUP_BY_ID["play.scene_control"].tools
     assert "campaign_rules" in GROUP_BY_ID["play.scene_control"].tools
     assert "combat_start" not in GROUP_BY_ID["play.resolution"].tools
     assert GROUP_BY_ID["play.combat_control"].roles == frozenset({"owner", "dm"})

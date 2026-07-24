@@ -138,6 +138,18 @@ def test_party_long_rest_advances_once_and_settles_members_atomically(tmp_path: 
         }
         assert set(rested["member_ids"]) == {first["id"], second["id"]}
         assert rested["expired"] == {first["id"]: ["hours"], second["id"]: ["hours"]}
+        receipt = await _call(
+            server,
+            "state_revision",
+            {
+                "campaign_id": campaign["id"],
+                "action": "receipt",
+                "payload": {"idempotency_key": "long-rest"},
+            },
+        )
+        assert receipt["key"] == "long-rest"
+        assert receipt["replayed"] is True
+        assert receipt["response"] == rested
 
         updated = []
         for actor in (first, second):
