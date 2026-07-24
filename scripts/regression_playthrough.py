@@ -5744,6 +5744,7 @@ async def _advance_level(
             + ", ".join(sorted(unknown_feature_selections))
         )
     applied_features: list[dict[str, Any]] = []
+    feature_spell_grants: list[dict[str, Any]] = []
     for artifact_id, feature in sorted(required_features.items()):
         requirements = dict(feature.get("selection_requirements") or {})
         selection = deepcopy(feature_selections.get(artifact_id, {}))
@@ -5773,6 +5774,9 @@ async def _advance_level(
         )
         if applied.get("status") == "pending_ruling":
             raise RuntimeError(f"level feature needs DM review: {artifact_id}: {applied['reason']}")
+        feature_spell_grants.extend(
+            deepcopy(list(applied.get("feature_spell_grants") or []))
+        )
         actor = dict(applied.get("character") or applied)
         applied_features.append({"artifact_id": artifact_id, "selection": deepcopy(selection)})
 
@@ -5915,6 +5919,12 @@ async def _advance_level(
     }
     if not set(applied_spells).issubset(verified_spells):
         raise RuntimeError("level advancement verification found missing spell artifacts")
+    if not {
+        str(item.get("artifact_id") or "") for item in feature_spell_grants
+    }.issubset(verified_spells):
+        raise RuntimeError(
+            "level advancement verification found missing feature-granted spells"
+        )
     if prepared_event:
         actual_prepared = set(
             dict(verified_sheet["spellcasting"]["preparation"]).get("selected_spell_ids", [])
@@ -5977,6 +5987,7 @@ async def _advance_level(
         "selected_subclass": selected_subclass,
         "applied_features": applied_features,
         "applied_spells": applied_spells,
+        "feature_spell_grants": feature_spell_grants,
         "prepared_spell_additions": prepared_additions,
         "prepared": prepared,
         "phase_changes": phase_changes,

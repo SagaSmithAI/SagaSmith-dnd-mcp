@@ -368,6 +368,235 @@ def test_source_choice_repeats_and_off_list_oath_spells_are_enforced(
     asyncio.run(exercise())
 
 
+def test_feature_granted_spells_and_invocation_prerequisites_are_settled(
+    tmp_path: Path,
+) -> None:
+    workspace = Path(__file__).resolve().parents[2]
+    config = McpConfig(
+        home=tmp_path / "home",
+        database_url=None,
+        chroma_url=None,
+        chroma_path_override=None,
+        dnd_skills_dir=workspace / "SagaSmith-dnd-skills",
+        modulegen_skills_dir=workspace / "SagaSmith-module-gen-skills",
+        auto_seed_rules=True,
+    )
+
+    async def exercise() -> None:
+        server = create_server(config)
+        campaign = await _call(
+            server,
+            "campaign_create",
+            {
+                "name": "Feature Spell Grants",
+                "edition": "2014",
+                "idempotency_key": "campaign",
+            },
+        )
+
+        bard_sheet = default_character_sheet()
+        bard_sheet["progression"].update(
+            {
+                "level": 10,
+                "classes": [
+                    {
+                        "name": "Bard",
+                        "level": 10,
+                        "subclass": "College of Lore",
+                        "hit_die": 8,
+                    }
+                ],
+            }
+        )
+        bard_sheet["spellcasting"]["preparation"]["mode"] = "known"
+        bard_sheet["spellcasting"]["spell_slots"]["5"] = {
+            "label": "Level 5 spell slots",
+            "value": 2,
+            "max": 2,
+            "recovers_on": "long_rest",
+            "source_key": "Bard",
+            "slot_level": 5,
+        }
+        bard = await _call(
+            server,
+            "character_create_from",
+            {
+                "mode": "direct",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "name": "Song",
+                    "sheet": bard_sheet,
+                },
+                "idempotency_key": "bard",
+            },
+        )
+        secrets = await _call(
+            server,
+            "character_content_apply",
+            {
+                "character_id": bard["id"],
+                "artifact_id": "dnd5e.content.srd2014.feature.bard-magical-secrets",
+                "selection": {
+                    "spell_artifact_ids": [
+                        "dnd5e.content.srd2014.spell.fireball",
+                        "dnd5e.content.srd2014.spell.eldritch-blast",
+                    ]
+                },
+                "expected_revision": bard["revision"],
+                "idempotency_key": "magical-secrets",
+            },
+        )
+        assert {
+            item["artifact_id"] for item in secrets["feature_spell_grants"]
+        } == {
+            "dnd5e.content.srd2014.spell.fireball",
+            "dnd5e.content.srd2014.spell.eldritch-blast",
+        }
+        secrets_character = secrets["character"]
+        assert {
+            spell["grant"]["source_key"]
+            for spell in secrets_character["sheet"]["content"]["spells"]
+        } == {"Bard"}
+
+        warlock_sheet = default_character_sheet()
+        warlock_sheet["progression"].update(
+            {
+                "level": 11,
+                "classes": [
+                    {
+                        "name": "Warlock",
+                        "level": 11,
+                        "subclass": "The Fiend",
+                        "hit_die": 8,
+                    }
+                ],
+            }
+        )
+        warlock_sheet["spellcasting"]["preparation"]["mode"] = "known"
+        warlock = await _call(
+            server,
+            "character_create_from",
+            {
+                "mode": "direct",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "name": "Ash",
+                    "sheet": warlock_sheet,
+                },
+                "idempotency_key": "warlock",
+            },
+        )
+        arcanum = await _call(
+            server,
+            "character_content_apply",
+            {
+                "character_id": warlock["id"],
+                "artifact_id": "dnd5e.content.srd2014.feature.warlock-mystic-arcanum",
+                "selection": {
+                    "grant_level": 11,
+                    "spell_artifact_ids": [
+                        "dnd5e.content.srd2014.spell.mass-suggestion"
+                    ],
+                },
+                "expected_revision": warlock["revision"],
+                "idempotency_key": "arcanum",
+            },
+        )
+        arcanum_character = arcanum["character"]
+        assert arcanum_character["sheet"]["resources"][
+            "mystic_arcanum:dnd5e.content.srd2014.spell.mass-suggestion"
+        ]["value"] == 1
+        arcanum_spell = next(
+            spell
+            for spell in arcanum_character["sheet"]["content"]["spells"]
+            if spell["name"] == "Mass Suggestion"
+        )
+        assert arcanum_spell["grant"]["method"] == "mystic_arcanum"
+
+        novice_sheet = default_character_sheet()
+        novice_sheet["progression"].update(
+            {
+                "level": 2,
+                "classes": [
+                    {
+                        "name": "Warlock",
+                        "level": 2,
+                        "subclass": "The Fiend",
+                        "hit_die": 8,
+                    }
+                ],
+            }
+        )
+        novice_sheet["spellcasting"]["preparation"]["mode"] = "known"
+        novice = await _call(
+            server,
+            "character_create_from",
+            {
+                "mode": "direct",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "name": "Nox",
+                    "sheet": novice_sheet,
+                },
+                "idempotency_key": "novice",
+            },
+        )
+        eldritch_blast = await _call(
+            server,
+            "character_content_apply",
+            {
+                "character_id": novice["id"],
+                "artifact_id": "dnd5e.content.srd2014.spell.eldritch-blast",
+                "selection": {"source_class": "Warlock", "method": "known"},
+                "expected_revision": novice["revision"],
+                "idempotency_key": "eldritch-blast",
+            },
+        )
+        with pytest.raises(Exception, match="level prerequisite"):
+            await _call(
+                server,
+                "character_content_apply",
+                {
+                    "character_id": novice["id"],
+                    "artifact_id": (
+                        "dnd5e.content.srd2014.feature.warlock-eldritch-invocations"
+                    ),
+                    "selection": {
+                        "grant_level": 2,
+                        "options": ["Ascendant Step", "Agonizing Blast"],
+                    },
+                    "expected_revision": eldritch_blast["revision"],
+                    "idempotency_key": "invalid-invocations",
+                },
+            )
+        invocations = await _call(
+            server,
+            "character_content_apply",
+            {
+                "character_id": novice["id"],
+                "artifact_id": (
+                    "dnd5e.content.srd2014.feature.warlock-eldritch-invocations"
+                ),
+                "selection": {
+                    "grant_level": 2,
+                    "options": ["Agonizing Blast", "Armor of Shadows"],
+                },
+                "expected_revision": eldritch_blast["revision"],
+                "idempotency_key": "invocations",
+            },
+        )
+        invocation_character = invocations["character"]
+        mage_armor = next(
+            spell
+            for spell in invocation_character["sheet"]["content"]["spells"]
+            if spell["name"] == "Mage Armor"
+        )
+        assert mage_armor["access"]["at_will"] is True
+        assert mage_armor["grant"]["method"] == "eldritch_invocation"
+
+    asyncio.run(exercise())
+
+
 def test_land_druid_bonus_cantrip_and_non_list_circle_spells_are_materialized(
     tmp_path: Path,
 ) -> None:

@@ -15756,6 +15756,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         phase = str(dict(campaign.state or {}).get("game_phase") or PROFILE_LOBBY)
         spellbook_copy: dict[str, Any] | None = None
         subclass_spell_grants: list[dict[str, Any]] = []
+        feature_spell_grants: list[dict[str, Any]] = []
         requested_method = str(selection.get("method") or "").strip().casefold()
         operation = (
             "character.spellbook.copy"
@@ -15785,6 +15786,59 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "rule_refs": list(artifact.get("rule_refs") or []),
             "mechanic_refs": list(artifact.get("mechanic_refs") or []),
         }
+
+        def materialize_feature_spell(
+            spell_match: tuple[str, str, dict[str, Any]],
+            *,
+            method: str,
+            source_key: str,
+            at_will: bool = False,
+            allow_existing: bool = False,
+        ) -> dict[str, Any]:
+            spell_pack_id, spell_version, spell_artifact = spell_match
+            spell_id = str(spell_artifact["id"])
+            spell_card = next(
+                (
+                    item
+                    for item in sheet["content"]["spells"]
+                    if str(item.get("id") or "") == spell_id
+                ),
+                None,
+            )
+            if spell_card is not None and not allow_existing:
+                raise ValueError("feature spell choice is already present")
+            created = spell_card is None
+            if spell_card is None:
+                spell_card = deepcopy(dict(spell_artifact.get("card") or {}))
+                spell_card.pop("classes", None)
+                spell_card["grant"] = {
+                    "source_type": "feature",
+                    "source_key": source_key,
+                    "method": method,
+                }
+                spell_card.update(
+                    id=spell_id,
+                    pack_id=spell_pack_id,
+                    pack_version=spell_version,
+                    rule_refs=list(spell_artifact.get("rule_refs") or []),
+                    mechanic_refs=list(spell_artifact.get("mechanic_refs") or []),
+                )
+                sheet["content"]["spells"].append(spell_card)
+            spell_card.setdefault("access", {})["known"] = True
+            spell_card["access"]["prepared"] = False
+            if at_will:
+                spell_card["access"]["at_will"] = True
+            feature_spell_grants.append(
+                {
+                    "artifact_id": spell_id,
+                    "name": str(spell_card.get("name") or spell_id),
+                    "method": method,
+                    "source_key": source_key,
+                    "at_will": at_will,
+                    "created": created,
+                }
+            )
+            return spell_card
         if kind == "spell":
             if any(item.get("id") == artifact_id for item in sheet["content"]["spells"]):
                 raise ValueError("content spell is already present")
@@ -16405,6 +16459,145 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                             raise ValueError(
                                 "favored enemy choice was already selected"
                             )
+                    elif requirements.get("kind") in {
+                        "known_spell_grants",
+                        "mystic_arcanum",
+                        "spell_mastery",
+                    }:
+                        spell_ids = _validated_distinct_choices(
+                            selection.get(choice_field),
+                            count=int(requirements.get("count", 1) or 1),
+                            label=f"feature {choice_field}",
+                        )
+                        spell_matches = []
+                        for spell_id in spell_ids:
+                            spell_match = next(
+                                (
+                                    item
+                                    for item in candidates
+                                    if str(item[2].get("id") or "") == spell_id
+                                    and item[2].get("kind") == "spell"
+                                ),
+                                None,
+                            )
+                            if spell_match is None:
+                                raise ValueError(
+                                    "feature spell artifact is unavailable"
+                                )
+                            spell_matches.append(spell_match)
+                        spell_levels = [
+                            int(dict(item[2].get("card") or {}).get("level", 0) or 0)
+                            for item in spell_matches
+                        ]
+                        eligible_class = str(
+                            requirements.get("eligible_class") or ""
+                        ).casefold()
+                        if eligible_class and eligible_class != "any":
+                            for spell_match in spell_matches:
+                                eligible_classes = {
+                                    str(item).casefold()
+                                    for item in dict(
+                                        spell_match[2].get("card") or {}
+                                    ).get("classes", [])
+                                }
+                                if eligible_class not in eligible_classes:
+                                    raise ValueError(
+                                        "feature spell is not on the required class list"
+                                    )
+                        feature_kind = str(requirements.get("kind") or "")
+                        if feature_kind == "known_spell_grants":
+                            maximum_spell_level = max(
+                                [
+                                    int(level)
+                                    for level, resource in dict(
+                                        sheet["spellcasting"].get("spell_slots")
+                                        or {}
+                                    ).items()
+                                    if int(dict(resource).get("max", 0) or 0) > 0
+                                ]
+                                + [
+                                    int(
+                                        dict(
+                                            sheet["spellcasting"].get("pact_magic")
+                                            or {}
+                                        ).get("slot_level", 0)
+                                        or 0
+                                    )
+                                ]
+                            )
+                            if any(
+                                level > maximum_spell_level
+                                for level in spell_levels
+                            ):
+                                raise ValueError(
+                                    "feature spell exceeds the actor's available "
+                                    "spell level"
+                                )
+                            source_class = str(
+                                requirements.get("source_class")
+                                or declared_class
+                            ).title()
+                            for spell_match in spell_matches:
+                                materialize_feature_spell(
+                                    spell_match,
+                                    method="known",
+                                    source_key=source_class,
+                                )
+                        elif feature_kind == "mystic_arcanum":
+                            required_level = int(
+                                requirements.get("spell_level", 0) or 0
+                            )
+                            if spell_levels != [required_level]:
+                                raise ValueError(
+                                    "Mystic Arcanum requires the exact spell level"
+                                )
+                            spell_card = materialize_feature_spell(
+                                spell_matches[0],
+                                method="mystic_arcanum",
+                                source_key="Warlock",
+                            )
+                            resource_key = (
+                                f"mystic_arcanum:{spell_matches[0][2]['id']}"
+                            )
+                            sheet["resources"][resource_key] = {
+                                "label": (
+                                    f"Mystic Arcanum: "
+                                    f"{spell_card.get('name') or spell_ids[0]}"
+                                ),
+                                "value": 1,
+                                "max": 1,
+                                "recovers_on": "long_rest",
+                                "source_key": "Warlock",
+                            }
+                        else:
+                            required_levels = sorted(
+                                int(value)
+                                for value in requirements.get(
+                                    "required_spell_levels", []
+                                )
+                            )
+                            if sorted(spell_levels) != required_levels:
+                                raise ValueError(
+                                    "Spell Mastery requires one 1st-level and one "
+                                    "2nd-level spell"
+                                )
+                            spellbook_ids = set(
+                                sheet["spellcasting"]["spellbook"].get(
+                                    "spell_ids", []
+                                )
+                            )
+                            if not set(spell_ids).issubset(spellbook_ids):
+                                raise ValueError(
+                                    "Spell Mastery choices must be in the spellbook"
+                                )
+                            for spell_match in spell_matches:
+                                materialize_feature_spell(
+                                    spell_match,
+                                    method="spell_mastery",
+                                    source_key="Wizard",
+                                    at_will=True,
+                                    allow_existing=True,
+                                )
                     elif requirements.get("kind") == "bonus_cantrip":
                         spell_artifact_id = str(
                             selection.get(choice_field) or ""
@@ -16517,6 +16710,89 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                             ):
                                 raise ValueError(
                                     "feature choice was already selected"
+                                )
+                        option_prerequisites = dict(
+                            requirements.get("option_prerequisites") or {}
+                        )
+                        at_will_spells = dict(
+                            requirements.get("at_will_spells") or {}
+                        )
+                        for selected_value in selected_values:
+                            prerequisite = dict(
+                                option_prerequisites.get(selected_value) or {}
+                            )
+                            if target is not None and int(
+                                target.get("level", 0) or 0
+                            ) < int(prerequisite.get("minimum_level", 0) or 0):
+                                raise ValueError(
+                                    "eldritch invocation level prerequisite is "
+                                    "not met"
+                                )
+                            required_pact = str(
+                                prerequisite.get("required_pact_boon") or ""
+                            )
+                            if required_pact and not any(
+                                required_pact.casefold()
+                                == str(
+                                    dict(feature.get("choices") or {}).get(
+                                        "option"
+                                    )
+                                    or ""
+                                ).casefold()
+                                for feature in sheet["content"]["features"]
+                            ):
+                                raise ValueError(
+                                    "eldritch invocation pact prerequisite is "
+                                    "not met"
+                                )
+                            required_cantrip = str(
+                                prerequisite.get("required_cantrip") or ""
+                            )
+                            if required_cantrip and not any(
+                                int(spell.get("level", -1)) == 0
+                                and str(spell.get("name") or "").casefold()
+                                == required_cantrip.casefold()
+                                and bool(
+                                    dict(spell.get("access") or {}).get(
+                                        "known"
+                                    )
+                                )
+                                for spell in sheet["content"]["spells"]
+                            ):
+                                raise ValueError(
+                                    "eldritch invocation cantrip prerequisite is "
+                                    "not met"
+                                )
+                            at_will_spell = str(
+                                at_will_spells.get(selected_value) or ""
+                            )
+                            if at_will_spell:
+                                at_will_match = next(
+                                    (
+                                        item
+                                        for item in candidates
+                                        if item[2].get("kind") == "spell"
+                                        and str(
+                                            dict(
+                                                item[2].get("card") or {}
+                                            ).get("name")
+                                            or ""
+                                        ).casefold()
+                                        == at_will_spell.casefold()
+                                    ),
+                                    None,
+                                )
+                                if at_will_match is None:
+                                    raise RulesetUnavailableError(
+                                        "eldritch invocation at-will spell is "
+                                        f"unavailable: {at_will_spell}"
+                                    )
+                                materialize_feature_spell(
+                                    at_will_match,
+                                    method="eldritch_invocation",
+                                    source_key=selected_value,
+                                    at_will=True,
+                                    allow_existing=True,
                                 )
                         if requirements.get("requires_existing_proficiency"):
                             for item in selected_values:
@@ -16702,9 +16978,19 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "selection": selection,
             },
             response_extra=(
-                {"subclass_spell_grants": subclass_spell_grants}
-                if subclass_spell_grants
-                else None
+                {
+                    **(
+                        {"subclass_spell_grants": subclass_spell_grants}
+                        if subclass_spell_grants
+                        else {}
+                    ),
+                    **(
+                        {"feature_spell_grants": feature_spell_grants}
+                        if feature_spell_grants
+                        else {}
+                    ),
+                }
+                or None
             ),
         )
 
