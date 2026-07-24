@@ -234,6 +234,23 @@ def test_attunement_requires_a_short_rest_during_play(tmp_path: Path) -> None:
             campaign["id"],
             "attunement",
         )
+        with pytest.raises(Exception, match="explicit DM confirmation"):
+            await _call(
+                server,
+                "character_state_change",
+                {
+                    "character_id": actor["id"],
+                    "action": "rest",
+                    "payload": {
+                        "rest_type": "short_rest",
+                        "attune_item_id": "staff",
+                        "started_elapsed_minutes": started,
+                        "rest_schedule": _short_rest_schedule(),
+                    },
+                    "expected_revision": equipped_actor["revision"],
+                    "idempotency_key": "unreviewed-attunement",
+                },
+            )
         rested = await _call(
             server,
             "character_state_change",
@@ -243,6 +260,7 @@ def test_attunement_requires_a_short_rest_during_play(tmp_path: Path) -> None:
                 "payload": {
                     "rest_type": "short_rest",
                     "attune_item_id": "staff",
+                    "attunement_prerequisite_confirmed": True,
                     "started_elapsed_minutes": started,
                     "rest_schedule": _short_rest_schedule(),
                 },

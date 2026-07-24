@@ -3165,6 +3165,7 @@ async def _short_rest(
         "actor_id",
         "arcane_recovery",
         "attune_item_id",
+        "attunement_prerequisite_confirmed",
         "hit_dice_spends",
         "rest_activity_minutes",
         "rest_schedule",
@@ -3177,6 +3178,7 @@ async def _short_rest(
         actor_id = str(member.get("actor_id") or "")
         arcane_recovery = member.get("arcane_recovery")
         attune_item_id = str(member.get("attune_item_id") or "").strip() or None
+        attunement_prerequisite_confirmed = member.get("attunement_prerequisite_confirmed")
         hit_dice_spends = member.get("hit_dice_spends")
         rest_activity_minutes = member.get("rest_activity_minutes")
         rest_schedule = member.get("rest_schedule")
@@ -3184,15 +3186,26 @@ async def _short_rest(
             unexpected
             or not actor_id
             or (arcane_recovery is not None and not isinstance(arcane_recovery, dict))
+            or (
+                attunement_prerequisite_confirmed is not None
+                and not isinstance(attunement_prerequisite_confirmed, bool)
+            )
             or (hit_dice_spends is not None and not isinstance(hit_dice_spends, list))
             or (rest_activity_minutes is not None and not isinstance(rest_activity_minutes, dict))
             or (rest_schedule is not None and not isinstance(rest_schedule, dict))
         ):
             raise ValueError(
                 "short-rest members accept actor_id, optional arcane_recovery, "
-                "optional attune_item_id, optional hit_dice_spends, optional "
-                "rest_activity_minutes, and optional rest_schedule only"
+                "optional attune_item_id with attunement_prerequisite_confirmed, "
+                "optional hit_dice_spends, optional rest_activity_minutes, and "
+                "optional rest_schedule only"
             )
+        if attune_item_id and attunement_prerequisite_confirmed is not True:
+            raise ValueError(
+                "short-rest attunement requires attunement_prerequisite_confirmed=true"
+            )
+        if not attune_item_id and attunement_prerequisite_confirmed is not None:
+            raise ValueError("attunement_prerequisite_confirmed requires attune_item_id")
         normalized_spends: list[dict[str, Any]] = []
         for spend_index, spend in enumerate(hit_dice_spends or []):
             if (
@@ -3224,6 +3237,11 @@ async def _short_rest(
                     }
                 ),
                 **({"attune_item_id": attune_item_id} if attune_item_id is not None else {}),
+                **(
+                    {"attunement_prerequisite_confirmed": True}
+                    if attune_item_id is not None
+                    else {}
+                ),
             }
         )
     actor_ids = [item["actor_id"] for item in normalized]
@@ -3256,6 +3274,9 @@ async def _short_rest(
                     "hit_dice_spends": member["hit_dice_spends"],
                     "arcane_recovery": member["arcane_recovery"],
                     "attune_item_id": member.get("attune_item_id"),
+                    "attunement_prerequisite_confirmed": member.get(
+                        "attunement_prerequisite_confirmed"
+                    ),
                     "rest_activity_minutes": member["rest_activity_minutes"],
                     "rest_schedule": member["rest_schedule"],
                     "duration_minutes": duration_minutes,
@@ -3328,6 +3349,7 @@ async def _short_rest(
             payload["arcane_recovery"] = member["arcane_recovery"]
         if member.get("attune_item_id"):
             payload["attune_item_id"] = member["attune_item_id"]
+            payload["attunement_prerequisite_confirmed"] = True
         if member["hit_dice_spends"]:
             payload["hit_dice_spends"] = member["hit_dice_spends"]
         if member["rest_activity_minutes"]:

@@ -9876,6 +9876,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         hit_dice_recovery: dict[str, int] | None = None,
         arcane_recovery: dict[str, int] | None = None,
         attune_item_id: str | None = None,
+        attunement_prerequisite_confirmed: bool | None = None,
         rest_activity_minutes: dict[str, int] | None = None,
         rest_schedule: dict[str, int] | None = None,
         started_elapsed_minutes: int | None = None,
@@ -9906,6 +9907,17 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             )
         if prepared_spell_ids is not None and normalized_rest_type != "long_rest":
             raise CombatEngineError("prepared spells can be changed only as part of a long rest")
+        if attune_item_id:
+            if attunement_prerequisite_confirmed is not True:
+                raise CombatEngineError(
+                    "attunement requires explicit DM confirmation that the actor "
+                    "satisfies every source-defined prerequisite"
+                )
+            if not is_dm(current.campaign_id, principal_id):
+                raise PermissionError("attunement prerequisite confirmation requires the DM")
+            attune_inventory_item(current.sheet, str(attune_item_id))
+        elif attunement_prerequisite_confirmed is not None:
+            raise CombatEngineError("attunement_prerequisite_confirmed requires attune_item_id")
         payload = {
             "character_id": character_id,
             "rest_type": rest_type,
@@ -9914,6 +9926,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "hit_dice_recovery": hit_dice_recovery or {},
             "arcane_recovery": arcane_recovery or {},
             "attune_item_id": attune_item_id,
+            "attunement_prerequisite_confirmed": attunement_prerequisite_confirmed,
             "rest_activity_minutes": rest_activity_minutes or {},
             "rest_schedule": rest_schedule,
             "started_elapsed_minutes": started_elapsed_minutes,
@@ -18036,7 +18049,16 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             )
             attune_item_id = str(data.get("attune_item_id") or "").strip() or None
             if attune_item_id is not None:
+                if data.get("attunement_prerequisite_confirmed") is not True:
+                    raise CombatEngineError(
+                        "attunement requires explicit DM confirmation that the actor "
+                        "satisfies every source-defined prerequisite"
+                    )
+                if not is_dm(current.campaign_id, principal_id):
+                    raise PermissionError("attunement prerequisite confirmation requires the DM")
                 attune_inventory_item(current.sheet, attune_item_id)
+            elif data.get("attunement_prerequisite_confirmed") is not None:
+                raise CombatEngineError("attunement_prerequisite_confirmed requires attune_item_id")
             duration_minutes = data.get("duration_minutes")
             if isinstance(duration_minutes, bool) or not isinstance(duration_minutes, int):
                 raise CombatEngineError("short rest preflight requires duration_minutes")
@@ -18060,6 +18082,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "hit_dice_spends": [{"key": key, "count": count} for key, count in hit_dice],
                 "arcane_recovery": arcane_recovery,
                 "attune_item_id": attune_item_id,
+                "attunement_prerequisite_confirmed": (True if attune_item_id is not None else None),
                 "rest_activity_minutes": rest_activity_minutes,
                 "rest_schedule": rest_schedule,
                 "pending": list(before_rules.pending),
@@ -18841,6 +18864,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 hit_dice_recovery=data.get("hit_dice_recovery"),
                 arcane_recovery=data.get("arcane_recovery"),
                 attune_item_id=data.get("attune_item_id"),
+                attunement_prerequisite_confirmed=data.get("attunement_prerequisite_confirmed"),
                 rest_activity_minutes=data.get("rest_activity_minutes"),
                 rest_schedule=data.get("rest_schedule"),
                 started_elapsed_minutes=data.get("started_elapsed_minutes"),
