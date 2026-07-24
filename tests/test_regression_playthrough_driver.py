@@ -1544,6 +1544,69 @@ def test_checkpoint_uses_only_public_manifest_branch_and_snapshot_tools() -> Non
     ]
 
 
+def test_checkpoint_recovers_verified_same_branch_snapshot_after_retry_revision_change() -> None:
+    class Client:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict]] = []
+
+        async def core(self, tool_id: str, arguments: dict):
+            assert tool_id == "campaign_query"
+            return {"result": {"id": "campaign-1", "revision": 9}}
+
+        async def domain(self, tool_id: str, arguments: dict):
+            self.calls.append((tool_id, arguments))
+            if tool_id == "playthrough_manifest" and arguments["action"] == "sync":
+                return {"campaign_revision": 10, "manifest": {"status": "in_progress"}}
+            if tool_id == "branch_query":
+                return [
+                    {
+                        "id": "branch-1",
+                        "is_current": True,
+                        "head_snapshot_id": "snapshot-2",
+                    }
+                ]
+            if tool_id == "snapshot_create":
+                raise RuntimeError(
+                    "idempotency key reused with a different request: checkpoint-key"
+                )
+            if tool_id == "snapshot_query" and arguments["view"] == "list":
+                return [
+                    {
+                        "id": "snapshot-2",
+                        "branch_id": "branch-1",
+                        "slot": 2,
+                        "label": "Scene checkpoint",
+                    }
+                ]
+            if tool_id == "snapshot_query" and arguments["view"] == "verify":
+                return {"valid": True, "slot": 2}
+            if tool_id == "playthrough_manifest" and arguments["action"] == "get":
+                return {"manifest": {"status": "in_progress"}}
+            raise AssertionError((tool_id, arguments))
+
+    client = Client()
+    result = asyncio.run(
+        _checkpoint(
+            client,
+            campaign_id="campaign-1",
+            run_id="run-1",
+            label="Scene checkpoint",
+        )
+    )
+
+    assert result["reused"] is True
+    assert result["snapshot"]["id"] == "snapshot-2"
+    assert result["verification"] == {"valid": True, "slot": 2}
+    assert [name for name, _ in client.calls] == [
+        "playthrough_manifest",
+        "branch_query",
+        "snapshot_create",
+        "snapshot_query",
+        "snapshot_query",
+        "playthrough_manifest",
+    ]
+
+
 def test_failed_route_is_preserved_when_branching_from_verified_snapshot() -> None:
     class Client:
         def __init__(self) -> None:
