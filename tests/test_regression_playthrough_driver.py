@@ -2510,7 +2510,7 @@ def test_xp_award_idempotency_identity_includes_exact_recipient_set() -> None:
 def test_source_cited_automatic_event_does_not_roll() -> None:
     source_ref = {
         "module_id": "module-1",
-        "scene_id": "scene-1",
+        "scene_id": "source-scene-1",
         "chunk_id": "chunk-1",
         "page_start": 7,
         "page_end": 7,
@@ -2521,6 +2521,7 @@ def test_source_cited_automatic_event_does_not_roll() -> None:
     class Client:
         def __init__(self) -> None:
             self.tools: list[str] = []
+            self.continuity_payload: dict = {}
 
         async def core(self, tool_id: str, arguments: dict):
             self.tools.append(tool_id)
@@ -2530,10 +2531,16 @@ def test_source_cited_automatic_event_does_not_roll() -> None:
         async def domain(self, tool_id: str, arguments: dict):
             self.tools.append(tool_id)
             if tool_id == "module_query" and arguments["view"] == "scene":
+                if arguments["payload"]["scene_id"] == "source-scene-1":
+                    return {
+                        "module_id": "module-1",
+                        "scene_id": "source-scene-1",
+                        "content": "The lead character spots the snare automatically.",
+                    }
+                assert arguments["payload"]["scene_id"] == "scene-1"
                 return {
                     "module_id": "module-1",
                     "scene_id": "scene-1",
-                    "content": "The lead character spots the snare automatically.",
                     "locations": [{"key": "ambush"}],
                 }
             if tool_id == "module_query" and arguments["view"] == "progress":
@@ -2543,6 +2550,7 @@ def test_source_cited_automatic_event_does_not_roll() -> None:
             if tool_id == "branch_query":
                 return [{"id": "branch-1", "is_current": True}]
             if tool_id == "continuity_commit":
+                self.continuity_payload = deepcopy(arguments["payload"])
                 assert len(arguments["payload"]["actor_knowledge"]) == 2
                 return {"event": {"id": "event-1"}, "snapshot": {"slot": 4}}
             if tool_id == "playthrough_manifest":
@@ -2564,10 +2572,16 @@ def test_source_cited_automatic_event_does_not_roll() -> None:
             knowledge="The party knows the snare's location.",
             knowledge_actor_ids=["actor-1", "actor-2"],
             progress_percent=65,
+            source_scene_id="source-scene-1",
         )
     )
 
     assert result["knowledge_actor_ids"] == ["actor-1", "actor-2"]
+    assert result["scene"]["scene_id"] == "scene-1"
+    assert result["scene"]["source_scene_id"] == "source-scene-1"
+    assert client.continuity_payload["event"]["payload"]["source_scene_id"] == (
+        "source-scene-1"
+    )
     assert "character_check" not in client.tools
     assert "dnd_dice_roll" not in client.tools
 
@@ -2655,7 +2669,7 @@ def test_record_event_preserves_prior_scene_events_in_same_run() -> None:
 def test_record_outcome_commits_facts_then_syncs_manifest_and_checkpoint() -> None:
     source_ref = {
         "module_id": "module-1",
-        "scene_id": "scene-1",
+        "scene_id": "source-scene-1",
         "chunk_id": "chunk-1",
         "page_start": 10,
         "page_end": 11,
@@ -2697,10 +2711,16 @@ def test_record_outcome_commits_facts_then_syncs_manifest_and_checkpoint() -> No
 
         async def domain(self, tool_id: str, arguments: dict):
             if tool_id == "module_query" and arguments["view"] == "scene":
+                if arguments["payload"]["scene_id"] == "source-scene-1":
+                    return {
+                        "module_id": "module-1",
+                        "scene_id": "source-scene-1",
+                        "content": "The hostage is released.",
+                    }
+                assert arguments["payload"]["scene_id"] == "scene-1"
                 return {
                     "module_id": "module-1",
                     "scene_id": "scene-1",
-                    "content": "The hostage is released.",
                     "locations": [{"key": "goblin-den"}],
                 }
             if tool_id == "module_query" and arguments["view"] == "progress":
@@ -2816,10 +2836,15 @@ def test_record_outcome_commits_facts_then_syncs_manifest_and_checkpoint() -> No
             world_state={"hostage_released": True},
             objective="Escort the hostage to safety.",
             progress_percent=100,
+            source_scene_id="source-scene-1",
         )
     )
 
     assert result["checkpoint"]["verification"]["valid"] is True
+    assert result["scene"]["source_scene_id"] == "source-scene-1"
+    assert client.continuity_payload["event"]["payload"]["source_scene_id"] == (
+        "source-scene-1"
+    )
     assert client.loaded_groups == [("play.characters",)]
     assert client.replaced_manifest["current"]["objective"] == ("Escort the hostage to safety.")
     assert client.replaced_manifest["world_state"] == {

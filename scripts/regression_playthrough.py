@@ -1535,6 +1535,7 @@ async def _record_event(
     knowledge_actor_ids: list[str],
     progress_percent: int | None,
     audience_scope: str = "party",
+    source_scene_id: str = "",
 ) -> dict[str, Any]:
     if not all((scene_id, location_key, source_excerpt, event_type, summary)):
         raise ValueError("record-event requires scene, location, excerpt, event type, and summary")
@@ -1546,7 +1547,7 @@ async def _record_event(
         raise ValueError("record-event progress percent must be between 0 and 100")
     if audience_scope not in {"party", "dm"}:
         raise ValueError("record-event audience scope must be party or dm")
-    scene = await client.domain(
+    occurrence_scene = await client.domain(
         "module_query",
         {
             "campaign_id": campaign_id,
@@ -1554,8 +1555,23 @@ async def _record_event(
             "payload": {"scene_id": scene_id},
         },
     )
-    exact_ref = _validate_source_ref(scene, source_ref, excerpt=source_excerpt)
-    location_keys = {str(item.get("key") or "") for item in _scene_locations(scene)}
+    cited_scene_id = source_scene_id.strip() or scene_id
+    source_scene = (
+        occurrence_scene
+        if cited_scene_id == scene_id
+        else await client.domain(
+            "module_query",
+            {
+                "campaign_id": campaign_id,
+                "view": "scene",
+                "payload": {"scene_id": cited_scene_id},
+            },
+        )
+    )
+    exact_ref = _validate_source_ref(source_scene, source_ref, excerpt=source_excerpt)
+    location_keys = {
+        str(item.get("key") or "") for item in _scene_locations(occurrence_scene)
+    }
     if location_key not in location_keys:
         raise ValueError("record-event location is not present in the scene atlas")
     progress_rows = await client.domain(
@@ -1612,6 +1628,7 @@ async def _record_event(
                     "audience_scope": audience_scope,
                     "payload": {
                         "scene_id": scene_id,
+                        "source_scene_id": cited_scene_id,
                         "location_key": location_key,
                         "source_excerpt": source_excerpt,
                         "source_ref": exact_ref,
@@ -1643,6 +1660,7 @@ async def _record_event(
     return {
         "scene": {
             "scene_id": scene_id,
+            "source_scene_id": cited_scene_id,
             "location_key": location_key,
             "source_ref": exact_ref,
         },
@@ -1908,6 +1926,7 @@ async def _record_outcome(
     objective: str,
     progress_percent: int | None,
     audience_scope: str = "party",
+    source_scene_id: str = "",
 ) -> dict[str, Any]:
     if not all(
         (
@@ -1966,7 +1985,7 @@ async def _record_outcome(
     manifest = validate_playthrough_manifest(manifest)
 
     await client.load("play.characters")
-    scene = await client.domain(
+    occurrence_scene = await client.domain(
         "module_query",
         {
             "campaign_id": campaign_id,
@@ -1974,8 +1993,23 @@ async def _record_outcome(
             "payload": {"scene_id": scene_id},
         },
     )
-    exact_ref = _validate_source_ref(scene, source_ref, excerpt=source_excerpt)
-    if location_key not in {str(item.get("key") or "") for item in _scene_locations(scene)}:
+    cited_scene_id = source_scene_id.strip() or scene_id
+    source_scene = (
+        occurrence_scene
+        if cited_scene_id == scene_id
+        else await client.domain(
+            "module_query",
+            {
+                "campaign_id": campaign_id,
+                "view": "scene",
+                "payload": {"scene_id": cited_scene_id},
+            },
+        )
+    )
+    exact_ref = _validate_source_ref(source_scene, source_ref, excerpt=source_excerpt)
+    if location_key not in {
+        str(item.get("key") or "") for item in _scene_locations(occurrence_scene)
+    }:
         raise ValueError("record-outcome location is not present in the scene atlas")
 
     recipients = list(dict.fromkeys(knowledge_actor_ids))
@@ -2057,6 +2091,7 @@ async def _record_outcome(
                     "payload": {
                         "outcome_id": outcome_id.strip(),
                         "scene_id": scene_id,
+                        "source_scene_id": cited_scene_id,
                         "location_key": location_key,
                         "source_excerpt": source_excerpt,
                         "source_ref": exact_ref,
@@ -2099,6 +2134,7 @@ async def _record_outcome(
         "outcome_id": outcome_id.strip(),
         "scene": {
             "scene_id": scene_id,
+            "source_scene_id": cited_scene_id,
             "location_key": location_key,
             "source_ref": exact_ref,
         },
@@ -5219,6 +5255,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     knowledge_actor_ids=args.event_knowledge_actor_id,
                     progress_percent=args.progress_percent,
                     audience_scope=args.event_audience_scope,
+                    source_scene_id=args.source_scene_id,
                 )
             elif args.action == "record-outcome":
                 if phase != "play":
@@ -5244,6 +5281,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     objective=args.objective,
                     progress_percent=args.progress_percent,
                     audience_scope=args.event_audience_scope,
+                    source_scene_id=args.source_scene_id,
                 )
             elif args.action == "apply-damage":
                 if phase != "play":
