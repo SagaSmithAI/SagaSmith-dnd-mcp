@@ -3270,6 +3270,9 @@ def test_record_event_preserves_prior_scene_events_in_same_run() -> None:
             if tool_id == "branch_query":
                 return [{"id": "branch-1", "is_current": True}]
             if tool_id == "continuity_commit":
+                assert arguments["payload"]["actor_knowledge"][0]["cause"] == (
+                    "told_by"
+                )
                 return {"event": {"id": "event-2"}, "snapshot": {"slot": 5}}
             if tool_id == "playthrough_manifest":
                 return {"manifest": {"status": "in_progress"}, "campaign_revision": 5}
@@ -3290,6 +3293,7 @@ def test_record_event_preserves_prior_scene_events_in_same_run() -> None:
             knowledge="Yeemik has broken the spirit of the bargain.",
             knowledge_actor_ids=["actor-1"],
             progress_percent=70,
+            knowledge_cause="told_by",
         )
     )
 
@@ -3393,6 +3397,9 @@ def test_record_outcome_commits_facts_then_syncs_manifest_and_checkpoint(
             if tool_id == "continuity_commit":
                 self.continuity_payload = deepcopy(arguments["payload"])
                 assert "snapshot" not in self.continuity_payload
+                assert {
+                    item["cause"] for item in self.continuity_payload["actor_knowledge"]
+                } == {"witnessed"}
                 assert self.continuity_payload["facts"][0]["fact_key"] == ("quest:hostage:status")
                 self.revision += 1
                 return {

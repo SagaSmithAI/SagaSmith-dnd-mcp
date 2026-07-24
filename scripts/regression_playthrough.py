@@ -204,6 +204,12 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--event-summary", default="")
     parser.add_argument("--event-knowledge", default="")
     parser.add_argument("--event-knowledge-actor-id", action="append", default=[])
+    parser.add_argument(
+        "--event-knowledge-cause",
+        choices=("witnessed", "told_by"),
+        default="witnessed",
+        help="How the event knowledge recipients learned the proposition",
+    )
     parser.add_argument("--replacement-predecessor-id", default="")
     parser.add_argument("--replacement-actor-id", default="")
     parser.add_argument("--replacement-knowledge", action="append", default=[])
@@ -1701,6 +1707,7 @@ async def _record_event(
     audience_scope: str = "party",
     source_scene_id: str = "",
     defer_checkpoint: bool = False,
+    knowledge_cause: str = "witnessed",
 ) -> dict[str, Any]:
     if not all((scene_id, location_key, source_excerpt, event_type, summary)):
         raise ValueError("record-event requires scene, location, excerpt, event type, and summary")
@@ -1712,6 +1719,8 @@ async def _record_event(
         raise ValueError("record-event progress percent must be between 0 and 100")
     if audience_scope not in {"party", "dm"}:
         raise ValueError("record-event audience scope must be party or dm")
+    if knowledge_cause not in {"witnessed", "told_by"}:
+        raise ValueError("record-event knowledge cause must be witnessed or told_by")
     occurrence_scene = await client.domain(
         "module_query",
         {
@@ -1802,6 +1811,7 @@ async def _record_event(
                     f"playthrough.{_token(run_id)}.{_token(event_identity)}"
                 ),
                 "proposition": knowledge.strip(),
+                "cause": knowledge_cause,
                 "disclosure_scope": "owner",
             }
             for actor_id in list(dict.fromkeys(knowledge_actor_ids))
@@ -2104,6 +2114,7 @@ async def _record_outcome(
     audience_scope: str = "party",
     source_scene_id: str = "",
     defer_checkpoint: bool = False,
+    knowledge_cause: str = "witnessed",
 ) -> dict[str, Any]:
     if not all(
         (
@@ -2128,6 +2139,8 @@ async def _record_outcome(
         raise ValueError("record-outcome progress percent must be between 0 and 100")
     if audience_scope not in {"party", "dm"}:
         raise ValueError("record-outcome audience scope must be party or dm")
+    if knowledge_cause not in {"witnessed", "told_by"}:
+        raise ValueError("record-outcome knowledge cause must be witnessed or told_by")
     if not isinstance(world_state, dict):
         raise ValueError("record-outcome world state must be an object")
     normalized_facts = []
@@ -2282,6 +2295,7 @@ async def _record_outcome(
                             f"playthrough.{_token(run_id)}.outcome.{_token(outcome_id.strip())}"
                         ),
                         "proposition": knowledge.strip(),
+                        "cause": knowledge_cause,
                         "disclosure_scope": "owner",
                     }
                     for actor_id in recipients
@@ -5845,6 +5859,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     audience_scope=args.event_audience_scope,
                     source_scene_id=args.source_scene_id,
                     defer_checkpoint=args.defer_checkpoint,
+                    knowledge_cause=args.event_knowledge_cause,
                 )
             elif args.action == "record-outcome":
                 if phase != "play":
@@ -5872,6 +5887,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     audience_scope=args.event_audience_scope,
                     source_scene_id=args.source_scene_id,
                     defer_checkpoint=args.defer_checkpoint,
+                    knowledge_cause=args.event_knowledge_cause,
                 )
             elif args.action == "apply-damage":
                 if phase != "play":
