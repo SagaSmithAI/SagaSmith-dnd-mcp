@@ -56,6 +56,16 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--surprise-check-report", type=Path)
     parser.add_argument("--source-surprised-actor-id", action="append", default=[])
     parser.add_argument(
+        "--source-condition-json",
+        action="append",
+        type=json.loads,
+        default=[],
+        help=(
+            "Encounter-scoped source condition with condition, actor_ids, source_ref, "
+            "and exact source_excerpt; repeat for independently cited conditions"
+        ),
+    )
+    parser.add_argument(
         "--no-surprise",
         action="store_true",
         help="Explicitly start with neither side surprised when the cited scene warrants it",
@@ -221,6 +231,7 @@ def _participant_config(
     surprise_by_actor: dict[str, bool],
     hostiles_hidden: bool = True,
     visible_to_actor_ids_by_hostile: dict[str, list[str]] | None = None,
+    source_conditions_by_actor: dict[str, list[dict[str, Any]]] | None = None,
 ) -> list[dict[str, Any]]:
     if len(party_ids) > 10 or len(hostile_ids) > 10:
         raise ValueError("default encounter layout supports at most 10 PCs and 10 hostiles")
@@ -259,6 +270,15 @@ def _participant_config(
             ),
             "surprised": bool(surprise_by_actor.get(actor_id, False)),
             "death_saves": False,
+            **(
+                {
+                    "source_conditions": list(
+                        dict(source_conditions_by_actor or {}).get(actor_id) or []
+                    )
+                }
+                if dict(source_conditions_by_actor or {}).get(actor_id)
+                else {}
+            ),
         }
         for index, actor_id in enumerate(hostile_ids)
     )
@@ -339,6 +359,63 @@ def _source_declared_surprise(
             "source_excerpt": source_excerpt.strip(),
         },
     )
+
+
+def _source_declared_conditions(
+    declarations: list[dict[str, Any]],
+    *,
+    participant_ids: list[str],
+) -> dict[str, list[dict[str, Any]]]:
+    participants = set(participant_ids)
+    by_actor: dict[str, list[dict[str, Any]]] = {}
+    seen: set[tuple[str, str]] = set()
+    for declaration in declarations:
+        if not isinstance(declaration, dict):
+            raise ValueError("source condition declaration must be an object")
+        allowed = {"condition", "actor_ids", "source_ref", "source_excerpt"}
+        unknown = set(declaration) - allowed
+        if unknown:
+            raise ValueError(f"unsupported source condition fields: {sorted(unknown)}")
+        condition = str(declaration.get("condition") or "").strip().casefold()
+        actor_ids = declaration.get("actor_ids")
+        source_ref = declaration.get("source_ref")
+        source_excerpt = str(declaration.get("source_excerpt") or "").strip()
+        if (
+            not condition
+            or not isinstance(actor_ids, list)
+            or not actor_ids
+            or any(not str(actor_id).strip() for actor_id in actor_ids)
+            or len({str(actor_id) for actor_id in actor_ids}) != len(actor_ids)
+            or not isinstance(source_ref, dict)
+            or not source_excerpt
+        ):
+            raise ValueError(
+                "source condition requires condition, unique actor_ids, "
+                "source_ref, and an exact source_excerpt"
+            )
+        normalized_actor_ids = [str(actor_id) for actor_id in actor_ids]
+        unknown_actors = sorted(set(normalized_actor_ids) - participants)
+        if unknown_actors:
+            raise ValueError(
+                "source condition actor_ids are not encounter participants: "
+                + ", ".join(unknown_actors)
+            )
+        for actor_id in normalized_actor_ids:
+            identity = (actor_id, condition)
+            if identity in seen:
+                raise ValueError(
+                    f"duplicate source condition for encounter actor: {actor_id} {condition}"
+                )
+            seen.add(identity)
+            by_actor.setdefault(actor_id, []).append(
+                {
+                    "condition": condition,
+                    "duration": "encounter",
+                    "source_ref": source_ref,
+                    "source_excerpt": source_excerpt,
+                }
+            )
+    return by_actor
 
 
 def _surprise_from_hostile_stealth_totals(
@@ -690,6 +767,10 @@ async def _start(
         raise RuntimeError("encounter start requires the play phase")
     branch = await _current_branch(client, args.campaign_id)
     all_hostile_ids = [*hostile_ids, *additional_hostile_ids]
+    source_conditions_by_actor = _source_declared_conditions(
+        args.source_condition_json,
+        participant_ids=[*party_ids, *all_hostile_ids],
+    )
     actors = {
         actor_id: await _character(client, actor_id)
         for actor_id in [*party_ids, *all_hostile_ids]
@@ -778,6 +859,7 @@ async def _start(
                 surprise_by_actor=surprise,
                 hostiles_hidden=args.hostiles_hidden or not args.no_surprise,
                 visible_to_actor_ids_by_hostile=visible_to_actor_ids_by_hostile,
+                source_conditions_by_actor=source_conditions_by_actor,
             ),
             "participant_manifest": _participant_manifest(
                 hostile_ids,
@@ -819,6 +901,7 @@ async def _start(
         "passive_perception": passive_perception,
         "visible_to_actor_ids_by_hostile": visible_to_actor_ids_by_hostile,
         "surprise": surprise,
+        "source_conditions_by_actor": source_conditions_by_actor,
         "source_opening_casts": _source_opening_casts(
             args.source_opening_cast_json,
             participant_ids=[*party_ids, *all_hostile_ids],

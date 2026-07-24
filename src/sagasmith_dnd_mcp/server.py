@@ -2352,6 +2352,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "combat_concentration_checks": True,
                 "combat_ruleset_adapter": True,
                 "combat_authoritative_attack_data": True,
+                "source_bound_encounter_conditions": True,
                 "combat_target_mechanics_redacted": True,
                 "combat_active_state_guard": True,
                 "combat_spatial_reactions": True,
@@ -3853,6 +3854,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "death_saves",
                 "initiative",
                 "tie_breaker",
+                "source_conditions",
             }
             unknown = set(entry) - allowed
             if unknown:
@@ -3863,6 +3865,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     str(item) not in participant_ids for item in visible_to
                 ):
                     raise ValueError("visible_to_actor_ids must contain only participant actor IDs")
+            source_conditions = entry.get("source_conditions")
+            if source_conditions is not None and (
+                not isinstance(source_conditions, list)
+                or any(not isinstance(item, dict) for item in source_conditions)
+            ):
+                raise ValueError("source_conditions must be a list of objects")
             config_by_actor[actor_id_value] = dict(entry)
         current_scene_context = modules.current_scene(campaign_id, scope_id=scope_id)
         scene_context = None
@@ -4004,10 +4012,153 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "narrative-only actors cannot enter combat without an exact statblock: "
                 + ", ".join(narrative_only_ids)
             )
+        source_condition_records: list[dict[str, Any]] = []
+        source_condition_sheets: dict[str, dict[str, Any]] = {}
+        source_condition_characters = {character.id: character for character in participants}
+        supported_source_conditions = {
+            "blinded",
+            "charmed",
+            "deafened",
+            "frightened",
+            "grappled",
+            "incapacitated",
+            "invisible",
+            "paralyzed",
+            "petrified",
+            "poisoned",
+            "prone",
+            "restrained",
+            "stunned",
+            "unconscious",
+        }
+        for actor_id_value, config_entry in config_by_actor.items():
+            for raw_condition in config_entry.get("source_conditions") or []:
+                allowed_condition_fields = {
+                    "condition",
+                    "source_ref",
+                    "source_excerpt",
+                    "duration",
+                }
+                unknown_condition_fields = set(raw_condition) - allowed_condition_fields
+                if unknown_condition_fields:
+                    raise ValueError(
+                        "unsupported source condition fields: "
+                        f"{sorted(unknown_condition_fields)}"
+                    )
+                condition = str(raw_condition.get("condition") or "").strip().casefold()
+                duration = str(raw_condition.get("duration") or "encounter").strip().casefold()
+                excerpt = str(raw_condition.get("source_excerpt") or "").strip()
+                source_ref = raw_condition.get("source_ref")
+                if condition not in supported_source_conditions:
+                    raise ValueError(
+                        f"unsupported source-declared combat condition: {condition or '<empty>'}"
+                    )
+                if duration != "encounter":
+                    raise ValueError("source-declared combat condition duration must be encounter")
+                if not excerpt:
+                    raise ValueError("source-declared combat condition needs an exact excerpt")
+                if resolved_scene_id is None:
+                    raise ValueError(
+                        "source-declared combat conditions require an encounter scene_id"
+                    )
+                if not isinstance(source_ref, dict):
+                    raise ValueError("source-declared combat condition needs a source_ref object")
+                required_source_fields = {
+                    "module_id",
+                    "scene_id",
+                    "chunk_id",
+                    "page_start",
+                    "page_end",
+                    "heading_path",
+                    "content_sha256",
+                }
+                missing_source_fields = sorted(required_source_fields - set(source_ref))
+                if missing_source_fields:
+                    raise ValueError(
+                        "source-declared combat condition source_ref is missing: "
+                        + ", ".join(missing_source_fields)
+                    )
+                expanded = modules.expand(str(source_ref["chunk_id"]))
+                if str(expanded.get("campaign_id")) != campaign_id:
+                    raise ValueError("source condition chunk does not belong to the campaign")
+                if str(dict(expanded.get("module") or {}).get("id")) != str(
+                    source_ref["module_id"]
+                ):
+                    raise ValueError("source condition module_id does not match its chunk")
+                if str(dict(expanded.get("scene") or {}).get("id")) != str(
+                    source_ref["scene_id"]
+                ):
+                    raise ValueError("source condition scene_id does not match its chunk")
+                if str(source_ref["scene_id"]) != str(resolved_scene_id):
+                    raise ValueError(
+                        "source condition scene_id does not match the encounter scene"
+                    )
+                chunk_content = str(expanded.get("content") or "")
+                chunk_content_sha256 = hashlib.sha256(
+                    chunk_content.encode("utf-8")
+                ).hexdigest()
+                if str(source_ref["content_sha256"]).casefold() != chunk_content_sha256:
+                    raise ValueError(
+                        "source condition content_sha256 does not match its chunk"
+                    )
+                cited_page_range = (
+                    None
+                    if source_ref["page_start"] is None
+                    else int(source_ref["page_start"]),
+                    None
+                    if source_ref["page_end"] is None
+                    else int(source_ref["page_end"]),
+                )
+                expanded_page_range = (
+                    None
+                    if expanded.get("page_start") is None
+                    else int(expanded["page_start"]),
+                    None
+                    if expanded.get("page_end") is None
+                    else int(expanded["page_end"]),
+                )
+                if cited_page_range != expanded_page_range:
+                    raise ValueError("source condition page range does not match its chunk")
+                if [str(item) for item in source_ref["heading_path"]] != [
+                    str(item) for item in expanded.get("heading_path") or []
+                ]:
+                    raise ValueError("source condition heading_path does not match its chunk")
+                normalized_excerpt = " ".join(excerpt.split())
+                if normalized_excerpt not in " ".join(chunk_content.split()):
+                    raise ValueError(
+                        "source condition excerpt is not contained in its cited chunk"
+                    )
+                actor = source_condition_characters[actor_id_value]
+                sheet = source_condition_sheets.setdefault(
+                    actor_id_value, deepcopy(actor.sheet)
+                )
+                existing_conditions = {
+                    str(item).strip().casefold() for item in sheet.get("conditions", [])
+                }
+                added_by_encounter = condition not in existing_conditions
+                if added_by_encounter:
+                    sheet.setdefault("conditions", []).append(condition)
+                source_condition_records.append(
+                    {
+                        "actor_id": actor_id_value,
+                        "condition": condition,
+                        "duration": duration,
+                        "source_ref": deepcopy(source_ref),
+                        "source_excerpt": excerpt,
+                        "added_by_encounter": added_by_encounter,
+                    }
+                )
         actors = []
         for character_id in participant_ids:
             actor = combat_actor_snapshot(character_id)
-            actor.update(config_by_actor.get(character_id, {}))
+            actor_config = dict(config_by_actor.get(character_id, {}))
+            actor_config.pop("source_conditions", None)
+            actor.update(actor_config)
+            if character_id in source_condition_sheets:
+                actor["sheet"] = validate_character_sheet(
+                    source_condition_sheets[character_id],
+                    rules=effective_rule_context(campaign_id),
+                )
             actors.append(actor)
         encounter = start_encounter(
             actors,
@@ -4018,6 +4169,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         if readiness is not None:
             encounter["participant_manifest"] = readiness
+        if source_condition_records:
+            encounter["source_conditions"] = source_condition_records
         initiatives = [
             int(item.get("initiative", 0) or 0) for item in encounter.get("combatants", [])
         ]
@@ -4033,9 +4186,24 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         updated_state["combat"] = encounter
         updated_state["game_phase"] = PROFILE_COMBAT
         updated_state = validate_party_state(updated_state)
+        source_condition_updates = [
+            CharacterStateUpdate(
+                character_id=actor_id_value,
+                sheet=validate_character_sheet(
+                    sheet,
+                    rules=effective_rule_context(campaign_id),
+                ),
+                notes=validate_character_notes(
+                    source_condition_characters[actor_id_value].notes
+                ),
+                expected_revision=source_condition_characters[actor_id_value].revision,
+            )
+            for actor_id_value, sheet in source_condition_sheets.items()
+        ]
         revisions_result = StateMutationService(storage.database).replace(
             campaign_id,
             campaign_state=updated_state,
+            character_updates=source_condition_updates,
             expected_campaign_revision=campaign.revision,
             operation="combat.start",
             actor=principal_id,
@@ -12532,6 +12700,18 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         for combatant in combat.get("combatants", []):
             actor = characters.get(str(combatant["actor_id"]))
             sheet = deepcopy(actor.sheet)
+            for source_condition in combat.get("source_conditions", []):
+                if (
+                    str(source_condition.get("actor_id") or "") != actor.id
+                    or not source_condition.get("added_by_encounter", False)
+                ):
+                    continue
+                condition = str(source_condition.get("condition") or "").casefold()
+                sheet["conditions"] = [
+                    item
+                    for item in sheet.get("conditions", [])
+                    if str(item).casefold() != condition
+                ]
             holding_ids = {
                 str(item.get("holding_effect_id"))
                 for item in ending_readied

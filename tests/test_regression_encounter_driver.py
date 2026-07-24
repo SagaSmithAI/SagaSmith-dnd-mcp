@@ -15,6 +15,7 @@ from scripts.regression_encounter import (
     _preferred_multiattack_option_id,
     _roll_total,
     _should_stand,
+    _source_declared_conditions,
     _source_declared_surprise,
     _source_departure_patch,
     _source_opening_casts,
@@ -257,6 +258,48 @@ def test_source_declared_surprise_marks_only_cited_participants() -> None:
     assert surprise == {"pc-1": False, "pc-2": False, "iarno": True}
     assert basis["mode"] == "source_declared_surprise"
     assert basis["surprised_actor_ids"] == ["iarno"]
+
+
+def test_source_declared_conditions_are_scoped_to_cited_participants() -> None:
+    source_ref = {
+        "module_id": "module-1",
+        "scene_id": "scene-1",
+        "chunk_id": "chunk-1",
+        "page_start": 24,
+        "page_end": 25,
+        "heading_path": ["Redbrand Hideout", "10. Common Room"],
+        "content_sha256": "a" * 64,
+    }
+    conditions = _source_declared_conditions(
+        [
+            {
+                "condition": "Poisoned",
+                "actor_ids": ["ruffian-1", "ruffian-2"],
+                "source_ref": source_ref,
+                "source_excerpt": "All four are heavily drunk and poisoned.",
+            }
+        ],
+        participant_ids=["pc-1", "ruffian-1", "ruffian-2"],
+    )
+
+    assert set(conditions) == {"ruffian-1", "ruffian-2"}
+    assert conditions["ruffian-1"] == [
+        {
+            "condition": "poisoned",
+            "duration": "encounter",
+            "source_ref": source_ref,
+            "source_excerpt": "All four are heavily drunk and poisoned.",
+        }
+    ]
+    config = _participant_config(
+        ["pc-1"],
+        ["ruffian-1", "ruffian-2"],
+        surprise_by_actor={},
+        source_conditions_by_actor=conditions,
+    )
+    by_actor = {item["actor_id"]: item for item in config}
+    assert "source_conditions" not in by_actor["pc-1"]
+    assert by_actor["ruffian-1"]["source_conditions"][0]["condition"] == "poisoned"
 
 
 def test_source_opening_item_casts_preserve_authored_order_and_evidence() -> None:
