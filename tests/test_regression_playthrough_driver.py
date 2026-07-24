@@ -15,6 +15,7 @@ from sagasmith_dnd.playthrough import (
 from scripts.regression_playthrough import (
     _acquire_source_loot,
     _advance_level,
+    _advance_scene,
     _advance_time,
     _apply_source_damage,
     _award_experience,
@@ -67,6 +68,88 @@ def _manifest_source_ref() -> dict:
         "chunk_id": "chunk-1",
         "excerpt": "The hostage is released.",
     }
+
+
+def test_advance_scene_identity_supports_exact_retry_and_later_revisit() -> None:
+    class Client:
+        def __init__(self) -> None:
+            self.revision = 1
+            self.manifest = new_playthrough_manifest(
+                run_id="run-1",
+                campaign_line_id="line-1",
+                module_ids=["module-1"],
+                recommended_party_minimum=None,
+                recommended_party_maximum=None,
+                selected_party_size=None,
+                source_refs=[_manifest_source_ref()],
+            )
+            self.manifest["current"] = {
+                "module_id": "module-1",
+                "chapter_id": "chapter-1",
+                "chapter_title": "Chapter",
+                "scene_id": "scene-old",
+                "scene_title": "Old scene",
+                "objective": "Leave.",
+            }
+            self.replace_calls: list[dict] = []
+
+        async def core(self, tool_id: str, arguments: dict):
+            assert tool_id == "campaign_query"
+            return {"result": {"id": "campaign-1", "revision": self.revision}}
+
+        async def domain(self, tool_id: str, arguments: dict):
+            if tool_id == "module_query":
+                assert arguments["payload"]["scene_id"] == "scene-town"
+                return {
+                    "module_id": "module-1",
+                    "chapter_id": "chapter-1",
+                    "chapter": "Chapter",
+                    "scene_id": "scene-town",
+                    "title": "Town",
+                }
+            if tool_id == "playthrough_manifest" and arguments["action"] == "get":
+                return {
+                    "manifest": deepcopy(self.manifest),
+                    "campaign_revision": self.revision,
+                }
+            if tool_id == "playthrough_manifest" and arguments["action"] == "replace":
+                self.replace_calls.append(deepcopy(arguments))
+                self.manifest = deepcopy(arguments["payload"]["manifest"])
+                self.revision += 1
+                return {
+                    "manifest": deepcopy(self.manifest),
+                    "campaign_revision": self.revision,
+                }
+            raise AssertionError((tool_id, arguments))
+
+    async def advance(client: Client) -> None:
+        await _advance_scene(
+            client,
+            campaign_id="campaign-1",
+            run_id="run-1",
+            scene_id="scene-town",
+            objective="Return the rescued family.",
+            mark_visited=True,
+            reachable_scene_ids=[],
+            excluded_scenes=[],
+        )
+
+    client = Client()
+    asyncio.run(advance(client))
+    asyncio.run(advance(client))
+    first_key, retry_key = [
+        item["idempotency_key"] for item in client.replace_calls
+    ]
+    assert first_key == retry_key
+    assert (
+        client.replace_calls[0]["payload"]["manifest"]
+        == client.replace_calls[1]["payload"]["manifest"]
+    )
+
+    client.manifest["world_state"]["visit_marker"] = 2
+    asyncio.run(advance(client))
+    revisit_key = client.replace_calls[2]["idempotency_key"]
+    assert revisit_key != first_key
 
 
 def test_core_relock_driver_requires_current_checkpoint_and_public_profile() -> None:

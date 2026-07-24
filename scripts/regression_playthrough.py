@@ -484,6 +484,16 @@ def _mutation_key(run_id: str, action: str, identity: str) -> str:
     return f"full-playthrough-{action}-{_token(f'{run_id}:{identity}', length=24)}"
 
 
+def _manifest_payload_identity(manifest: dict[str, Any]) -> str:
+    serialized = json.dumps(
+        manifest,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return _token(serialized, length=24)
+
+
 def _check_knowledge_key(
     run_id: str,
     scene_id: str,
@@ -1155,7 +1165,7 @@ async def _advance_scene(
         campaign_id=campaign_id,
         action="replace",
         run_id=run_id,
-        identity=f"advance-scene:{scene_id}:{mark_visited}",
+        identity=f"advance-scene:{_manifest_payload_identity(manifest)}",
         payload={"manifest": manifest},
     )
 
