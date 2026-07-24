@@ -2299,7 +2299,18 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         result = idempotency.lookup(scope, key, payload)
         if result is not None:
             return result.response
-        campaign_id = scope.split(":", 2)[1] if ":" in scope else ""
+        campaign_id = next(
+            (
+                component
+                for component in scope.split(":")
+                if re.fullmatch(
+                    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-"
+                    r"[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}",
+                    component,
+                )
+            ),
+            "",
+        )
         if campaign_id:
             bind_idempotency_request(
                 campaign_id,
