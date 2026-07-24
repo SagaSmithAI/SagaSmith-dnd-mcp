@@ -730,6 +730,8 @@ def test_source_item_transfer_driver_uses_atomic_character_to_party_public_tool(
 
         async def core(self, tool_id: str, arguments: dict):
             assert tool_id == "campaign_query"
+            if arguments["view"] == "party":
+                return {"result": deepcopy(self.party)}
             return {"result": {"id": "campaign-1", "revision": 20}}
 
         async def domain(self, tool_id: str, arguments: dict):
@@ -744,8 +746,6 @@ def test_source_item_transfer_driver_uses_atomic_character_to_party_public_tool(
                 }
             if tool_id == "character_query":
                 return deepcopy(self.actor)
-            if tool_id == "party_show":
-                return deepcopy(self.party)
             if tool_id == "inventory_transfer":
                 self.transfer_arguments = deepcopy(arguments)
                 moved = self.actor["sheet"]["inventory"]["items"].pop()

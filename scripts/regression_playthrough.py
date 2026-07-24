@@ -3611,7 +3611,18 @@ async def _transfer_source_item_to_party(
             )
         )
     )
-    party = dict(await client.domain("party_show", {"campaign_id": campaign_id}))
+    party = dict(
+        _facade_value(
+            await client.core(
+                "campaign_query",
+                {
+                    "view": "party",
+                    "payload": {"campaign_id": campaign_id},
+                    "principal_id": PRINCIPAL_ID,
+                },
+            )
+        )
+    )
     actor_item = next(
         (
             dict(item)
