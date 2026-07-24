@@ -48,6 +48,7 @@ def _arguments() -> argparse.Namespace:
             "long-rest",
             "recover-stable",
             "provision-source-item",
+            "transfer-source-item",
             "acquire-loot",
             "spend-coins",
             "spend-item",
@@ -154,6 +155,10 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--item-json", type=json.loads)
     parser.add_argument("--item-equip-slot", default="")
     parser.add_argument("--item-reason", default="")
+    parser.add_argument("--transfer-character-id", default="")
+    parser.add_argument("--transfer-item-id", default="")
+    parser.add_argument("--transfer-item-quantity", type=int)
+    parser.add_argument("--transfer-reason", default="")
     parser.add_argument("--loot-acquisition-id", default="")
     parser.add_argument("--loot-coins-json", type=json.loads, default={})
     parser.add_argument("--loot-item-json", action="append", type=json.loads, default=[])
@@ -3549,6 +3554,145 @@ async def _provision_source_item(
     }
 
 
+async def _transfer_source_item_to_party(
+    client: ExposureClient,
+    *,
+    campaign_id: str,
+    run_id: str,
+    scene_id: str,
+    location_key: str,
+    source_excerpt: str,
+    source_ref: dict[str, Any] | None,
+    character_id: str,
+    item_id: str,
+    quantity: int | None,
+    reason: str,
+    checkpoint_label: str,
+) -> dict[str, Any]:
+    normalized_character_id = character_id.strip()
+    normalized_item_id = item_id.strip()
+    normalized_reason = reason.strip()
+    if not all(
+        (
+            scene_id,
+            location_key,
+            source_excerpt.strip(),
+            normalized_character_id,
+            normalized_item_id,
+            normalized_reason,
+        )
+    ):
+        raise ValueError(
+            "transfer-source-item requires scene, location, excerpt, character, "
+            "item, and reason"
+        )
+    if quantity is not None and quantity <= 0:
+        raise ValueError("transfer-source-item quantity must be positive")
+
+    scene = await client.domain(
+        "module_query",
+        {
+            "campaign_id": campaign_id,
+            "view": "scene",
+            "payload": {"scene_id": scene_id},
+        },
+    )
+    exact_ref = _validate_source_ref(scene, source_ref, excerpt=source_excerpt)
+    if location_key not in {
+        str(item.get("key") or "") for item in _scene_locations(scene)
+    }:
+        raise ValueError("transfer-source-item location is not present in the scene atlas")
+
+    actor = dict(
+        _facade_value(
+            await client.domain(
+                "character_query",
+                {"view": "get", "payload": {"character_id": normalized_character_id}},
+            )
+        )
+    )
+    party = dict(await client.domain("party_show", {"campaign_id": campaign_id}))
+    actor_item = next(
+        (
+            dict(item)
+            for item in actor["sheet"]["inventory"]["items"]
+            if str(item.get("id") or "") == normalized_item_id
+        ),
+        None,
+    )
+    party_item = next(
+        (
+            dict(item)
+            for item in party["inventory"]["items"]
+            if str(item.get("id") or "") == normalized_item_id
+        ),
+        None,
+    )
+    recovered = actor_item is None and party_item is not None
+    if actor_item is None and not recovered:
+        raise ValueError("source character does not carry the requested item")
+    if actor_item is not None and party_item is not None:
+        raise RuntimeError("source item id already exists in both inventories")
+
+    if recovered:
+        transferred: dict[str, Any] = {
+            "party": party,
+            "character": actor,
+            "item": party_item,
+            "status": "recovered",
+        }
+    else:
+        campaign = await _campaign(client, campaign_id)
+        payload: dict[str, Any] = {
+            "campaign_id": campaign_id,
+            "character_id": normalized_character_id,
+            "item_id": normalized_item_id,
+            "expected_campaign_revision": campaign["revision"],
+            "expected_character_revision": actor["revision"],
+        }
+        if quantity is not None:
+            payload["quantity"] = quantity
+        transferred = dict(
+            _facade_value(
+                await client.domain(
+                    "inventory_transfer",
+                    {
+                        "mode": "character_to_party",
+                        "payload": payload,
+                        "idempotency_key": _mutation_key(
+                            run_id,
+                            "source-item-transfer",
+                            f"{normalized_character_id}:{normalized_item_id}:"
+                            f"{quantity or 'all'}",
+                        ),
+                    },
+                )
+            )
+        )
+        if str(dict(transferred.get("item") or {}).get("id") or "") != normalized_item_id:
+            raise RuntimeError("source item transfer returned a different item")
+
+    checkpoint = await _checkpoint(
+        client,
+        campaign_id=campaign_id,
+        run_id=run_id,
+        label=(
+            checkpoint_label.strip()
+            or f"Full playthrough source item transferred: {normalized_item_id}"
+        ),
+    )
+    return {
+        "character_id": normalized_character_id,
+        "item_id": normalized_item_id,
+        "quantity": quantity,
+        "reason": normalized_reason,
+        "source_ref": exact_ref,
+        "transfer": transferred,
+        "recovered": recovered,
+        "checkpoint": checkpoint,
+    }
+
+
 async def _acquire_source_loot(
     client: ExposureClient,
     *,
@@ -5705,6 +5849,24 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     item=args.item_json,
                     equip_slot=args.item_equip_slot,
                     reason=args.item_reason,
+                    checkpoint_label=args.checkpoint_label,
+                )
+            elif args.action == "transfer-source-item":
+                if phase != "play":
+                    raise RuntimeError("transfer-source-item requires the play phase")
+                await client.load("play.characters")
+                report["result"] = await _transfer_source_item_to_party(
+                    client,
+                    campaign_id=args.campaign_id,
+                    run_id=args.run_id,
+                    scene_id=str(args.scene_id or ""),
+                    location_key=args.location_key,
+                    source_excerpt=args.source_excerpt,
+                    source_ref=args.source_ref_json,
+                    character_id=args.transfer_character_id,
+                    item_id=args.transfer_item_id,
+                    quantity=args.transfer_item_quantity,
+                    reason=args.transfer_reason,
                     checkpoint_label=args.checkpoint_label,
                 )
             elif args.action == "acquire-loot":

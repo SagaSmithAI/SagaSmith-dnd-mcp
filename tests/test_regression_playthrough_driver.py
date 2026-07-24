@@ -52,6 +52,7 @@ from scripts.regression_playthrough import (
     _spend_source_item,
     _stand_after_source_event,
     _start_play,
+    _transfer_source_item_to_party,
     _use_activity,
     _use_shared_consumable,
 )
@@ -690,6 +691,100 @@ def test_source_item_driver_validates_provenance_hydrates_and_equips(
     assert result["actor"]["armor_class"] == 13
     assert result["item"]["equipped_slot"] == "main_hand"
     assert result["item"]["mechanics"]["spellcasting"]["spells"][0]["card"]["rule_refs"]
+    assert result["checkpoint"]["verification"]["valid"] is True
+
+
+def test_source_item_transfer_driver_uses_atomic_character_to_party_public_tool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_ref = {
+        "module_id": "module-1",
+        "scene_id": "scene-1",
+        "chunk_id": "treasure-chunk",
+        "page_start": 26,
+        "page_end": 26,
+        "heading_path": ["Redbrand Hideout", "Treasure"],
+        "content_sha256": "a" * 64,
+    }
+    staff = {
+        "id": "staff-of-defense",
+        "name": "Staff of Defense",
+        "kind": "magic_item",
+        "quantity": 1,
+    }
+
+    class Client:
+        def __init__(self) -> None:
+            sheet = default_character_sheet()
+            sheet["inventory"]["items"].append(deepcopy(staff))
+            self.actor = {
+                "id": "iarno",
+                "name": "Iarno",
+                "campaign_id": "campaign-1",
+                "revision": 4,
+                "sheet": sheet,
+                "derived": {"armor_class": 13},
+            }
+            self.party = {"inventory": {"items": []}}
+            self.transfer_arguments: dict | None = None
+
+        async def core(self, tool_id: str, arguments: dict):
+            assert tool_id == "campaign_query"
+            return {"result": {"id": "campaign-1", "revision": 20}}
+
+        async def domain(self, tool_id: str, arguments: dict):
+            if tool_id == "module_query":
+                return {
+                    "module_id": "module-1",
+                    "scene_id": "scene-1",
+                    "content": "Iarno also wields a staff of defense.",
+                    "spatial": {
+                        "locations": [{"key": "iarno-quarters", "title": "Iarno's Quarters"}]
+                    },
+                }
+            if tool_id == "character_query":
+                return deepcopy(self.actor)
+            if tool_id == "party_show":
+                return deepcopy(self.party)
+            if tool_id == "inventory_transfer":
+                self.transfer_arguments = deepcopy(arguments)
+                moved = self.actor["sheet"]["inventory"]["items"].pop()
+                self.party["inventory"]["items"].append(deepcopy(moved))
+                self.actor["revision"] += 1
+                return {
+                    "party": deepcopy(self.party),
+                    "character": deepcopy(self.actor),
+                    "item": moved,
+                }
+            raise AssertionError((tool_id, arguments))
+
+    async def checkpoint(*_args, **_kwargs):
+        return {"snapshot": {"slot": 13}, "verification": {"valid": True}}
+
+    monkeypatch.setattr(regression_playthrough, "_checkpoint", checkpoint)
+    client = Client()
+    result = asyncio.run(
+        _transfer_source_item_to_party(
+            client,
+            campaign_id="campaign-1",
+            run_id="run-1",
+            scene_id="scene-1",
+            location_key="iarno-quarters",
+            source_excerpt="Iarno also wields a staff of defense.",
+            source_ref=source_ref,
+            character_id="iarno",
+            item_id="staff-of-defense",
+            quantity=None,
+            reason="The party secured the surrendered mage's staff.",
+            checkpoint_label="Staff secured",
+        )
+    )
+
+    assert client.transfer_arguments is not None
+    assert client.transfer_arguments["mode"] == "character_to_party"
+    assert client.transfer_arguments["payload"]["expected_campaign_revision"] == 20
+    assert client.transfer_arguments["payload"]["expected_character_revision"] == 4
+    assert result["transfer"]["item"]["id"] == "staff-of-defense"
     assert result["checkpoint"]["verification"]["valid"] is True
 
 
