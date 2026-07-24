@@ -149,6 +149,9 @@ def test_party_long_rest_advances_once_and_settles_members_atomically(tmp_path: 
         )
         assert receipt["key"] == "long-rest"
         assert receipt["replayed"] is True
+        assert len(receipt["request_hash"]) == 64
+        assert receipt["branch_id"]
+        assert len(receipt["entity_revisions"]) == 3
         assert receipt["response"] == rested
 
         updated = []

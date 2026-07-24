@@ -3183,9 +3183,53 @@ def test_long_rest_recovers_committed_receipt_without_advancing_time_twice() -> 
                     "action": "receipt",
                     "payload": {"idempotency_key": self.receipt_key},
                 }
+                request_hash = regression_playthrough._idempotency_request_hash(
+                    {
+                        "members": [
+                            {
+                                "character_id": "fighter",
+                                "expected_revision": 2,
+                                "prepared_spell_ids": None,
+                                "hit_dice_recovery": None,
+                                "food_and_drink": True,
+                            },
+                            {
+                                "character_id": "cleric",
+                                "expected_revision": 2,
+                                "prepared_spell_ids": ["cure-wounds"],
+                                "hit_dice_recovery": None,
+                                "food_and_drink": False,
+                            },
+                        ],
+                        "duration_minutes": 480,
+                        "branch_id": "branch-1",
+                    }
+                )
                 return {
                     "key": self.receipt_key,
                     "replayed": True,
+                    "request_hash": request_hash,
+                    "branch_id": "branch-1",
+                    "entity_revisions": [
+                        {
+                            "entity_type": "campaign",
+                            "entity_id": "campaign-1",
+                            "before_revision": 5,
+                            "after_revision": 6,
+                        },
+                        {
+                            "entity_type": "character",
+                            "entity_id": "fighter",
+                            "before_revision": 2,
+                            "after_revision": 3,
+                        },
+                        {
+                            "entity_type": "character",
+                            "entity_id": "cleric",
+                            "before_revision": 2,
+                            "after_revision": 3,
+                        },
+                    ],
                     "response": {
                         "status": "committed",
                         "rest_type": "long_rest",
@@ -3193,6 +3237,9 @@ def test_long_rest_recovers_committed_receipt_without_advancing_time_twice() -> 
                         "member_ids": ["fighter", "cleric"],
                         "world_time": self.world_time,
                         "campaign_revision": 6,
+                        "preparations": {
+                            "cleric": {"selected_spell_ids": ["cure-wounds"]}
+                        },
                     },
                 }
             if tool_id == "continuity_commit":
@@ -3225,6 +3272,22 @@ def test_long_rest_recovers_committed_receipt_without_advancing_time_twice() -> 
     assert client.world_time["elapsed_minutes"] == 1440
     assert result["rest_recovered"] is True
     assert result["continuity"]["snapshot"]["slot"] == 5
+
+
+def test_long_rest_recovery_rejects_a_different_original_request() -> None:
+    with pytest.raises(RuntimeError, match="request does not match"):
+        regression_playthrough._validate_recovered_long_rest(
+            {
+                "replayed": True,
+                "request_hash": "original-request",
+                "response": {},
+            },
+            campaign={},
+            actors=[],
+            members=[],
+            duration_minutes=480,
+            expected_request_hash="different-request",
+        )
 
 
 def test_partially_committed_check_is_recovered_without_reroll() -> None:

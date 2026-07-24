@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import os
 import sys
@@ -530,6 +531,16 @@ def _mutation_key(run_id: str, action: str, identity: str) -> str:
     return f"full-playthrough-{action}-{_token(f'{run_id}:{identity}', length=24)}"
 
 
+def _idempotency_request_hash(payload: dict[str, Any]) -> str:
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
 def _manifest_payload_identity(manifest: dict[str, Any]) -> str:
     serialized = json.dumps(
         manifest,
@@ -566,10 +577,13 @@ def _validate_recovered_long_rest(
     actors: list[dict[str, Any]],
     members: list[dict[str, Any]],
     duration_minutes: int,
+    expected_request_hash: str,
 ) -> dict[str, Any]:
     response = receipt.get("response")
-    if not isinstance(response, dict):
+    if receipt.get("replayed") is not True or not isinstance(response, dict):
         raise RuntimeError("long-rest recovery receipt has no response")
+    if receipt.get("request_hash") != expected_request_hash:
+        raise RuntimeError("long-rest recovery receipt request does not match")
     actor_ids = [str(item["actor_id"]) for item in members]
     if (
         response.get("status") != "committed"
@@ -590,6 +604,7 @@ def _validate_recovered_long_rest(
         raise RuntimeError("long-rest recovery requires an elapsed campaign clock")
     started_elapsed = completed_elapsed - duration_minutes
     actor_by_id = {str(actor.get("id")): actor for actor in actors}
+    receipt_preparations = dict(response.get("preparations") or {})
     for member in members:
         actor_id = str(member["actor_id"])
         actor = actor_by_id.get(actor_id)
@@ -610,7 +625,11 @@ def _validate_recovered_long_rest(
         if prepared_ids is not None:
             spellcasting = dict(dict(actor.get("sheet") or {}).get("spellcasting") or {})
             preparation = dict(spellcasting.get("preparation") or {})
-            if preparation.get("selected_spell_ids") != prepared_ids:
+            receipt_preparation = dict(receipt_preparations.get(actor_id) or {})
+            if (
+                receipt_preparation.get("selected_spell_ids")
+                != preparation.get("selected_spell_ids")
+            ):
                 raise RuntimeError(
                     f"long-rest recovery preparations do not match for actor {actor_id}"
                 )
@@ -3245,12 +3264,62 @@ async def _long_rest(
                 "payload": {"idempotency_key": party_rest_key},
             },
         )
+        receipt_branch_id = str(receipt.get("branch_id") or "")
+        if receipt_branch_id != str(branch["id"]):
+            raise RuntimeError("long-rest recovery receipt is from another branch")
+        revision_rows = list(receipt.get("entity_revisions") or [])
+        if not all(isinstance(item, dict) for item in revision_rows):
+            raise RuntimeError("long-rest recovery receipt has invalid revision evidence")
+        revision_by_entity = {
+            (str(item.get("entity_type") or ""), str(item.get("entity_id") or "")): item
+            for item in revision_rows
+        }
+        expected_entities = {("campaign", campaign_id)} | {
+            ("character", actor_id) for actor_id in actor_ids
+        }
+        if set(revision_by_entity) != expected_entities:
+            raise RuntimeError("long-rest recovery receipt has unexpected revision evidence")
+        campaign_revision_row = revision_by_entity[("campaign", campaign_id)]
+        if (
+            campaign_revision_row.get("after_revision") != campaign.get("revision")
+            or campaign_revision_row.get("before_revision") != campaign.get("revision") - 1
+        ):
+            raise RuntimeError("long-rest recovery campaign revisions do not match")
+        recovery_members = []
+        for member in normalized:
+            actor = actor_by_id[member["actor_id"]]
+            current_revision = actor.get("revision")
+            revision_row = revision_by_entity[("character", member["actor_id"])]
+            if (
+                isinstance(current_revision, bool)
+                or not isinstance(current_revision, int)
+                or revision_row.get("after_revision") != current_revision
+                or revision_row.get("before_revision") != current_revision - 1
+            ):
+                raise RuntimeError("long-rest recovery actor revisions do not match")
+            recovery_members.append(
+                {
+                    "character_id": member["actor_id"],
+                    "expected_revision": revision_row["before_revision"],
+                    "prepared_spell_ids": member["prepared_spell_ids"],
+                    "hit_dice_recovery": member["hit_dice_recovery"],
+                    "food_and_drink": member["food_and_drink"],
+                }
+            )
+        expected_request_hash = _idempotency_request_hash(
+            {
+                "members": recovery_members,
+                "duration_minutes": duration_minutes,
+                "branch_id": receipt_branch_id,
+            }
+        )
         rested = _validate_recovered_long_rest(
             receipt,
             campaign=campaign,
             actors=actors,
             members=normalized,
             duration_minutes=duration_minutes,
+            expected_request_hash=expected_request_hash,
         )
         rest_recovered = True
     if rested.get("status") != "committed":
