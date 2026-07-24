@@ -374,6 +374,10 @@ def test_manifest_syncs_canonical_state_and_verifies_source_defined_ending(
         assert snapshot["id"] in {
             item["id"] for item in inspected["runtime"]["snapshot_dag"]["nodes"]
         }
+        assert snapshot["id"] in {
+            item["id"] for item in inspected["manifest"]["snapshot_dag"]["nodes"]
+        }
+        assert inspected["manifest"]["snapshot_dag"]["head_snapshot_id"] == snapshot["id"]
 
         ended = await _call(
             server,

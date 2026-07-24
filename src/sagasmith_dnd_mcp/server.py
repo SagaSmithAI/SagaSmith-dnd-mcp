@@ -17895,9 +17895,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             if not current_manifest:
                 raise LookupError("campaign has no full-playthrough manifest")
             validated = validate_playthrough_manifest(current_manifest)
+            projected = sync_playthrough_manifest(campaign_id, validated)
             return {
-                "manifest": validated,
-                "runtime": playthrough_runtime_projection(campaign_id, validated),
+                "manifest": projected,
+                "runtime": playthrough_runtime_projection(campaign_id, projected),
                 "campaign_revision": campaign.revision,
             }
         if expected_revision is None or not idempotency_key:

@@ -421,6 +421,21 @@ def test_narrative_npc_driver_round_trips_lobby_and_registers_manifest(
                 self.snapshot_calls += 1
                 assert arguments["label"] == "Narrative NPC prepared: Qelline Alderleaf"
                 self.revision += 1
+                self.manifest["snapshot_dag"] = {
+                    "active_branch_id": "branch-1",
+                    "head_snapshot_id": "snapshot-new",
+                    "nodes": [
+                        {
+                            "id": "snapshot-new",
+                            "parent_id": "snapshot-old",
+                            "branch_id": "branch-1",
+                            "slot": 7,
+                            "label": arguments["label"],
+                            "checksum": "a" * 64,
+                            "is_head": True,
+                        }
+                    ],
+                }
                 return {"id": "snapshot-new", "slot": 7}
             if tool_id == "snapshot_query":
                 return {"valid": True, "slot": 7}
@@ -1365,6 +1380,21 @@ def test_replacement_join_preserves_predecessor_and_only_hands_off_explicit_know
                 assert arguments["expected_head_snapshot_id"] == "snapshot-1"
                 self.head_snapshot_id = "snapshot-2"
                 self.revision += 1
+                self.manifest["snapshot_dag"] = {
+                    "active_branch_id": "branch-1",
+                    "head_snapshot_id": "snapshot-2",
+                    "nodes": [
+                        {
+                            "id": "snapshot-2",
+                            "parent_id": "snapshot-1",
+                            "branch_id": "branch-1",
+                            "slot": 2,
+                            "label": arguments["label"],
+                            "checksum": "b" * 64,
+                            "is_head": True,
+                        }
+                    ],
+                }
                 return {"id": "snapshot-2", "slot": 2}
             if tool_id == "snapshot_query":
                 return {"valid": True}
@@ -1613,7 +1643,21 @@ def test_level_advancement_exhausts_public_follow_up_and_restores_play() -> None
             if tool_id == "snapshot_query":
                 return {"valid": True}
             if tool_id == "playthrough_manifest" and arguments["action"] == "get":
-                return {"manifest": {"status": "in_progress"}}
+                return {
+                    "manifest": {
+                        "status": "in_progress",
+                        "snapshot_dag": {
+                            "active_branch_id": "branch-1",
+                            "head_snapshot_id": "snapshot-2",
+                            "nodes": [
+                                {
+                                    "id": "snapshot-2",
+                                    "branch_id": "branch-1",
+                                }
+                            ],
+                        },
+                    }
+                }
             raise AssertionError((tool_id, arguments))
 
     client = Client()
@@ -1777,7 +1821,21 @@ def test_checkpoint_recovers_verified_same_branch_snapshot_after_retry_revision_
             if tool_id == "snapshot_query" and arguments["view"] == "verify":
                 return {"valid": True, "slot": 2}
             if tool_id == "playthrough_manifest" and arguments["action"] == "get":
-                return {"manifest": {"status": "in_progress"}}
+                return {
+                    "manifest": {
+                        "status": "in_progress",
+                        "snapshot_dag": {
+                            "active_branch_id": "branch-1",
+                            "head_snapshot_id": "snapshot-2",
+                            "nodes": [
+                                {
+                                    "id": "snapshot-2",
+                                    "branch_id": "branch-1",
+                                }
+                            ],
+                        },
+                    }
+                }
             raise AssertionError((tool_id, arguments))
 
     client = Client()
@@ -3428,6 +3486,21 @@ def test_record_outcome_commits_facts_then_syncs_manifest_and_checkpoint(
             if tool_id == "snapshot_create":
                 assert arguments["label"] == ("Full playthrough outcome: hostage-released")
                 self.revision += 1
+                self.manifest["snapshot_dag"] = {
+                    "active_branch_id": "branch-1",
+                    "head_snapshot_id": "snapshot-new",
+                    "nodes": [
+                        {
+                            "id": "snapshot-new",
+                            "parent_id": "snapshot-old",
+                            "branch_id": "branch-1",
+                            "slot": 7,
+                            "label": arguments["label"],
+                            "checksum": "c" * 64,
+                            "is_head": True,
+                        }
+                    ],
+                }
                 return {"id": "snapshot-new", "slot": 7}
             if tool_id == "snapshot_query":
                 return {"valid": True, "slot": 7}

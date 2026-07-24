@@ -815,12 +815,34 @@ async def _checkpoint(
     )
     if not verification.get("valid"):
         raise RuntimeError(f"checkpoint slot {snapshot['slot']} failed integrity verification")
+    manifest_view = await _manifest_get(client, campaign_id)
+    manifest = dict(manifest_view.get("manifest") or {})
+    if "snapshot_dag" in manifest:
+        snapshot_dag = dict(manifest["snapshot_dag"])
+        nodes = list(snapshot_dag.get("nodes") or [])
+        projected = next(
+            (
+                item
+                for item in nodes
+                if str(item.get("id") or "") == str(snapshot["id"])
+            ),
+            None,
+        )
+        if (
+            projected is None
+            or str(projected.get("branch_id") or "") != str(current_branch["id"])
+            or str(snapshot_dag.get("active_branch_id") or "")
+            != str(current_branch["id"])
+            or str(snapshot_dag.get("head_snapshot_id") or "")
+            != str(snapshot["id"])
+        ):
+            raise RuntimeError("checkpoint is missing from the current manifest Snapshot DAG")
     return {
         "sync": synced,
         "snapshot": snapshot,
         "verification": verification,
         "reused": reused,
-        "manifest": await _manifest_get(client, campaign_id),
+        "manifest": manifest_view,
     }
 
 
