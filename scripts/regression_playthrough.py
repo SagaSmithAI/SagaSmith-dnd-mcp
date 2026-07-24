@@ -47,6 +47,7 @@ def _arguments() -> argparse.Namespace:
             "short-rest",
             "long-rest",
             "recover-stable",
+            "provision-source-item",
             "acquire-loot",
             "spend-coins",
             "spend-item",
@@ -149,6 +150,10 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--rest-duration-minutes", type=int, default=60)
     parser.add_argument("--rest-reason", default="")
     parser.add_argument("--recovery-actor-id", action="append", default=[])
+    parser.add_argument("--item-actor-id", default="")
+    parser.add_argument("--item-json", type=json.loads)
+    parser.add_argument("--item-equip-slot", default="")
+    parser.add_argument("--item-reason", default="")
     parser.add_argument("--loot-acquisition-id", default="")
     parser.add_argument("--loot-coins-json", type=json.loads, default={})
     parser.add_argument("--loot-item-json", action="append", type=json.loads, default=[])
@@ -3332,6 +3337,195 @@ async def _recover_stable_party(
     }
 
 
+def _assert_source_item_shape(
+    actual: Any,
+    requested: Any,
+    *,
+    field: str = "item",
+) -> None:
+    """Require every requested source field while allowing server hydration fields."""
+    if isinstance(requested, dict):
+        if not isinstance(actual, dict):
+            raise RuntimeError(f"existing {field} does not match the requested source item")
+        for key, value in requested.items():
+            if key not in actual:
+                raise RuntimeError(f"existing {field} is missing requested field {key}")
+            _assert_source_item_shape(actual[key], value, field=f"{field}.{key}")
+        return
+    if isinstance(requested, list):
+        if not isinstance(actual, list) or len(actual) != len(requested):
+            raise RuntimeError(f"existing {field} does not match the requested source item")
+        for index, value in enumerate(requested):
+            _assert_source_item_shape(actual[index], value, field=f"{field}[{index}]")
+        return
+    if actual != requested:
+        raise RuntimeError(f"existing {field} does not match the requested source item")
+
+
+async def _provision_source_item(
+    client: ExposureClient,
+    *,
+    campaign_id: str,
+    run_id: str,
+    actor_id: str,
+    source_scene_id: str,
+    source_excerpt: str,
+    source_ref: dict[str, Any] | None,
+    item: dict[str, Any] | None,
+    equip_slot: str,
+    reason: str,
+    checkpoint_label: str,
+) -> dict[str, Any]:
+    normalized_actor_id = actor_id.strip()
+    normalized_scene_id = source_scene_id.strip()
+    normalized_excerpt = source_excerpt.strip()
+    normalized_reason = reason.strip()
+    requested_item = deepcopy(item) if isinstance(item, dict) else {}
+    item_id = str(requested_item.get("id") or "").strip()
+    if not all(
+        (
+            normalized_actor_id,
+            normalized_scene_id,
+            normalized_excerpt,
+            normalized_reason,
+            item_id,
+            str(requested_item.get("name") or "").strip(),
+            str(requested_item.get("kind") or "").strip(),
+        )
+    ):
+        raise ValueError(
+            "provision-source-item requires actor, source scene, excerpt, reason, "
+            "and an item with id, name, and kind"
+        )
+
+    source_scene = await client.domain(
+        "module_query",
+        {
+            "campaign_id": campaign_id,
+            "view": "scene",
+            "payload": {"scene_id": normalized_scene_id},
+        },
+    )
+    exact_ref = _validate_source_ref(
+        source_scene,
+        source_ref,
+        excerpt=normalized_excerpt,
+    )
+    expected_source_key = f"module-chunk:{exact_ref['chunk_id']}"
+    if str(requested_item.get("source_key") or "") != expected_source_key:
+        raise ValueError(
+            "source item source_key must be module-chunk:<source_ref.chunk_id>"
+        )
+    charges = requested_item.get("charges")
+    if isinstance(charges, dict) and charges:
+        if str(charges.get("source_key") or "") != expected_source_key:
+            raise ValueError(
+                "source item charges.source_key must match the cited module chunk"
+            )
+
+    actor = dict(
+        _facade_value(
+            await client.domain(
+                "character_query",
+                {"view": "get", "payload": {"character_id": normalized_actor_id}},
+            )
+        )
+    )
+    if str(actor.get("campaign_id") or "") not in {"", campaign_id}:
+        raise ValueError("source item actor does not belong to the campaign")
+    existing = next(
+        (
+            dict(entry)
+            for entry in actor["sheet"]["inventory"]["items"]
+            if str(entry.get("id") or "") == item_id
+        ),
+        None,
+    )
+    recovered_add = existing is not None
+    if existing is None:
+        added = _facade_value(
+            await client.domain(
+                "inventory_change",
+                {
+                    "owner": "character",
+                    "action": "add",
+                    "owner_id": normalized_actor_id,
+                    "payload": {"item": requested_item},
+                    "expected_revision": actor["revision"],
+                    "idempotency_key": _mutation_key(
+                        run_id,
+                        "source-item-add",
+                        f"{normalized_actor_id}:{item_id}",
+                    ),
+                },
+            )
+        )
+        actor = dict(added.get("character") or added)
+        existing = next(
+            dict(entry)
+            for entry in actor["sheet"]["inventory"]["items"]
+            if str(entry.get("id") or "") == item_id
+        )
+    _assert_source_item_shape(existing, requested_item)
+
+    normalized_slot = equip_slot.strip()
+    recovered_equip = bool(
+        normalized_slot
+        and existing.get("equipped")
+        and str(existing.get("equipped_slot") or "") == normalized_slot
+    )
+    if normalized_slot and not recovered_equip:
+        equipped = _facade_value(
+            await client.domain(
+                "inventory_change",
+                {
+                    "owner": "character",
+                    "action": "equip",
+                    "owner_id": normalized_actor_id,
+                    "payload": {"item_id": item_id, "slot": normalized_slot},
+                    "expected_revision": actor["revision"],
+                    "idempotency_key": _mutation_key(
+                        run_id,
+                        "source-item-equip",
+                        f"{normalized_actor_id}:{item_id}:{normalized_slot}",
+                    ),
+                },
+            )
+        )
+        actor = dict(equipped.get("character") or equipped)
+        existing = next(
+            dict(entry)
+            for entry in actor["sheet"]["inventory"]["items"]
+            if str(entry.get("id") or "") == item_id
+        )
+
+    checkpoint = await _checkpoint(
+        client,
+        campaign_id=campaign_id,
+        run_id=run_id,
+        label=(
+            checkpoint_label.strip()
+            or f"Full playthrough source item: {requested_item['name']} — {normalized_reason}"
+        ),
+    )
+    return {
+        "actor": {
+            "id": str(actor["id"]),
+            "name": str(actor["name"]),
+            "revision": int(actor["revision"]),
+            "armor_class": int(actor["derived"]["armor_class"]),
+            "class_lists": list(actor["sheet"]["spellcasting"].get("class_lists") or []),
+        },
+        "item": existing,
+        "source_ref": exact_ref,
+        "source_excerpt": normalized_excerpt,
+        "reason": normalized_reason,
+        "add_recovered": recovered_add,
+        "equip_recovered": recovered_equip,
+        "checkpoint": checkpoint,
+    }
+
+
 async def _acquire_source_loot(
     client: ExposureClient,
     *,
@@ -5472,6 +5666,23 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     actor_ids=args.recovery_actor_id,
                     knowledge_actor_ids=args.knowledge_actor_id,
                     reason=args.rest_reason,
+                )
+            elif args.action == "provision-source-item":
+                if phase != "play":
+                    raise RuntimeError("provision-source-item requires the play phase")
+                await client.load("play.characters")
+                report["result"] = await _provision_source_item(
+                    client,
+                    campaign_id=args.campaign_id,
+                    run_id=args.run_id,
+                    actor_id=args.item_actor_id,
+                    source_scene_id=args.source_scene_id,
+                    source_excerpt=args.source_excerpt,
+                    source_ref=args.source_ref_json,
+                    item=args.item_json,
+                    equip_slot=args.item_equip_slot,
+                    reason=args.item_reason,
+                    checkpoint_label=args.checkpoint_label,
                 )
             elif args.action == "acquire-loot":
                 if phase != "play":

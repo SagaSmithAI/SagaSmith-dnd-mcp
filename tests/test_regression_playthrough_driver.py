@@ -12,6 +12,7 @@ from sagasmith_dnd.playthrough import (
     validate_playthrough_manifest,
 )
 
+import scripts.regression_playthrough as regression_playthrough
 from scripts.regression_playthrough import (
     _acquire_source_loot,
     _advance_level,
@@ -34,6 +35,7 @@ from scripts.regression_playthrough import (
     _party_selections,
     _phase_groups,
     _prepare_narrative_npc,
+    _provision_source_item,
     _query_source,
     _record_event,
     _record_outcome,
@@ -574,6 +576,121 @@ def test_source_loot_driver_uses_one_public_atomic_campaign_transition() -> None
     assert client.tools.count("campaign_change") == 1
     assert result["knowledge_actor_ids"] == ["actor-1", "actor-2"]
     assert result["scene"]["source_scene_id"] == "source-scene-1"
+
+
+def test_source_item_driver_validates_provenance_hydrates_and_equips(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_ref = {
+        "module_id": "module-1",
+        "scene_id": "reference-scene",
+        "chunk_id": "staff-chunk",
+        "page_start": 53,
+        "page_end": 53,
+        "heading_path": ["Appendix A", "Staff of Defense"],
+        "content_sha256": "a" * 64,
+    }
+    item = {
+        "id": "staff-of-defense",
+        "name": "Staff of Defense",
+        "kind": "magic_item",
+        "source_key": "module-chunk:staff-chunk",
+        "attunement": "attuned",
+        "charges": {
+            "label": "Staff charges",
+            "value": 10,
+            "max": 10,
+            "recovers_on": "dawn",
+            "source_key": "module-chunk:staff-chunk",
+        },
+        "mechanics": {
+            "ac_bonus": 1,
+            "spellcasting": {
+                "requires_attunement": True,
+                "requires_class_spell_list": True,
+                "components_required": False,
+                "spells": [
+                    {
+                        "artifact_id": "dnd5e.content.srd2014.spell.mage-armor",
+                        "charge_cost": 1,
+                        "casting_time": "1 action",
+                    }
+                ],
+            },
+        },
+    }
+
+    class Client:
+        def __init__(self) -> None:
+            sheet = default_character_sheet()
+            sheet["spellcasting"]["class_lists"] = ["wizard"]
+            self.actor = {
+                "id": "iarno",
+                "name": "Iarno Albrek",
+                "campaign_id": "campaign-1",
+                "revision": 3,
+                "sheet": sheet,
+                "derived": {"armor_class": 12},
+            }
+            self.inventory_actions: list[str] = []
+
+        async def domain(self, tool_id: str, arguments: dict):
+            if tool_id == "module_query":
+                return {
+                    "module_id": "module-1",
+                    "scene_id": "reference-scene",
+                    "content": "The staff has 10 charges and can cast mage armor.",
+                }
+            if tool_id == "character_query":
+                return deepcopy(self.actor)
+            if tool_id == "inventory_change":
+                action = arguments["action"]
+                self.inventory_actions.append(action)
+                if action == "add":
+                    hydrated = deepcopy(arguments["payload"]["item"])
+                    hydrated["mechanics"]["spellcasting"]["spells"][0]["card"] = {
+                        "id": "dnd5e.content.srd2014.spell.mage-armor",
+                        "pack_id": "dnd5e.content.srd2014",
+                        "rule_refs": ["srd2014.spells.mage-armor"],
+                    }
+                    self.actor["sheet"]["inventory"]["items"].append(hydrated)
+                else:
+                    assert action == "equip"
+                    equipped = self.actor["sheet"]["inventory"]["items"][0]
+                    equipped["equipped"] = True
+                    equipped["equipped_slot"] = arguments["payload"]["slot"]
+                    self.actor["derived"]["armor_class"] = 13
+                self.actor["revision"] += 1
+                return {"character": deepcopy(self.actor)}
+            raise AssertionError((tool_id, arguments))
+
+    async def checkpoint(*_args, **_kwargs):
+        return {"snapshot": {"slot": 12}, "verification": {"valid": True}}
+
+    monkeypatch.setattr(regression_playthrough, "_checkpoint", checkpoint)
+    client = Client()
+    result = asyncio.run(
+        _provision_source_item(
+            client,
+            campaign_id="campaign-1",
+            run_id="run-1",
+            actor_id="iarno",
+            source_scene_id="reference-scene",
+            source_excerpt="staff has 10 charges",
+            source_ref=source_ref,
+            item=item,
+            equip_slot="main_hand",
+            reason="Iarno wields the source-declared staff.",
+            checkpoint_label="Area 12 staff ready",
+        )
+    )
+
+    assert client.inventory_actions == ["add", "equip"]
+    assert result["actor"]["class_lists"] == ["wizard"]
+    assert result["actor"]["armor_class"] == 13
+    assert result["item"]["equipped_slot"] == "main_hand"
+    assert result["item"]["mechanics"]["spellcasting"]["spells"][0]["card"]["rule_refs"]
+    assert result["checkpoint"]["verification"]["valid"] is True
 
 
 def test_source_currency_spend_driver_uses_one_public_atomic_campaign_transition() -> None:
