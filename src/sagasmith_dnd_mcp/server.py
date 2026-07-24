@@ -14957,112 +14957,177 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         subclass_name = str(target_class.get("subclass") or "")
         if not subclass_name:
             return []
-        recorded = next(
+
+        def exact_recorded_card(
+            record: dict[str, Any],
+            *,
+            required: bool = True,
+        ) -> dict[str, Any] | None:
+            artifact_id = str(record.get("artifact_id") or record.get("id") or "")
+            pack_id = str(record.get("pack_id") or "")
+            version = str(record.get("pack_version") or "")
+            if not artifact_id or not pack_id or not version:
+                raise ValueError(
+                    "recorded subclass content must include artifact id, pack id, "
+                    "and pack version"
+                )
+            try:
+                pack = rule_packs.get_version(pack_id, version)
+            except LookupError as error:
+                raise RulesetUnavailableError(
+                    f"recorded subclass content pack is unavailable: "
+                    f"{pack_id}@{version}"
+                ) from error
+            artifact = next(
+                (
+                    item
+                    for item in pack.artifacts
+                    if str(item.get("id") or "") == artifact_id
+                ),
+                None,
+            )
+            if artifact is None:
+                if not required:
+                    return None
+                raise RulesetUnavailableError(
+                    f"recorded subclass content is unavailable: "
+                    f"{artifact_id} in {pack_id}@{version}"
+                )
+            return dict(artifact.get("card") or {})
+
+        grant_sources: list[tuple[str, list[dict[str, Any]]]] = []
+        recorded_subclass = next(
             (
                 item
                 for item in sheet.get("content", {}).get("selections", [])
                 if str(item.get("kind") or "") == "subclass"
-                and str(item.get("name") or "").casefold() == subclass_name.casefold()
+                and str(item.get("name") or "").casefold()
+                == subclass_name.casefold()
             ),
             None,
         )
-        if recorded is None:
-            return []
-        artifact_id = str(recorded.get("artifact_id") or "")
-        pack_id = str(recorded.get("pack_id") or "")
-        version = str(recorded.get("pack_version") or "")
-        if not artifact_id or not pack_id or not version:
-            raise ValueError(
-                "recorded subclass must include artifact id, pack id, and pack version"
+        if recorded_subclass is not None:
+            subclass_card = exact_recorded_card(recorded_subclass)
+            assert subclass_card is not None
+            if (
+                str(subclass_card.get("class_name") or "").casefold()
+                != class_name.casefold()
+            ):
+                raise ValueError(
+                    "recorded subclass does not belong to the advanced class"
+                )
+            grant_sources.append(
+                (
+                    subclass_name,
+                    list(subclass_card.get("always_prepared_spells") or []),
+                )
             )
-        try:
-            pack = rule_packs.get_version(pack_id, version)
-        except LookupError as error:
-            raise RulesetUnavailableError(
-                f"recorded subclass pack is unavailable: {pack_id}@{version}"
-            ) from error
-        subclass_artifact = next(
-            (item for item in pack.artifacts if str(item.get("id") or "") == artifact_id),
-            None,
-        )
-        if subclass_artifact is None:
-            raise RulesetUnavailableError(
-                f"recorded subclass is unavailable: {artifact_id} in {pack_id}@{version}"
+        for feature_record in sheet.get("content", {}).get("features", []):
+            if not feature_record.get("pack_id") or not feature_record.get(
+                "pack_version"
+            ):
+                continue
+            feature_card = exact_recorded_card(feature_record, required=False)
+            if feature_card is None:
+                continue
+            if (
+                str(feature_card.get("class_name") or "").casefold()
+                != class_name.casefold()
+                or str(feature_card.get("subclass_name") or "").casefold()
+                != subclass_name.casefold()
+            ):
+                continue
+            spell_options = dict(
+                feature_card.get("always_prepared_spell_options") or {}
             )
-        subclass_card = dict(subclass_artifact.get("card") or {})
-        if str(subclass_card.get("class_name") or "").casefold() != class_name.casefold():
-            raise ValueError("recorded subclass does not belong to the advanced class")
+            if not spell_options:
+                continue
+            choices = dict(feature_record.get("choices") or {})
+            if not choices:
+                grants = list(feature_record.get("advancement_grants") or [])
+                if grants:
+                    choices = dict(grants[-1].get("choices") or {})
+            option = str(choices.get("option") or "")
+            if option not in spell_options:
+                raise ValueError(
+                    "recorded subclass spell option is missing or unavailable"
+                )
+            grant_sources.append((subclass_name, list(spell_options[option])))
 
         candidates = available_content_artifacts(campaign_id, branch_id=branch_id)
         class_level = int(target_class.get("level", 0) or 0)
         unlocked: list[dict[str, Any]] = []
         always_prepared_ids: set[str] = set()
-        for grant in subclass_card.get("always_prepared_spells", []):
-            minimum_level = int(grant.get("minimum_level", 1) or 1)
-            if minimum_level > class_level:
-                continue
-            spell_name = str(grant.get("name") or "").strip()
-            match = next(
-                (
-                    item
-                    for item in candidates
-                    if item[2].get("kind") == "spell"
-                    and str(dict(item[2].get("card") or {}).get("name") or "").casefold()
-                    == spell_name.casefold()
-                    and class_name.casefold()
-                    in {
-                        str(value).casefold()
-                        for value in dict(item[2].get("card") or {}).get("classes", [])
-                    }
-                ),
-                None,
-            )
-            if match is None:
-                raise RulesetUnavailableError(
-                    f"subclass spell is unavailable at level {class_level}: {spell_name}"
+        for source_name, grants in grant_sources:
+            for grant in grants:
+                minimum_level = int(grant.get("minimum_level", 1) or 1)
+                if minimum_level > class_level:
+                    continue
+                spell_name = str(grant.get("name") or "").strip()
+                match = next(
+                    (
+                        item
+                        for item in candidates
+                        if item[2].get("kind") == "spell"
+                        and str(
+                            dict(item[2].get("card") or {}).get("name") or ""
+                        ).casefold()
+                        == spell_name.casefold()
+                    ),
+                    None,
                 )
-            spell_pack_id, spell_version, spell_artifact = match
-            spell_id = str(spell_artifact["id"])
-            always_prepared_ids.add(spell_id)
-            spell_card = next(
-                (
-                    item
-                    for item in sheet["content"]["spells"]
-                    if str(item.get("id") or "") == spell_id
-                ),
-                None,
-            )
-            was_always_prepared = bool(
-                spell_card and dict(spell_card.get("access") or {}).get("always_prepared")
-            )
-            if spell_card is None:
-                spell_card = deepcopy(dict(spell_artifact.get("card") or {}))
-                spell_card.pop("classes", None)
-                sheet["content"]["spells"].append(spell_card)
-            spell_card["grant"] = {
-                "source_type": "subclass",
-                "source_key": subclass_name,
-                "method": "class_prepared",
-            }
-            spell_card.setdefault("access", {})["known"] = False
-            spell_card["access"]["prepared"] = True
-            spell_card["access"]["always_prepared"] = True
-            spell_card.update(
-                id=spell_id,
-                pack_id=spell_pack_id,
-                pack_version=spell_version,
-                rule_refs=list(spell_artifact.get("rule_refs") or []),
-                mechanic_refs=list(spell_artifact.get("mechanic_refs") or []),
-            )
-            if not was_always_prepared:
-                unlocked.append(
-                    {
-                        "artifact_id": spell_id,
-                        "name": str(spell_card.get("name") or spell_name),
-                        "minimum_level": minimum_level,
-                        "source_subclass": subclass_name,
-                    }
+                if match is None:
+                    raise RulesetUnavailableError(
+                        f"subclass spell is unavailable at level "
+                        f"{class_level}: {spell_name}"
+                    )
+                spell_pack_id, spell_version, spell_artifact = match
+                spell_id = str(spell_artifact["id"])
+                always_prepared_ids.add(spell_id)
+                spell_card = next(
+                    (
+                        item
+                        for item in sheet["content"]["spells"]
+                        if str(item.get("id") or "") == spell_id
+                    ),
+                    None,
                 )
+                was_always_prepared = bool(
+                    spell_card
+                    and dict(spell_card.get("access") or {}).get(
+                        "always_prepared"
+                    )
+                )
+                if spell_card is None:
+                    spell_card = deepcopy(dict(spell_artifact.get("card") or {}))
+                    spell_card.pop("classes", None)
+                    sheet["content"]["spells"].append(spell_card)
+                spell_card["grant"] = {
+                    "source_type": "subclass",
+                    "source_key": source_name,
+                    "method": "class_prepared",
+                }
+                spell_card.setdefault("access", {})["known"] = False
+                spell_card["access"]["prepared"] = True
+                spell_card["access"]["always_prepared"] = True
+                spell_card.update(
+                    id=spell_id,
+                    pack_id=spell_pack_id,
+                    pack_version=spell_version,
+                    rule_refs=list(spell_artifact.get("rule_refs") or []),
+                    mechanic_refs=list(
+                        spell_artifact.get("mechanic_refs") or []
+                    ),
+                )
+                if not was_always_prepared:
+                    unlocked.append(
+                        {
+                            "artifact_id": spell_id,
+                            "name": str(spell_card.get("name") or spell_name),
+                            "minimum_level": minimum_level,
+                            "source_subclass": source_name,
+                        }
+                    )
         if always_prepared_ids:
             preparation = sheet["spellcasting"]["preparation"]
             preparation["selected_spell_ids"] = [
@@ -15196,6 +15261,16 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 declared_subclass = str(card.get("subclass_name") or "")
                 if declared_subclass and declared_subclass.casefold() != subclass_name.casefold():
                     continue
+                requirements_by_level = dict(
+                    card.get("selection_requirements_by_level") or {}
+                )
+                selection_requirements = deepcopy(
+                    dict(
+                        requirements_by_level.get(str(new_level))
+                        or card.get("selection_requirements")
+                        or {}
+                    )
+                )
                 feature_options.append(
                     {
                         "artifact_id": artifact_id,
@@ -15203,9 +15278,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         "minimum_level": minimum_level,
                         "class_name": declared_class,
                         "subclass_name": declared_subclass,
-                        "selection_requirements": deepcopy(
-                            dict(card.get("selection_requirements") or {})
-                        ),
+                        "selection_requirements": selection_requirements,
                         "grant_level": new_level if repeat_due else None,
                         "pack_id": pack_id,
                         "pack_version": version,
@@ -15312,6 +15385,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         int(value)
                         for value in card.get("repeatable_selection_levels", [])
                     ],
+                    "selection_requirements_by_level": deepcopy(
+                        dict(card.get("selection_requirements_by_level") or {})
+                    ),
                     **requirements,
                 }
             elif artifact_kind == "species":
@@ -15679,6 +15755,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         campaign = campaigns.get(current.campaign_id)
         phase = str(dict(campaign.state or {}).get("game_phase") or PROFILE_LOBBY)
         spellbook_copy: dict[str, Any] | None = None
+        subclass_spell_grants: list[dict[str, Any]] = []
         requested_method = str(selection.get("method") or "").strip().casefold()
         operation = (
             "character.spellbook.copy"
@@ -15840,11 +15917,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         if item[2].get("kind") == "spell"
                         and str(dict(item[2].get("card") or {}).get("name") or "").casefold()
                         == spell_name.casefold()
-                        and declared_class.casefold()
-                        in {
-                            str(value).casefold()
-                            for value in dict(item[2].get("card") or {}).get("classes", [])
-                        }
                     ),
                     None,
                 )
@@ -16189,7 +16261,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     or str(target.get("subclass") or "").casefold() != declared_subclass.casefold()
                 ):
                     raise ValueError("feature subclass is not selected on this actor card")
-                requirements = dict(card.get("selection_requirements") or {})
+                requirements = dict(
+                    dict(card.get("selection_requirements_by_level") or {}).get(
+                        str(grant_level)
+                    )
+                    or card.get("selection_requirements")
+                    or {}
+                )
                 choice_field = str(requirements.get("field") or "")
                 if choice_field:
                     if requirements.get("kind") == "ability_score_increase":
@@ -16249,6 +16327,146 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                                 "Ability Score Improvement"
                             ),
                         )
+                    elif requirements.get("kind") == "favored_enemy":
+                        favored_enemy = selection.get(choice_field)
+                        if not isinstance(favored_enemy, dict):
+                            raise ValueError(
+                                "feature favored_enemy must be a structured object"
+                            )
+                        creature_type = str(
+                            favored_enemy.get("creature_type") or ""
+                        ).strip()
+                        humanoid_races = _validated_distinct_choices(
+                            favored_enemy.get("humanoid_races"),
+                            count=(
+                                int(requirements.get("humanoid_race_count", 2) or 2)
+                                if creature_type.casefold() == "humanoid"
+                                else 0
+                            ),
+                            label="favored enemy humanoid races",
+                        )
+                        creature_options = {
+                            str(item).casefold()
+                            for item in requirements.get(
+                                "creature_type_options", []
+                            )
+                        }
+                        if creature_type.casefold() == "humanoid":
+                            if not humanoid_races:
+                                raise ValueError(
+                                    "humanoid favored enemy requires two races"
+                                )
+                        elif creature_type.casefold() not in creature_options:
+                            raise ValueError(
+                                "favored enemy creature_type is not an allowed option"
+                            )
+                        language = str(favored_enemy.get("language") or "").strip()
+                        if requirements.get("requires_language") and not language:
+                            raise ValueError(
+                                "favored enemy requires its associated language"
+                            )
+                        normalized_enemy = (
+                            "humanoid:"
+                            + ",".join(
+                                sorted(item.casefold() for item in humanoid_races)
+                            )
+                            if creature_type.casefold() == "humanoid"
+                            else creature_type.casefold()
+                        )
+                        prior_enemies: set[str] = set()
+                        if existing_content is not None:
+                            prior_choices = [
+                                dict(existing_content.get("choices") or {}),
+                                *[
+                                    dict(item.get("choices") or {})
+                                    for item in existing_content.get(
+                                        "advancement_grants", []
+                                    )
+                                ],
+                            ]
+                            for prior in prior_choices:
+                                value = prior.get(choice_field)
+                                if not isinstance(value, dict):
+                                    continue
+                                prior_type = str(
+                                    value.get("creature_type") or ""
+                                ).casefold()
+                                if prior_type == "humanoid":
+                                    prior_races = [
+                                        str(item).casefold()
+                                        for item in value.get("humanoid_races", [])
+                                    ]
+                                    prior_enemies.add(
+                                        "humanoid:" + ",".join(sorted(prior_races))
+                                    )
+                                elif prior_type:
+                                    prior_enemies.add(prior_type)
+                        if normalized_enemy in prior_enemies:
+                            raise ValueError(
+                                "favored enemy choice was already selected"
+                            )
+                    elif requirements.get("kind") == "bonus_cantrip":
+                        spell_artifact_id = str(
+                            selection.get(choice_field) or ""
+                        ).strip()
+                        spell_match = next(
+                            (
+                                item
+                                for item in candidates
+                                if str(item[2].get("id") or "")
+                                == spell_artifact_id
+                            ),
+                            None,
+                        )
+                        if spell_match is None:
+                            raise ValueError(
+                                "bonus cantrip spell_artifact_id is unavailable"
+                            )
+                        spell_pack_id, spell_version, spell_artifact = spell_match
+                        spell_card = deepcopy(
+                            dict(spell_artifact.get("card") or {})
+                        )
+                        eligible_class = str(
+                            requirements.get("eligible_class") or declared_class
+                        ).casefold()
+                        if (
+                            spell_artifact.get("kind") != "spell"
+                            or int(spell_card.get("level", -1))
+                            != int(requirements.get("spell_level", 0) or 0)
+                            or eligible_class
+                            not in {
+                                str(item).casefold()
+                                for item in spell_card.get("classes", [])
+                            }
+                        ):
+                            raise ValueError(
+                                "bonus cantrip does not meet its class and level rule"
+                            )
+                        if any(
+                            item.get("id") == spell_artifact_id
+                            for item in sheet["content"]["spells"]
+                        ):
+                            raise ValueError("bonus cantrip is already present")
+                        spell_card.pop("classes", None)
+                        spell_card["grant"] = {
+                            "source_type": "subclass",
+                            "source_key": declared_subclass or declared_class,
+                            "method": "known",
+                        }
+                        spell_card.setdefault("access", {})["known"] = True
+                        spell_card["access"]["prepared"] = False
+                        spell_card.update(
+                            id=spell_artifact_id,
+                            pack_id=spell_pack_id,
+                            pack_version=spell_version,
+                            rule_refs=list(
+                                spell_artifact.get("rule_refs") or []
+                            ),
+                            mechanic_refs=list(
+                                spell_artifact.get("mechanic_refs") or []
+                            ),
+                        )
+                        sheet["content"]["spells"].append(spell_card)
                     else:
                         selected = selection.get(choice_field)
                         if int(requirements.get("count", 1) or 1) == 1 and not isinstance(
@@ -16270,6 +16488,36 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                             item.casefold() not in options for item in selected_values
                         ):
                             raise ValueError("feature choice is not one of the allowed options")
+                        if requirements.get("requires_new_choice"):
+                            prior_values: set[str] = set()
+                            for prior_feature in sheet["content"]["features"]:
+                                prior_choice_sets = [
+                                    dict(prior_feature.get("choices") or {}),
+                                    *[
+                                        dict(item.get("choices") or {})
+                                        for item in prior_feature.get(
+                                            "advancement_grants", []
+                                        )
+                                    ],
+                                ]
+                                for prior_choices in prior_choice_sets:
+                                    prior_value = prior_choices.get(choice_field)
+                                    if isinstance(prior_value, list):
+                                        prior_values.update(
+                                            str(item).casefold()
+                                            for item in prior_value
+                                        )
+                                    elif prior_value is not None:
+                                        prior_values.add(
+                                            str(prior_value).casefold()
+                                        )
+                            if any(
+                                item.casefold() in prior_values
+                                for item in selected_values
+                            ):
+                                raise ValueError(
+                                    "feature choice was already selected"
+                                )
                         if requirements.get("requires_existing_proficiency"):
                             for item in selected_values:
                                 skill = sheet["skills"].get(item.casefold())
@@ -16355,7 +16603,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "unlock_levels",
                     "repeatable_selection_levels",
                     "selection_requirements",
+                    "selection_requirements_by_level",
                     "mechanical_grants",
+                    "choice_metadata",
+                    "always_prepared_spell_options",
                 ):
                     card.pop(metadata_key, None)
                 recorded_selection = {
@@ -16385,6 +16636,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         card["advancement_grants"] = [grant_record]
                     card.update(provenance)
                     sheet["content"][section].append(card)
+                if artifact.get("kind") == "feature" and dict(
+                    artifact.get("card") or {}
+                ).get("always_prepared_spell_options"):
+                    subclass_spell_grants = refresh_level_unlocked_subclass_spells(
+                        current.campaign_id,
+                        sheet,
+                        class_name=declared_class,
+                        branch_id=branch_id,
+                    )
             else:
                 card.update(provenance)
                 sheet["content"][section].append(card)
@@ -16441,6 +16701,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "version": version,
                 "selection": selection,
             },
+            response_extra=(
+                {"subclass_spell_grants": subclass_spell_grants}
+                if subclass_spell_grants
+                else None
+            ),
         )
 
     @mcp.tool()

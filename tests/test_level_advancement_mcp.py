@@ -129,6 +129,342 @@ def _fighter_sheet() -> dict:
     return sheet
 
 
+def _land_druid_sheet() -> dict:
+    sheet = default_character_sheet()
+    sheet["progression"]["level"] = 2
+    sheet["progression"]["classes"] = [
+        {
+            "name": "Druid",
+            "level": 2,
+            "subclass": "Circle of the Land",
+            "hit_die": 8,
+        }
+    ]
+    sheet["abilities"]["constitution"]["score"] = 14
+    sheet["abilities"]["wisdom"]["score"] = 16
+    sheet["combat"]["hp"] = {"value": 17, "max": 17, "temp": 0}
+    sheet["combat"]["hit_dice"] = {
+        "d8": {
+            "label": "d8",
+            "value": 2,
+            "max": 2,
+            "recovers_on": "long_rest",
+            "source_key": "Druid",
+        }
+    }
+    sheet["combat"]["hp_progression"] = [
+        {
+            "level": level,
+            "method": "manual" if level == 1 else "fixed",
+            "value": 9 if level == 1 else 8,
+            "source": f"Druid level {level}",
+        }
+        for level in range(1, 3)
+    ]
+    sheet["spellcasting"]["ability"] = "wisdom"
+    sheet["spellcasting"]["preparation"].update(
+        {
+            "mode": "prepared",
+            "max_prepared": 5,
+            "changes_on": "long_rest",
+        }
+    )
+    sheet["content"]["selections"] = [
+        {
+            "artifact_id": "dnd5e.content.srd2014.subclass.circle-of-the-land",
+            "kind": "subclass",
+            "name": "Circle of the Land",
+            "pack_id": "dnd5e.content.srd2014",
+            "pack_version": CORE_CONTENT_PACK_VERSION,
+            "rule_refs": ["bundled:srd2014/02_Classes/Druid.md"],
+            "mechanic_refs": [],
+            "selection": {"target_class_name": "Druid"},
+        }
+    ]
+    sheet["content"]["features"] = [
+        {
+            "id": "dnd5e.content.srd2014.feature.circle-of-the-land-circle-spells",
+            "name": "Circle Spells",
+            "source_key": "Circle of the Land",
+            "description": "Circle spells are always prepared.",
+            "choices": {"option": "Coast"},
+            "pack_id": "dnd5e.content.srd2014",
+            "pack_version": CORE_CONTENT_PACK_VERSION,
+            "rule_refs": ["bundled:srd2014/02_Classes/Druid.md"],
+            "mechanic_refs": [],
+        }
+    ]
+    return sheet
+
+
+def test_source_choice_repeats_and_off_list_oath_spells_are_enforced(
+    tmp_path: Path,
+) -> None:
+    workspace = Path(__file__).resolve().parents[2]
+    config = McpConfig(
+        home=tmp_path / "home",
+        database_url=None,
+        chroma_url=None,
+        chroma_path_override=None,
+        dnd_skills_dir=workspace / "SagaSmith-dnd-skills",
+        modulegen_skills_dir=workspace / "SagaSmith-module-gen-skills",
+        auto_seed_rules=True,
+    )
+
+    async def exercise() -> None:
+        server = create_server(config)
+        campaign = await _call(
+            server,
+            "campaign_create",
+            {
+                "name": "Source Choices",
+                "edition": "2014",
+                "idempotency_key": "campaign",
+            },
+        )
+
+        paladin_sheet = default_character_sheet()
+        paladin_sheet["progression"].update(
+            {
+                "level": 3,
+                "classes": [
+                    {
+                        "name": "Paladin",
+                        "level": 3,
+                        "subclass": "",
+                        "hit_die": 10,
+                    }
+                ],
+            }
+        )
+        paladin = await _call(
+            server,
+            "character_create_from",
+            {
+                "mode": "direct",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "name": "Oathkeeper",
+                    "sheet": paladin_sheet,
+                },
+                "idempotency_key": "paladin",
+            },
+        )
+        oath = await _call(
+            server,
+            "character_content_apply",
+            {
+                "character_id": paladin["id"],
+                "artifact_id": "dnd5e.content.srd2014.subclass.oath-of-devotion",
+                "selection": {"target_class_name": "Paladin"},
+                "expected_revision": paladin["revision"],
+                "idempotency_key": "oath",
+            },
+        )
+        sanctuary = next(
+            spell
+            for spell in oath["sheet"]["content"]["spells"]
+            if spell["name"] == "Sanctuary"
+        )
+        assert sanctuary["access"]["always_prepared"] is True
+        assert sanctuary["grant"]["source_key"] == "Oath of Devotion"
+
+        sorcerer_sheet = default_character_sheet()
+        sorcerer_sheet["progression"].update(
+            {
+                "level": 10,
+                "classes": [
+                    {
+                        "name": "Sorcerer",
+                        "level": 10,
+                        "subclass": "Draconic Bloodline",
+                        "hit_die": 6,
+                    }
+                ],
+            }
+        )
+        metamagic_id = "dnd5e.content.srd2014.feature.sorcerer-metamagic"
+        sorcerer_sheet["content"]["features"] = [
+            {
+                "id": metamagic_id,
+                "name": "Metamagic",
+                "source_key": "Sorcerer",
+                "description": "Selected Metamagic options.",
+                "choices": {"options": ["Careful Spell", "Distant Spell"]},
+                "advancement_grants": [
+                    {
+                        "level": 3,
+                        "choices": {
+                            "options": ["Careful Spell", "Distant Spell"]
+                        },
+                        "pack_id": "dnd5e.content.srd2014",
+                        "pack_version": CORE_CONTENT_PACK_VERSION,
+                        "rule_refs": [
+                            "bundled:srd2014/02_Classes/Sorcerer.md"
+                        ],
+                    }
+                ],
+                "pack_id": "dnd5e.content.srd2014",
+                "pack_version": CORE_CONTENT_PACK_VERSION,
+                "rule_refs": ["bundled:srd2014/02_Classes/Sorcerer.md"],
+                "mechanic_refs": [],
+            }
+        ]
+        sorcerer = await _call(
+            server,
+            "character_create_from",
+            {
+                "mode": "direct",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "name": "Ember",
+                    "sheet": sorcerer_sheet,
+                },
+                "idempotency_key": "sorcerer",
+            },
+        )
+        with pytest.raises(Exception, match="already selected"):
+            await _call(
+                server,
+                "character_content_apply",
+                {
+                    "character_id": sorcerer["id"],
+                    "artifact_id": metamagic_id,
+                    "selection": {
+                        "grant_level": 10,
+                        "options": ["Careful Spell"],
+                    },
+                    "expected_revision": sorcerer["revision"],
+                    "idempotency_key": "repeat-existing-metamagic",
+                },
+            )
+        repeated = await _call(
+            server,
+            "character_content_apply",
+            {
+                "character_id": sorcerer["id"],
+                "artifact_id": metamagic_id,
+                "selection": {
+                    "grant_level": 10,
+                    "options": ["Quickened Spell"],
+                },
+                "expected_revision": sorcerer["revision"],
+                "idempotency_key": "new-metamagic",
+            },
+        )
+        metamagic = next(
+            item
+            for item in repeated["sheet"]["content"]["features"]
+            if item["id"] == metamagic_id
+        )
+        assert [item["level"] for item in metamagic["advancement_grants"]] == [
+            3,
+            10,
+        ]
+        assert metamagic["advancement_grants"][-1]["choices"] == {
+            "options": ["Quickened Spell"]
+        }
+
+    asyncio.run(exercise())
+
+
+def test_land_druid_bonus_cantrip_and_non_list_circle_spells_are_materialized(
+    tmp_path: Path,
+) -> None:
+    workspace = Path(__file__).resolve().parents[2]
+    config = McpConfig(
+        home=tmp_path / "home",
+        database_url=None,
+        chroma_url=None,
+        chroma_path_override=None,
+        dnd_skills_dir=workspace / "SagaSmith-dnd-skills",
+        modulegen_skills_dir=workspace / "SagaSmith-module-gen-skills",
+        auto_seed_rules=True,
+    )
+
+    async def exercise() -> None:
+        server = create_server(config)
+        campaign = await _call(
+            server,
+            "campaign_create",
+            {
+                "name": "Circle Spell Advancement",
+                "edition": "2014",
+                "idempotency_key": "campaign",
+            },
+        )
+        actor = await _call(
+            server,
+            "character_create_from",
+            {
+                "mode": "direct",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "name": "Rowan",
+                    "sheet": _land_druid_sheet(),
+                },
+                "idempotency_key": "actor",
+            },
+        )
+        bonus = await _call(
+            server,
+            "character_content_apply",
+            {
+                "character_id": actor["id"],
+                "artifact_id": (
+                    "dnd5e.content.srd2014.feature.circle-of-the-land-bonus-cantrip"
+                ),
+                "selection": {
+                    "spell_artifact_id": "dnd5e.content.srd2014.spell.guidance"
+                },
+                "expected_revision": actor["revision"],
+                "idempotency_key": "bonus-cantrip",
+            },
+        )
+        guidance = next(
+            spell
+            for spell in bonus["sheet"]["content"]["spells"]
+            if spell["id"] == "dnd5e.content.srd2014.spell.guidance"
+        )
+        assert guidance["grant"] == {
+            "source_type": "subclass",
+            "source_key": "Circle of the Land",
+            "method": "known",
+        }
+        assert guidance["access"]["known"] is True
+
+        advanced = await _call(
+            server,
+            "character_state_change",
+            {
+                "character_id": actor["id"],
+                "action": "level_advance",
+                "payload": {
+                    "class_name": "Druid",
+                    "hp_method": "fixed",
+                    "reason": "milestone",
+                    "source_ref": "module:chapter-2",
+                },
+                "expected_revision": bonus["revision"],
+                "idempotency_key": "level-3",
+            },
+        )
+        unlocked = {
+            item["name"]
+            for item in advanced["advancement"]["subclass_spell_grants"]
+        }
+        assert unlocked == {"Mirror Image", "Misty Step"}
+        spells = {
+            spell["name"]: spell
+            for spell in advanced["character"]["sheet"]["content"]["spells"]
+        }
+        for name in unlocked:
+            assert spells[name]["access"]["always_prepared"] is True
+            assert spells[name]["grant"]["source_key"] == "Circle of the Land"
+
+    asyncio.run(exercise())
+
+
 def test_ability_score_improvement_is_applied_and_repeats_at_later_unlocks(
     tmp_path: Path,
 ) -> None:
