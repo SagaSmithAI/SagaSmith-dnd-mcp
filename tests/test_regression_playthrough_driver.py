@@ -48,6 +48,7 @@ from scripts.regression_playthrough import (
     _relock_core,
     _resolve_check,
     _restore_phase_after_failed_refresh,
+    _roll_source_table,
     _scene_progress_percent,
     _short_rest,
     _short_rest_identity,
@@ -109,6 +110,7 @@ def test_playthrough_rejects_deferred_checkpoint_for_key_rest() -> None:
 
 def test_scene_resource_actions_support_deferred_checkpoint_batching() -> None:
     assert {
+        "roll-source",
         "spend-coins",
         "spend-item",
         "use-consumable",
@@ -1172,6 +1174,115 @@ def test_read_scene_rejects_mismatched_public_result() -> None:
                 scene_id="scene-1",
             )
         )
+
+
+def test_source_table_roll_is_public_replayable_and_deferred() -> None:
+    source_ref = {
+        "module_id": "module-1",
+        "scene_id": "scene-1",
+        "chunk_id": "chunk-1",
+        "page_start": 27,
+        "page_end": 27,
+        "heading_path": ["Triboar Trail", "Wilderness Encounters"],
+        "content_sha256": "a" * 64,
+    }
+
+    class Client:
+        def __init__(self) -> None:
+            self.campaign_revision = 10
+            self.calls: list[tuple[str, dict]] = []
+
+        async def core(self, tool_id: str, arguments: dict):
+            assert tool_id == "campaign_query"
+            return {
+                "result": {
+                    "id": "campaign-1",
+                    "revision": self.campaign_revision,
+                }
+            }
+
+        async def domain(self, tool_id: str, arguments: dict):
+            self.calls.append((tool_id, arguments))
+            if tool_id == "module_query" and arguments["view"] == "scene":
+                return {
+                    "module_id": "module-1",
+                    "scene_id": "scene-1",
+                    "content": (
+                        "Check for encounters once during the day and once at night "
+                        "by rolling a d20."
+                    ),
+                    "locations": [{"key": "triboar-trail"}],
+                }
+            if tool_id == "module_query" and arguments["view"] == "progress":
+                return [
+                    {
+                        "scene_id": "scene-1",
+                        "status": "active",
+                        "progress": 25,
+                        "state_version": 2,
+                        "state": {},
+                    }
+                ]
+            if tool_id == "branch_query":
+                return [{"id": "branch-1", "is_current": True}]
+            if tool_id == "dnd_dice_roll":
+                assert arguments["expression"] == "1d20"
+                assert arguments["expected_campaign_revision"] == 10
+                self.campaign_revision += 1
+                return {
+                    "total": 18,
+                    "rolls": [18],
+                    "random_stream_receipt": {
+                        "start_position": 42,
+                        "end_position": 43,
+                    },
+                }
+            if tool_id == "module_set_progress":
+                stored = arguments["state"]["full_playthrough_rolls"]
+                assert next(iter(stored.values()))["result"]["total"] == 18
+                assert arguments["expected_state_version"] == 2
+                return {"scene_id": "scene-1", "state_version": 3}
+            if tool_id == "continuity_commit":
+                event = arguments["payload"]["event"]
+                assert event["event_type"] == "source_table_roll"
+                assert event["audience_scope"] == "dm"
+                assert event["payload"]["result"]["total"] == 18
+                assert "snapshot" not in arguments["payload"]
+                self.campaign_revision += 1
+                return {"event": {"id": "event-1"}, "snapshot": None}
+            if tool_id == "playthrough_manifest":
+                assert arguments["action"] == "sync"
+                return {
+                    "manifest": {"status": "in_progress"},
+                    "campaign_revision": self.campaign_revision,
+                }
+            raise AssertionError((tool_id, arguments))
+
+    client = Client()
+    result = asyncio.run(
+        _roll_source_table(
+            client,
+            campaign_id="campaign-1",
+            run_id="run-1",
+            scene_id="scene-1",
+            location_key="triboar-trail",
+            source_excerpt=(
+                "Check for encounters once during the day and once at night "
+                "by rolling a d20."
+            ),
+            source_ref=source_ref,
+            roll_id="travel-day-1-daylight",
+            expression="1d20",
+            reason="Daylight wilderness encounter check.",
+            audience_scope="dm",
+            defer_checkpoint=True,
+        )
+    )
+
+    assert result["roll"]["total"] == 18
+    assert result["random_stream_receipt"]["end_position"] == 43
+    dice_call = next(args for tool, args in client.calls if tool == "dnd_dice_roll")
+    assert dice_call["idempotency_key"].startswith("full-playthrough-source-roll-")
 
 
 def test_stable_party_recovery_uses_one_public_campaign_transition() -> None:

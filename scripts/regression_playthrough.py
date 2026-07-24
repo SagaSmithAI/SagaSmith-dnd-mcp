@@ -27,6 +27,7 @@ from scripts.regression_modules import PRINCIPAL_ID, ExposureClient, _token
 DEFERRED_CHECKPOINT_ACTIONS = frozenset(
     {
         "advance-time",
+        "roll-source",
         "resolve-check",
         "stand-up",
         "record-event",
@@ -78,6 +79,7 @@ def _arguments() -> argparse.Namespace:
             "refresh-module",
             "query-source",
             "read-scene",
+            "roll-source",
             "register-party",
             "register-replacement",
             "prepare-narrative-npc",
@@ -150,6 +152,9 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--damage-expression", default="")
     parser.add_argument("--damage-type", default="")
     parser.add_argument("--damage-reason", default="")
+    parser.add_argument("--roll-id", default="")
+    parser.add_argument("--roll-expression", default="")
+    parser.add_argument("--roll-reason", default="")
     parser.add_argument(
         "--damage-half",
         action="store_true",
@@ -2478,6 +2483,191 @@ def _dice_result(value: dict[str, Any]) -> dict[str, Any]:
     if isinstance(total, bool) or not isinstance(total, int) or total <= 0:
         raise RuntimeError("server dice roll did not return a positive integer total")
     return result
+
+
+async def _roll_source_table(
+    client: ExposureClient,
+    *,
+    campaign_id: str,
+    run_id: str,
+    scene_id: str,
+    location_key: str,
+    source_excerpt: str,
+    source_ref: dict[str, Any] | None,
+    roll_id: str,
+    expression: str,
+    reason: str,
+    audience_scope: str,
+    defer_checkpoint: bool,
+) -> dict[str, Any]:
+    normalized_roll_id = roll_id.strip()
+    normalized_expression = expression.strip()
+    normalized_reason = reason.strip()
+    if not all(
+        (
+            scene_id,
+            location_key,
+            source_excerpt,
+            normalized_roll_id,
+            normalized_expression,
+            normalized_reason,
+        )
+    ):
+        raise ValueError(
+            "roll-source requires scene, location, excerpt, roll id, expression, and reason"
+        )
+    if audience_scope not in {"party", "dm"}:
+        raise ValueError("roll-source audience scope must be party or dm")
+    scene = await client.domain(
+        "module_query",
+        {
+            "campaign_id": campaign_id,
+            "view": "scene",
+            "payload": {"scene_id": scene_id},
+        },
+    )
+    exact_ref = _validate_source_ref(scene, source_ref, excerpt=source_excerpt)
+    location_keys = {str(item.get("key") or "") for item in _scene_locations(scene)}
+    if location_key not in location_keys:
+        raise ValueError("roll-source location is not present in the scene atlas")
+    branches = await client.domain(
+        "branch_query",
+        {"campaign_id": campaign_id, "view": "list"},
+    )
+    branch = next((item for item in branches if item.get("is_current")), None)
+    if branch is None:
+        raise RuntimeError("campaign has no current branch")
+    roll_identity = json.dumps(
+        {
+            "scene_id": scene_id,
+            "location_key": location_key,
+            "roll_id": normalized_roll_id,
+            "expression": normalized_expression,
+            "source_ref": exact_ref,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    campaign = await _campaign(client, campaign_id)
+    rolled = await client.domain(
+        "dnd_dice_roll",
+        {
+            "campaign_id": campaign_id,
+            "expression": normalized_expression,
+            "branch_id": str(branch["id"]),
+            "expected_campaign_revision": campaign["revision"],
+            "idempotency_key": _mutation_key(
+                run_id,
+                "source-roll",
+                roll_identity,
+            ),
+        },
+    )
+    roll_result = _dice_result(rolled)
+    random_receipt = dict(
+        rolled.get("random_stream_receipt")
+        or roll_result.get("random_stream_receipt")
+        or {}
+    )
+    progress_rows = await client.domain(
+        "module_query",
+        {"campaign_id": campaign_id, "view": "progress"},
+    )
+    progress_before = next(
+        (item for item in progress_rows if item.get("scene_id") == scene_id),
+        None,
+    )
+    state = deepcopy(dict((progress_before or {}).get("state") or {}))
+    rolls = deepcopy(dict(state.get("full_playthrough_rolls") or {}))
+    roll_key = _token(f"{run_id}:{roll_identity}", length=24)
+    rolls[roll_key] = {
+        "roll_id": normalized_roll_id,
+        "expression": normalized_expression,
+        "reason": normalized_reason,
+        "result": roll_result,
+        "random_stream_receipt": random_receipt,
+        "source_ref": exact_ref,
+    }
+    state["full_playthrough_rolls"] = rolls
+    progress = await client.domain(
+        "module_set_progress",
+        {
+            "campaign_id": campaign_id,
+            "scene_id": scene_id,
+            "status": str((progress_before or {}).get("status") or "active"),
+            "progress": _scene_progress_percent(progress_before),
+            "state": state,
+            "current_location_key": location_key,
+            "expected_state_version": int(
+                (progress_before or {}).get("state_version", 0) or 0
+            ),
+            "idempotency_key": _mutation_key(
+                run_id,
+                "source-roll-progress",
+                roll_identity,
+            ),
+        },
+    )
+    event_summary = (
+        f"{normalized_reason} Server roll {normalized_expression} = {roll_result['total']}."
+    )
+    campaign = await _campaign(client, campaign_id)
+    continuity_payload: dict[str, Any] = {
+        "event": {
+            "summary": event_summary,
+            "event_type": "source_table_roll",
+            "audience_scope": audience_scope,
+            "payload": {
+                "scene_id": scene_id,
+                "location_key": location_key,
+                "roll_id": normalized_roll_id,
+                "expression": normalized_expression,
+                "result": roll_result,
+                "random_stream_receipt": random_receipt,
+                "source_excerpt": source_excerpt,
+                "source_ref": exact_ref,
+            },
+        },
+        "branch_id": str(branch["id"]),
+    }
+    if not defer_checkpoint:
+        continuity_payload["snapshot"] = {
+            "label": f"Full playthrough source roll: {normalized_roll_id}"
+        }
+    committed = await client.domain(
+        "continuity_commit",
+        {
+            "campaign_id": campaign_id,
+            "payload": continuity_payload,
+            "expected_revision": campaign["revision"],
+            "idempotency_key": _mutation_key(
+                run_id,
+                "source-roll-continuity",
+                roll_identity,
+            ),
+        },
+    )
+    synced = await _manifest_mutation(
+        client,
+        campaign_id=campaign_id,
+        action="sync",
+        run_id=run_id,
+        identity=f"source-roll-sync:{roll_identity}",
+    )
+    return {
+        "scene": {
+            "scene_id": scene_id,
+            "location_key": location_key,
+            "source_ref": exact_ref,
+        },
+        "roll_id": normalized_roll_id,
+        "roll": roll_result,
+        "random_stream_receipt": random_receipt,
+        "progress": progress,
+        "continuity": committed,
+        "sync": synced,
+    }
 
 
 async def _apply_source_damage(
@@ -6043,6 +6233,24 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     reason=args.time_reason,
                     start_clock=args.time_start_clock_json,
                     knowledge_actor_ids=args.knowledge_actor_id,
+                    defer_checkpoint=args.defer_checkpoint,
+                )
+            elif args.action == "roll-source":
+                if phase != "play":
+                    raise RuntimeError("roll-source requires the play phase")
+                await client.load("play.resolution")
+                report["result"] = await _roll_source_table(
+                    client,
+                    campaign_id=args.campaign_id,
+                    run_id=args.run_id,
+                    scene_id=str(args.scene_id or ""),
+                    location_key=args.location_key,
+                    source_excerpt=args.source_excerpt,
+                    source_ref=args.source_ref_json,
+                    roll_id=args.roll_id,
+                    expression=args.roll_expression,
+                    reason=args.roll_reason,
+                    audience_scope=args.event_audience_scope,
                     defer_checkpoint=args.defer_checkpoint,
                 )
             elif args.action == "resolve-check":
