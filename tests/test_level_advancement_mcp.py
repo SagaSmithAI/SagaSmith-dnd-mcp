@@ -1102,6 +1102,38 @@ def test_lobby_level_advance_is_source_bound_and_reports_catalog_follow_up(
         assert len(receipts) == 1
         assert receipts[0]["event"] == "character.level.advance"
 
+        current_character = used["character"]
+        for level in range(3, 7):
+            current_character = (
+                await _call(
+                    server,
+                    "character_state_change",
+                    {
+                        "character_id": actor["id"],
+                        "action": "level_advance",
+                        "payload": {
+                            "class_name": "Cleric",
+                            "hp_method": "fixed",
+                            "reason": f"resource scaling regression level {level}",
+                            "source_ref": f"test:cleric-level-{level}",
+                        },
+                        "expected_revision": current_character["revision"],
+                        "idempotency_key": f"cleric-level-{level}",
+                    },
+                )
+            )["character"]
+        channel_resource = current_character["sheet"]["resources"]["channel_divinity"]
+        assert channel_resource["max"] == 2
+        # One use was spent before leveling. Gaining one point of capacity grants
+        # only that new point; level advancement is not a hidden rest.
+        assert channel_resource["value"] == 1
+        channel_feature = next(
+            item
+            for item in current_character["sheet"]["content"]["features"]
+            if item["id"] == "dnd5e.content.srd2014.feature.cleric-channel-divinity"
+        )
+        assert channel_feature["resource_scaling"]["maximum_by_level"]["18"] == 3
+
         unresolvable_sheet = _cleric_sheet()
         unresolvable_sheet["content"]["selections"][0]["pack_version"] = "9.9.9"
         unresolvable = await _call(

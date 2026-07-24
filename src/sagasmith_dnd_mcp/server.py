@@ -147,6 +147,7 @@ from sagasmith_dnd.progression import (
     apply_per_level_hit_point_bonus,
     award_experience,
     experience_status,
+    synchronize_class_feature_resources,
 )
 from sagasmith_dnd.random_stream import (
     CampaignRandomStream,
@@ -17097,6 +17098,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "selection": selection,
                 }
             )
+        resource_sync = synchronize_class_feature_resources(sheet)
+        sheet = resource_sync["sheet"]
         if spellbook_copy is not None:
             return settle_spellbook_copy(
                 current=current,
