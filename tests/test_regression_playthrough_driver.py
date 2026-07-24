@@ -38,6 +38,7 @@ from scripts.regression_playthrough import (
     _party_member,
     _party_selections,
     _phase_groups,
+    _preflight_level_completion,
     _prepare_narrative_npc,
     _provision_source_item,
     _query_source,
@@ -1777,6 +1778,33 @@ def test_level_advancement_exhausts_public_follow_up_and_restores_play(
                     "content": "The characters divide XP evenly.",
                 }
             if tool_id == "character_query":
+                if arguments["view"] == "advancement":
+                    return {
+                        "status": "ready",
+                        "character_id": "bard-1",
+                        "character_revision": self.actor["revision"],
+                        "new_level": 2,
+                        "follow_up": {
+                            "feature_artifacts": [
+                                {
+                                    "artifact_id": "feature-jack",
+                                    "name": "Jack of All Trades",
+                                    "selection_requirements": {},
+                                    "grant_level": 2,
+                                }
+                            ],
+                            "subclass_options": [],
+                            "spell_choices": {
+                                "cantrips_to_add": 0,
+                                "leveled_spells_to_add": 1,
+                            },
+                            "prepared_spell_event": None,
+                        },
+                        "spellcasting": {
+                            "preparation_mode": "known",
+                            "maximum_spell_level": 1,
+                        },
+                    }
                 return deepcopy(self.actor)
             if tool_id == "branch_query":
                 return [
@@ -1965,6 +1993,100 @@ def test_level_advancement_rejects_malformed_choices_before_public_mutation() ->
                 checkpoint_label="",
             )
         )
+
+
+def test_level_preflight_rejects_missing_feature_choice_without_mutation() -> None:
+    sheet = default_character_sheet()
+    sheet["progression"].update(
+        {
+            "level": 1,
+            "classes": [
+                {
+                    "name": "Fighter",
+                    "level": 1,
+                    "subclass": "",
+                    "hit_die": 10,
+                }
+            ],
+        }
+    )
+    actor = {
+        "id": "fighter-1",
+        "revision": 4,
+        "sheet": sheet,
+    }
+
+    class Client:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict]] = []
+
+        async def domain(self, tool_id: str, arguments: dict):
+            self.calls.append((tool_id, arguments))
+            if tool_id == "character_query":
+                return {
+                    "status": "ready",
+                    "character_id": "fighter-1",
+                    "character_revision": 4,
+                    "new_level": 2,
+                    "follow_up": {
+                        "feature_artifacts": [
+                            {
+                                "artifact_id": "feature-style",
+                                "selection_requirements": {
+                                    "field": "option",
+                                    "options": ["Defense", "Dueling"],
+                                },
+                            }
+                        ],
+                        "subclass_options": [],
+                        "spell_choices": {
+                            "cantrips_to_add": 0,
+                            "leveled_spells_to_add": 0,
+                        },
+                        "prepared_spell_event": None,
+                    },
+                    "spellcasting": {
+                        "preparation_mode": "known",
+                        "maximum_spell_level": 0,
+                    },
+                }
+            if tool_id == "rule_pack_query":
+                assert arguments["payload"]["kind"] == "feature"
+                return [
+                    {
+                        "id": "feature-style",
+                        "name": "Fighting Style",
+                        "selection_requirements": {
+                            "class_name": "Fighter",
+                            "subclass_name": "",
+                            "minimum_level": 1,
+                            "field": "option",
+                            "options": ["Defense", "Dueling"],
+                        },
+                    }
+                ]
+            raise AssertionError((tool_id, arguments))
+
+    client = Client()
+    with pytest.raises(ValueError, match="requires an explicit option choice"):
+        asyncio.run(
+            _preflight_level_completion(
+                client,
+                campaign_id="campaign-1",
+                actor=actor,
+                class_name="Fighter",
+                target_level=2,
+                subclass_artifact_id="",
+                feature_selections={},
+                spell_selections=[],
+                prepared_spell_ids=[],
+            )
+        )
+
+    assert [tool for tool, _ in client.calls] == [
+        "character_query",
+        "rule_pack_query",
+    ]
 
 
 def test_prepared_caster_spell_hydration_does_not_consume_known_spell_quota() -> None:

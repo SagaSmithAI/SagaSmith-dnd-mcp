@@ -348,6 +348,15 @@ def test_manifest_syncs_canonical_state_and_verifies_source_defined_ending(
         assert synced_member["resources"]["death_saves"]["successes"] == 1
         assert synced["runtime"]["world_state"]["combat_active"] is False
         assert synced["manifest"]["random_stream"]["position"] == 0
+        persisted = await _call(
+            server,
+            "campaign_query",
+            {"view": "get", "payload": {"campaign_id": campaign_id}},
+        )
+        assert (
+            persisted["state"]["playthrough_manifest"]["snapshot_dag"]["nodes"]
+            == []
+        )
 
         branches = await _call(
             server,

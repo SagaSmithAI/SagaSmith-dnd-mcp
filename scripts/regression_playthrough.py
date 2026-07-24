@@ -5513,6 +5513,226 @@ def _level_spell_choice_counts(
     return selected_cantrips, selected_leveled, prepared_additions
 
 
+def _required_level_features(
+    *,
+    follow_up: dict[str, Any],
+    feature_catalog: list[dict[str, Any]],
+    actor_sheet: dict[str, Any],
+    class_name: str,
+    subclass_name: str,
+    target_level: int,
+) -> dict[str, dict[str, Any]]:
+    """Preserve the server's dependency order while adding catch-up features."""
+    required: dict[str, dict[str, Any]] = {
+        str(item["artifact_id"]): dict(item)
+        for item in follow_up.get("feature_artifacts") or []
+    }
+    existing_feature_ids = {
+        str(item.get("id") or "")
+        for item in dict(actor_sheet.get("content") or {}).get("features", [])
+    }
+    for item in feature_catalog:
+        catalog_requirements = dict(item.get("selection_requirements") or {})
+        by_level = dict(
+            catalog_requirements.get("selection_requirements_by_level") or {}
+        )
+        level_requirements = dict(
+            by_level.get(str(target_level))
+            or catalog_requirements
+        )
+        artifact_id = str(item.get("id") or "")
+        repeatable_levels = {
+            int(value)
+            for value in catalog_requirements.get(
+                "repeatable_selection_levels", []
+            )
+        }
+        repeat_due = target_level in repeatable_levels
+        if (
+            artifact_id
+            and (artifact_id not in existing_feature_ids or repeat_due)
+            and str(catalog_requirements.get("class_name") or "").casefold()
+            == class_name.casefold()
+            and int(catalog_requirements.get("minimum_level", 1) or 1)
+            <= target_level
+            and (
+                not str(catalog_requirements.get("subclass_name") or "")
+                or str(catalog_requirements.get("subclass_name") or "").casefold()
+                == subclass_name.casefold()
+            )
+        ):
+            required.setdefault(
+                artifact_id,
+                {
+                    "artifact_id": artifact_id,
+                    "name": str(item.get("name") or artifact_id),
+                    "selection_requirements": level_requirements,
+                    "grant_level": target_level if repeat_due else None,
+                },
+            )
+    return required
+
+
+def _validate_level_feature_completion(
+    required_features: dict[str, dict[str, Any]],
+    feature_selections: dict[str, dict[str, Any]],
+) -> None:
+    unknown = set(feature_selections) - set(required_features)
+    if unknown:
+        raise ValueError(
+            "feature selections were supplied for artifacts not required at this level: "
+            + ", ".join(sorted(unknown))
+        )
+    for artifact_id, feature in required_features.items():
+        requirements = dict(feature.get("selection_requirements") or {})
+        choice_field = str(requirements.get("field") or "")
+        selection = feature_selections.get(artifact_id, {})
+        if choice_field and choice_field not in selection:
+            raise ValueError(
+                f"level feature {artifact_id} requires an explicit "
+                f"{choice_field} choice"
+            )
+
+
+async def _preflight_level_completion(
+    client: ExposureClient,
+    *,
+    campaign_id: str,
+    actor: dict[str, Any],
+    class_name: str,
+    target_level: int,
+    subclass_artifact_id: str,
+    feature_selections: dict[str, dict[str, Any]],
+    spell_selections: list[dict[str, str]],
+    prepared_spell_ids: list[str],
+) -> dict[str, Any]:
+    plan = await client.domain(
+        "character_query",
+        {
+            "view": "advancement",
+            "payload": {
+                "character_id": actor["id"],
+                "class_name": class_name,
+            },
+        },
+    )
+    if (
+        plan.get("status") != "ready"
+        or int(plan.get("character_revision", -1)) != int(actor["revision"])
+        or int(plan.get("new_level", 0) or 0) != target_level
+    ):
+        raise ValueError("level advancement plan is not ready for the requested target")
+    follow_up = dict(plan.get("follow_up") or {})
+    subclass_options = list(follow_up.get("subclass_options") or [])
+    selected_subclass = None
+    if subclass_options:
+        if not subclass_artifact_id:
+            raise ValueError("level advancement requires an explicit subclass artifact")
+        selected_subclass = next(
+            (
+                item
+                for item in subclass_options
+                if str(item.get("artifact_id") or "") == subclass_artifact_id
+            ),
+            None,
+        )
+        if selected_subclass is None:
+            raise ValueError("selected subclass is not offered by this level advancement")
+    elif subclass_artifact_id:
+        raise ValueError("this level advancement does not offer a subclass selection")
+
+    feature_catalog = list(
+        _facade_value(
+            await client.domain(
+                "rule_pack_query",
+                {
+                    "view": "content_catalog",
+                    "payload": {"campaign_id": campaign_id, "kind": "feature"},
+                },
+            )
+        )
+    )
+    actor_class = next(
+        item
+        for item in actor["sheet"]["progression"]["classes"]
+        if str(item.get("name") or "").casefold() == class_name.casefold()
+    )
+    planned_subclass = str(
+        (selected_subclass or {}).get("name")
+        or actor_class.get("subclass")
+        or ""
+    )
+    required_features = _required_level_features(
+        follow_up=follow_up,
+        feature_catalog=feature_catalog,
+        actor_sheet=actor["sheet"],
+        class_name=class_name,
+        subclass_name=planned_subclass,
+        target_level=target_level,
+    )
+    _validate_level_feature_completion(required_features, feature_selections)
+
+    spell_catalog = list(
+        _facade_value(
+            await client.domain(
+                "rule_pack_query",
+                {
+                    "view": "content_catalog",
+                    "payload": {"campaign_id": campaign_id, "kind": "spell"},
+                },
+            )
+        )
+    )
+    spell_by_id = {str(item["id"]): item for item in spell_catalog}
+    spell_choices = dict(follow_up.get("spell_choices") or {})
+    prepared_event = str(follow_up.get("prepared_spell_event") or "")
+    spellcasting_plan = dict(plan.get("spellcasting") or {})
+    selected_cantrips, selected_leveled, prepared_additions = (
+        _level_spell_choice_counts(
+            spell_selections,
+            spell_by_id=spell_by_id,
+            class_name=class_name,
+            prepared_event=prepared_event,
+            preparation_mode=str(
+                spellcasting_plan.get("preparation_mode") or "known"
+            ),
+            prepared_spell_ids=prepared_spell_ids,
+            maximum_spell_level=int(
+                spellcasting_plan.get("maximum_spell_level", 0) or 0
+            ),
+        )
+    )
+    required_counts = (
+        int(spell_choices.get("cantrips_to_add", 0) or 0),
+        int(spell_choices.get("leveled_spells_to_add", 0) or 0),
+    )
+    if (selected_cantrips, selected_leveled) != required_counts:
+        raise ValueError(
+            "level spell selections do not satisfy the reported cantrip and "
+            "leveled-spell choices: expected "
+            f"{required_counts[0]}/{required_counts[1]}, got "
+            f"{selected_cantrips}/{selected_leveled}"
+        )
+    if prepared_event and not prepared_spell_ids:
+        raise ValueError(
+            "prepared or spellbook advancement requires an explicit complete "
+            "prepared-spell list"
+        )
+    if not prepared_event and prepared_spell_ids:
+        raise ValueError(
+            "this level advancement does not allow a prepared-spell event"
+        )
+    return {
+        "plan": plan,
+        "follow_up": follow_up,
+        "selected_subclass": selected_subclass,
+        "feature_catalog": feature_catalog,
+        "required_features": required_features,
+        "spell_catalog": spell_catalog,
+        "prepared_spell_additions": prepared_additions,
+    }
+
+
 async def _advance_level(
     client: ExposureClient,
     *,
@@ -5630,6 +5850,25 @@ async def _advance_level(
         "character_query",
         {"view": "get", "payload": {"character_id": actor_id}},
     )
+    actor_level_before_commit = int(
+        dict(dict(actor.get("sheet") or {}).get("progression") or {}).get(
+            "level", 0
+        )
+        or 0
+    )
+    preflight = None
+    if actor_level_before_commit == target_level - 1:
+        preflight = await _preflight_level_completion(
+            client,
+            campaign_id=campaign_id,
+            actor=actor,
+            class_name=normalized_class,
+            target_level=target_level,
+            subclass_artifact_id=subclass_artifact_id,
+            feature_selections=feature_selections,
+            spell_selections=spell_selections,
+            prepared_spell_ids=prepared_spell_ids,
+        )
     advanced = _facade_value(
         await client.domain(
             "character_state_change",
@@ -5653,22 +5892,36 @@ async def _advance_level(
         raise RuntimeError("character level advancement did not commit")
     actor = dict(advanced["character"])
     follow_up = dict(dict(advanced["advancement"]).get("follow_up") or {})
+    if preflight is not None and follow_up != preflight["follow_up"]:
+        raise RuntimeError(
+            "level advancement follow-up changed after its revision-bound plan"
+        )
 
     subclass_options = list(follow_up.get("subclass_options") or [])
-    selected_subclass: dict[str, Any] | None = None
+    selected_subclass: dict[str, Any] | None = (
+        deepcopy(preflight["selected_subclass"])
+        if preflight is not None and preflight["selected_subclass"] is not None
+        else None
+    )
     if subclass_options:
-        if not subclass_artifact_id:
-            raise ValueError("level advancement requires an explicit subclass artifact")
-        selected_subclass = next(
-            (
-                item
-                for item in subclass_options
-                if str(item.get("artifact_id") or "") == subclass_artifact_id
-            ),
-            None,
-        )
         if selected_subclass is None:
-            raise ValueError("selected subclass is not offered by this level advancement")
+            if not subclass_artifact_id:
+                raise ValueError(
+                    "level advancement requires an explicit subclass artifact"
+                )
+            selected_subclass = next(
+                (
+                    item
+                    for item in subclass_options
+                    if str(item.get("artifact_id") or "")
+                    == subclass_artifact_id
+                ),
+                None,
+            )
+            if selected_subclass is None:
+                raise ValueError(
+                    "selected subclass is not offered by this level advancement"
+                )
         applied = _facade_value(
             await client.domain(
                 "character_content_apply",
@@ -5691,61 +5944,46 @@ async def _advance_level(
     elif subclass_artifact_id:
         raise ValueError("this level advancement does not offer a subclass selection")
 
-    feature_catalog = list(
-        _facade_value(
-            await client.domain(
-                "rule_pack_query",
-                {
-                    "view": "content_catalog",
-                    "payload": {"campaign_id": campaign_id, "kind": "feature"},
-                },
+    feature_catalog = (
+        list(preflight["feature_catalog"])
+        if preflight is not None
+        else list(
+            _facade_value(
+                await client.domain(
+                    "rule_pack_query",
+                    {
+                        "view": "content_catalog",
+                        "payload": {
+                            "campaign_id": campaign_id,
+                            "kind": "feature",
+                        },
+                    },
+                )
             )
         )
     )
-    existing_feature_ids = {
-        str(item.get("id") or "")
-        for item in dict(actor["sheet"].get("content") or {}).get("features", [])
-    }
     actor_class = next(
         item
         for item in actor["sheet"]["progression"]["classes"]
         if str(item.get("name") or "").casefold() == normalized_class.casefold()
     )
     actor_subclass = str(actor_class.get("subclass") or "")
-    required_features: dict[str, dict[str, Any]] = {
-        str(item["artifact_id"]): dict(item) for item in follow_up.get("feature_artifacts") or []
-    }
-    for item in feature_catalog:
-        requirements = dict(item.get("selection_requirements") or {})
-        artifact_id = str(item.get("id") or "")
-        if (
-            artifact_id
-            and artifact_id not in existing_feature_ids
-            and str(requirements.get("class_name") or "").casefold() == normalized_class.casefold()
-            and int(requirements.get("minimum_level", 1) or 1) <= target_level
-            and (
-                not str(requirements.get("subclass_name") or "")
-                or str(requirements.get("subclass_name") or "").casefold()
-                == actor_subclass.casefold()
-            )
-        ):
-            required_features.setdefault(
-                artifact_id,
-                {
-                    "artifact_id": artifact_id,
-                    "name": str(item.get("name") or artifact_id),
-                    "selection_requirements": requirements,
-                },
-            )
-    unknown_feature_selections = set(feature_selections) - set(required_features)
-    if unknown_feature_selections:
-        raise ValueError(
-            "feature selections were supplied for artifacts not required at this level: "
-            + ", ".join(sorted(unknown_feature_selections))
+    required_features = (
+        deepcopy(preflight["required_features"])
+        if preflight is not None
+        else _required_level_features(
+            follow_up=follow_up,
+            feature_catalog=feature_catalog,
+            actor_sheet=actor["sheet"],
+            class_name=normalized_class,
+            subclass_name=actor_subclass,
+            target_level=target_level,
         )
+    )
+    _validate_level_feature_completion(required_features, feature_selections)
     applied_features: list[dict[str, Any]] = []
     feature_spell_grants: list[dict[str, Any]] = []
-    for artifact_id, feature in sorted(required_features.items()):
+    for artifact_id, feature in required_features.items():
         requirements = dict(feature.get("selection_requirements") or {})
         selection = deepcopy(feature_selections.get(artifact_id, {}))
         choice_field = str(requirements.get("field") or "")
@@ -5780,14 +6018,21 @@ async def _advance_level(
         actor = dict(applied.get("character") or applied)
         applied_features.append({"artifact_id": artifact_id, "selection": deepcopy(selection)})
 
-    spell_catalog = list(
-        _facade_value(
-            await client.domain(
-                "rule_pack_query",
-                {
-                    "view": "content_catalog",
-                    "payload": {"campaign_id": campaign_id, "kind": "spell"},
-                },
+    spell_catalog = (
+        list(preflight["spell_catalog"])
+        if preflight is not None
+        else list(
+            _facade_value(
+                await client.domain(
+                    "rule_pack_query",
+                    {
+                        "view": "content_catalog",
+                        "payload": {
+                            "campaign_id": campaign_id,
+                            "kind": "spell",
+                        },
+                    },
+                )
             )
         )
     )
@@ -5988,6 +6233,9 @@ async def _advance_level(
         "applied_features": applied_features,
         "applied_spells": applied_spells,
         "feature_spell_grants": feature_spell_grants,
+        "advancement_plan": (
+            deepcopy(preflight["plan"]) if preflight is not None else None
+        ),
         "prepared_spell_additions": prepared_additions,
         "prepared": prepared,
         "phase_changes": phase_changes,

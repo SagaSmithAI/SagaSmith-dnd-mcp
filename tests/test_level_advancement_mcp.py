@@ -597,6 +597,95 @@ def test_feature_granted_spells_and_invocation_prerequisites_are_settled(
     asyncio.run(exercise())
 
 
+def test_level_plan_is_read_only_and_orders_feature_resource_dependencies(
+    tmp_path: Path,
+) -> None:
+    workspace = Path(__file__).resolve().parents[2]
+    config = McpConfig(
+        home=tmp_path / "home",
+        database_url=None,
+        chroma_url=None,
+        chroma_path_override=None,
+        dnd_skills_dir=workspace / "SagaSmith-dnd-skills",
+        modulegen_skills_dir=workspace / "SagaSmith-module-gen-skills",
+        auto_seed_rules=True,
+    )
+
+    async def exercise() -> None:
+        server = create_server(config)
+        campaign = await _call(
+            server,
+            "campaign_create",
+            {
+                "name": "Read-only advancement plan",
+                "edition": "2014",
+                "idempotency_key": "campaign",
+            },
+        )
+        sheet = default_character_sheet()
+        sheet["progression"].update(
+            {
+                "level": 1,
+                "classes": [
+                    {
+                        "name": "Cleric",
+                        "level": 1,
+                        "subclass": "Life Domain",
+                        "hit_die": 8,
+                    }
+                ],
+            }
+        )
+        cleric = await _call(
+            server,
+            "character_create_from",
+            {
+                "mode": "direct",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "name": "Mercy",
+                    "sheet": sheet,
+                },
+                "idempotency_key": "cleric",
+            },
+        )
+
+        plan = await _call(
+            server,
+            "character_query",
+            {
+                "view": "advancement",
+                "payload": {
+                    "character_id": cleric["id"],
+                    "class_name": "Cleric",
+                },
+            },
+        )
+        feature_ids = [
+            item["artifact_id"]
+            for item in plan["follow_up"]["feature_artifacts"]
+        ]
+        channel_id = (
+            "dnd5e.content.srd2014.feature.cleric-channel-divinity"
+        )
+        preserve_id = (
+            "dnd5e.content.srd2014.feature.life-domain-channel-divinity-preserve-life"
+        )
+        assert feature_ids.index(channel_id) < feature_ids.index(preserve_id)
+        assert plan["new_level"] == 2
+
+        unchanged = await _call(
+            server,
+            "character_query",
+            {"view": "get", "payload": {"character_id": cleric["id"]}},
+        )
+        assert unchanged["revision"] == cleric["revision"]
+        assert unchanged["sheet"]["progression"]["level"] == 1
+        assert unchanged["sheet"]["resources"] == cleric["sheet"]["resources"]
+
+    asyncio.run(exercise())
+
+
 def test_land_druid_bonus_cantrip_and_non_list_circle_spells_are_materialized(
     tmp_path: Path,
 ) -> None:

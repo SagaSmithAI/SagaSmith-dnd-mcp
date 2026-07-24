@@ -10617,6 +10617,104 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             rule_receipts=receipts,
         )
 
+    def character_level_advancement_plan(
+        character_id: str,
+        class_name: str,
+        principal_id: str = "system:local",
+    ) -> dict[str, Any]:
+        """Preview all source-bound follow-up work without committing a level."""
+        current = characters.get(character_id)
+        require_character_control(current, principal_id)
+        require_outside_active_combat(current, "level advancement planning")
+        if current.campaign_id is None:
+            raise ValueError("level advancement planning requires a campaign-bound character")
+        if not is_dm(current.campaign_id, principal_id):
+            raise PermissionError("level advancement planning requires the campaign DM")
+        campaign = campaigns.get(current.campaign_id)
+        if dict(campaign.state or {}).get("game_phase", PROFILE_LOBBY) != PROFILE_LOBBY:
+            raise CombatEngineError("switch to lobby before planning a character level")
+        branch_id = require_current_branch(current.campaign_id, None)
+        old_level = int(current.sheet.get("progression", {}).get("level", 0) or 0)
+        experience = experience_status(current.sheet)
+        advancement_mode = campaign_advancement_mode(campaign)
+        context = level_advancement_content_context(
+            current.campaign_id,
+            current.sheet,
+            class_name=class_name,
+            new_level=old_level + 1,
+            branch_id=branch_id,
+        )
+        preview = advance_single_class_level(
+            current.sheet,
+            class_name=class_name,
+            hp_method="fixed",
+            hp_per_level_bonus=int(context["hp_per_level_bonus"]),
+            source="read-only advancement plan",
+        )
+        spellcasting = dict(preview["sheet"].get("spellcasting") or {})
+        preparation = dict(spellcasting.get("preparation") or {})
+        maximum_spell_level = max(
+            [
+                int(level)
+                for level, resource in dict(
+                    spellcasting.get("spell_slots") or {}
+                ).items()
+                if int(dict(resource).get("max", 0) or 0) > 0
+            ]
+            + [
+                int(
+                    dict(spellcasting.get("pact_magic") or {}).get(
+                        "slot_level", 0
+                    )
+                    or 0
+                )
+            ]
+        )
+        follow_up = {
+            "feature_artifacts": context["feature_options"],
+            "subclass_options": context["subclass_options"],
+            "spell_choices": preview["spell_choices"],
+            "prepared_spell_event": (
+                "level_up"
+                if preview["spellcasting"].get("mode")
+                in {"prepared", "spellbook"}
+                else None
+            ),
+        }
+        follow_up["complete"] = not (
+            follow_up["feature_artifacts"]
+            or follow_up["subclass_options"]
+            or any(
+                int(value)
+                for value in dict(follow_up["spell_choices"]).values()
+            )
+            or follow_up["prepared_spell_event"]
+        )
+        return {
+            "status": (
+                "ready"
+                if advancement_mode != "xp" or experience["eligible"]
+                else "ineligible"
+            ),
+            "character_id": current.id,
+            "character_revision": current.revision,
+            "campaign_id": current.campaign_id,
+            "campaign_revision": campaign.revision,
+            "branch_id": branch_id,
+            "class_name": str(class_name).strip(),
+            "old_level": old_level,
+            "new_level": old_level + 1,
+            "mode": advancement_mode,
+            "experience": experience,
+            "hp_bonus_sources": context["hp_bonus_sources"],
+            "follow_up": follow_up,
+            "spellcasting": {
+                "mode": str(preview["spellcasting"].get("mode") or ""),
+                "preparation_mode": str(preparation.get("mode") or "known"),
+                "maximum_spell_level": maximum_spell_level,
+            },
+        }
+
     @mcp.tool()
     def character_cast_spell(
         character_id: str,
@@ -15296,6 +15394,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         "pack_id": pack_id,
                         "pack_version": version,
                         "rule_refs": list(artifact.get("rule_refs") or []),
+                        "_provides_resources": list(
+                            dict(
+                                dict(card.get("mechanical_grants") or {}).get(
+                                    "resources"
+                                )
+                                or {}
+                            )
+                        ),
+                        "_requires_resource": str(card.get("resource_key") or ""),
                     }
                 )
             if kind == "subclass" and not subclass_name:
@@ -15309,13 +15416,44 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         "rule_refs": list(artifact.get("rule_refs") or []),
                     }
                 )
+        ordered_features: list[dict[str, Any]] = []
+        pending_features = sorted(
+            feature_options,
+            key=lambda item: (
+                item["minimum_level"],
+                item["name"],
+                item["artifact_id"],
+            ),
+        )
+        provided_resources = {
+            str(key) for key in dict(sheet.get("resources") or {})
+        }
+        while pending_features:
+            pending_providers = {
+                str(resource_key)
+                for item in pending_features
+                for resource_key in item.get("_provides_resources", [])
+            }
+            ready_index = next(
+                (
+                    index
+                    for index, item in enumerate(pending_features)
+                    if not str(item.get("_requires_resource") or "")
+                    or str(item["_requires_resource"]) in provided_resources
+                    or str(item["_requires_resource"]) not in pending_providers
+                ),
+                0,
+            )
+            selected = pending_features.pop(ready_index)
+            provided_resources.update(
+                str(value) for value in selected.pop("_provides_resources", [])
+            )
+            selected.pop("_requires_resource", None)
+            ordered_features.append(selected)
         return {
             "hp_per_level_bonus": hp_per_level_bonus,
             "hp_bonus_sources": hp_bonus_sources,
-            "feature_options": sorted(
-                feature_options,
-                key=lambda item: (item["minimum_level"], item["name"], item["artifact_id"]),
-            ),
+            "feature_options": ordered_features,
             "subclass_options": sorted(
                 subclass_options, key=lambda item: (item["name"], item["artifact_id"])
             ),
@@ -17600,7 +17738,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
 
     @mcp.tool()
     def character_query(
-        view: Literal["get", "batch", "list", "library", "document", "rest"] = "list",
+        view: Literal[
+            "get",
+            "batch",
+            "list",
+            "library",
+            "document",
+            "rest",
+            "advancement",
+        ] = "list",
         payload: dict[str, Any] | None = None,
         principal_id: str = "system:local",
     ) -> dict[str, Any]:
@@ -17644,6 +17790,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 result = [
                     visible_character_view(character, principal_id) for character in selected
                 ]
+        elif view == "advancement":
+            result = character_level_advancement_plan(
+                str(required(data, "character_id")),
+                str(required(data, "class_name")),
+                principal_id,
+            )
         elif view == "rest":
             character_id = str(required(data, "character_id"))
             current = characters.get(character_id)
@@ -19165,8 +19317,19 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 else:
                     next_manifest["ending"]["status"] = "pending"
                 next_manifest = validate_playthrough_manifest(next_manifest)
+        persisted_manifest = deepcopy(next_manifest)
+        # Snapshot nodes are authoritative in core tables and are projected on
+        # every public manifest read. Persisting the full derived DAG inside
+        # campaign state makes each revision and snapshot recursively repeat
+        # all prior checkpoint metadata.
+        persisted_manifest["snapshot_dag"]["nodes"] = []
         next_state = validate_party_state(
-            {**deepcopy(campaign.state), "playthrough_manifest": next_manifest}
+            {
+                **deepcopy(campaign.state),
+                "playthrough_manifest": validate_playthrough_manifest(
+                    persisted_manifest
+                ),
+            }
         )
         StateMutationService(storage.database).replace(
             campaign_id,
