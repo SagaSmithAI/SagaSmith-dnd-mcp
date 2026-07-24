@@ -31,6 +31,9 @@ packages = ["src/sagasmith_dnd_mcp"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+markers = [
+    "fresh_database: bypass the test database template to exercise real migration and seed startup",
+]
 
 [tool.ruff]
 line-length = 100

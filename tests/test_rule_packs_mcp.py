@@ -10,6 +10,7 @@ from sagasmith_dnd_mcp.config import McpConfig
 from sagasmith_dnd_mcp.server import create_server
 
 
+@pytest.mark.fresh_database
 def test_core_srd_content_catalog_is_structured_and_selectable(tmp_path: Path) -> None:
     workspace = Path(__file__).resolve().parents[2]
     config = McpConfig(
