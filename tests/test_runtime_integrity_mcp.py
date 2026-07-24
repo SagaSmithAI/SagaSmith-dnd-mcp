@@ -6,11 +6,74 @@ from pathlib import Path
 
 import pytest
 from mcp.server.fastmcp.exceptions import ToolError
+from sagasmith_core import IdempotencyService
 from sagasmith_dnd.character_schema import default_character_sheet
 
 import sagasmith_dnd_mcp.server as server_module
 from sagasmith_dnd_mcp.config import McpConfig
 from sagasmith_dnd_mcp.server import create_server
+
+
+def test_committed_write_recovers_after_response_receipt_crash(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = McpConfig(
+        home=tmp_path / "home",
+        database_url=None,
+        chroma_url=None,
+        chroma_path_override=None,
+        dnd_skills_dir=tmp_path / "dnd",
+        modulegen_skills_dir=tmp_path / "modulegen",
+        auto_seed_rules=False,
+    )
+
+    async def call(server, name: str, arguments: dict):
+        _, result = await server.call_tool(name, arguments)
+        return result.get("result", result) if isinstance(result, dict) else result
+
+    async def exercise() -> None:
+        server = create_server(config)
+        campaign = await call(
+            server,
+            "campaign_create",
+            {"name": "Crash recovery", "edition": "2014", "idempotency_key": "campaign"},
+        )
+        arguments = {
+            "campaign_id": campaign["id"],
+            "tool_profile": "play",
+            "expected_revision": campaign["revision"],
+            "idempotency_key": "phase-after-commit",
+        }
+        original_remember = IdempotencyService.remember
+        failed = False
+
+        def fail_after_commit(self, scope, key, payload, response, **kwargs):
+            nonlocal failed
+            if key == "phase-after-commit" and not failed:
+                failed = True
+                raise RuntimeError("simulated response receipt crash")
+            return original_remember(self, scope, key, payload, response, **kwargs)
+
+        monkeypatch.setattr(IdempotencyService, "remember", fail_after_commit)
+        with pytest.raises(ToolError, match="simulated response receipt crash"):
+            await call(server, "game_phase_set", arguments)
+        monkeypatch.setattr(IdempotencyService, "remember", original_remember)
+
+        replay = await call(server, "game_phase_set", arguments)
+        assert replay == {
+            "status": "committed",
+            "idempotency_replayed": True,
+            "response_recovery": "read_current_state",
+        }
+        with pytest.raises(ToolError, match="different request"):
+            await call(
+                server,
+                "game_phase_set",
+                {**arguments, "tool_profile": "lobby"},
+            )
+
+    asyncio.run(exercise())
 
 
 def test_2024_prepared_spell_changes_follow_phase_and_long_rest_rules(tmp_path: Path) -> None:

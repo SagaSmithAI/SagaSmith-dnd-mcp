@@ -2,17 +2,52 @@
 
 from __future__ import annotations
 
+from contextvars import ContextVar
 from copy import deepcopy
+from dataclasses import dataclass
 from typing import Any
 
 from sagasmith_core import CampaignService
 from sagasmith_core import StateMutationService as CoreStateMutationService
+from sagasmith_core.idempotency import request_hash
 from sagasmith_dnd.character_schema import validate_party_state
 from sagasmith_dnd.random_stream import active_random_stream
 
 
+@dataclass(frozen=True)
+class PendingIdempotencyRequest:
+    campaign_id: str
+    branch_id: str | None
+    key: str
+    request_hash: str
+
+
+_PENDING_IDEMPOTENCY_REQUEST: ContextVar[PendingIdempotencyRequest | None] = ContextVar(
+    "sagasmith_dnd_mcp_pending_idempotency_request",
+    default=None,
+)
+
+
+def bind_idempotency_request(
+    campaign_id: str,
+    branch_id: str | None,
+    key: str,
+    payload: Any,
+) -> None:
+    """Bind the public request digest to the next mutation in this call context."""
+
+    _PENDING_IDEMPOTENCY_REQUEST.set(
+        PendingIdempotencyRequest(
+            campaign_id=campaign_id,
+            branch_id=branch_id,
+            key=key,
+            request_hash=request_hash(payload),
+        )
+    )
+
+
 class RandomStateMutationService(CoreStateMutationService):
-    """Persist active random-stream progress with the domain mutation that used it."""
+    """Persist random progress and the public retry digest with one mutation."""
 
     def replace(
         self,
@@ -21,6 +56,17 @@ class RandomStateMutationService(CoreStateMutationService):
         campaign_state: dict[str, Any] | None = None,
         **kwargs: Any,
     ):
+        idempotency_key = kwargs.get("idempotency_key")
+        branch_id = kwargs.get("branch_id")
+        pending = _PENDING_IDEMPOTENCY_REQUEST.get()
+        if (
+            idempotency_key
+            and pending is not None
+            and pending.campaign_id == campaign_id
+            and pending.key == idempotency_key
+            and (branch_id is None or branch_id == pending.branch_id)
+        ):
+            kwargs["idempotency_request_hash"] = pending.request_hash
         stream = active_random_stream()
         should_persist = (
             stream is not None
@@ -43,4 +89,3 @@ class RandomStateMutationService(CoreStateMutationService):
         if should_persist:
             stream.mark_persisted()
         return result
-

@@ -204,7 +204,12 @@ from sqlalchemy.exc import NoResultFound
 
 from sagasmith_dnd_mcp.config import McpConfig
 from sagasmith_dnd_mcp.exposure import Exposure, ExposureError, ExposureRegistry
-from sagasmith_dnd_mcp.random_state import RandomStateMutationService as StateMutationService
+from sagasmith_dnd_mcp.random_state import (
+    RandomStateMutationService as StateMutationService,
+)
+from sagasmith_dnd_mcp.random_state import (
+    bind_idempotency_request,
+)
 from sagasmith_dnd_mcp.skills import SkillCatalog
 from sagasmith_dnd_mcp.storage import SagaSmithStorage
 from sagasmith_dnd_mcp.tool_profiles import (
@@ -2295,6 +2300,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if result is not None:
             return result.response
         campaign_id = scope.split(":", 2)[1] if ":" in scope else ""
+        if campaign_id:
+            bind_idempotency_request(
+                campaign_id,
+                current_branch_id(campaign_id),
+                key,
+                payload,
+            )
         if campaign_id and idempotency.mutation_committed(
             campaign_id,
             key,
