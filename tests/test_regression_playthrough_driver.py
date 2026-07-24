@@ -39,6 +39,7 @@ from scripts.regression_playthrough import (
     _prepare_narrative_npc,
     _provision_source_item,
     _query_source,
+    _read_scene,
     _record_event,
     _record_outcome,
     _recover_committed_check,
@@ -1121,6 +1122,56 @@ def test_query_source_searches_and_expands_only_public_mcp_results() -> None:
         ),
         ("module_expand", {"chunk_id": "chunk-1"}),
     ]
+
+
+def test_read_scene_uses_exact_public_mcp_scene_query() -> None:
+    class Client:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict]] = []
+
+        async def domain(self, tool_id: str, arguments: dict):
+            self.calls.append((tool_id, arguments))
+            return {
+                "scene_id": "scene-1",
+                "title": "Triboar Trail",
+                "content": "Assume that the party travels twenty-four miles per day.",
+            }
+
+    client = Client()
+    result = asyncio.run(
+        _read_scene(
+            client,
+            campaign_id="campaign-1",
+            scene_id="  scene-1  ",
+        )
+    )
+
+    assert result["scene_id"] == "scene-1"
+    assert client.calls == [
+        (
+            "module_query",
+            {
+                "campaign_id": "campaign-1",
+                "view": "scene",
+                "payload": {"scene_id": "scene-1", "scope_id": "dm"},
+            },
+        )
+    ]
+
+
+def test_read_scene_rejects_mismatched_public_result() -> None:
+    class Client:
+        async def domain(self, tool_id: str, arguments: dict):
+            return {"scene_id": "scene-other"}
+
+    with pytest.raises(RuntimeError, match="different scene"):
+        asyncio.run(
+            _read_scene(
+                Client(),
+                campaign_id="campaign-1",
+                scene_id="scene-1",
+            )
+        )
 
 
 def test_stable_party_recovery_uses_one_public_campaign_transition() -> None:

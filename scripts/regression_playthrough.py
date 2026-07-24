@@ -77,6 +77,7 @@ def _arguments() -> argparse.Namespace:
             "relock-core",
             "refresh-module",
             "query-source",
+            "read-scene",
             "register-party",
             "register-replacement",
             "prepare-narrative-npc",
@@ -347,6 +348,34 @@ async def _query_source(
         "hits": hits,
         "expanded_chunks": expanded,
     }
+
+
+async def _read_scene(
+    client: ExposureClient,
+    *,
+    campaign_id: str,
+    scene_id: str,
+) -> dict[str, Any]:
+    normalized_scene_id = scene_id.strip()
+    if not normalized_scene_id:
+        raise ValueError("read-scene requires --scene-id")
+    result = await client.domain(
+        "module_query",
+        {
+            "campaign_id": campaign_id,
+            "view": "scene",
+            "payload": {
+                "scene_id": normalized_scene_id,
+                "scope_id": "dm",
+            },
+        },
+    )
+    if not isinstance(result, dict):
+        raise RuntimeError("module_query returned an invalid scene")
+    returned_scene_id = str(result.get("scene_id") or result.get("id") or "")
+    if returned_scene_id != normalized_scene_id:
+        raise RuntimeError("module_query returned a different scene")
+    return result
 
 
 def _server_parameters(args: argparse.Namespace) -> StdioServerParameters:
@@ -5964,6 +5993,14 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     query=args.source_query,
                     top_k=args.source_top_k,
                     expand=args.source_expand,
+                )
+            elif args.action == "read-scene":
+                if phase == "lobby":
+                    await client.load("lobby.modules")
+                report["result"] = await _read_scene(
+                    client,
+                    campaign_id=args.campaign_id,
+                    scene_id=str(args.scene_id or ""),
                 )
             elif args.action == "advance-scene":
                 if phase != "play":
