@@ -16167,6 +16167,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     if requirements.get("requires_existing_proficiency"):
                         for item in selected_values:
                             skill = sheet["skills"].get(item.casefold())
+                            if requirements.get("skills_only") and skill is None:
+                                raise ValueError(
+                                    "feature expertise choice must be an existing skill"
+                                )
                             tool_known = item.casefold() in {
                                 value.casefold()
                                 for value in sheet["traits"]["proficiencies"]["tools"]
@@ -16179,6 +16183,21 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                                 )
                             if skill is not None:
                                 skill["proficiency"] = "expertise"
+                    if requirements.get("grants_skill_proficiency"):
+                        for item in selected_values:
+                            skill = sheet["skills"].get(item.casefold())
+                            if skill is None:
+                                raise ValueError(
+                                    "feature proficiency choice must be an existing skill"
+                                )
+                            if (
+                                requirements.get("requires_untrained_skill")
+                                and skill.get("proficiency") != "none"
+                            ):
+                                raise ValueError(
+                                    "feature proficiency choice must be an untrained skill"
+                                )
+                            skill["proficiency"] = "proficient"
                 mechanical_grants = dict(card.get("mechanical_grants") or {})
                 armor = sheet["traits"]["proficiencies"]["armor"]
                 sheet["traits"]["proficiencies"]["armor"] = list(

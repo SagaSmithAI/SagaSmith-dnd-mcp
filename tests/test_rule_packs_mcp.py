@@ -280,6 +280,68 @@ def test_core_srd_content_catalog_is_structured_and_selectable(tmp_path: Path) -
         assert healed["after_hp"] == 12
         assert healed["source"]["actor_id"] == cleric["id"]
 
+        bard_sheet = default_character_sheet()
+        bard_sheet["progression"].update(
+            {
+                "level": 3,
+                "classes": [
+                    {
+                        "name": "Bard",
+                        "level": 3,
+                        "subclass": "College of Lore",
+                        "hit_die": 8,
+                    }
+                ],
+            }
+        )
+        for skill in ("deception", "insight", "perception", "performance"):
+            bard_sheet["skills"][skill]["proficiency"] = "proficient"
+        bard = await call(
+            server,
+            "character_create",
+            {
+                "campaign_id": campaign["id"],
+                "name": "Lore Bard",
+                "sheet": bard_sheet,
+                "idempotency_key": "catalog-lore-bard",
+            },
+        )
+        bard = await call(
+            server,
+            "character_content_apply",
+            {
+                "character_id": bard["id"],
+                "artifact_id": "dnd5e.content.srd2014.feature.bard-expertise",
+                "selection": {"proficiencies": ["deception", "performance"]},
+                "expected_revision": bard["revision"],
+                "idempotency_key": "catalog-bard-expertise",
+            },
+        )
+        assert bard["sheet"]["skills"]["deception"]["proficiency"] == "expertise"
+        assert bard["sheet"]["skills"]["performance"]["proficiency"] == "expertise"
+        bard = await call(
+            server,
+            "character_content_apply",
+            {
+                "character_id": bard["id"],
+                "artifact_id": (
+                    "dnd5e.content.srd2014.feature."
+                    "college-of-lore-bonus-proficiencies"
+                ),
+                "selection": {"skills": ["arcana", "investigation", "persuasion"]},
+                "expected_revision": bard["revision"],
+                "idempotency_key": "catalog-lore-proficiencies",
+            },
+        )
+        assert {
+            skill: bard["sheet"]["skills"][skill]["proficiency"]
+            for skill in ("arcana", "investigation", "persuasion")
+        } == {
+            "arcana": "proficient",
+            "investigation": "proficient",
+            "persuasion": "proficient",
+        }
+
         backgrounds = await call(
             server,
             "content_catalog_list",
