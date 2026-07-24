@@ -112,6 +112,7 @@ def test_playthrough_rejects_deferred_checkpoint_for_key_rest() -> None:
 
 def test_scene_resource_actions_support_deferred_checkpoint_batching() -> None:
     assert {
+        "advance-level",
         "roll-source",
         "spend-coins",
         "spend-item",
@@ -1702,7 +1703,10 @@ def test_advancement_configuration_uses_public_campaign_change() -> None:
     assert result["phase_changes"] == []
 
 
-def test_level_advancement_exhausts_public_follow_up_and_restores_play() -> None:
+@pytest.mark.parametrize("defer_checkpoint", [False, True])
+def test_level_advancement_exhausts_public_follow_up_and_restores_play(
+    defer_checkpoint: bool,
+) -> None:
     source_ref = {
         "module_id": "module-1",
         "scene_id": "scene-1",
@@ -1899,6 +1903,7 @@ def test_level_advancement_exhausts_public_follow_up_and_restores_play() -> None
             ],
             prepared_spell_ids=[],
             checkpoint_label="Bard reaches level 2",
+            defer_checkpoint=defer_checkpoint,
         )
     )
 
@@ -1906,7 +1911,12 @@ def test_level_advancement_exhausts_public_follow_up_and_restores_play() -> None
     assert result["actor"]["sheet"]["progression"]["level"] == 2
     assert result["applied_features"] == [{"artifact_id": "feature-jack", "selection": {}}]
     assert result["applied_spells"] == ["spell-heroism"]
-    assert result["checkpoint"]["verification"] == {"valid": True}
+    if defer_checkpoint:
+        assert result["checkpoint"] is None
+        assert "snapshot_create" not in client.calls
+    else:
+        assert result["checkpoint"]["verification"] == {"valid": True}
+        assert client.calls.count("snapshot_create") == 1
     assert client.calls.count("game_phase") == 2
     assert "character_state_change" in client.calls
     assert "character_content_apply" in client.calls

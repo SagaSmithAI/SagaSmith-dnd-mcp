@@ -40,6 +40,7 @@ DEFERRED_CHECKPOINT_ACTIONS = frozenset(
         "spend-coins",
         "spend-item",
         "use-consumable",
+        "advance-level",
     }
 )
 
@@ -5475,6 +5476,7 @@ async def _advance_level(
     spell_selection_values: list[dict[str, Any]],
     prepared_spell_ids: list[str],
     checkpoint_label: str,
+    defer_checkpoint: bool = False,
 ) -> dict[str, Any]:
     normalized_class = class_name.strip()
     normalized_reason = reason.strip()
@@ -5879,15 +5881,17 @@ async def _advance_level(
             )
             await client.open(campaign_id)
             await client.load("play.scene", "play.scene_control")
-    label = checkpoint_label.strip() or (
-        f"Level {target_level} advancement: {verified_actor['name']}"
-    )
-    checkpoint = await _checkpoint(
-        client,
-        campaign_id=campaign_id,
-        run_id=run_id,
-        label=label,
-    )
+    checkpoint = None
+    if not defer_checkpoint:
+        label = checkpoint_label.strip() or (
+            f"Level {target_level} advancement: {verified_actor['name']}"
+        )
+        checkpoint = await _checkpoint(
+            client,
+            campaign_id=campaign_id,
+            run_id=run_id,
+            label=label,
+        )
     return {
         "actor": verified_actor,
         "target_level": target_level,
@@ -6773,6 +6777,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     spell_selection_values=args.level_spell_json,
                     prepared_spell_ids=args.level_prepared_spell_id,
                     checkpoint_label=args.checkpoint_label,
+                    defer_checkpoint=args.defer_checkpoint,
                 )
             elif args.action == "checkpoint":
                 label = args.checkpoint_label or f"Full playthrough checkpoint: {args.run_id}"
