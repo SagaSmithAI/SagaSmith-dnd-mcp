@@ -34,6 +34,9 @@ DEFERRED_CHECKPOINT_ACTIONS = frozenset(
         "provision-source-item",
         "transfer-source-item",
         "acquire-loot",
+        "spend-coins",
+        "spend-item",
+        "use-consumable",
     }
 )
 
@@ -4051,6 +4054,7 @@ async def _spend_source_currency(
     rule_ref: str,
     knowledge_actor_ids: list[str],
     source_scene_id: str = "",
+    defer_checkpoint: bool = False,
 ) -> dict[str, Any]:
     normalized_spend_id = spend_id.strip()
     normalized_reason = reason.strip()
@@ -4165,41 +4169,43 @@ async def _spend_source_currency(
     if branch is None:
         raise RuntimeError("campaign has no current branch")
     campaign = await _campaign(client, campaign_id)
+    continuity_payload = {
+        "event": {
+            "summary": normalized_reason,
+            "event_type": "currency_spent",
+            "audience_scope": "party",
+            "payload": {
+                "scene_id": scene_id,
+                "location_key": location_key,
+                "spend_id": normalized_spend_id,
+                "coins": deepcopy(coins),
+                "source_excerpt": source_excerpt.strip(),
+                "source_ref": exact_ref,
+                "rule_ref": normalized_rule_ref,
+            },
+        },
+        "actor_knowledge": [
+            {
+                "actor_id": actor_id,
+                "knowledge_key": (
+                    f"playthrough.{_token(run_id)}.spend.{_token(normalized_spend_id)}"
+                ),
+                "proposition": normalized_reason,
+                "disclosure_scope": "owner",
+            }
+            for actor_id in recipients
+        ],
+        "branch_id": str(branch["id"]),
+    }
+    if not defer_checkpoint:
+        continuity_payload["snapshot"] = {
+            "label": f"Full playthrough currency spend: {normalized_spend_id}"
+        }
     committed = await client.domain(
         "continuity_commit",
         {
             "campaign_id": campaign_id,
-            "payload": {
-                "event": {
-                    "summary": normalized_reason,
-                    "event_type": "currency_spent",
-                    "audience_scope": "party",
-                    "payload": {
-                        "scene_id": scene_id,
-                        "location_key": location_key,
-                        "spend_id": normalized_spend_id,
-                        "coins": deepcopy(coins),
-                        "source_excerpt": source_excerpt.strip(),
-                        "source_ref": exact_ref,
-                        "rule_ref": normalized_rule_ref,
-                    },
-                },
-                "actor_knowledge": [
-                    {
-                        "actor_id": actor_id,
-                        "knowledge_key": (
-                            f"playthrough.{_token(run_id)}.spend.{_token(normalized_spend_id)}"
-                        ),
-                        "proposition": normalized_reason,
-                        "disclosure_scope": "owner",
-                    }
-                    for actor_id in recipients
-                ],
-                "snapshot": {
-                    "label": f"Full playthrough currency spend: {normalized_spend_id}"
-                },
-                "branch_id": str(branch["id"]),
-            },
+            "payload": continuity_payload,
             "expected_revision": campaign["revision"],
             "idempotency_key": _mutation_key(
                 run_id, "currency-spend-continuity", normalized_spend_id
@@ -4243,6 +4249,7 @@ async def _spend_source_item(
     reason: str,
     knowledge_actor_ids: list[str],
     source_scene_id: str = "",
+    defer_checkpoint: bool = False,
 ) -> dict[str, Any]:
     normalized_spend_id = spend_id.strip()
     normalized_item_id = item_id.strip()
@@ -4358,43 +4365,45 @@ async def _spend_source_item(
     if branch is None:
         raise RuntimeError("campaign has no current branch")
     campaign = await _campaign(client, campaign_id)
+    continuity_payload = {
+        "event": {
+            "summary": normalized_reason,
+            "event_type": "item_spent",
+            "audience_scope": "party",
+            "payload": {
+                "scene_id": scene_id,
+                "location_key": location_key,
+                "spend_id": normalized_spend_id,
+                "item_id": normalized_item_id,
+                "quantity": quantity,
+                "removed": deepcopy(spent.get("removed") or {}),
+                "source_excerpt": source_excerpt.strip(),
+                "source_ref": exact_ref,
+            },
+        },
+        "actor_knowledge": [
+            {
+                "actor_id": actor_id,
+                "knowledge_key": (
+                    f"playthrough.{_token(run_id)}.item-spend."
+                    f"{_token(normalized_spend_id)}"
+                ),
+                "proposition": normalized_reason,
+                "disclosure_scope": "owner",
+            }
+            for actor_id in recipients
+        ],
+        "branch_id": str(branch["id"]),
+    }
+    if not defer_checkpoint:
+        continuity_payload["snapshot"] = {
+            "label": f"Full playthrough item spend: {normalized_spend_id}"
+        }
     committed = await client.domain(
         "continuity_commit",
         {
             "campaign_id": campaign_id,
-            "payload": {
-                "event": {
-                    "summary": normalized_reason,
-                    "event_type": "item_spent",
-                    "audience_scope": "party",
-                    "payload": {
-                        "scene_id": scene_id,
-                        "location_key": location_key,
-                        "spend_id": normalized_spend_id,
-                        "item_id": normalized_item_id,
-                        "quantity": quantity,
-                        "removed": deepcopy(spent.get("removed") or {}),
-                        "source_excerpt": source_excerpt.strip(),
-                        "source_ref": exact_ref,
-                    },
-                },
-                "actor_knowledge": [
-                    {
-                        "actor_id": actor_id,
-                        "knowledge_key": (
-                            f"playthrough.{_token(run_id)}.item-spend."
-                            f"{_token(normalized_spend_id)}"
-                        ),
-                        "proposition": normalized_reason,
-                        "disclosure_scope": "owner",
-                    }
-                    for actor_id in recipients
-                ],
-                "snapshot": {
-                    "label": f"Full playthrough item spend: {normalized_spend_id}"
-                },
-                "branch_id": str(branch["id"]),
-            },
+            "payload": continuity_payload,
             "expected_revision": campaign["revision"],
             "idempotency_key": _mutation_key(
                 run_id, "item-spend-continuity", normalized_spend_id
@@ -4435,6 +4444,7 @@ async def _use_shared_consumable(
     target_character_id: str,
     reason: str,
     knowledge_actor_ids: list[str],
+    defer_checkpoint: bool = False,
 ) -> dict[str, Any]:
     normalized_use_id = use_id.strip()
     normalized_reason = reason.strip()
@@ -4524,40 +4534,44 @@ async def _use_shared_consumable(
         raise RuntimeError("campaign has no current branch")
     recipients = list(dict.fromkeys([target_character_id, *knowledge_actor_ids]))
     campaign = await _campaign(client, campaign_id)
+    continuity_payload = {
+        "event": {
+            "summary": normalized_reason,
+            "event_type": "consumable_used",
+            "audience_scope": "party",
+            "payload": {
+                "scene_id": scene_id,
+                "location_key": location_key,
+                "use_id": normalized_use_id,
+                "item_id": item_id,
+                "target_character_id": target_character_id,
+                "formula": used["formula"],
+                "roll": deepcopy(used["roll"]),
+                "healing": deepcopy(used["healing"]),
+            },
+        },
+        "actor_knowledge": [
+            {
+                "actor_id": actor_id,
+                "knowledge_key": (
+                    f"playthrough.{_token(run_id)}.consumable.{_token(normalized_use_id)}"
+                ),
+                "proposition": normalized_reason,
+                "disclosure_scope": "owner",
+            }
+            for actor_id in recipients
+        ],
+        "branch_id": str(branch["id"]),
+    }
+    if not defer_checkpoint:
+        continuity_payload["snapshot"] = {
+            "label": f"Full playthrough consumable: {normalized_use_id}"
+        }
     committed = await client.domain(
         "continuity_commit",
         {
             "campaign_id": campaign_id,
-            "payload": {
-                "event": {
-                    "summary": normalized_reason,
-                    "event_type": "consumable_used",
-                    "audience_scope": "party",
-                    "payload": {
-                        "scene_id": scene_id,
-                        "location_key": location_key,
-                        "use_id": normalized_use_id,
-                        "item_id": item_id,
-                        "target_character_id": target_character_id,
-                        "formula": used["formula"],
-                        "roll": deepcopy(used["roll"]),
-                        "healing": deepcopy(used["healing"]),
-                    },
-                },
-                "actor_knowledge": [
-                    {
-                        "actor_id": actor_id,
-                        "knowledge_key": (
-                            f"playthrough.{_token(run_id)}.consumable.{_token(normalized_use_id)}"
-                        ),
-                        "proposition": normalized_reason,
-                        "disclosure_scope": "owner",
-                    }
-                    for actor_id in recipients
-                ],
-                "snapshot": {"label": f"Full playthrough consumable: {normalized_use_id}"},
-                "branch_id": str(branch["id"]),
-            },
+            "payload": continuity_payload,
             "expected_revision": campaign["revision"],
             "idempotency_key": _mutation_key(run_id, "consumable-continuity", normalized_use_id),
         },
@@ -6075,6 +6089,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     rule_ref=args.spend_rule_ref,
                     knowledge_actor_ids=args.knowledge_actor_id,
                     source_scene_id=args.source_scene_id,
+                    defer_checkpoint=args.defer_checkpoint,
                 )
             elif args.action == "spend-item":
                 if phase != "play":
@@ -6093,6 +6108,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     reason=args.spend_reason,
                     knowledge_actor_ids=args.knowledge_actor_id,
                     source_scene_id=args.source_scene_id,
+                    defer_checkpoint=args.defer_checkpoint,
                 )
             elif args.action == "use-consumable":
                 if phase != "play":
@@ -6109,6 +6125,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     target_character_id=args.consumable_target_id,
                     reason=args.consumable_reason,
                     knowledge_actor_ids=args.knowledge_actor_id,
+                    defer_checkpoint=args.defer_checkpoint,
                 )
             elif args.action == "award-xp":
                 if phase != "play":

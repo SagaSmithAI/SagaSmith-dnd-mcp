@@ -106,6 +106,14 @@ def test_playthrough_rejects_deferred_checkpoint_for_key_rest() -> None:
         asyncio.run(regression_playthrough._run(args))
 
 
+def test_scene_resource_actions_support_deferred_checkpoint_batching() -> None:
+    assert {
+        "spend-coins",
+        "spend-item",
+        "use-consumable",
+    } <= regression_playthrough.DEFERRED_CHECKPOINT_ACTIONS
+
+
 def test_advance_scene_identity_supports_exact_retry_and_later_revisit() -> None:
     class Client:
         def __init__(self) -> None:
@@ -475,11 +483,15 @@ def test_narrative_npc_driver_round_trips_lobby_and_registers_manifest(
         assert result["checkpoint"]["verification"]["valid"] is True
 
 
-def test_shared_consumable_driver_keeps_roll_item_and_healing_in_one_transition() -> None:
+@pytest.mark.parametrize("defer_checkpoint", [False, True])
+def test_shared_consumable_driver_keeps_roll_item_and_healing_in_one_transition(
+    defer_checkpoint: bool,
+) -> None:
     class Client:
         def __init__(self) -> None:
             self.revision = 10
             self.tools: list[str] = []
+            self.continuity_payload: dict = {}
 
         async def core(self, tool_id: str, arguments: dict):
             assert tool_id == "campaign_query"
@@ -518,7 +530,11 @@ def test_shared_consumable_driver_keeps_roll_item_and_healing_in_one_transition(
             if tool_id == "branch_query":
                 return [{"id": "branch-1", "is_current": True}]
             if tool_id == "continuity_commit":
-                return {"event": {"id": "event-1"}, "snapshot": {"slot": 8}}
+                self.continuity_payload = deepcopy(arguments["payload"])
+                return {
+                    "event": {"id": "event-1"},
+                    **({} if defer_checkpoint else {"snapshot": {"slot": 8}}),
+                }
             if tool_id == "playthrough_manifest":
                 return {"manifest": {"status": "in_progress"}, "campaign_revision": 12}
             raise AssertionError((tool_id, arguments))
@@ -536,12 +552,14 @@ def test_shared_consumable_driver_keeps_roll_item_and_healing_in_one_transition(
             target_character_id="actor-1",
             reason="Actor One drank a healing potion.",
             knowledge_actor_ids=["actor-2"],
+            defer_checkpoint=defer_checkpoint,
         )
     )
 
     assert client.tools.count("campaign_change") == 1
     assert result["use"]["roll"]["total"] == 7
     assert result["knowledge_actor_ids"] == ["actor-1", "actor-2"]
+    assert ("snapshot" in client.continuity_payload) is not defer_checkpoint
 
 
 def test_source_loot_driver_uses_one_public_atomic_campaign_transition() -> None:
@@ -871,7 +889,10 @@ def test_source_item_transfer_driver_uses_atomic_character_to_party_public_tool(
         assert result["checkpoint"]["verification"]["valid"] is True
 
 
-def test_source_currency_spend_driver_uses_one_public_atomic_campaign_transition() -> None:
+@pytest.mark.parametrize("defer_checkpoint", [False, True])
+def test_source_currency_spend_driver_uses_one_public_atomic_campaign_transition(
+    defer_checkpoint: bool,
+) -> None:
     source_ref = {
         "module_id": "module-1",
         "scene_id": "scene-1",
@@ -886,6 +907,7 @@ def test_source_currency_spend_driver_uses_one_public_atomic_campaign_transition
         def __init__(self) -> None:
             self.revision = 4
             self.tools: list[str] = []
+            self.continuity_payload: dict = {}
 
         async def core(self, tool_id: str, arguments: dict):
             assert tool_id == "campaign_query"
@@ -918,10 +940,14 @@ def test_source_currency_spend_driver_uses_one_public_atomic_campaign_transition
             if tool_id == "branch_query":
                 return [{"id": "branch-1", "is_current": True}]
             if tool_id == "continuity_commit":
+                self.continuity_payload = deepcopy(arguments["payload"])
                 assert len(arguments["payload"]["actor_knowledge"]) == 2
                 assert arguments["payload"]["event"]["event_type"] == "currency_spent"
                 self.revision += 1
-                return {"event": {"id": "event-1"}, "snapshot": {"slot": 7}}
+                return {
+                    "event": {"id": "event-1"},
+                    **({} if defer_checkpoint else {"snapshot": {"slot": 7}}),
+                }
             if tool_id == "playthrough_manifest":
                 return {"manifest": {"status": "in_progress"}, "campaign_revision": 7}
             raise AssertionError((tool_id, arguments))
@@ -941,6 +967,7 @@ def test_source_currency_spend_driver_uses_one_public_atomic_campaign_transition
             reason="The five PCs paid 5 sp each for one modest inn stay.",
             rule_ref="srd2014.expenses.food-drink-lodging.modest-inn",
             knowledge_actor_ids=["actor-1", "actor-2"],
+            defer_checkpoint=defer_checkpoint,
         )
     )
 
@@ -948,9 +975,13 @@ def test_source_currency_spend_driver_uses_one_public_atomic_campaign_transition
     assert client.tools.count("campaign_change") == 1
     assert result["knowledge_actor_ids"] == ["actor-1", "actor-2"]
     assert result["scene"]["location_key"] == "inn"
+    assert ("snapshot" in client.continuity_payload) is not defer_checkpoint
 
 
-def test_source_item_spend_driver_uses_one_public_atomic_campaign_transition() -> None:
+@pytest.mark.parametrize("defer_checkpoint", [False, True])
+def test_source_item_spend_driver_uses_one_public_atomic_campaign_transition(
+    defer_checkpoint: bool,
+) -> None:
     source_ref = {
         "module_id": "module-1",
         "scene_id": "scene-1",
@@ -965,6 +996,7 @@ def test_source_item_spend_driver_uses_one_public_atomic_campaign_transition() -
         def __init__(self) -> None:
             self.revision = 4
             self.tools: list[str] = []
+            self.continuity_payload: dict = {}
 
         async def core(self, tool_id: str, arguments: dict):
             assert tool_id == "campaign_query"
@@ -1000,10 +1032,14 @@ def test_source_item_spend_driver_uses_one_public_atomic_campaign_transition() -
             if tool_id == "branch_query":
                 return [{"id": "branch-1", "is_current": True}]
             if tool_id == "continuity_commit":
+                self.continuity_payload = deepcopy(arguments["payload"])
                 assert len(arguments["payload"]["actor_knowledge"]) == 3
                 assert arguments["payload"]["event"]["event_type"] == "item_spent"
                 self.revision += 1
-                return {"event": {"id": "event-1"}, "snapshot": {"slot": 7}}
+                return {
+                    "event": {"id": "event-1"},
+                    **({} if defer_checkpoint else {"snapshot": {"slot": 7}}),
+                }
             if tool_id == "playthrough_manifest":
                 return {"manifest": {"status": "in_progress"}, "campaign_revision": 7}
             raise AssertionError((tool_id, arguments))
@@ -1023,6 +1059,7 @@ def test_source_item_spend_driver_uses_one_public_atomic_campaign_transition() -
             quantity=1,
             reason="The party surrendered the severed head to secure the nothic's truce.",
             knowledge_actor_ids=["actor-1", "actor-2", "nothic"],
+            defer_checkpoint=defer_checkpoint,
         )
     )
 
@@ -1030,6 +1067,7 @@ def test_source_item_spend_driver_uses_one_public_atomic_campaign_transition() -
     assert result["spend"]["removed"]["id"] == "severed-head"
     assert client.tools.count("campaign_change") == 1
     assert result["knowledge_actor_ids"] == ["actor-1", "actor-2", "nothic"]
+    assert ("snapshot" in client.continuity_payload) is not defer_checkpoint
 
 
 def test_query_source_searches_and_expands_only_public_mcp_results() -> None:
