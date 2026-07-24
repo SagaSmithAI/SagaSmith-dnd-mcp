@@ -8936,6 +8936,152 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
 
     @mcp.tool()
+    def snapshot_core_lock(
+        campaign_id: str,
+        slot: int,
+        principal_id: str = "system:local",
+    ) -> dict[str, Any]:
+        """Inspect one snapshot's immutable Core lock and current conversion target."""
+        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        document = snapshots.get(campaign_id, slot)
+        profile = dict(document.get("payload", {}).get("rule_profile") or {})
+        options = dict(profile.get("options") or {})
+        locked = dict(options.get("_core_rule_pack_lock") or {})
+        edition = str(profile.get("edition") or "")
+        available = None
+        if edition:
+            try:
+                pack = get_core_rule_pack(edition)
+                available = {
+                    "id": pack.id,
+                    "version": pack.version,
+                    "edition": pack.edition,
+                    "fingerprint": pack.fingerprint,
+                }
+            except (KeyError, ValueError):
+                available = None
+        return {
+            "snapshot": {
+                "id": document["id"],
+                "slot": document["slot"],
+                "checksum": document["checksum"],
+                "valid": bool(document["valid"]),
+            },
+            "edition": edition,
+            "core_pack": locked or None,
+            "available_core_pack": available,
+            "conversion_required": bool(locked and available and locked != {
+                "id": available["id"],
+                "version": available["version"],
+                "fingerprint": available["fingerprint"],
+            }),
+        }
+
+    @mcp.tool()
+    def snapshot_restore_core_upgrade(
+        campaign_id: str,
+        slot: int,
+        name: str,
+        expected_snapshot_core_fingerprint: str,
+        expected_runtime_core_fingerprint: str,
+        reason: str,
+        principal_id: str = "system:local",
+        expected_revision: int | None = None,
+        expected_branch_id: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Fork an old-Core snapshot after an explicit, audited runtime conversion."""
+        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        if expected_revision is None or expected_branch_id is None or not idempotency_key:
+            raise ValueError(
+                "expected_revision, expected_branch_id, and idempotency_key are required "
+                "for snapshot Core conversion"
+            )
+        normalized_name = str(name or "").strip()
+        normalized_reason = str(reason or "").strip()
+        if not normalized_name:
+            raise ValueError("name is required for snapshot Core conversion")
+        if not normalized_reason or len(normalized_reason) > 500:
+            raise ValueError("a reason of at most 500 characters is required for Core conversion")
+        request_payload = {
+            "slot": int(slot),
+            "name": normalized_name,
+            "expected_snapshot_core_fingerprint": expected_snapshot_core_fingerprint,
+            "expected_runtime_core_fingerprint": expected_runtime_core_fingerprint,
+            "reason": normalized_reason,
+            "expected_branch_id": expected_branch_id,
+        }
+        scope = f"snapshot-core-convert:{campaign_id}:{principal_id}"
+        replay = replay_idempotent(scope, idempotency_key, request_payload)
+        if replay is not None:
+            return replay
+        campaign = campaigns.get(campaign_id)
+        if campaign.revision != expected_revision:
+            raise ValueError(
+                f"campaign revision conflict: expected {expected_revision}, "
+                f"found {campaign.revision}"
+            )
+        if current_branch_id(campaign_id) != expected_branch_id:
+            raise ValueError("active branch changed before snapshot Core conversion")
+        if dict(campaign.state or {}).get("combat", {}).get("active", False):
+            raise CombatEngineError("snapshot Core conversion cannot run during active combat")
+        lock_view = snapshot_core_lock(campaign_id, slot, principal_id)
+        if not lock_view["snapshot"]["valid"]:
+            raise ValueError("snapshot failed integrity verification")
+        previous = dict(lock_view.get("core_pack") or {})
+        latest = dict(lock_view.get("available_core_pack") or {})
+        if not previous:
+            raise RulesetUnavailableError(
+                "snapshot has no locked built-in core rule pack; "
+                "an explicit edition migration is required"
+            )
+        if not latest:
+            raise RulesetUnavailableError("snapshot edition has no available built-in Core")
+        if not lock_view["conversion_required"]:
+            raise ValueError("snapshot already uses the available built-in Core")
+        if previous.get("fingerprint") != expected_snapshot_core_fingerprint:
+            raise ValueError("expected snapshot Core fingerprint does not match")
+        if latest.get("fingerprint") != expected_runtime_core_fingerprint:
+            raise ValueError("expected runtime Core fingerprint does not match")
+        document = snapshots.get(campaign_id, slot)
+        source_profile = deepcopy(dict(document["payload"].get("rule_profile") or {}))
+        source_options = dict(source_profile.get("options") or {})
+        user_options = {
+            key: value for key, value in source_options.items() if key != "_core_rule_pack_lock"
+        }
+        converted_profile = {
+            **source_profile,
+            "options": profile_options_with_core_lock(
+                str(source_profile.get("edition") or ""),
+                user_options,
+            ),
+        }
+        converted = snapshots.restore_with_rule_profile_conversion(
+            campaign_id,
+            slot,
+            rule_profile=converted_profile,
+            branch_name=normalized_name,
+            label=f"Converted Core for slot {slot}: {normalized_reason}",
+        )
+        response = {
+            "status": "converted",
+            "reason": normalized_reason,
+            "source_snapshot": lock_view["snapshot"],
+            "previous_core_pack": previous,
+            "core_pack": latest,
+            "branch": asdict(branches.current(campaign_id)),
+            "snapshot": asdict(converted),
+            "campaign_revision": mutation_revision(campaign_id),
+        }
+        return remember_idempotent(
+            scope,
+            idempotency_key,
+            request_payload,
+            response,
+            campaign_id=campaign_id,
+        )
+
+    @mcp.tool()
     def snapshot_verify(
         campaign_id: str, slot: int, principal_id: str = "system:local"
     ) -> dict[str, bool]:
@@ -18170,7 +18316,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     @mcp.tool()
     def branch_change(
         campaign_id: str,
-        action: Literal["create", "checkout"],
+        action: Literal["create", "checkout", "create_core_upgrade"],
         payload: dict[str, Any],
         principal_id: str = "system:local",
         expected_revision: int | None = None,
@@ -18190,10 +18336,23 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 expected_branch_id,
                 idempotency_key,
             )
-        else:
+        elif action == "checkout":
             result = branch_checkout(
                 campaign_id,
                 required(data, "branch_id"),
+                principal_id,
+                expected_revision,
+                expected_branch_id,
+                idempotency_key,
+            )
+        else:
+            result = snapshot_restore_core_upgrade(
+                campaign_id,
+                required(data, "slot"),
+                required(data, "name"),
+                required(data, "expected_snapshot_core_fingerprint"),
+                required(data, "expected_runtime_core_fingerprint"),
+                required(data, "reason"),
                 principal_id,
                 expected_revision,
                 expected_branch_id,
@@ -18204,7 +18363,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     @mcp.tool()
     def snapshot_query(
         campaign_id: str,
-        view: Literal["list", "verify", "lineage", "recap"] = "list",
+        view: Literal["list", "verify", "lineage", "recap", "core"] = "list",
         payload: dict[str, Any] | None = None,
         principal_id: str = "system:local",
     ) -> dict[str, Any]:
@@ -18216,8 +18375,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             result = snapshot_verify(campaign_id, required(data, "slot"), principal_id)
         elif view == "lineage":
             result = snapshot_lineage(campaign_id, data.get("slot"), principal_id)
-        else:
+        elif view == "recap":
             result = snapshot_regenerate_recap(campaign_id, required(data, "slot"), principal_id)
+        else:
+            result = snapshot_core_lock(campaign_id, required(data, "slot"), principal_id)
         return facade_result(view, result)
 
     @mcp.tool()
@@ -18790,6 +18951,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         "branch_create",
         "branch_checkout",
         "snapshot_list",
+        "snapshot_core_lock",
+        "snapshot_restore_core_upgrade",
         "snapshot_verify",
         "snapshot_lineage",
         "snapshot_regenerate_recap",

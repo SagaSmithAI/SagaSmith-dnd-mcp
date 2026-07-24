@@ -135,6 +135,11 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--activity-reason", default="")
     parser.add_argument("--snapshot-slot", type=int)
     parser.add_argument("--branch-name", default="")
+    parser.add_argument(
+        "--core-conversion-reason",
+        default="",
+        help="Explicit reviewed reason for converting an old-Core snapshot on the new branch",
+    )
     parser.add_argument("--time-period", choices=("minute", "hour", "day"))
     parser.add_argument("--time-count", type=int)
     parser.add_argument("--time-reason", default="")
@@ -1198,6 +1203,7 @@ async def _branch_from_snapshot(
     snapshot_slot: int | None,
     branch_name: str,
     checkpoint_label: str,
+    core_conversion_reason: str = "",
 ) -> dict[str, Any]:
     if initial_phase == "combat":
         raise RuntimeError("branch-from-snapshot cannot run during active combat")
@@ -1225,6 +1231,22 @@ async def _branch_from_snapshot(
     )
     if verification.get("valid") is not True:
         raise RuntimeError(f"snapshot slot {snapshot_slot} failed verification")
+    core_lock = await client.domain(
+        "snapshot_query",
+        {
+            "campaign_id": campaign_id,
+            "view": "core",
+            "payload": {"slot": snapshot_slot},
+        },
+    )
+    conversion_required = bool(core_lock.get("conversion_required"))
+    if conversion_required and not core_conversion_reason.strip():
+        raise RuntimeError(
+            "snapshot uses an unavailable built-in Core; rerun with "
+            "--core-conversion-reason after reviewing the runtime upgrade"
+        )
+    if core_conversion_reason.strip() and not conversion_required:
+        raise RuntimeError("snapshot Core conversion was requested but is not required")
     branches = await client.domain(
         "branch_query",
         {"campaign_id": campaign_id, "view": "list"},
@@ -1266,16 +1288,32 @@ async def _branch_from_snapshot(
         ),
     )
     campaign = await _campaign(client, campaign_id)
+    branch_action = "create_core_upgrade" if conversion_required else "create"
+    branch_payload = (
+        {
+            "slot": snapshot_slot,
+            "name": branch_name.strip(),
+            "expected_snapshot_core_fingerprint": str(
+                dict(core_lock.get("core_pack") or {}).get("fingerprint") or ""
+            ),
+            "expected_runtime_core_fingerprint": str(
+                dict(core_lock.get("available_core_pack") or {}).get("fingerprint") or ""
+            ),
+            "reason": core_conversion_reason.strip(),
+        }
+        if conversion_required
+        else {
+            "name": branch_name.strip(),
+            "from_snapshot_id": str(target["id"]),
+            "checkout": True,
+        }
+    )
     created = await client.domain(
         "branch_change",
         {
             "campaign_id": campaign_id,
-            "action": "create",
-            "payload": {
-                "name": branch_name.strip(),
-                "from_snapshot_id": str(target["id"]),
-                "checkout": True,
-            },
+            "action": branch_action,
+            "payload": branch_payload,
             "expected_revision": campaign["revision"],
             "expected_branch_id": str(source_branch["id"]),
             "idempotency_key": _mutation_key(
@@ -1304,6 +1342,7 @@ async def _branch_from_snapshot(
         "source_checkpoint": source_checkpoint,
         "target_snapshot": target,
         "target_verification": verification,
+        "target_core_lock": core_lock,
         "created_branch": created,
         "phase_changes": phase_changes,
         "restored_phase": restored_phase,
@@ -5257,6 +5296,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     snapshot_slot=args.snapshot_slot,
                     branch_name=args.branch_name,
                     checkpoint_label=args.checkpoint_label,
+                    core_conversion_reason=args.core_conversion_reason,
                 )
             elif args.action == "advance-time":
                 if phase != "play":

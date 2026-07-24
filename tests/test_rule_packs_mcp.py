@@ -1114,6 +1114,52 @@ def test_checkpointed_core_relock_preserves_profile_and_adopts_current_runtime(
         )
         assert replayed == relocked
 
+        lock_view = await call(
+            server,
+            "snapshot_query",
+            {
+                "campaign_id": campaign["id"],
+                "view": "core",
+                "payload": {"slot": snapshot["slot"]},
+            },
+        )
+        assert lock_view["core_pack"]["fingerprint"] == "old-core-fingerprint"
+        assert lock_view["available_core_pack"]["fingerprint"] == relocked["core_pack"][
+            "fingerprint"
+        ]
+        assert lock_view["conversion_required"] is True
+        conversion_arguments = {
+            "campaign_id": campaign["id"],
+            "action": "create_core_upgrade",
+            "payload": {
+                "slot": snapshot["slot"],
+                "name": "converted-old-core",
+                "expected_snapshot_core_fingerprint": "old-core-fingerprint",
+                "expected_runtime_core_fingerprint": relocked["core_pack"]["fingerprint"],
+                "reason": "Explicitly convert the old checkpoint to the reviewed runtime Core.",
+            },
+            "expected_revision": relocked["campaign_revision"],
+            "expected_branch_id": branch["id"],
+            "idempotency_key": "convert-old-core-snapshot",
+        }
+        converted = await call(server, "branch_change", conversion_arguments)
+        converted_replay = await call(server, "branch_change", conversion_arguments)
+        assert converted_replay == converted
+        assert converted["status"] == "converted"
+        assert converted["branch"]["name"] == "converted-old-core"
+        assert converted["snapshot"]["parent_id"] == snapshot["id"]
+        assert converted["previous_core_pack"]["fingerprint"] == "old-core-fingerprint"
+        converted_profile = await call(
+            server,
+            "campaign_rule_profile_get",
+            {"campaign_id": campaign["id"]},
+        )
+        assert converted_profile["profile"]["locale"] == "zh-CN"
+        assert converted_profile["profile"]["options"]["house_option"] == "preserved"
+        assert converted_profile["effective"]["core_pack"]["fingerprint"] == relocked["core_pack"][
+            "fingerprint"
+        ]
+
     asyncio.run(exercise())
 
 

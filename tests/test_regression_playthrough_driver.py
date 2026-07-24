@@ -1465,6 +1465,12 @@ def test_failed_route_is_preserved_when_branching_from_verified_snapshot() -> No
                 return [{"id": "snapshot-58", "slot": 58, "branch_id": "failed-branch"}]
             if tool_id == "snapshot_query" and arguments["view"] == "verify":
                 return {"valid": True}
+            if tool_id == "snapshot_query" and arguments["view"] == "core":
+                return {
+                    "core_pack": {"fingerprint": "current"},
+                    "available_core_pack": {"fingerprint": "current"},
+                    "conversion_required": False,
+                }
             if tool_id == "branch_query":
                 return [
                     {
