@@ -34,6 +34,66 @@ def _config(tmp_path: Path) -> McpConfig:
     )
 
 
+def test_end_turn_does_not_revision_unchanged_character_documents(tmp_path: Path) -> None:
+    async def exercise() -> None:
+        server = create_server(_config(tmp_path))
+        campaign = await _call(
+            server,
+            "campaign_create",
+            {"name": "Lean turn revisions", "edition": "2014", "idempotency_key": "campaign"},
+        )
+        actors = []
+        for index in range(2):
+            actors.append(
+                await _call(
+                    server,
+                    "character_create",
+                    {
+                        "campaign_id": campaign["id"],
+                        "name": f"Actor {index + 1}",
+                        "idempotency_key": f"actor-{index + 1}",
+                    },
+                )
+            )
+        campaign = await _call(server, "campaign_get", {"campaign_id": campaign["id"]})
+        started = await _call(
+            server,
+            "combat_start",
+            {
+                "campaign_id": campaign["id"],
+                "participant_ids": [item["id"] for item in actors],
+                "participant_config": [
+                    {"actor_id": actors[0]["id"], "initiative": 20},
+                    {"actor_id": actors[1]["id"], "initiative": 10},
+                ],
+                "expected_revision": campaign["revision"],
+                "idempotency_key": "start",
+            },
+        )
+
+        ended = await _call(
+            server,
+            "combat_end_turn",
+            {
+                "campaign_id": campaign["id"],
+                "actor_id": actors[0]["id"],
+                "expected_revision": started["campaign_revision"],
+                "idempotency_key": "end",
+            },
+        )
+        current = [
+            await _call(server, "character_get", {"character_id": item["id"]})
+            for item in actors
+        ]
+
+        assert [item["entity_type"] for item in ended["revisions"]] == ["campaign"]
+        assert [item["revision"] for item in current] == [
+            item["revision"] for item in actors
+        ]
+
+    asyncio.run(exercise())
+
+
 def test_available_actions_explicitly_discovers_required_death_save(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

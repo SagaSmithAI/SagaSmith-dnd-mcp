@@ -818,14 +818,24 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         random_context_factory=campaign_random_context,
     )
 
-    def character_view(character: Any) -> dict[str, Any]:
+    rules_context_unset = object()
+
+    def character_view(
+        character: Any,
+        *,
+        rules_context: Any = rules_context_unset,
+    ) -> dict[str, Any]:
         """Return a raw validated sheet together with its non-persisted derived view."""
         value = asdict(character)
         try:
-            rules_context = (
-                effective_rule_context(character.campaign_id) if character.campaign_id else None
-            )
-            value["derived"] = derive_character_sheet(value["sheet"], rules=rules_context)
+            resolved_rules = rules_context
+            if resolved_rules is rules_context_unset:
+                resolved_rules = (
+                    effective_rule_context(character.campaign_id)
+                    if character.campaign_id
+                    else None
+                )
+            value["derived"] = derive_character_sheet(value["sheet"], rules=resolved_rules)
         except RulesetUnavailableError as error:
             value["derived"] = derive_character_sheet(value["sheet"])
             value["derived"]["unresolved_rules"] = sorted(
@@ -4509,9 +4519,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 raise CombatEngineError("spell attack resolution has no source spell")
         else:
             require_no_blocking_pending(encounter)
-        require_campaign_actor(campaign_id, target_id)
-        attacker = combat_actor_snapshot(actor_id)
-        target = combat_actor_snapshot(target_id)
         rule_context = effective_rule_context(
             campaign_id,
             facts={
@@ -4525,6 +4532,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 ),
             },
         )
+        attacker_record = require_campaign_actor(campaign_id, actor_id)
+        target_record = require_campaign_actor(campaign_id, target_id)
+        attacker = character_view(attacker_record, rules_context=rule_context)
+        target = character_view(target_record, rules_context=rule_context)
         try:
             if spell_resolution is not None:
                 plan = preflight_spell_attack(
@@ -4762,20 +4773,23 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         ][-100:]
         next_state = dict(campaign.state or {})
         next_state["combat"] = next_encounter
-        updates = [
-            CharacterStateUpdate(
-                character_id=actor_id,
-                sheet=validate_character_sheet(updated_attacker["sheet"]),
-                notes=validate_character_notes(characters.get(actor_id).notes),
-                expected_revision=characters.get(actor_id).revision,
-            ),
-            CharacterStateUpdate(
-                character_id=target_id,
-                sheet=validate_character_sheet(updated_target["sheet"]),
-                notes=validate_character_notes(characters.get(target_id).notes),
-                expected_revision=characters.get(target_id).revision,
-            ),
-        ]
+        updates = []
+        for record, updated in (
+            (attacker_record, updated_attacker),
+            (target_record, updated_target),
+        ):
+            normalized_sheet = validate_character_sheet(updated["sheet"])
+            normalized_notes = validate_character_notes(record.notes)
+            if normalized_sheet == record.sheet and normalized_notes == record.notes:
+                continue
+            updates.append(
+                CharacterStateUpdate(
+                    character_id=record.id,
+                    sheet=normalized_sheet,
+                    notes=normalized_notes,
+                    expected_revision=record.revision,
+                )
+            )
         revisions_result = StateMutationService(storage.database).replace(
             campaign_id,
             campaign_state=validate_party_state(next_state),
@@ -4856,7 +4870,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         for combatant in next_state["combat"].get("combatants", []):
             target_id = str(combatant.get("actor_id"))
             target = characters.get(target_id)
-            sheet = duration["sheet"] if target_id == actor_id else target.sheet
+            sheet = deepcopy(duration["sheet"] if target_id == actor_id else target.sheet)
             for readied in expired_readied:
                 if str(readied.get("actor_id")) != target_id:
                     continue
@@ -4899,14 +4913,17 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 rule_receipts.extend(ended.receipts)
             expired_effects.update(expired)
             sync_combatant_conditions(next_state["combat"], target_id, sheet)
-            combat_updates.append(
-                CharacterStateUpdate(
-                    character_id=target_id,
-                    sheet=validate_character_sheet(sheet),
-                    notes=validate_character_notes(target.notes),
-                    expected_revision=target.revision,
+            normalized_sheet = validate_character_sheet(sheet)
+            normalized_notes = validate_character_notes(target.notes)
+            if normalized_sheet != target.sheet or normalized_notes != target.notes:
+                combat_updates.append(
+                    CharacterStateUpdate(
+                        character_id=target_id,
+                        sheet=normalized_sheet,
+                        notes=normalized_notes,
+                        expected_revision=target.revision,
+                    )
                 )
-            )
         revisions_result = StateMutationService(storage.database).replace(
             campaign_id,
             campaign_state=validate_party_state(next_state),
@@ -16710,7 +16727,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
 
     @mcp.tool()
     def character_query(
-        view: Literal["get", "list", "library", "document", "rest"] = "list",
+        view: Literal["get", "batch", "list", "library", "document", "rest"] = "list",
         payload: dict[str, Any] | None = None,
         principal_id: str = "system:local",
     ) -> dict[str, Any]:
@@ -16718,6 +16735,42 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         data = facade_payload(payload)
         if view == "get":
             result = character_get(required(data, "character_id"), principal_id)
+        elif view == "batch":
+            campaign_id = str(required(data, "campaign_id"))
+            actor_ids_value = data.get("character_ids")
+            if not isinstance(actor_ids_value, list) or not actor_ids_value:
+                raise ValueError("batch character query requires a non-empty character_ids list")
+            actor_ids = [str(item).strip() for item in actor_ids_value]
+            if (
+                len(actor_ids) > 100
+                or any(not item for item in actor_ids)
+                or len(actor_ids) != len(set(actor_ids))
+            ):
+                raise ValueError(
+                    "batch character query requires 1-100 unique non-empty character_ids"
+                )
+            membership = access.require_campaign(campaign_id, principal_id)
+            campaign_characters = {
+                item.id: item
+                for item in characters.list(system_id="dnd5e", campaign_id=campaign_id)
+            }
+            missing = [actor_id for actor_id in actor_ids if actor_id not in campaign_characters]
+            if missing:
+                raise ValueError(
+                    "batch character query includes actors outside the campaign: "
+                    + ", ".join(missing)
+                )
+            selected = [campaign_characters[actor_id] for actor_id in actor_ids]
+            if membership.role in {"owner", "dm"}:
+                rules_context = effective_rule_context(campaign_id)
+                result = [
+                    character_view(character, rules_context=rules_context)
+                    for character in selected
+                ]
+            else:
+                result = [
+                    visible_character_view(character, principal_id) for character in selected
+                ]
         elif view == "rest":
             character_id = str(required(data, "character_id"))
             current = characters.get(character_id)

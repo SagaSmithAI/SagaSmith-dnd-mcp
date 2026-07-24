@@ -151,7 +151,26 @@ class ExposureClient:
         self.exposure_id = ""
 
     async def core(self, tool_id: str, arguments: dict[str, Any]) -> Any:
-        return _decode(await self.session.call_tool(tool_id, arguments))
+        started = perf_counter()
+        try:
+            return _decode(await self.session.call_tool(tool_id, arguments))
+        finally:
+            if os.environ.get("SAGASMITH_REGRESSION_TIMINGS") == "1":
+                label = (
+                    str(arguments.get("tool_id") or "")
+                    if tool_id == "exposure_call"
+                    else tool_id
+                )
+                print(
+                    json.dumps(
+                        {
+                            "regression_timing": label,
+                            "seconds": round(perf_counter() - started, 6),
+                        }
+                    ),
+                    file=sys.stderr,
+                    flush=True,
+                )
 
     async def open(self, campaign_id: str | None = None) -> dict[str, Any]:
         arguments: dict[str, Any] = {"principal_id": PRINCIPAL_ID}

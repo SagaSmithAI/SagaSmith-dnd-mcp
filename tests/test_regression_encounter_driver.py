@@ -1,9 +1,11 @@
+import asyncio
 import json
 
 from scripts.regression_encounter import (
     GUIDING_BOLT_ID,
     HEALING_WORD_ID,
     MAGIC_MISSILE_ID,
+    _characters,
     _choose_destination,
     _choose_party_spell,
     _has_blocking_pending,
@@ -27,6 +29,34 @@ from scripts.regression_encounter import (
     _validate_hostile_attacks,
     _wound_priority,
 )
+
+
+def test_character_reads_are_batched_per_encounter_step() -> None:
+    class Client:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict]] = []
+
+        async def domain(self, tool_id: str, arguments: dict) -> list[dict]:
+            self.calls.append((tool_id, arguments))
+            actor_ids = arguments["payload"]["character_ids"]
+            return [{"id": actor_id, "name": actor_id} for actor_id in actor_ids]
+
+    client = Client()
+    result = asyncio.run(_characters(client, "campaign-1", ["pc-1", "goblin-1"]))
+
+    assert list(result) == ["pc-1", "goblin-1"]
+    assert client.calls == [
+        (
+            "character_query",
+            {
+                "view": "batch",
+                "payload": {
+                    "campaign_id": "campaign-1",
+                    "character_ids": ["pc-1", "goblin-1"],
+                },
+            },
+        )
+    ]
 
 
 def _spell_actor(*spell_ids: str, hp: int = 10, slots: int = 1) -> dict:

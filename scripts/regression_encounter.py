@@ -125,9 +125,12 @@ def _server_parameters(args: argparse.Namespace) -> StdioServerParameters:
             "SAGASMITH_DND_MCP_AUTO_SEED": "1",
         }
     )
+    server_args = ["-m", "sagasmith_dnd_mcp.server"]
+    if profile_output := str(env.get("SAGASMITH_SERVER_PROFILE_OUTPUT") or "").strip():
+        server_args = ["-m", "cProfile", "-o", profile_output, *server_args]
     return StdioServerParameters(
         command=sys.executable,
-        args=["-m", "sagasmith_dnd_mcp.server"],
+        args=server_args,
         cwd=repo,
         env=env,
     )
@@ -618,14 +621,29 @@ async def _current_branch(client: ExposureClient, campaign_id: str) -> dict[str,
     return branch
 
 
-async def _character(
+async def _characters(
     client: ExposureClient,
-    actor_id: str,
-) -> dict[str, Any]:
-    return await client.domain(
+    campaign_id: str,
+    actor_ids: list[str],
+) -> dict[str, dict[str, Any]]:
+    values = await client.domain(
         "character_query",
-        {"view": "get", "payload": {"character_id": actor_id}},
+        {
+            "view": "batch",
+            "payload": {
+                "campaign_id": campaign_id,
+                "character_ids": actor_ids,
+            },
+        },
     )
+    actors = {
+        str(item.get("id") or ""): item
+        for item in values
+        if isinstance(item, dict) and str(item.get("id") or "")
+    }
+    if set(actors) != set(actor_ids):
+        raise RuntimeError("batch character query did not return every requested actor")
+    return actors
 
 
 def _character_summary(actor: dict[str, Any]) -> dict[str, Any]:
@@ -771,10 +789,11 @@ async def _start(
         args.source_condition_json,
         participant_ids=[*party_ids, *all_hostile_ids],
     )
-    actors = {
-        actor_id: await _character(client, actor_id)
-        for actor_id in [*party_ids, *all_hostile_ids]
-    }
+    actors = await _characters(
+        client,
+        args.campaign_id,
+        [*party_ids, *all_hostile_ids],
+    )
     for actor_id in all_hostile_ids:
         attacks = list(
             dict(dict(actors[actor_id].get("derived") or {}).get("inventory") or {}).get(
@@ -1432,10 +1451,11 @@ async def _auto_run(
             "combat_query",
             {"campaign_id": args.campaign_id, "view": "status"},
         )
-        actors = {
-            actor_id: await _character(client, actor_id)
-            for actor_id in [*party_ids, *hostile_ids]
-        }
+        actors = await _characters(
+            client,
+            args.campaign_id,
+            [*party_ids, *hostile_ids],
+        )
         defeated_hostiles = [
             actor_id
             for actor_id in hostile_ids
@@ -1946,9 +1966,10 @@ async def _auto_run(
         run_id=args.run_id,
         label=args.checkpoint_label,
     )
+    final_actor_ids = [*party_ids, *hostile_ids]
+    final_actor_values = await _characters(client, args.campaign_id, final_actor_ids)
     final_actors = [
-        _character_summary(await _character(client, actor_id))
-        for actor_id in [*party_ids, *hostile_ids]
+        _character_summary(final_actor_values[actor_id]) for actor_id in final_actor_ids
     ]
     return {
         "combat_exposure": opened_combat,
@@ -2022,6 +2043,12 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             else:
                 opened = await client.open(args.campaign_id)
                 await client.load("combat.observe")
+                actor_ids = [*party_ids, *all_hostile_ids]
+                actor_values = await _characters(
+                    client,
+                    args.campaign_id,
+                    actor_ids,
+                )
                 report["result"] = {
                     "exposure": opened,
                     "combat": await client.domain(
@@ -2029,8 +2056,8 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                         {"campaign_id": args.campaign_id, "view": "status"},
                     ),
                     "actors": [
-                        _character_summary(await _character(client, actor_id))
-                        for actor_id in [*party_ids, *all_hostile_ids]
+                        _character_summary(actor_values[actor_id])
+                        for actor_id in actor_ids
                     ],
                 }
     report["passed"] = True
