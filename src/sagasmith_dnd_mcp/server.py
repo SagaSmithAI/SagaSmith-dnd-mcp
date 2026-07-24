@@ -10560,6 +10560,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             hp_per_level_bonus=int(context["hp_per_level_bonus"]),
             source=audit_source,
         )
+        applied["subclass_spell_grants"] = refresh_level_unlocked_subclass_spells(
+            current.campaign_id,
+            applied["sheet"],
+            class_name=class_name,
+            branch_id=branch_id,
+        )
         receipts = core_receipts(
             rules,
             [
@@ -14933,6 +14939,137 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             ),
         ]
         return result
+
+    def refresh_level_unlocked_subclass_spells(
+        campaign_id: str,
+        sheet: dict[str, Any],
+        *,
+        class_name: str,
+        branch_id: str,
+    ) -> list[dict[str, Any]]:
+        """Materialize always-prepared subclass spells unlocked by the new class level."""
+        target_class = next(
+            item
+            for item in sheet["progression"]["classes"]
+            if str(item.get("name") or "").casefold() == class_name.casefold()
+        )
+        subclass_name = str(target_class.get("subclass") or "")
+        if not subclass_name:
+            return []
+        recorded = next(
+            (
+                item
+                for item in sheet.get("content", {}).get("selections", [])
+                if str(item.get("kind") or "") == "subclass"
+                and str(item.get("name") or "").casefold() == subclass_name.casefold()
+            ),
+            None,
+        )
+        if recorded is None:
+            return []
+        artifact_id = str(recorded.get("artifact_id") or "")
+        pack_id = str(recorded.get("pack_id") or "")
+        version = str(recorded.get("pack_version") or "")
+        if not artifact_id or not pack_id or not version:
+            raise ValueError(
+                "recorded subclass must include artifact id, pack id, and pack version"
+            )
+        try:
+            pack = rule_packs.get_version(pack_id, version)
+        except LookupError as error:
+            raise RulesetUnavailableError(
+                f"recorded subclass pack is unavailable: {pack_id}@{version}"
+            ) from error
+        subclass_artifact = next(
+            (item for item in pack.artifacts if str(item.get("id") or "") == artifact_id),
+            None,
+        )
+        if subclass_artifact is None:
+            raise RulesetUnavailableError(
+                f"recorded subclass is unavailable: {artifact_id} in {pack_id}@{version}"
+            )
+        subclass_card = dict(subclass_artifact.get("card") or {})
+        if str(subclass_card.get("class_name") or "").casefold() != class_name.casefold():
+            raise ValueError("recorded subclass does not belong to the advanced class")
+
+        candidates = available_content_artifacts(campaign_id, branch_id=branch_id)
+        class_level = int(target_class.get("level", 0) or 0)
+        unlocked: list[dict[str, Any]] = []
+        always_prepared_ids: set[str] = set()
+        for grant in subclass_card.get("always_prepared_spells", []):
+            minimum_level = int(grant.get("minimum_level", 1) or 1)
+            if minimum_level > class_level:
+                continue
+            spell_name = str(grant.get("name") or "").strip()
+            match = next(
+                (
+                    item
+                    for item in candidates
+                    if item[2].get("kind") == "spell"
+                    and str(dict(item[2].get("card") or {}).get("name") or "").casefold()
+                    == spell_name.casefold()
+                    and class_name.casefold()
+                    in {
+                        str(value).casefold()
+                        for value in dict(item[2].get("card") or {}).get("classes", [])
+                    }
+                ),
+                None,
+            )
+            if match is None:
+                raise RulesetUnavailableError(
+                    f"subclass spell is unavailable at level {class_level}: {spell_name}"
+                )
+            spell_pack_id, spell_version, spell_artifact = match
+            spell_id = str(spell_artifact["id"])
+            always_prepared_ids.add(spell_id)
+            spell_card = next(
+                (
+                    item
+                    for item in sheet["content"]["spells"]
+                    if str(item.get("id") or "") == spell_id
+                ),
+                None,
+            )
+            was_always_prepared = bool(
+                spell_card and dict(spell_card.get("access") or {}).get("always_prepared")
+            )
+            if spell_card is None:
+                spell_card = deepcopy(dict(spell_artifact.get("card") or {}))
+                spell_card.pop("classes", None)
+                sheet["content"]["spells"].append(spell_card)
+            spell_card["grant"] = {
+                "source_type": "subclass",
+                "source_key": subclass_name,
+                "method": "class_prepared",
+            }
+            spell_card.setdefault("access", {})["known"] = False
+            spell_card["access"]["prepared"] = True
+            spell_card["access"]["always_prepared"] = True
+            spell_card.update(
+                id=spell_id,
+                pack_id=spell_pack_id,
+                pack_version=spell_version,
+                rule_refs=list(spell_artifact.get("rule_refs") or []),
+                mechanic_refs=list(spell_artifact.get("mechanic_refs") or []),
+            )
+            if not was_always_prepared:
+                unlocked.append(
+                    {
+                        "artifact_id": spell_id,
+                        "name": str(spell_card.get("name") or spell_name),
+                        "minimum_level": minimum_level,
+                        "source_subclass": subclass_name,
+                    }
+                )
+        if always_prepared_ids:
+            preparation = sheet["spellcasting"]["preparation"]
+            preparation["selected_spell_ids"] = [
+                spell_id
+                for spell_id in preparation.get("selected_spell_ids", [])
+                if spell_id not in always_prepared_ids
+            ]
+        return unlocked
 
     def level_advancement_content_context(
         campaign_id: str,

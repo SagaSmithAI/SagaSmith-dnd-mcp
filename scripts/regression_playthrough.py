@@ -5457,6 +5457,62 @@ def _level_spell_selections(values: list[dict[str, Any]]) -> list[dict[str, str]
     return result
 
 
+def _level_spell_choice_counts(
+    spell_selections: list[dict[str, str]],
+    *,
+    spell_by_id: dict[str, dict[str, Any]],
+    class_name: str,
+    prepared_event: str,
+    preparation_mode: str,
+    prepared_spell_ids: list[str],
+    maximum_spell_level: int,
+) -> tuple[int, int, list[str]]:
+    """Count advancement choices while auditing prepared-caster card hydration."""
+    selected_cantrips = 0
+    selected_leveled = 0
+    prepared_additions: list[str] = []
+    for selection in spell_selections:
+        artifact = spell_by_id.get(selection["artifact_id"])
+        if artifact is None:
+            raise ValueError(
+                f"selected level spell is not in the active catalog: "
+                f"{selection['artifact_id']}"
+            )
+        requirements = dict(artifact.get("selection_requirements") or {})
+        eligible_classes = {
+            str(item).casefold() for item in requirements.get("eligible_classes") or []
+        }
+        if class_name.casefold() not in eligible_classes:
+            raise ValueError("selected level spell is not eligible for the advanced class")
+        spell_level = int(requirements.get("level", 0) or 0)
+        method = selection["method"]
+        if method == "class_prepared":
+            if prepared_event != "level_up" or preparation_mode != "prepared":
+                raise ValueError(
+                    "class_prepared level spells require a prepared-caster level-up event"
+                )
+            if spell_level < 1:
+                raise ValueError("prepared-caster cantrips must use the known method")
+            if spell_level > maximum_spell_level:
+                raise ValueError(
+                    "class_prepared level spell exceeds the actor's available spell slots"
+                )
+            if selection["artifact_id"] not in prepared_spell_ids:
+                raise ValueError(
+                    "every class_prepared level spell must appear in the complete "
+                    "prepared-spell list"
+                )
+            prepared_additions.append(selection["artifact_id"])
+            continue
+        if spell_level == 0:
+            selected_cantrips += 1
+            if method != "known":
+                raise ValueError("selected cantrips must use the known method")
+        else:
+            selected_leveled += 1
+    return selected_cantrips, selected_leveled, prepared_additions
+
+
 async def _advance_level(
     client: ExposureClient,
     *,
@@ -5732,27 +5788,30 @@ async def _advance_level(
     spell_choices = dict(follow_up.get("spell_choices") or {})
     required_cantrips = int(spell_choices.get("cantrips_to_add", 0) or 0)
     required_leveled = int(spell_choices.get("leveled_spells_to_add", 0) or 0)
-    selected_cantrips = 0
-    selected_leveled = 0
-    for selection in spell_selections:
-        artifact = spell_by_id.get(selection["artifact_id"])
-        if artifact is None:
-            raise ValueError(
-                f"selected level spell is not in the active catalog: {selection['artifact_id']}"
-            )
-        requirements = dict(artifact.get("selection_requirements") or {})
-        eligible_classes = {
-            str(item).casefold() for item in requirements.get("eligible_classes") or []
-        }
-        if normalized_class.casefold() not in eligible_classes:
-            raise ValueError("selected level spell is not eligible for the advanced class")
-        spell_level = int(requirements.get("level", 0) or 0)
-        if spell_level == 0:
-            selected_cantrips += 1
-            if selection["method"] != "known":
-                raise ValueError("selected cantrips must use the known method")
-        else:
-            selected_leveled += 1
+    prepared_event = str(follow_up.get("prepared_spell_event") or "")
+    spellcasting = dict(actor["sheet"].get("spellcasting") or {})
+    preparation_mode = str(
+        dict(spellcasting.get("preparation") or {}).get("mode") or "known"
+    )
+    maximum_spell_level = max(
+        (
+            int(level)
+            for level, resource in dict(spellcasting.get("spell_slots") or {}).items()
+            if int(dict(resource).get("max", 0) or 0) > 0
+        ),
+        default=0,
+    )
+    selected_cantrips, selected_leveled, prepared_additions = (
+        _level_spell_choice_counts(
+            spell_selections,
+            spell_by_id=spell_by_id,
+            class_name=normalized_class,
+            prepared_event=prepared_event,
+            preparation_mode=preparation_mode,
+            prepared_spell_ids=prepared_spell_ids,
+            maximum_spell_level=maximum_spell_level,
+        )
+    )
     if (selected_cantrips, selected_leveled) != (
         required_cantrips,
         required_leveled,
@@ -5789,7 +5848,6 @@ async def _advance_level(
         actor = dict(applied.get("character") or applied)
         applied_spells.append(artifact_id)
 
-    prepared_event = str(follow_up.get("prepared_spell_event") or "")
     prepared = None
     if prepared_event:
         if not prepared_spell_ids:
@@ -5901,6 +5959,7 @@ async def _advance_level(
         "selected_subclass": selected_subclass,
         "applied_features": applied_features,
         "applied_spells": applied_spells,
+        "prepared_spell_additions": prepared_additions,
         "prepared": prepared,
         "phase_changes": phase_changes,
         "return_phase": return_phase,

@@ -31,6 +31,7 @@ from scripts.regression_playthrough import (
     _configure_advancement,
     _extend_manifest_for_module_revision,
     _initialize_source_state,
+    _level_spell_choice_counts,
     _long_rest,
     _matching_check_progress,
     _mutation_key,
@@ -1954,6 +1955,46 @@ def test_level_advancement_rejects_malformed_choices_before_public_mutation() ->
                 prepared_spell_ids=[],
                 checkpoint_label="",
             )
+        )
+
+
+def test_prepared_caster_spell_hydration_does_not_consume_known_spell_quota() -> None:
+    artifact_id = "dnd5e.content.srd2014.spell.aid"
+    selections = [
+        {
+            "artifact_id": artifact_id,
+            "source_class": "Cleric",
+            "method": "class_prepared",
+        }
+    ]
+    catalog = {
+        artifact_id: {
+            "selection_requirements": {
+                "level": 2,
+                "eligible_classes": ["Cleric", "Paladin"],
+            }
+        }
+    }
+
+    assert _level_spell_choice_counts(
+        selections,
+        spell_by_id=catalog,
+        class_name="Cleric",
+        prepared_event="level_up",
+        preparation_mode="prepared",
+        prepared_spell_ids=[artifact_id],
+        maximum_spell_level=2,
+    ) == (0, 0, [artifact_id])
+
+    with pytest.raises(ValueError, match="complete prepared-spell list"):
+        _level_spell_choice_counts(
+            selections,
+            spell_by_id=catalog,
+            class_name="Cleric",
+            prepared_event="level_up",
+            preparation_mode="prepared",
+            prepared_spell_ids=[],
+            maximum_spell_level=2,
         )
 
 

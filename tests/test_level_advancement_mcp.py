@@ -309,6 +309,117 @@ def test_lobby_level_advance_is_source_bound_and_reports_catalog_follow_up(
     asyncio.run(exercise())
 
 
+def test_level_advance_materializes_new_always_prepared_domain_spells(
+    tmp_path: Path,
+) -> None:
+    workspace = Path(__file__).resolve().parents[2]
+    config = McpConfig(
+        home=tmp_path / "home",
+        database_url=None,
+        chroma_url=None,
+        chroma_path_override=None,
+        dnd_skills_dir=workspace / "SagaSmith-dnd-skills",
+        modulegen_skills_dir=workspace / "SagaSmith-module-gen-skills",
+        auto_seed_rules=True,
+    )
+
+    async def exercise() -> None:
+        server = create_server(config)
+        campaign = await _call(
+            server,
+            "campaign_create",
+            {
+                "name": "Domain Spell Advancement",
+                "edition": "2014",
+                "idempotency_key": "campaign",
+            },
+        )
+        sheet = _cleric_sheet()
+        sheet["progression"]["classes"][0]["subclass"] = ""
+        actor = await _call(
+            server,
+            "character_create_from",
+            {
+                "mode": "direct",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "name": "Mara",
+                    "sheet": sheet,
+                },
+                "idempotency_key": "actor",
+            },
+        )
+        selected = await _call(
+            server,
+            "character_content_apply",
+            {
+                "character_id": actor["id"],
+                "artifact_id": "dnd5e.content.srd2014.subclass.life-domain",
+                "selection": {"target_class_name": "Cleric"},
+                "expected_revision": actor["revision"],
+                "idempotency_key": "life-domain",
+            },
+        )
+        level_two = await _call(
+            server,
+            "character_state_change",
+            {
+                "character_id": actor["id"],
+                "action": "level_advance",
+                "payload": {
+                    "class_name": "Cleric",
+                    "hp_method": "fixed",
+                    "reason": "module milestone",
+                    "source_ref": "module:chapter-1",
+                },
+                "expected_revision": selected["revision"],
+                "idempotency_key": "level-2",
+            },
+        )
+        level_three = await _call(
+            server,
+            "character_state_change",
+            {
+                "character_id": actor["id"],
+                "action": "level_advance",
+                "payload": {
+                    "class_name": "Cleric",
+                    "hp_method": "fixed",
+                    "reason": "module milestone",
+                    "source_ref": "module:chapter-2",
+                },
+                "expected_revision": level_two["character"]["revision"],
+                "idempotency_key": "level-3",
+            },
+        )
+
+        unlocked = {
+            item["name"]
+            for item in level_three["advancement"]["subclass_spell_grants"]
+        }
+        assert unlocked == {"Lesser Restoration", "Spiritual Weapon"}
+        spells = {
+            spell["name"]: spell
+            for spell in level_three["character"]["sheet"]["content"]["spells"]
+        }
+        assert set(spells) == {
+            "Bless",
+            "Cure Wounds",
+            "Lesser Restoration",
+            "Spiritual Weapon",
+        }
+        for name in unlocked:
+            assert spells[name]["grant"] == {
+                "source_type": "subclass",
+                "source_key": "Life Domain",
+                "method": "class_prepared",
+            }
+            assert spells[name]["access"]["always_prepared"] is True
+            assert spells[name]["access"]["prepared"] is True
+
+    asyncio.run(exercise())
+
+
 def test_rolled_level_hp_is_engine_owned_idempotent_and_revision_safe(
     tmp_path: Path, monkeypatch
 ) -> None:
