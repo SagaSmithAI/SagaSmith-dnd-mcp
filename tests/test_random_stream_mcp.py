@@ -157,7 +157,7 @@ def test_public_rolls_replay_after_restore_and_do_not_pollute_the_parent_branch(
                 "campaign_id": campaign_id,
                 "expression": "1d20",
                 "expected_campaign_revision": restored_campaign["revision"],
-                "idempotency_key": "restored-roll",
+                "idempotency_key": "parent-roll",
             },
         )
         assert replayed_branch_roll["rolls"] == branch_roll["rolls"]

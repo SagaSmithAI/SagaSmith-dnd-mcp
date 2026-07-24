@@ -2294,7 +2294,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if result is not None:
             return result.response
         campaign_id = scope.split(":", 2)[1] if ":" in scope else ""
-        if campaign_id and idempotency.mutation_committed(campaign_id, key, payload):
+        if campaign_id and idempotency.mutation_committed(
+            campaign_id,
+            key,
+            payload,
+            branch_id=current_branch_id(campaign_id),
+        ):
             return {
                 "status": "committed",
                 "idempotency_replayed": True,
@@ -12468,11 +12473,19 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     def state_idempotency_receipt(
         campaign_id: str,
         key: str,
+        branch_id: str | None = None,
         principal_id: str = "system:local",
     ) -> dict[str, Any]:
         """Read a campaign-owned mutation receipt after a stale-request retry conflict."""
         access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
-        return asdict(idempotency.receipt(campaign_id, key))
+        resolved_branch_id = readable_branch(campaign_id, branch_id, principal_id)
+        return asdict(
+            idempotency.receipt(
+                campaign_id,
+                key,
+                branch_id=resolved_branch_id,
+            )
+        )
 
     @mcp.tool()
     def state_history(
@@ -19569,6 +19582,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             result = state_idempotency_receipt(
                 campaign_id,
                 receipt_key,
+                data.get("branch_id"),
                 principal_id,
             )
         elif action == "undo":
