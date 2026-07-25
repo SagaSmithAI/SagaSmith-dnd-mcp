@@ -282,6 +282,55 @@ def test_scene_readiness_blocks_missing_combatants_and_reserves(tmp_path: Path) 
         assert ready["reinforcement_actor_ids"] == [actors["guard"]["id"]]
         assert ready["checksum"]
 
+        original_bandit_notes = deepcopy(actors["bandit1"]["notes"])
+        incomplete_notes = deepcopy(original_bandit_notes)
+        incomplete_notes["profile"]["dm_notes"] = (
+            "Statblock import: test. Manual rulings: "
+            "invisihility: no active spell artifact or complete statblock action exists."
+        )
+        actors["bandit1"] = await _call(
+            server,
+            "character_sheet_replace",
+            {
+                "character_id": actors["bandit1"]["id"],
+                "sheet": actors["bandit1"]["sheet"],
+                "notes": incomplete_notes,
+                "expected_revision": actors["bandit1"]["revision"],
+                "idempotency_key": "incomplete-spell-hydration",
+            },
+        )
+        incomplete = await _call(
+            server,
+            "module_query",
+            {
+                "campaign_id": campaign["id"],
+                "view": "readiness",
+                "payload": {
+                    "scene_id": scene["scene_id"],
+                    "participant_manifest": complete_manifest,
+                },
+            },
+        )
+        incomplete_bandits = next(
+            item for item in incomplete["groups"] if item["key"] == "rusk-bandits"
+        )
+        assert incomplete["ready"] is False
+        assert incomplete_bandits["unready_actor_ids"] == [actors["bandit1"]["id"]]
+        assert incomplete_bandits["actors"][0]["combat_card"]["blocking_reasons"] == [
+            "incomplete_statblock_spell_hydration"
+        ]
+        actors["bandit1"] = await _call(
+            server,
+            "character_sheet_replace",
+            {
+                "character_id": actors["bandit1"]["id"],
+                "sheet": actors["bandit1"]["sheet"],
+                "notes": original_bandit_notes,
+                "expected_revision": actors["bandit1"]["revision"],
+                "idempotency_key": "restore-complete-spell-hydration",
+            },
+        )
+
         campaign = await _call(server, "campaign_get", {"campaign_id": campaign["id"]})
         phase = await _call(
             server,

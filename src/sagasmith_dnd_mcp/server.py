@@ -1049,6 +1049,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 and item.split(":", 1)[0] in specific_multiattacks
             )
         ]
+        if any(
+            item.endswith("no active spell artifact or complete statblock action exists")
+            or (
+                item.startswith("Spellcasting:")
+                and item.endswith("descriptive passive is not automatically settled")
+            )
+            for item in manual_rulings
+        ):
+            blockers.append("incomplete_statblock_spell_hydration")
         inventory_items = {
             str(item.get("id") or ""): item
             for item in dict(sheet.get("inventory") or {}).get("items", [])
