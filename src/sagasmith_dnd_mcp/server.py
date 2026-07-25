@@ -3073,6 +3073,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "rule_import(inspect)",
                     "rule_document_page_render",
                     "rule_import(ingest)",
+                    "rule_import(review_statblock)",
                     "rule_import(extract_candidates)",
                     "rule_import(review)",
                     "rule_import(compile)",
@@ -16078,6 +16079,104 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         ]
 
     @mcp.tool()
+    def rule_statblock_review(
+        campaign_id: str,
+        job_id: str,
+        page_number: int,
+        normalized_content: str,
+        observation: str,
+        principal_id: str = "system:local",
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Retain a DM transcription bound to one rendered rulebook PDF page."""
+        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        if not idempotency_key:
+            raise ValueError("idempotency_key is required for a rule statblock review")
+        job = require_import_job(campaign_id, job_id, "rulebook")
+        if not job.source_id:
+            raise ValueError("rule import job must be indexed before statblock review")
+        source = rules.source(job.source_id)
+        campaign_edition = str(campaigns.get(campaign_id).settings.get("edition") or "2024")
+        if campaign_edition != "2014" or str(source.get("edition") or "") != "2014":
+            raise ValueError("reviewed rule statblocks require a D&D 2014 campaign and source")
+        if isinstance(page_number, bool) or not isinstance(page_number, int) or page_number < 1:
+            raise ValueError("page_number must be a positive integer")
+        content = str(normalized_content or "").strip()
+        if not content or len(content) > 100_000:
+            raise ValueError("normalized_content must contain 1 to 100000 characters")
+        reviewed_observation = str(observation or "").strip()
+        if not 8 <= len(reviewed_observation) <= 2_000:
+            raise ValueError("observation must contain 8 to 2000 characters")
+        payload = {
+            "job_id": job_id,
+            "operation": "review_statblock",
+            "page_number": page_number,
+            "normalized_content": content,
+            "observation": reviewed_observation,
+        }
+        scope = f"import-job:{campaign_id}:{job_id}:{principal_id}"
+        replay = replay_idempotent(scope, idempotency_key, payload)
+        if replay is not None:
+            return replay
+        source_path = storage.artifact_rulebook_path(job.artifact)
+        if source_path.suffix.casefold() != ".pdf":
+            raise ValueError("visual rule statblock review requires a staged PDF")
+        rendered = render_pdf_page(source_path, page_number, scale=1.5)
+        if rendered.source_checksum != job.artifact_checksum:
+            raise RuntimeError("rulebook PDF no longer matches its staged checksum")
+        review_digest = hashlib.sha256(
+            f"{job.id}:{page_number}:{hashlib.sha256(content.encode('utf-8')).hexdigest()}".encode()
+        ).hexdigest()
+        review_id = f"rule-statblock-review:{review_digest[:24]}"
+        parsed = parse_2014_statblock(
+            content,
+            source_key=f"rule-review:{review_id}",
+            rule_refs=[
+                f"rule-source:{job.source_id}",
+                f"rule-source-page:{job.source_id}:{page_number}",
+                f"rule-review:{review_id}",
+            ],
+        )
+        review = {
+            "id": review_id,
+            "campaign_id": campaign_id,
+            "job_id": job_id,
+            "source_id": job.source_id,
+            "source_key": source["source_key"],
+            "source_checksum": source["checksum"],
+            "artifact": job.artifact,
+            "asset_checksum": job.artifact_checksum,
+            "page_number": page_number,
+            "page_count": rendered.page_count,
+            "image_checksum": rendered.checksum,
+            "normalized_content": content,
+            "normalized_content_sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+            "observation": reviewed_observation,
+        }
+        reviews = list(dict(job.result or {}).get("statblock_reviews") or [])
+        reviews = [item for item in reviews if str(item.get("id") or "") != review_id]
+        reviews.append(review)
+        updated = import_jobs.record_result(
+            job_id,
+            {**dict(job.result or {}), "statblock_reviews": reviews},
+            state=job.state,
+            source_id=job.source_id,
+        )
+        response = {
+            "job": asdict(updated),
+            "review": review,
+            "validation": {
+                "challenge_rating": parsed.challenge_rating,
+                "experience_points": parsed.experience_points,
+                "warnings": list(parsed.warnings),
+                "settlement": "automatic" if not parsed.warnings else "mixed",
+            },
+        }
+        return remember_idempotent(
+            scope, idempotency_key, payload, response, campaign_id=campaign_id
+        )
+
+    @mcp.tool()
     def rule_document_import(
         campaign_id: str,
         artifact: str,
@@ -19576,6 +19675,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "stage",
             "inspect",
             "ingest",
+            "review_statblock",
             "extract_candidates",
             "review",
             "compile",
@@ -19629,6 +19729,19 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     campaign_id,
                     job_id,
                     acknowledge_warnings,
+                    principal_id,
+                    idempotency_key,
+                ),
+            )
+        if action == "review_statblock":
+            return facade_result(
+                action,
+                rule_statblock_review(
+                    campaign_id,
+                    job_id,
+                    required(data, "page_number"),
+                    required(data, "normalized_content"),
+                    required(data, "observation"),
                     principal_id,
                     idempotency_key,
                 ),
@@ -20184,6 +20297,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "build",
             "template",
             "statblock",
+            "reviewed_rule_statblock",
             "module_statblock",
             "narrative_npc",
         ],
@@ -20372,6 +20486,116 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 data.get("player_name"),
                 principal_id,
             )
+        elif mode == "reviewed_rule_statblock":
+            campaign_id = str(required(data, "campaign_id"))
+            job_id = str(required(data, "job_id"))
+            review_id = str(required(data, "review_id"))
+            access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+            job = require_import_job(campaign_id, job_id, "rulebook")
+            reviews = list(dict(job.result or {}).get("statblock_reviews") or [])
+            matches = [item for item in reviews if str(item.get("id") or "") == review_id]
+            if len(matches) != 1:
+                raise ValueError("reviewed rule statblock does not belong to the import job")
+            review = dict(matches[0])
+            if str(review.get("source_id") or "") != str(job.source_id or ""):
+                raise ValueError("reviewed rule statblock source no longer matches its import job")
+            content = str(review.get("normalized_content") or "")
+            if hashlib.sha256(content.encode("utf-8")).hexdigest() != str(
+                review.get("normalized_content_sha256") or ""
+            ):
+                raise ValueError("reviewed rule statblock content checksum is invalid")
+            campaign = campaigns.get(campaign_id)
+            source = rules.source(str(job.source_id))
+            if (
+                str(campaign.settings.get("edition") or "2024") != "2014"
+                or str(source.get("edition") or "") != "2014"
+            ):
+                raise ValueError("reviewed rule statblocks require a D&D 2014 campaign and source")
+            source_key = f"rule-review:{review_id}"
+            source_rule_refs = [
+                f"rule-source:{job.source_id}",
+                f"rule-source-page:{job.source_id}:{review['page_number']}",
+                f"rule-review:{review_id}",
+            ]
+            parsed = parse_2014_statblock(
+                content,
+                source_key=source_key,
+                rule_refs=source_rule_refs,
+                name=str(data.get("name") or "").strip() or None,
+            )
+            hydrated_sheet, spell_warnings = hydrate_statblock_spellcasting(
+                campaign_id,
+                parsed,
+                source_key=source_key,
+                rule_refs=source_rule_refs,
+            )
+            variant = data.get("variant")
+            variant_evidence = statblock_variant_evidence(campaign_id, variant)
+            statblock_warnings = retained_statblock_warnings(
+                [*parsed.warnings, *spell_warnings],
+                variant,
+            )
+            sheet = (
+                apply_statblock_variant(hydrated_sheet, variant)
+                if variant is not None
+                else hydrated_sheet
+            )
+            character_type = str(data.get("character_type") or "monster")
+            if character_type not in {"npc", "monster"}:
+                raise ValueError(
+                    "reviewed rule statblock import creates only npc or monster actors"
+                )
+            notes = deepcopy(data.get("notes") or default_character_notes())
+            profile = notes.setdefault("profile", {})
+            if not str(profile.get("summary") or "").strip():
+                profile["summary"] = parsed.summary
+            provenance = (
+                f"Reviewed rule statblock: rule-source:{job.source_id} "
+                f"(review_id={review_id}; page={review['page_number']}; "
+                f"asset_checksum={review['asset_checksum']}; "
+                f"image_checksum={review['image_checksum']})."
+            )
+            if variant is not None:
+                changed_fields = (
+                    ", ".join(sorted(set(variant) - {"source_ref", "source_refs"})) or "none"
+                )
+                provenance += (
+                    f"\nVariant source: {statblock_variant_source_label(variant)}; "
+                    f"applied fields: {changed_fields}."
+                )
+            if statblock_warnings:
+                provenance += "\nManual rulings: " + "; ".join(statblock_warnings) + "."
+            existing_dm_notes = str(profile.get("dm_notes") or "").strip()
+            profile["dm_notes"] = "\n".join(
+                item for item in (existing_dm_notes, provenance) if item
+            )
+            character = character_create(
+                parsed.name,
+                campaign_id,
+                character_type,
+                data.get("player_name"),
+                str(data.get("summary") or parsed.summary),
+                sheet,
+                notes,
+                principal_id,
+                idempotency_key,
+            )
+            result = {
+                "character": character,
+                "source": {
+                    key: value
+                    for key, value in review.items()
+                    if key != "normalized_content"
+                },
+                "statblock": {
+                    "challenge_rating": parsed.challenge_rating,
+                    "experience_points": parsed.experience_points,
+                    "warnings": list(statblock_warnings),
+                    "settlement": "automatic" if not statblock_warnings else "mixed",
+                },
+                "variant": deepcopy(variant) if variant is not None else None,
+                "variant_evidence": variant_evidence,
+            }
         elif mode == "module_statblock":
             campaign_id = str(required(data, "campaign_id"))
             review_id = str(required(data, "review_id"))
@@ -22492,6 +22716,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         "rule_import_job_create",
         "rule_import_job_inspect",
         "rule_import_job_ingest",
+        "rule_statblock_review",
         "rule_content_candidates_extract",
         "import_job_review_candidates",
         "rule_import_job_compile",

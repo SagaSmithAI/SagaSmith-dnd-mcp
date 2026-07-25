@@ -2469,7 +2469,7 @@ async def _statblock_preparation_with_recovery(
 
 
 async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
-    """Ingest one strict SRD statblock and create source-identical encounter actors."""
+    """Ingest or visually review one rule statblock and create source-identical actors."""
 
     if bool(args.source_path) == bool(args.source_id):
         raise ValueError(
@@ -2486,6 +2486,22 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError("--source-page must be positive")
     if explicit_chunk_ids and (source_query or source_page is not None):
         raise ValueError("--chunk-id cannot be combined with source discovery filters")
+    reviewed_content = None
+    review_observation = None
+    review_override_path = None
+    if args.review_override is not None:
+        reviewed_content, review_observation, review_override_path = _load_review_override(
+            args.review_override,
+            args.review_observation,
+        )
+        if not args.source_path or source_page is None:
+            raise ValueError(
+                "rule statblock review override requires --source-path and --source-page"
+            )
+        if explicit_chunk_ids or source_query:
+            raise ValueError(
+                "rule statblock review override cannot be combined with chunk text filters"
+            )
     variant = None
     variant_path = None
     if args.statblock_variant is not None:
@@ -2601,9 +2617,31 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
             else:
                 source_id = str(args.source_id)
 
+            rule_review: dict[str, Any] | None = None
+            if reviewed_content is not None:
+                if import_report is None:
+                    raise RuntimeError("rule statblock review requires an import job")
+                reviewed = _facade_value(
+                    await client.domain(
+                        "rule_import",
+                        {
+                            "campaign_id": args.campaign_id,
+                            "action": "review_statblock",
+                            "payload": {
+                                "job_id": import_report["job_id"],
+                                "page_number": source_page,
+                                "normalized_content": reviewed_content,
+                                "observation": review_observation,
+                            },
+                            "idempotency_key": f"{token}-review-rule-statblock",
+                        },
+                    )
+                )
+                rule_review = dict(reviewed["review"])
+
             selected_source_chunks: list[dict[str, Any]] = []
             selected_chunk_ids = explicit_chunk_ids
-            if source_query or source_page is not None:
+            if rule_review is None and (source_query or source_page is not None):
                 chunk_query_payload: dict[str, Any] = {
                     "source_id": source_id,
                     "query": source_query,
@@ -2639,20 +2677,26 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
                 )
                 payload: dict[str, Any] = {
                     "campaign_id": args.campaign_id,
-                    "source_id": source_id,
                     "name": actor_name,
                     "character_type": args.actor_type,
                     "summary": "Strict source-bound encounter actor for campaign regression.",
                 }
-                if selected_chunk_ids:
-                    payload["chunk_ids"] = selected_chunk_ids
+                creation_mode = "statblock"
+                if rule_review is not None:
+                    creation_mode = "reviewed_rule_statblock"
+                    payload["job_id"] = import_report["job_id"]
+                    payload["review_id"] = rule_review["id"]
+                else:
+                    payload["source_id"] = source_id
+                    if selected_chunk_ids:
+                        payload["chunk_ids"] = selected_chunk_ids
                 if variant is not None:
                     payload["variant"] = variant
                 created = _facade_value(
                     await client.domain(
                         "character_create_from",
                         {
-                            "mode": "statblock",
+                            "mode": creation_mode,
                             "payload": payload,
                             "idempotency_key": f"{token}-create-rule-statblock-{index}",
                         },
@@ -2734,6 +2778,10 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
                 "import": import_report,
                 "source": source_report,
                 "selected_source_chunks": selected_source_chunks,
+                "rule_review": rule_review,
+                "review_override_path": (
+                    str(review_override_path) if review_override_path is not None else None
+                ),
                 "statblock": statblock_report,
                 "actors": actors,
                 "variant": deepcopy(variant) if variant is not None else None,

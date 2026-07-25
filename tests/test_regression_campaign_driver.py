@@ -179,6 +179,23 @@ class _RuleStatblockClient:
                     "head_snapshot_id": "snapshot-0",
                 }
             ]
+        if tool_id == "rule_import":
+            action = arguments["action"]
+            if action == "stage":
+                return {"job": {"id": "job-1"}, "artifact": "rulebook.pdf"}
+            if action == "inspect":
+                return {"inspection": {"warnings": []}}
+            if action == "ingest":
+                return {"source": {"id": "source-1"}}
+            if action == "review_statblock":
+                return {
+                    "review": {
+                        "id": "rule-statblock-review:kenku",
+                        "source_id": "source-1",
+                        "page_number": arguments["payload"]["page_number"],
+                    }
+                }
+            raise AssertionError(arguments)
         if tool_id == "rule_pack_query":
             assert arguments["view"] == "source_chunks"
             return [
@@ -247,6 +264,8 @@ def _rule_statblock_args(tmp_path: Path, *, defer_checkpoint: bool) -> argparse.
         actor_type="monster",
         source_query="",
         source_page=None,
+        review_override=None,
+        review_observation="",
     )
 
 
@@ -384,6 +403,45 @@ def test_prepare_rule_statblock_discovers_chunks_by_source_page_and_text(
     )
     assert create_call["payload"]["chunk_ids"] == ["kenku-chunk"]
     assert report["selected_source_chunks"][0]["page_start"] == 195
+
+
+def test_prepare_rule_statblock_uses_checksum_bound_visual_review(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = _RuleStatblockClient()
+    _patch_rule_statblock_transport(monkeypatch, client)
+    source = tmp_path / "monster-manual.pdf"
+    source.write_bytes(b"test fixture")
+    override = tmp_path / "kenku.md"
+    override.write_text("# Kenku\n\nReviewed statblock.", encoding="utf-8")
+    args = _rule_statblock_args(tmp_path, defer_checkpoint=True)
+    args.source_id = None
+    args.source_path = source
+    args.chunk_id = []
+    args.source_page = 195
+    args.review_override = override
+    args.review_observation = "Visually checked every Kenku field on rendered PDF page 195."
+
+    report = asyncio.run(_prepare_rule_statblock(args))
+
+    review_call = next(
+        arguments
+        for scope, tool_id, arguments in client.calls
+        if scope == "domain"
+        and tool_id == "rule_import"
+        and arguments["action"] == "review_statblock"
+    )
+    assert review_call["payload"]["page_number"] == 195
+    assert review_call["payload"]["normalized_content"].startswith("# Kenku")
+    create_call = next(
+        arguments
+        for scope, tool_id, arguments in client.calls
+        if scope == "domain" and tool_id == "character_create_from"
+    )
+    assert create_call["mode"] == "reviewed_rule_statblock"
+    assert create_call["payload"]["review_id"] == "rule-statblock-review:kenku"
+    assert report["rule_review"]["source_id"] == "source-1"
+    assert report["review_override_path"] == str(override.resolve())
 
 
 def test_failed_rule_statblock_preparation_uses_shared_phase_recovery(

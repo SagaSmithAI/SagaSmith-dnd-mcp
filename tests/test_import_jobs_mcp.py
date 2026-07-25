@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 from mcp.types import ImageContent, TextContent
 from pypdf import PdfWriter
+from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 
 from sagasmith_dnd_mcp.config import McpConfig
 from sagasmith_dnd_mcp.server import create_server
@@ -52,7 +53,27 @@ def test_rule_import_renders_a_checksum_bound_review_page(tmp_path: Path) -> Non
     import_root.mkdir()
     source = import_root / "review.pdf"
     writer = PdfWriter()
-    writer.add_blank_page(width=200, height=100)
+    page = writer.add_blank_page(width=300, height=200)
+    font = DictionaryObject(
+        {
+            NameObject("/Type"): NameObject("/Font"),
+            NameObject("/Subtype"): NameObject("/Type1"),
+            NameObject("/BaseFont"): NameObject("/Helvetica"),
+        }
+    )
+    font_ref = writer._add_object(font)
+    page[NameObject("/Resources")] = DictionaryObject(
+        {
+            NameObject("/Font"): DictionaryObject(
+                {NameObject("/F1"): font_ref}
+            )
+        }
+    )
+    content = DecodedStreamObject()
+    content.set_data(
+        b"BT /F1 12 Tf 20 160 Td (Commoner rulebook review page) Tj ET"
+    )
+    page[NameObject("/Contents")] = writer._add_object(content)
     with source.open("wb") as stream:
         writer.write(stream)
     config = McpConfig(
@@ -69,7 +90,7 @@ def test_rule_import_renders_a_checksum_bound_review_page(tmp_path: Path) -> Non
         server = create_server(config)
         _, campaign = await server.call_tool(
             "campaign_create",
-            {"name": "Page review", "idempotency_key": "campaign"},
+            {"name": "Page review", "edition": "2014", "idempotency_key": "campaign"},
         )
         _, staged = await server.call_tool(
             "rule_import",
@@ -101,6 +122,90 @@ def test_rule_import_renders_a_checksum_bound_review_page(tmp_path: Path) -> Non
         assert metadata["page_number"] == 1
         assert metadata["source_checksum"] == staged["result"]["checksum"]
         assert rendered[1].mimeType == "image/png"
+
+        _, inspected = await server.call_tool(
+            "rule_import",
+            {
+                "campaign_id": campaign["id"],
+                "action": "inspect",
+                "payload": {"job_id": job_id},
+                "idempotency_key": "inspect",
+            },
+        )
+        _, ingested = await server.call_tool(
+            "rule_import",
+            {
+                "campaign_id": campaign["id"],
+                "action": "ingest",
+                "payload": {
+                    "job_id": job_id,
+                    "acknowledge_warnings": bool(
+                        inspected["result"]["inspection"]["warnings"]
+                    ),
+                },
+                "idempotency_key": "ingest",
+            },
+        )
+        commoner = """### Commoner
+
+*Medium humanoid (any race), any alignment*
+
+**Armor Class** 10
+**Hit Points** 4 (1d8)
+**Speed** 30 ft.
+
+| STR | DEX | CON | INT | WIS | CHA |
+|:---:|:---:|:---:|:---:|:---:|:---:|
+| 10 (+0) | 10 (+0) | 10 (+0) | 10 (+0) | 10 (+0) | 10 (+0) |
+
+**Senses** passive Perception 10
+**Languages** Common
+**Challenge** 0 (10 XP)
+
+###### Actions
+
+***Club***. *Melee Weapon Attack:* +2 to hit, reach 5 ft., one target.
+*Hit:* 2 (1d4) bludgeoning damage.
+"""
+        review_arguments = {
+            "campaign_id": campaign["id"],
+            "action": "review_statblock",
+            "payload": {
+                "job_id": job_id,
+                "page_number": 1,
+                "normalized_content": commoner,
+                "observation": "DM compared every field with the rendered source page.",
+            },
+            "idempotency_key": "review-statblock",
+        }
+        _, reviewed = await server.call_tool("rule_import", review_arguments)
+        _, replayed = await server.call_tool("rule_import", review_arguments)
+        assert replayed == reviewed
+        review = reviewed["result"]["review"]
+        assert review["source_id"] == ingested["result"]["source_id"]
+        assert review["asset_checksum"] == metadata["source_checksum"]
+        assert review["image_checksum"] == metadata["image_checksum"]
+
+        _, created = await server.call_tool(
+            "character_create_from",
+            {
+                "mode": "reviewed_rule_statblock",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "job_id": job_id,
+                    "review_id": review["id"],
+                    "name": "Reviewed Commoner",
+                    "character_type": "npc",
+                },
+                "idempotency_key": "reviewed-commoner",
+            },
+        )
+        created = created["result"]
+        assert created["source"]["normalized_content_sha256"]
+        assert created["character"]["derived"]["hit_points"]["max"] == 4
+        assert "Reviewed rule statblock: rule-source:" in (
+            created["character"]["notes"]["profile"]["dm_notes"]
+        )
 
     asyncio.run(exercise())
 
