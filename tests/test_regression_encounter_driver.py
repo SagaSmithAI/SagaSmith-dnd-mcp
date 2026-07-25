@@ -12,6 +12,7 @@ from scripts.regression_encounter import (
     _choose_destination,
     _choose_party_spell,
     _defense_selection,
+    _encounter_actor_groups,
     _has_blocking_pending,
     _has_multiattack_followup,
     _observable_target_ids,
@@ -20,6 +21,8 @@ from scripts.regression_encounter import (
     _party_ids,
     _preferred_hostile_weapon_id,
     _preferred_multiattack_option_id,
+    _prepared_actor_ids,
+    _prioritize_targets,
     _reinforcement_config,
     _resolve_pending,
     _roll_total,
@@ -35,6 +38,7 @@ from scripts.regression_encounter import (
     _source_outcome,
     _source_precombat_casts,
     _source_surrender_outcome,
+    _source_target_priorities,
     _source_truce_outcome,
     _start_or_resume_auto_run,
     _status,
@@ -125,6 +129,77 @@ def test_party_ids_combine_public_party_reports_and_require_global_uniqueness(
         assert "unique character actor_id" in str(exc)
     else:
         raise AssertionError("duplicate actor ids must be rejected")
+
+
+def test_prepared_actor_reports_support_batched_rule_actors_and_module_actors(
+    tmp_path,
+) -> None:
+    rule_report = tmp_path / "rule.json"
+    module_report = tmp_path / "module.json"
+    rule_report.write_text(
+        json.dumps({"actors": [{"id": "stirge-1"}, {"id": "stirge-2"}]}),
+        encoding="utf-8",
+    )
+    module_report.write_text(
+        json.dumps({"created": {"character": {"id": "durnan"}}}),
+        encoding="utf-8",
+    )
+
+    assert _prepared_actor_ids(
+        [rule_report, module_report],
+        report_kind="encounter",
+    ) == ["stirge-1", "stirge-2", "durnan"]
+
+
+def test_encounter_actor_groups_keep_allies_out_of_registered_party_and_reject_overlap(
+    tmp_path,
+) -> None:
+    party_report = tmp_path / "party.json"
+    ally_report = tmp_path / "ally.json"
+    hostile_report = tmp_path / "hostile.json"
+    party_report.write_text(
+        json.dumps(
+            {
+                "characters": [
+                    {"actor_id": "pc-1"},
+                    {"actor_id": "pc-2"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    ally_report.write_text(
+        json.dumps({"created": {"character": {"id": "durnan"}}}),
+        encoding="utf-8",
+    )
+    hostile_report.write_text(
+        json.dumps({"actors": [{"id": "troll"}, {"id": "stirge"}]}),
+        encoding="utf-8",
+    )
+    args = SimpleNamespace(
+        party_report=[party_report],
+        ally_report=[ally_report],
+        hostile_report=[hostile_report],
+        additional_hostile_report=[],
+        reinforcement_hostile_report=[],
+    )
+
+    groups = _encounter_actor_groups(args)
+
+    assert groups["party_ids"] == ["pc-1", "pc-2"]
+    assert groups["ally_ids"] == ["durnan"]
+    assert groups["hostile_ids"] == ["troll", "stirge"]
+
+    hostile_report.write_text(
+        json.dumps({"actors": [{"id": "durnan"}]}),
+        encoding="utf-8",
+    )
+    try:
+        _encounter_actor_groups(args)
+    except ValueError as exc:
+        assert "must be disjoint" in str(exc)
+    else:
+        raise AssertionError("the same actor cannot be both an ally and a hostile")
 
 
 def test_character_reads_are_batched_per_encounter_step() -> None:
@@ -522,6 +597,70 @@ def test_source_declared_conditions_are_scoped_to_cited_participants() -> None:
     by_actor = {item["actor_id"]: item for item in config}
     assert "source_conditions" not in by_actor["pc-1"]
     assert by_actor["ruffian-1"]["source_conditions"][0]["condition"] == "poisoned"
+
+
+def test_source_target_priorities_preserve_authored_roles_and_tactical_order() -> None:
+    excerpt = (
+        "The stirges attack the nearest characters as Durnan confronts the monster. "
+        "He calls on the characters to focus on slaying the stirges."
+    )
+    priorities = _source_target_priorities(
+        [
+            {
+                "actor_ids": ["pc-1", "pc-2"],
+                "priority_groups": [["stirge-1", "stirge-2"], ["troll"]],
+                "source_excerpt": "He calls on the characters to focus on slaying the stirges.",
+            },
+            {
+                "actor_ids": ["durnan"],
+                "priority_groups": [["troll"]],
+                "source_excerpt": "Durnan confronts the monster.",
+            },
+            {
+                "actor_ids": ["stirge-1", "stirge-2"],
+                "priority_groups": [["pc-1", "pc-2"]],
+                "source_excerpt": "The stirges attack the nearest characters",
+            },
+        ],
+        participant_ids=[
+            "pc-1",
+            "pc-2",
+            "durnan",
+            "troll",
+            "stirge-1",
+            "stirge-2",
+        ],
+        encounter_source_excerpt=excerpt,
+    )
+
+    assert set(priorities) == {"pc-1", "pc-2", "durnan", "stirge-1", "stirge-2"}
+    assert _prioritize_targets(
+        "pc-1",
+        ["troll", "stirge-2", "stirge-1"],
+        priorities,
+    ) == ["stirge-2", "stirge-1", "troll"]
+    assert _prioritize_targets(
+        "durnan",
+        ["stirge-1", "troll"],
+        priorities,
+    ) == ["troll", "stirge-1"]
+
+    try:
+        _source_target_priorities(
+            [
+                {
+                    "actor_ids": ["pc-1"],
+                    "priority_groups": [["unknown"]],
+                    "source_excerpt": "focus on slaying the stirges",
+                }
+            ],
+            participant_ids=["pc-1", "stirge-1"],
+            encounter_source_excerpt=excerpt,
+        )
+    except ValueError as exc:
+        assert "participant ids" in str(exc)
+    else:
+        raise AssertionError("target priorities cannot cite nonparticipants")
 
 
 def test_source_opening_item_casts_preserve_authored_order_and_evidence() -> None:

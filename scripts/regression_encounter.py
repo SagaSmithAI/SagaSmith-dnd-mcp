@@ -34,6 +34,16 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--action", choices=("start", "status", "auto-run"), required=True)
     parser.add_argument("--run-id", default="full-playthrough-encounter-v1")
     parser.add_argument("--party-report", type=Path, action="append", required=True)
+    parser.add_argument(
+        "--ally-report",
+        type=Path,
+        action="append",
+        default=[],
+        help=(
+            "Prepared source-bound friendly NPC reports; allies join the encounter "
+            "without becoming registered party members"
+        ),
+    )
     parser.add_argument("--hostile-report", type=Path, action="append", default=[])
     parser.add_argument(
         "--additional-hostile-report",
@@ -80,6 +90,16 @@ def _arguments() -> argparse.Namespace:
         help=(
             "Encounter-scoped source condition with condition, actor_ids, source_ref, "
             "and exact source_excerpt; repeat for independently cited conditions"
+        ),
+    )
+    parser.add_argument(
+        "--source-target-priority-json",
+        action="append",
+        type=json.loads,
+        default=[],
+        help=(
+            "Source-cited target priorities with actor_ids, ordered priority_groups, "
+            "and an exact source_excerpt; ordering inside each group remains tactical"
         ),
     )
     parser.add_argument(
@@ -219,19 +239,75 @@ def _party_ids(paths: list[Path]) -> list[str]:
     return values
 
 
-def _hostile_ids(paths: list[Path]) -> list[str]:
-    values = [
-        str(
-            dict(dict(_read_report(path).get("created") or {}).get("character") or {}).get(
-                "id"
+def _prepared_actor_ids(paths: list[Path], *, report_kind: str) -> list[str]:
+    values: list[str] = []
+    for path in paths:
+        report = _read_report(path)
+        actors = report.get("actors")
+        if isinstance(actors, list) and actors:
+            report_values = [
+                str(item.get("id") or "")
+                for item in actors
+                if isinstance(item, dict)
+            ]
+        else:
+            report_values = [
+                str(
+                    dict(dict(report.get("created") or {}).get("character") or {}).get(
+                        "id"
+                    )
+                    or ""
+                )
+            ]
+        if not report_values or any(not item for item in report_values):
+            raise ValueError(
+                f"{report_kind} report must contain prepared actor id values"
             )
-            or ""
-        )
-        for path in paths
-    ]
+        values.extend(report_values)
     if not values or any(not item for item in values) or len(values) != len(set(values)):
-        raise ValueError("hostile reports must contain unique created.character.id values")
+        raise ValueError(f"{report_kind} reports must contain globally unique actor ids")
     return values
+
+
+def _encounter_actor_groups(args: argparse.Namespace) -> dict[str, list[str]]:
+    groups = {
+        "party_ids": _party_ids(args.party_report),
+        "ally_ids": (
+            _prepared_actor_ids(args.ally_report, report_kind="ally")
+            if args.ally_report
+            else []
+        ),
+        "hostile_ids": _prepared_actor_ids(
+            args.hostile_report,
+            report_kind="hostile",
+        ),
+        "additional_hostile_ids": (
+            _prepared_actor_ids(
+                args.additional_hostile_report,
+                report_kind="additional hostile",
+            )
+            if args.additional_hostile_report
+            else []
+        ),
+        "reinforcement_hostile_ids": (
+            _prepared_actor_ids(
+                args.reinforcement_hostile_report,
+                report_kind="reinforcement hostile",
+            )
+            if args.reinforcement_hostile_report
+            else []
+        ),
+    }
+    actor_sets = [(name, set(values)) for name, values in groups.items()]
+    overlaps = [
+        (left_name, right_name, sorted(left & right))
+        for index, (left_name, left) in enumerate(actor_sets)
+        for right_name, right in actor_sets[index + 1 :]
+        if left & right
+    ]
+    if overlaps:
+        raise ValueError(f"encounter actor reports must be disjoint: {overlaps}")
+    return groups
 
 
 def _participant_manifest(
@@ -539,6 +615,106 @@ def _source_declared_conditions(
                 }
             )
     return by_actor
+
+
+def _normalized_source_text(value: Any) -> str:
+    return " ".join(str(value or "").split()).casefold()
+
+
+def _source_target_priorities(
+    declarations: list[dict[str, Any]],
+    *,
+    participant_ids: list[str],
+    encounter_source_excerpt: str,
+) -> dict[str, dict[str, Any]]:
+    participants = set(participant_ids)
+    encounter_excerpt = _normalized_source_text(encounter_source_excerpt)
+    by_actor: dict[str, dict[str, Any]] = {}
+    allowed = {"actor_ids", "priority_groups", "source_excerpt"}
+    for index, declaration in enumerate(declarations):
+        if not isinstance(declaration, dict):
+            raise ValueError(f"source target priority {index} must be an object")
+        unknown = set(declaration) - allowed
+        if unknown:
+            raise ValueError(
+                f"source target priority {index} has unsupported fields: {sorted(unknown)}"
+            )
+        actor_ids = [str(item).strip() for item in declaration.get("actor_ids") or []]
+        raw_groups = declaration.get("priority_groups")
+        source_excerpt = str(declaration.get("source_excerpt") or "").strip()
+        if (
+            not actor_ids
+            or any(not item for item in actor_ids)
+            or len(actor_ids) != len(set(actor_ids))
+            or not set(actor_ids) <= participants
+            or not isinstance(raw_groups, list)
+            or not raw_groups
+            or not source_excerpt
+        ):
+            raise ValueError(
+                "source target priority requires unique participant actor_ids, "
+                "non-empty priority_groups, and an exact source_excerpt"
+            )
+        priority_groups: list[list[str]] = []
+        for raw_group in raw_groups:
+            if not isinstance(raw_group, list):
+                raise ValueError("source target priority groups must be actor-id lists")
+            group = [str(item).strip() for item in raw_group]
+            if (
+                not group
+                or any(not item for item in group)
+                or len(group) != len(set(group))
+                or not set(group) <= participants
+            ):
+                raise ValueError(
+                    "source target priority groups must contain unique participant ids"
+                )
+            priority_groups.append(group)
+        target_ids = [item for group in priority_groups for item in group]
+        if (
+            len(target_ids) != len(set(target_ids))
+            or set(actor_ids) & set(target_ids)
+            or set(actor_ids) & set(by_actor)
+        ):
+            raise ValueError(
+                "source target priority actors and targets must be disjoint and "
+                "each acting participant may be declared only once"
+            )
+        normalized_declaration_excerpt = _normalized_source_text(source_excerpt)
+        if (
+            not encounter_excerpt
+            or normalized_declaration_excerpt not in encounter_excerpt
+        ):
+            raise ValueError(
+                "source target priority excerpt is not contained in the encounter source"
+            )
+        value = {
+            "actor_ids": actor_ids,
+            "priority_groups": priority_groups,
+            "source_excerpt": source_excerpt,
+        }
+        for actor_id in actor_ids:
+            by_actor[actor_id] = value
+    return by_actor
+
+
+def _prioritize_targets(
+    actor_id: str,
+    target_ids: list[str],
+    priorities_by_actor: dict[str, dict[str, Any]],
+) -> list[str]:
+    prioritized = list(target_ids)
+    declaration = priorities_by_actor.get(actor_id)
+    if declaration is None:
+        return prioritized
+    rank = {
+        target_id: group_index
+        for group_index, group in enumerate(declaration["priority_groups"])
+        for target_id in group
+    }
+    fallback_rank = len(declaration["priority_groups"])
+    prioritized.sort(key=lambda target_id: rank.get(target_id, fallback_rank))
+    return prioritized
 
 
 def _surprise_from_hostile_stealth_totals(
@@ -1181,6 +1357,11 @@ async def _start(
     branch = await _current_branch(client, args.campaign_id)
     initial_hostile_ids = [*hostile_ids, *additional_hostile_ids]
     all_hostile_ids = [*initial_hostile_ids, *reinforcement_hostile_ids]
+    target_priorities = _source_target_priorities(
+        args.source_target_priority_json,
+        participant_ids=[*party_ids, *all_hostile_ids],
+        encounter_source_excerpt=str(args.source_excerpt or ""),
+    )
     source_conditions_by_actor = _source_declared_conditions(
         args.source_condition_json,
         participant_ids=[*party_ids, *initial_hostile_ids],
@@ -1462,6 +1643,12 @@ async def _start(
         "visible_to_actor_ids_by_hostile": visible_to_actor_ids_by_hostile,
         "surprise": surprise,
         "source_conditions_by_actor": source_conditions_by_actor,
+        "source_target_priorities": list(
+            {
+                tuple(value["actor_ids"]): value
+                for value in target_priorities.values()
+            }.values()
+        ),
         "source_precombat_casts": precombat_cast_results,
         "source_opening_weapons": list(opening_weapons.values()),
         "source_on_hit_rulings": list(on_hit_rulings.values()),
@@ -2022,6 +2209,11 @@ async def _auto_run(
         args.source_delayed_action_json,
         participant_ids=hostile_ids,
     )
+    target_priorities = _source_target_priorities(
+        args.source_target_priority_json,
+        participant_ids=[*party_ids, *hostile_ids],
+        encounter_source_excerpt=str(args.source_excerpt or ""),
+    )
     surrender_configured = bool(
         args.surrender_actor_id
         or args.surrender_at_hp
@@ -2496,6 +2688,11 @@ async def _auto_run(
                 ),
             )
         )
+        living_targets = _prioritize_targets(
+            actor_id,
+            living_targets,
+            target_priorities,
+        )
         spell_choice = _choose_party_spell(
             actor_id,
             party_ids=party_ids,
@@ -2848,6 +3045,12 @@ async def _auto_run(
         ),
         "source_on_hit_rulings": list(on_hit_rulings.values()),
         "source_delayed_actions": list(delayed_actions.values()),
+        "source_target_priorities": list(
+            {
+                tuple(value["actor_ids"]): value
+                for value in target_priorities.values()
+            }.values()
+        ),
         "surrender": (
             {
                 "actor_id": args.surrender_actor_id,
@@ -2940,31 +3143,13 @@ async def _status(
 
 
 async def _run(args: argparse.Namespace) -> dict[str, Any]:
-    party_ids = _party_ids(args.party_report)
-    hostile_ids = _hostile_ids(args.hostile_report)
-    additional_hostile_ids = (
-        _hostile_ids(args.additional_hostile_report)
-        if args.additional_hostile_report
-        else []
-    )
-    reinforcement_hostile_ids = (
-        _hostile_ids(args.reinforcement_hostile_report)
-        if args.reinforcement_hostile_report
-        else []
-    )
-    hostile_groups = [
-        set(hostile_ids),
-        set(additional_hostile_ids),
-        set(reinforcement_hostile_ids),
-    ]
-    if any(
-        left & right
-        for index, left in enumerate(hostile_groups)
-        for right in hostile_groups[index + 1 :]
-    ):
-        raise ValueError(
-            "base, additional, and reinforcement hostile reports must be disjoint"
-        )
+    actor_groups = _encounter_actor_groups(args)
+    party_ids = actor_groups["party_ids"]
+    ally_ids = actor_groups["ally_ids"]
+    friendly_ids = [*party_ids, *ally_ids]
+    hostile_ids = actor_groups["hostile_ids"]
+    additional_hostile_ids = actor_groups["additional_hostile_ids"]
+    reinforcement_hostile_ids = actor_groups["reinforcement_hostile_ids"]
     all_hostile_ids = [
         *hostile_ids,
         *additional_hostile_ids,
@@ -2976,6 +3161,8 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
         "campaign_id": args.campaign_id,
         "run_id": args.run_id,
         "party_ids": party_ids,
+        "ally_ids": ally_ids,
+        "friendly_ids": friendly_ids,
         "hostile_ids": hostile_ids,
         "additional_hostile_ids": additional_hostile_ids,
         "reinforcement_hostile_ids": reinforcement_hostile_ids,
@@ -2988,7 +3175,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                 report["result"] = await _start(
                     client,
                     args,
-                    party_ids,
+                    friendly_ids,
                     hostile_ids,
                     additional_hostile_ids,
                     reinforcement_hostile_ids,
@@ -2997,13 +3184,13 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                 report["result"] = await _start_or_resume_auto_run(
                     client,
                     args,
-                    party_ids,
+                    friendly_ids,
                     hostile_ids,
                     additional_hostile_ids,
                     reinforcement_hostile_ids,
                 )
             else:
-                actor_ids = [*party_ids, *all_hostile_ids]
+                actor_ids = [*friendly_ids, *all_hostile_ids]
                 report["result"] = await _status(
                     client,
                     campaign_id=args.campaign_id,
