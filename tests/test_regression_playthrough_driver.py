@@ -29,6 +29,7 @@ from scripts.regression_playthrough import (
     _checkpoint,
     _committed_check_result,
     _configure_advancement,
+    _configure_ending_conditions,
     _extend_manifest_for_module_revision,
     _initialize_source_state,
     _level_spell_choice_counts,
@@ -122,6 +123,83 @@ def test_scene_resource_actions_support_deferred_checkpoint_batching() -> None:
         "use-activity",
         "use-consumable",
     } <= regression_playthrough.DEFERRED_CHECKPOINT_ACTIONS
+
+
+def test_configure_ending_uses_public_manifest_replace_and_rejects_redefinition() -> None:
+    class Client:
+        def __init__(self) -> None:
+            self.revision = 3
+            self.manifest = new_playthrough_manifest(
+                run_id="run-1",
+                campaign_line_id="line-1",
+                module_ids=["module-1"],
+                recommended_party_minimum=None,
+                recommended_party_maximum=None,
+                selected_party_size=None,
+                source_refs=[_manifest_source_ref()],
+            )
+            self.replace_calls: list[dict] = []
+
+        async def core(self, tool_id: str, arguments: dict):
+            assert tool_id == "campaign_query"
+            return {"result": {"id": "campaign-1", "revision": self.revision}}
+
+        async def domain(self, tool_id: str, arguments: dict):
+            assert tool_id == "playthrough_manifest"
+            if arguments["action"] == "get":
+                return {
+                    "manifest": deepcopy(self.manifest),
+                    "campaign_revision": self.revision,
+                }
+            assert arguments["action"] == "replace"
+            self.replace_calls.append(deepcopy(arguments))
+            self.manifest = deepcopy(arguments["payload"]["manifest"])
+            self.revision += 1
+            return {
+                "manifest": deepcopy(self.manifest),
+                "campaign_revision": self.revision,
+            }
+
+    condition = {
+        "id": "source-victory",
+        "label": "The source-defined threat is defeated",
+        "source_ref": _manifest_source_ref(),
+        "all_of": [
+            {
+                "kind": "manifest_value",
+                "path": "world_state.victory",
+                "actor_id": "",
+                "fact_key": "",
+                "operator": "equals",
+                "value": True,
+            }
+        ],
+    }
+    client = Client()
+    result = asyncio.run(
+        _configure_ending_conditions(
+            client,
+            campaign_id="campaign-1",
+            run_id="run-1",
+            conditions=[condition],
+        )
+    )
+
+    assert result["manifest"]["ending"]["conditions"] == [condition]
+    assert len(client.replace_calls) == 1
+    assert client.replace_calls[0]["expected_revision"] == 3
+
+    changed = deepcopy(condition)
+    changed["label"] = "Different"
+    with pytest.raises(ValueError, match="already exists with different content"):
+        asyncio.run(
+            _configure_ending_conditions(
+                client,
+                campaign_id="campaign-1",
+                run_id="run-1",
+                conditions=[changed],
+            )
+        )
 
 
 def test_advance_scene_identity_supports_exact_retry_and_later_revisit() -> None:

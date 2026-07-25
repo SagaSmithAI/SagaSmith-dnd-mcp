@@ -89,6 +89,7 @@ def _arguments() -> argparse.Namespace:
             "register-party",
             "register-replacement",
             "prepare-narrative-npc",
+            "configure-ending",
             "start-play",
             "verify-ending",
         ),
@@ -301,6 +302,13 @@ def _arguments() -> argparse.Namespace:
         "--party-report",
         type=Path,
         help="Party-builder JSON report whose manifest_members should be registered",
+    )
+    parser.add_argument(
+        "--ending-condition-json",
+        action="append",
+        type=json.loads,
+        default=[],
+        help="Source-backed machine-verifiable ending condition to add to the manifest",
     )
     parser.add_argument("--condition-id")
     return parser.parse_args()
@@ -5313,6 +5321,57 @@ async def _award_experience(
     }
 
 
+async def _configure_ending_conditions(
+    client: ExposureClient,
+    *,
+    campaign_id: str,
+    run_id: str,
+    conditions: list[dict[str, Any]],
+) -> dict[str, Any]:
+    if not conditions:
+        raise ValueError("configure-ending requires at least one --ending-condition-json")
+    current = await _manifest_get(client, campaign_id)
+    manifest = deepcopy(dict(current["manifest"]))
+    if manifest["status"] == "completed":
+        raise RuntimeError("completed playthrough ending conditions cannot be changed")
+
+    existing = {
+        str(item["id"]): deepcopy(item)
+        for item in list(dict(manifest["ending"]).get("conditions") or [])
+    }
+    for index, raw in enumerate(conditions):
+        if not isinstance(raw, dict):
+            raise ValueError(f"ending-condition-json[{index}] must be an object")
+        condition = deepcopy(raw)
+        condition_id = str(condition.get("id") or "").strip()
+        if not condition_id:
+            raise ValueError(f"ending-condition-json[{index}] requires id")
+        previous = existing.get(condition_id)
+        if previous is not None and previous != condition:
+            raise ValueError(
+                f"ending condition {condition_id} already exists with different content"
+            )
+        existing[condition_id] = condition
+
+    manifest["ending"]["conditions"] = list(existing.values())
+    manifest = validate_playthrough_manifest(manifest)
+    identity_source = json.dumps(
+        conditions,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    identity = hashlib.sha256(identity_source.encode("utf-8")).hexdigest()[:24]
+    return await _manifest_mutation(
+        client,
+        campaign_id=campaign_id,
+        action="replace",
+        run_id=run_id,
+        identity=f"configure-ending:{identity}",
+        payload={"manifest": manifest},
+    )
+
+
 async def _start_play(
     client: ExposureClient,
     *,
@@ -7144,6 +7203,15 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     campaign_id=args.campaign_id,
                     run_id=args.run_id,
                     label=label,
+                )
+            elif args.action == "configure-ending":
+                if phase == "combat":
+                    raise RuntimeError("configure-ending cannot run during active combat")
+                report["result"] = await _configure_ending_conditions(
+                    client,
+                    campaign_id=args.campaign_id,
+                    run_id=args.run_id,
+                    conditions=args.ending_condition_json,
                 )
             elif args.action == "verify-ending":
                 if phase != "play":
