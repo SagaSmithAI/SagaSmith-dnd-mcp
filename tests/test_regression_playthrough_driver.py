@@ -795,6 +795,125 @@ def test_source_loot_driver_uses_one_public_atomic_campaign_transition() -> None
     assert "snapshot" not in client.continuity_payload
 
 
+def test_source_loot_driver_rejects_implicit_empty_spellbook() -> None:
+    class Client:
+        async def domain(self, tool_id: str, arguments: dict):
+            raise AssertionError((tool_id, arguments))
+
+    with pytest.raises(ValueError, match="requires explicit mechanics"):
+        asyncio.run(
+            _acquire_source_loot(
+                Client(),
+                campaign_id="campaign-1",
+                run_id="run-1",
+                scene_id="scene-1",
+                location_key="treasure-room",
+                source_excerpt="The spellbook contains six named spells.",
+                source_ref={},
+                acquisition_id="spellbook-loot",
+                coins={},
+                items=[
+                    {
+                        "id": "recovered-spellbook",
+                        "name": "Recovered spellbook",
+                        "kind": "spellbook",
+                        "quantity": 1,
+                    }
+                ],
+                reason="The party recovered the source-defined spellbook.",
+                knowledge_actor_ids=["actor-1"],
+            )
+        )
+
+
+def test_source_loot_driver_accepts_explicit_spellbook_contents() -> None:
+    source_ref = {
+        "module_id": "module-1",
+        "scene_id": "scene-1",
+        "chunk_id": "chunk-1",
+        "page_start": 1,
+        "page_end": 1,
+        "heading_path": ["Treasure"],
+        "content_sha256": "a" * 64,
+    }
+
+    class Client:
+        def __init__(self) -> None:
+            self.revision = 4
+
+        async def core(self, tool_id: str, arguments: dict):
+            assert tool_id == "campaign_query"
+            return {
+                "result": {
+                    "id": "campaign-1",
+                    "revision": self.revision,
+                    "state": {"game_phase": "play"},
+                }
+            }
+
+        async def domain(self, tool_id: str, arguments: dict):
+            if tool_id == "module_query":
+                return {
+                    "module_id": "module-1",
+                    "scene_id": "scene-1",
+                    "content": "The spellbook contains burning hands.",
+                    "spatial": {
+                        "locations": [{"key": "treasure-room", "title": "Treasure Room"}]
+                    },
+                }
+            if tool_id == "campaign_change":
+                self.revision += 1
+                return {
+                    "status": "committed",
+                    "acquisition_id": "spellbook-loot",
+                    "coins": {},
+                    "items": arguments["payload"]["items"],
+                }
+            if tool_id == "branch_query":
+                return [{"id": "branch-1", "is_current": True}]
+            if tool_id == "continuity_commit":
+                self.revision += 1
+                return {"event": {"id": "event-1"}}
+            if tool_id == "playthrough_manifest":
+                return {"manifest": {"status": "in_progress"}}
+            raise AssertionError((tool_id, arguments))
+
+    item = {
+        "id": "recovered-spellbook",
+        "name": "Recovered spellbook",
+        "kind": "spellbook",
+        "quantity": 1,
+        "mechanics": {
+            "edition": "2014",
+            "spell_ids": [],
+            "unresolved_spell_names": ["Burning Hands"],
+            "owner_mark": "The defeated mage",
+            "source_scene_id": "scene-1",
+            "deciphered": False,
+            "copyable": True,
+        },
+    }
+    result = asyncio.run(
+        _acquire_source_loot(
+            Client(),
+            campaign_id="campaign-1",
+            run_id="run-1",
+            scene_id="scene-1",
+            location_key="treasure-room",
+            source_excerpt="spellbook contains burning hands",
+            source_ref=source_ref,
+            acquisition_id="spellbook-loot",
+            coins={},
+            items=[item],
+            reason="The party recovered the source-defined spellbook.",
+            knowledge_actor_ids=["actor-1"],
+            defer_checkpoint=True,
+        )
+    )
+
+    assert result["acquisition"]["items"] == [item]
+
+
 @pytest.mark.parametrize("defer_checkpoint", [False, True])
 def test_source_item_driver_validates_provenance_hydrates_and_equips(
     defer_checkpoint: bool,

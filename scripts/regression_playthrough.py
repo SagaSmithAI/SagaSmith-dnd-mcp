@@ -4639,6 +4639,37 @@ async def _acquire_source_loot(
         raise ValueError("acquire-loot requires coins or items")
     if not recipients or len(recipients) != len(knowledge_actor_ids):
         raise ValueError("acquire-loot requires unique actor knowledge recipients")
+    item_ids = [str(item.get("id") or "").strip() for item in items]
+    if any(not item_id for item_id in item_ids) or len(item_ids) != len(set(item_ids)):
+        raise ValueError("acquire-loot items require unique non-empty ids")
+    for index, item in enumerate(items):
+        if str(item.get("kind") or "").strip() != "spellbook":
+            continue
+        mechanics = item.get("mechanics")
+        if not isinstance(mechanics, dict):
+            raise ValueError(
+                f"acquire-loot spellbook item {index} requires explicit mechanics"
+            )
+        required_spellbook_fields = {
+            "spell_ids",
+            "unresolved_spell_names",
+            "source_scene_id",
+        }
+        missing = sorted(required_spellbook_fields - set(mechanics))
+        if missing:
+            raise ValueError(
+                f"acquire-loot spellbook item {index} mechanics is missing {missing}"
+            )
+        if not isinstance(mechanics["spell_ids"], list) or not isinstance(
+            mechanics["unresolved_spell_names"], list
+        ):
+            raise ValueError(
+                f"acquire-loot spellbook item {index} spell contents must be arrays"
+            )
+        if not str(mechanics["source_scene_id"] or "").strip():
+            raise ValueError(
+                f"acquire-loot spellbook item {index} requires a source scene id"
+            )
 
     source_scene = await client.domain(
         "module_query",
