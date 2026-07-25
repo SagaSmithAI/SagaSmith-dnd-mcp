@@ -1312,6 +1312,59 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             not in removed_subjects
         ]
 
+    def persist_source_bound_statblock(
+        *,
+        data: dict[str, Any],
+        campaign_id: str,
+        character_type: str,
+        name: str,
+        summary: str,
+        sheet: dict[str, Any],
+        notes: dict[str, Any],
+        principal_id: str,
+        idempotency_key: str | None,
+    ) -> dict[str, Any]:
+        replace_character_id = str(data.get("replace_character_id") or "").strip()
+        if not replace_character_id:
+            return character_create(
+                name,
+                campaign_id,
+                character_type,
+                data.get("player_name"),
+                summary,
+                sheet,
+                notes,
+                principal_id,
+                idempotency_key,
+            )
+        existing = characters.get(replace_character_id)
+        if existing.campaign_id != campaign_id:
+            raise ValueError("replacement statblock actor belongs to another campaign")
+        if existing.character_type != character_type:
+            raise ValueError("replacement statblock actor type must remain unchanged")
+        expected_revision = data.get("expected_revision")
+        if (
+            not isinstance(expected_revision, int)
+            or isinstance(expected_revision, bool)
+            or expected_revision < 1
+        ):
+            raise ValueError(
+                "replacement statblock actor requires a positive expected_revision"
+            )
+        if not idempotency_key:
+            raise ValueError("replacement statblock actor requires idempotency_key")
+        return character_update(
+            replace_character_id,
+            name,
+            data.get("player_name"),
+            summary,
+            sheet,
+            notes,
+            principal_id,
+            expected_revision,
+            f"{idempotency_key}:replace-statblock",
+        )
+
     def combat_view(campaign_id: str, principal_id: str) -> dict[str, Any] | None:
         campaign = campaigns.get(campaign_id)
         encounter = dict(campaign.state or {}).get("combat")
@@ -20613,16 +20666,16 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             profile["dm_notes"] = "\n".join(
                 item for item in (existing_dm_notes, provenance) if item
             )
-            character = character_create(
-                parsed.name,
-                campaign_id,
-                character_type,
-                data.get("player_name"),
-                str(data.get("summary") or parsed.summary),
-                sheet,
-                notes,
-                principal_id,
-                idempotency_key,
+            character = persist_source_bound_statblock(
+                data=data,
+                campaign_id=campaign_id,
+                character_type=character_type,
+                name=parsed.name,
+                summary=str(data.get("summary") or parsed.summary),
+                sheet=sheet,
+                notes=notes,
+                principal_id=principal_id,
+                idempotency_key=idempotency_key,
             )
             result = {
                 "character": character,
@@ -20712,16 +20765,16 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             profile["dm_notes"] = "\n".join(
                 item for item in (existing_dm_notes, provenance) if item
             )
-            character = character_create(
-                parsed.name,
-                campaign_id,
-                character_type,
-                data.get("player_name"),
-                str(data.get("summary") or parsed.summary),
-                sheet,
-                notes,
-                principal_id,
-                idempotency_key,
+            character = persist_source_bound_statblock(
+                data=data,
+                campaign_id=campaign_id,
+                character_type=character_type,
+                name=parsed.name,
+                summary=str(data.get("summary") or parsed.summary),
+                sheet=sheet,
+                notes=notes,
+                principal_id=principal_id,
+                idempotency_key=idempotency_key,
             )
             result = {
                 "character": character,
@@ -20846,16 +20899,16 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             profile["dm_notes"] = "\n".join(
                 item for item in (existing_dm_notes, provenance) if item
             )
-            character = character_create(
-                parsed.name,
-                campaign_id,
-                character_type,
-                data.get("player_name"),
-                str(data.get("summary") or parsed.summary),
-                sheet,
-                notes,
-                principal_id,
-                idempotency_key,
+            character = persist_source_bound_statblock(
+                data=data,
+                campaign_id=campaign_id,
+                character_type=character_type,
+                name=parsed.name,
+                summary=str(data.get("summary") or parsed.summary),
+                sheet=sheet,
+                notes=notes,
+                principal_id=principal_id,
+                idempotency_key=idempotency_key,
             )
             result = {
                 "character": character,

@@ -211,6 +211,37 @@ def test_imported_rule_source_creates_a_source_bound_combat_actor(tmp_path: Path
         assert club["damage_expression"] == "1d4"
         assert "rule-source:srd/commoner" in actor["notes"]["profile"]["dm_notes"]
 
+        replacement_arguments = {
+            "mode": "statblock",
+            "payload": {
+                "campaign_id": campaign["id"],
+                "source_id": ingested["source_id"],
+                "name": "Falten",
+                "character_type": "npc",
+                "replace_character_id": actor["id"],
+                "expected_revision": actor["revision"],
+                "variant": {
+                    "source_ref": f"rule-chunk:{created['source']['chunk_ids'][0]}",
+                    "current_hit_points": 1,
+                },
+            },
+            "idempotency_key": "replace-actor-falten",
+        }
+        replaced = await _call(
+            server,
+            "character_create_from",
+            replacement_arguments,
+        )
+        replacement_replay = await _call(
+            server,
+            "character_create_from",
+            replacement_arguments,
+        )
+        assert replacement_replay == replaced
+        assert replaced["character"]["id"] == actor["id"]
+        assert replaced["character"]["revision"] == actor["revision"] + 1
+        assert replaced["character"]["sheet"]["combat"]["hp"]["value"] == 1
+
         variant = await _call(
             server,
             "character_create_from",

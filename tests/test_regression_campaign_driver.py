@@ -220,6 +220,12 @@ class _RuleStatblockClient:
                     "page_end": 195,
                 }
             ]
+        if tool_id == "character_query":
+            assert arguments == {
+                "view": "get",
+                "payload": {"character_id": "actor-1"},
+            }
+            return {"id": "actor-1", "revision": 4}
         if tool_id == "character_create_from":
             self.revision += 1
             result = {
@@ -276,6 +282,7 @@ def _rule_statblock_args(tmp_path: Path, *, defer_checkpoint: bool) -> argparse.
         defer_checkpoint=defer_checkpoint,
         statblock_variant=None,
         actor_type="monster",
+        replace_actor_id=None,
         source_query="",
         source_page=None,
         review_override=None,
@@ -385,6 +392,25 @@ def test_prepare_rule_statblock_applies_source_cited_variant_and_actor_type(
     assert report["variant"]["source_ref"] == "module-chunk:opening-chunk"
     assert report["variant_evidence"]["id"] == "opening-chunk"
     assert report["variant_path"] == str(variant_path.resolve())
+
+
+def test_prepare_rule_statblock_can_rebuild_an_existing_actor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = _RuleStatblockClient()
+    _patch_rule_statblock_transport(monkeypatch, client)
+    args = _rule_statblock_args(tmp_path, defer_checkpoint=True)
+    args.replace_actor_id = "actor-1"
+
+    asyncio.run(_prepare_rule_statblock(args))
+
+    create_call = next(
+        arguments
+        for scope, tool_id, arguments in client.calls
+        if scope == "domain" and tool_id == "character_create_from"
+    )
+    assert create_call["payload"]["replace_character_id"] == "actor-1"
+    assert create_call["payload"]["expected_revision"] == 4
 
 
 def test_prepare_rule_statblock_discovers_chunks_by_source_page_and_text(

@@ -142,6 +142,13 @@ def _arguments() -> argparse.Namespace:
         help="Number of source-identical actors to create for prepare-rule-statblock",
     )
     parser.add_argument(
+        "--replace-actor-id",
+        help=(
+            "Existing source-bound actor to rebuild in place during statblock "
+            "preparation; requires --actor-count 1"
+        ),
+    )
+    parser.add_argument(
         "--defer-checkpoint",
         action="store_true",
         help=(
@@ -2510,6 +2517,8 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
         )
     if args.actor_count < 1:
         raise ValueError("--actor-count must be positive")
+    if args.replace_actor_id and args.actor_count != 1:
+        raise ValueError("--replace-actor-id requires --actor-count 1")
     explicit_chunk_ids = (
         [str(args.chunk_id)] if isinstance(args.chunk_id, str) else list(args.chunk_id)
     )
@@ -2714,6 +2723,18 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
                     "character_type": args.actor_type,
                     "summary": "Strict source-bound encounter actor for campaign regression.",
                 }
+                if args.replace_actor_id:
+                    current_actor = _facade_value(
+                        await client.domain(
+                            "character_query",
+                            {
+                                "view": "get",
+                                "payload": {"character_id": args.replace_actor_id},
+                            },
+                        )
+                    )
+                    payload["replace_character_id"] = str(args.replace_actor_id)
+                    payload["expected_revision"] = int(current_actor["revision"])
                 creation_mode = "statblock"
                 if rule_review is not None:
                     creation_mode = "reviewed_rule_statblock"
