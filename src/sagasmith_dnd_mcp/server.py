@@ -809,6 +809,45 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "completed",
         }
 
+    def initial_preparation_allowed_for_new_actor(
+        campaign: Any,
+        character: Any,
+    ) -> bool:
+        """Allow one setup list for an actor introduced after live play began."""
+
+        preparation = dict(
+            dict(character.sheet or {}).get("spellcasting", {}).get(
+                "preparation", {}
+            )
+        )
+        if list(preparation.get("selected_spell_ids") or []):
+            return False
+        state = dict(campaign.state or {})
+        participated = {
+            str(actor_id)
+            for actor_id in state.get("adventure_started_actor_ids", [])
+            if str(actor_id)
+        }
+        manifest = state.get("playthrough_manifest")
+        if isinstance(manifest, dict):
+            party = dict(manifest.get("party") or {})
+            participated.update(
+                str(member.get("actor_id") or "")
+                for member in party.get("members", [])
+                if isinstance(member, dict)
+            )
+            for replacement in party.get("replacements", []):
+                if not isinstance(replacement, dict):
+                    continue
+                participated.update(
+                    {
+                        str(replacement.get("predecessor_actor_id") or ""),
+                        str(replacement.get("replacement_actor_id") or ""),
+                    }
+                )
+        participated.discard("")
+        return bool(participated) and str(character.id) not in participated
+
     def validate_exposure_scope(
         exposure: Exposure, tool_id: str, arguments: dict[str, Any]
     ) -> None:
@@ -2802,6 +2841,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         state = dict(campaign.state or {})
         state["game_phase"] = profile
         if profile == PROFILE_PLAY:
+            if not state.get("adventure_started", False):
+                state["adventure_started_actor_ids"] = sorted(
+                    character.id
+                    for character in characters.list(campaign_id=campaign_id)
+                )
             state["adventure_started"] = True
         revisions_result = StateMutationService(storage.database).replace(
             campaign_id,
@@ -12384,7 +12428,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 raise CombatEngineError(
                     "live prepared-spell changes must be submitted atomically with party_rest"
                 )
-            if preparation_setup_closed(campaign):
+            if preparation_setup_closed(
+                campaign
+            ) and not initial_preparation_allowed_for_new_actor(campaign, current):
                 raise CombatEngineError(
                     "individual preparation edits are initial setup only; after play starts, "
                     "submit the complete list with the edition's legal timing event"
@@ -12428,7 +12474,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 raise CombatEngineError("prepared spells cannot be changed during combat")
             if state.get("game_phase", PROFILE_LOBBY) != PROFILE_LOBBY:
                 raise CombatEngineError("switch to lobby for setup or level-up preparation changes")
-            if normalized_event == "setup" and preparation_setup_closed(campaign):
+            if (
+                normalized_event == "setup"
+                and preparation_setup_closed(campaign)
+                and not initial_preparation_allowed_for_new_actor(campaign, current)
+            ):
                 raise CombatEngineError(
                     "prepared-spell setup is closed after live play starts; use the edition's "
                     "legal long-rest or level-up workflow"

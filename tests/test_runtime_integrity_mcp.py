@@ -309,6 +309,143 @@ def test_2024_prepared_spell_changes_follow_phase_and_long_rest_rules(tmp_path: 
     asyncio.run(exercise())
 
 
+def test_new_live_campaign_actor_gets_one_initial_prepared_spell_setup(
+    tmp_path: Path,
+) -> None:
+    config = McpConfig(
+        home=tmp_path / "home",
+        database_url=None,
+        chroma_url=None,
+        chroma_path_override=None,
+        dnd_skills_dir=tmp_path / "dnd",
+        modulegen_skills_dir=tmp_path / "modulegen",
+        auto_seed_rules=False,
+    )
+
+    async def exercise() -> None:
+        server = create_server(config)
+
+        async def raw(name: str, arguments: dict):
+            _, result = await server.call_tool(name, arguments)
+            return result
+
+        async def call(name: str, arguments: dict):
+            result = await raw(name, arguments)
+            return result.get("result", result)
+
+        campaign = await call(
+            "campaign_create",
+            {
+                "name": "Replacement preparation setup",
+                "edition": "2014",
+                "idempotency_key": "campaign",
+            },
+        )
+        await call(
+            "character_create",
+            {
+                "campaign_id": campaign["id"],
+                "name": "Original adventurer",
+                "idempotency_key": "original",
+            },
+        )
+        campaign = await call("campaign_get", {"campaign_id": campaign["id"]})
+        played = await call(
+            "game_phase_set",
+            {
+                "campaign_id": campaign["id"],
+                "tool_profile": "play",
+                "expected_revision": campaign["revision"],
+                "idempotency_key": "play",
+            },
+        )
+        await call(
+            "game_phase_set",
+            {
+                "campaign_id": campaign["id"],
+                "tool_profile": "lobby",
+                "expected_revision": played["campaign_revision"],
+                "idempotency_key": "lobby",
+            },
+        )
+        replacement = await call(
+            "character_create",
+            {
+                "campaign_id": campaign["id"],
+                "name": "Replacement cleric",
+                "idempotency_key": "replacement",
+            },
+        )
+        sheet = default_character_sheet()
+        sheet["progression"] = {
+            "level": 1,
+            "xp": 0,
+            "classes": [
+                {
+                    "name": "Cleric",
+                    "level": 1,
+                    "subclass": "",
+                    "hit_die": 8,
+                }
+            ],
+        }
+        sheet["spellcasting"]["preparation"] = {
+            "mode": "prepared",
+            "max_prepared": 2,
+            "changes_on": "long_rest",
+            "selected_spell_ids": [],
+        }
+        sheet["content"]["spells"] = [
+            {
+                "id": spell_id,
+                "name": spell_id,
+                "level": 1,
+                "grant": {
+                    "source_type": "class",
+                    "source_key": "Cleric",
+                    "method": "class_prepared",
+                },
+                "access": {"known": True},
+            }
+            for spell_id in ("bless", "cure-wounds")
+        ]
+        replacement = await call(
+            "character_sheet_replace",
+            {
+                "character_id": replacement["id"],
+                "sheet": sheet,
+                "expected_revision": replacement["revision"],
+                "idempotency_key": "replacement-sheet",
+            },
+        )
+        prepared = await raw(
+            "character_spell_prepare_list",
+            {
+                "character_id": replacement["id"],
+                "spell_ids": ["bless"],
+                "event": "setup",
+                "expected_revision": replacement["revision"],
+                "idempotency_key": "replacement-setup",
+            },
+        )
+        assert prepared["character"]["sheet"]["spellcasting"]["preparation"][
+            "selected_spell_ids"
+        ] == ["bless"]
+        with pytest.raises(ToolError, match="setup is closed"):
+            await raw(
+                "character_spell_prepare_list",
+                {
+                    "character_id": replacement["id"],
+                    "spell_ids": ["cure-wounds"],
+                    "event": "setup",
+                    "expected_revision": prepared["character"]["revision"],
+                    "idempotency_key": "replacement-setup-again",
+                },
+            )
+
+    asyncio.run(exercise())
+
+
 def test_dm_can_read_actor_knowledge_from_a_non_current_branch_snapshot(tmp_path: Path) -> None:
     config = McpConfig(
         home=tmp_path / "home",
