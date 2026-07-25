@@ -226,6 +226,8 @@ def test_imported_rule_source_creates_a_source_bound_combat_actor(tmp_path: Path
                         "source_refs": [
                             f"rule-chunk:{created['source']['chunk_ids'][1]}"
                         ],
+                        "challenge_rating": "1/8",
+                        "experience_points": 25,
                         "creature_type": "undead",
                         "current_hit_points": 1,
                         "armor_class": 12,
@@ -253,6 +255,8 @@ def test_imported_rule_source_creates_a_source_bound_combat_actor(tmp_path: Path
             },
         )
         variant_actor = variant["character"]
+        assert variant["statblock"]["challenge_rating"] == "1/8"
+        assert variant["statblock"]["experience_points"] == 25
         assert variant_actor["sheet"]["progression"]["species"] == "undead"
         assert variant_actor["sheet"]["combat"]["hp"] == {"value": 1, "max": 4, "temp": 0}
         assert variant_actor["derived"]["armor_class"] == 12

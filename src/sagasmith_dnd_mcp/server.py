@@ -210,7 +210,11 @@ from sagasmith_dnd.spells import (
     validate_magic_missile_allocations,
     validate_spell_grant,
 )
-from sagasmith_dnd.statblocks import apply_statblock_variant, parse_2014_statblock
+from sagasmith_dnd.statblocks import (
+    apply_statblock_variant,
+    effective_statblock_rating,
+    parse_2014_statblock,
+)
 from sagasmith_dnd.system import DND5E
 from sqlalchemy.exc import NoResultFound
 
@@ -1291,14 +1295,21 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if variant is None:
             return warnings
         removed_subjects = {
-            str(item).strip().casefold()
+            "-".join(str(item).strip().casefold().split())
             for field in ("remove_actions", "remove_items", "remove_activities")
             for item in variant.get(field, [])
         }
+        removed_subjects.update(
+            "-".join(str(action_id).strip().casefold().split())
+            for action_id, override in dict(variant.get("action_overrides") or {}).items()
+            if isinstance(override, dict)
+            and override.get("remove_on_hit_effect") is True
+        )
         return [
             warning
             for warning in warnings
-            if warning.partition(":")[0].strip().casefold() not in removed_subjects
+            if "-".join(warning.partition(":")[0].strip().casefold().split())
+            not in removed_subjects
         ]
 
     def combat_view(campaign_id: str, principal_id: str) -> dict[str, Any] | None:
@@ -20568,6 +20579,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 if variant is not None
                 else hydrated_sheet
             )
+            challenge_rating, experience_points = effective_statblock_rating(
+                parsed.challenge_rating,
+                parsed.experience_points,
+                variant,
+            )
             character_type = str(data.get("character_type") or "monster")
             if character_type not in {"npc", "monster"}:
                 raise ValueError(
@@ -20616,8 +20632,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     if key != "normalized_content"
                 },
                 "statblock": {
-                    "challenge_rating": parsed.challenge_rating,
-                    "experience_points": parsed.experience_points,
+                    "challenge_rating": challenge_rating,
+                    "experience_points": experience_points,
                     "warnings": list(statblock_warnings),
                     "settlement": "automatic" if not statblock_warnings else "mixed",
                 },
@@ -20663,6 +20679,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 if variant is not None
                 else hydrated_sheet
             )
+            challenge_rating, experience_points = effective_statblock_rating(
+                parsed.challenge_rating,
+                parsed.experience_points,
+                variant,
+            )
             character_type = str(data.get("character_type") or "monster")
             if character_type not in {"npc", "monster"}:
                 raise ValueError("module statblock import creates only npc or monster actors")
@@ -20706,8 +20727,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "character": character,
                 "source": review,
                 "statblock": {
-                    "challenge_rating": parsed.challenge_rating,
-                    "experience_points": parsed.experience_points,
+                    "challenge_rating": challenge_rating,
+                    "experience_points": experience_points,
                     "warnings": list(statblock_warnings),
                     "settlement": "automatic" if not statblock_warnings else "mixed",
                 },
@@ -20794,6 +20815,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 if variant is not None
                 else hydrated_sheet
             )
+            challenge_rating, experience_points = effective_statblock_rating(
+                parsed.challenge_rating,
+                parsed.experience_points,
+                variant,
+            )
             character_type = str(data.get("character_type") or "npc")
             if character_type not in {"npc", "monster"}:
                 raise ValueError("statblock import creates only npc or monster actors")
@@ -20842,8 +20868,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "chunk_ids": selected_chunk_ids,
                 },
                 "statblock": {
-                    "challenge_rating": parsed.challenge_rating,
-                    "experience_points": parsed.experience_points,
+                    "challenge_rating": challenge_rating,
+                    "experience_points": experience_points,
                     "warnings": list(statblock_warnings),
                     "settlement": "automatic" if not statblock_warnings else "mixed",
                 },
