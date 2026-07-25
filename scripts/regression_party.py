@@ -32,6 +32,53 @@ ABILITY_NAMES = (
     "charisma",
 )
 
+_ITEM_WEIGHT_OZ: dict[str, int | float] = {
+    "arrows": 0.8,
+    "backpack": 80,
+    "ball bearings (bag of 1,000)": 32,
+    "bedroll": 112,
+    "blanket": 48,
+    "book of lore": 80,
+    "case, map or scroll": 16,
+    "chain mail": 880,
+    "chest": 400,
+    "common clothes": 48,
+    "component pouch": 32,
+    "crossbow bolts": 1.2,
+    "crossbow, light": 80,
+    "crowbar": 80,
+    "dagger": 16,
+    "fine clothes": 96,
+    "hammer": 48,
+    "hempen rope (50 feet)": 160,
+    "holy symbol (amulet)": 16,
+    "lamp": 16,
+    "lantern, hooded": 32,
+    "leather": 160,
+    "lute": 32,
+    "mace": 64,
+    "mess kit": 16,
+    "oil (flask)": 16,
+    "piton": 4,
+    "pouch": 16,
+    "prayer book": 80,
+    "quarterstaff": 64,
+    "rapier": 32,
+    "rations (1 day)": 32,
+    "shield": 96,
+    "shortbow": 32,
+    "shortsword": 32,
+    "spellbook": 48,
+    "thieves' tools": 16,
+    "tinderbox": 16,
+    "torch": 16,
+    "waterskin": 80,
+}
+
+
+def _item_weight_oz(name: str) -> int | float:
+    return _ITEM_WEIGHT_OZ.get(name.casefold(), 0)
+
 
 def _arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -59,6 +106,14 @@ def _arguments() -> argparse.Namespace:
         choices=("lobby", "play"),
         default="",
         help="Phase to expose after construction; defaults to the entry phase",
+    )
+    parser.add_argument(
+        "--repair-existing-party-report",
+        type=Path,
+        help=(
+            "Replace legacy opaque starting-equipment packs and repair audited "
+            "item weights for the actors in an existing public party report"
+        ),
     )
     return parser.parse_args()
 
@@ -109,6 +164,7 @@ def _weapon(
         "name": name,
         "kind": "weapon",
         "quantity": quantity,
+        "weight_oz": _item_weight_oz(name),
         "source_key": source_key,
         "mechanics": {
             "category": category,
@@ -141,6 +197,7 @@ def _armor(
         "name": name,
         "kind": "armor",
         "quantity": 1,
+        "weight_oz": _item_weight_oz(name),
         "source_key": source_key,
         "equipped": True,
         "equipped_slot": "armor",
@@ -159,6 +216,7 @@ def _shield(identifier: str, source_key: str) -> dict[str, Any]:
         "name": "Shield",
         "kind": "shield",
         "quantity": 1,
+        "weight_oz": _item_weight_oz("Shield"),
         "source_key": source_key,
         "equipped": True,
         "equipped_slot": "shield",
@@ -182,6 +240,7 @@ def _equipment(
         "name": name,
         "kind": kind,
         "quantity": quantity,
+        "weight_oz": _item_weight_oz(name),
         "source_key": source_key,
         "mechanics": deepcopy(mechanics or {}),
         "description": description,
@@ -195,18 +254,157 @@ def _profile_item_prefix(profile: dict[str, Any]) -> str:
     return re.sub(r"[^a-z0-9]+", "-", str(profile["name"]).casefold()).strip("-")
 
 
+OIL_RULE = (
+    "As an action, you can splash the oil in this flask onto a creature within "
+    "5 feet of you or throw it up to 20 feet, shattering it on impact. Make a "
+    "ranged attack against a target creature or object, treating the oil as an "
+    "improvised weapon. On a hit, the target is covered in oil. If the target "
+    "takes any fire damage before the oil dries (after 1 minute), the target "
+    "takes an additional 5 fire damage from the burning oil."
+)
+TORCH_RULE = (
+    "A torch burns for 1 hour, providing bright light in a 20-foot radius and "
+    "dim light for an additional 20 feet. If you make a melee attack with a "
+    "burning torch and hit, it deals 1 fire damage."
+)
+_PACK_CONTENTS: dict[str, tuple[tuple[str, int], ...]] = {
+    "explorer's pack": (
+        ("Backpack", 1),
+        ("Bedroll", 1),
+        ("Mess kit", 1),
+        ("Tinderbox", 1),
+        ("Torch", 10),
+        ("Rations (1 day)", 10),
+        ("Waterskin", 1),
+        ("Hempen rope (50 feet)", 1),
+    ),
+    "burglar's pack": (
+        ("Backpack", 1),
+        ("Ball bearings (bag of 1,000)", 1),
+        ("String (10 feet)", 1),
+        ("Bell", 1),
+        ("Candle", 5),
+        ("Crowbar", 1),
+        ("Hammer", 1),
+        ("Piton", 10),
+        ("Lantern, hooded", 1),
+        ("Oil (flask)", 2),
+        ("Rations (1 day)", 5),
+        ("Tinderbox", 1),
+        ("Waterskin", 1),
+        ("Hempen rope (50 feet)", 1),
+    ),
+    "scholar's pack": (
+        ("Backpack", 1),
+        ("Book of lore", 1),
+        ("Ink (1 ounce bottle)", 1),
+        ("Ink pen", 1),
+        ("Parchment (one sheet)", 10),
+        ("Sand (small bag)", 1),
+        ("Knife, small", 1),
+    ),
+    "priest's pack": (
+        ("Backpack", 1),
+        ("Blanket", 1),
+        ("Candle", 10),
+        ("Tinderbox", 1),
+        ("Alms box", 1),
+        ("Incense (block)", 2),
+        ("Censer", 1),
+        ("Vestments", 1),
+        ("Rations (1 day)", 2),
+        ("Waterskin", 1),
+    ),
+    "diplomat's pack": (
+        ("Chest", 1),
+        ("Case, map or scroll", 2),
+        ("Fine clothes", 1),
+        ("Ink (1 ounce bottle)", 1),
+        ("Ink pen", 1),
+        ("Lamp", 1),
+        ("Oil (flask)", 2),
+        ("Paper (one sheet)", 5),
+        ("Perfume (vial)", 1),
+        ("Sealing wax", 1),
+        ("Soap", 1),
+    ),
+}
+_CLASS_PACK: dict[str, str] = {
+    "bard": "Diplomat's Pack",
+    "cleric": "Priest's Pack",
+    "fighter": "Explorer's Pack",
+    "rogue": "Burglar's Pack",
+    "wizard": "Scholar's Pack",
+}
+
+
+def _pack_contents(
+    profile: dict[str, Any],
+    pack_name: str,
+) -> list[dict[str, Any]]:
+    contents = _PACK_CONTENTS.get(pack_name.casefold())
+    if contents is None:
+        raise ValueError(f"unsupported audited equipment pack: {pack_name}")
+    prefix = _profile_item_prefix(profile)
+    pack_slug = re.sub(r"[^a-z0-9]+", "-", pack_name.casefold()).strip("-")
+    source_key = str(profile["class"])
+    items: list[dict[str, Any]] = []
+    for name, quantity in contents:
+        item_slug = re.sub(r"[^a-z0-9]+", "-", name.casefold()).strip("-")
+        description = (
+            OIL_RULE
+            if name == "Oil (flask)"
+            else TORCH_RULE
+            if name == "Torch"
+            else f"Included in the source-granted {pack_name}."
+        )
+        mechanics = (
+            {
+                "consumable": True,
+                "use_action": "use_object",
+                "covered_duration_rounds": 10,
+                "trigger_damage_type": "fire",
+                "additional_fire_damage": 5,
+            }
+            if name == "Oil (flask)"
+            else {
+                "use_action": "attack",
+                "damage_formula": "1",
+                "damage_type": "fire",
+                "burn_duration_minutes": 60,
+            }
+            if name == "Torch"
+            else {}
+        )
+        items.append(
+            _equipment(
+                f"{prefix}-{pack_slug}-{item_slug}",
+                name,
+                source_key,
+                quantity=quantity,
+                mechanics=mechanics,
+                description=description,
+                source_kind="class",
+            )
+        )
+    return items
+
+
+def _class_pack_name(profile: dict[str, Any]) -> str:
+    class_name = str(profile["class"]).casefold()
+    try:
+        return _CLASS_PACK[class_name]
+    except KeyError as error:
+        raise ValueError(
+            f"no audited starting-equipment pack for {profile['class']}"
+        ) from error
+
+
 def _class_starting_supplements(profile: dict[str, Any]) -> list[dict[str, Any]]:
     prefix = _profile_item_prefix(profile)
     class_name = str(profile["class"]).casefold()
     if class_name == "fighter":
-        return [
-            _equipment(
-                f"{prefix}-explorers-pack",
-                "Explorer's Pack",
-                str(profile["class"]),
-                source_kind="class",
-            )
-        ]
+        return _pack_contents(profile, _class_pack_name(profile))
     if class_name == "rogue":
         return [
             _weapon(
@@ -222,22 +420,10 @@ def _class_starting_supplements(profile: dict[str, Any]) -> list[dict[str, Any]]
                 long_range=60,
                 quantity=2,
             ),
-            _equipment(
-                f"{prefix}-burglars-pack",
-                "Burglar's Pack",
-                str(profile["class"]),
-                source_kind="class",
-            ),
+            *_pack_contents(profile, _class_pack_name(profile)),
         ]
     if class_name == "wizard":
-        return [
-            _equipment(
-                f"{prefix}-scholars-pack",
-                "Scholar's Pack",
-                str(profile["class"]),
-                source_kind="class",
-            )
-        ]
+        return _pack_contents(profile, _class_pack_name(profile))
     if class_name == "cleric":
         bolts_id = f"{prefix}-class-bolts"
         return [
@@ -262,22 +448,10 @@ def _class_starting_supplements(profile: dict[str, Any]) -> list[dict[str, Any]]
                 long_range=320,
                 ammunition_item_id=bolts_id,
             ),
-            _equipment(
-                f"{prefix}-priests-pack",
-                "Priest's Pack",
-                str(profile["class"]),
-                source_kind="class",
-            ),
+            *_pack_contents(profile, _class_pack_name(profile)),
         ]
     if class_name == "bard":
-        return [
-            _equipment(
-                f"{prefix}-diplomats-pack",
-                "Diplomat's Pack",
-                str(profile["class"]),
-                source_kind="class",
-            )
-        ]
+        return _pack_contents(profile, _class_pack_name(profile))
     raise ValueError(f"no audited starting-equipment supplement for {profile['class']}")
 
 
@@ -1007,6 +1181,27 @@ def _catalog_source(
     return str(match["id"])
 
 
+def _source_linked_starting_items(
+    profile: dict[str, Any],
+    item_catalog: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    items = deepcopy(
+        [
+            *list(profile["items"]),
+            *_class_starting_supplements(profile),
+            *_background_starting_items(profile),
+        ]
+    )
+    for item in items:
+        source_kind = str(item.pop("_source_kind", "item"))
+        item["source_key"] = _catalog_source(
+            item_catalog,
+            str(item["source_key"]),
+            kind=source_kind,
+        )
+    return items
+
+
 def _configure_base_sheet(
     actor: dict[str, Any],
     profile: dict[str, Any],
@@ -1049,21 +1244,7 @@ def _configure_base_sheet(
         profile.get("tool_proficiencies") or []
     )
     sheet["resources"] = deepcopy(profile.get("resources") or {})
-    background_items = _background_starting_items(profile)
-    items = deepcopy(
-        [
-            *list(profile["items"]),
-            *_class_starting_supplements(profile),
-            *background_items,
-        ]
-    )
-    for item in items:
-        source_kind = str(item.pop("_source_kind", "item"))
-        item["source_key"] = _catalog_source(
-            item_catalog,
-            str(item["source_key"]),
-            kind=source_kind,
-        )
+    items = _source_linked_starting_items(profile, item_catalog)
     sheet["inventory"]["items"] = items
     sheet["inventory"]["wallet"]["gp"] = 15
     sheet["inventory"]["equipment_slots"]["armor"] = next(
@@ -1136,6 +1317,213 @@ async def _catalog(client: ExposureClient, campaign_id: str) -> list[dict[str, A
             )
         )
     )
+
+
+def _mutation_actor(value: Any) -> dict[str, Any]:
+    normalized = dict(_facade_value(value))
+    return dict(normalized.get("character") or normalized)
+
+
+async def _repair_existing_party_equipment(
+    client: ExposureClient,
+    *,
+    campaign_id: str,
+    run_id: str,
+    profiles: list[dict[str, Any]],
+    catalog: list[dict[str, Any]],
+    report_path: Path,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    source_report = json.loads(
+        report_path.expanduser().resolve().read_text(encoding="utf-8")
+    )
+    if str(source_report.get("campaign_id") or "") != campaign_id:
+        raise ValueError("existing party report belongs to a different campaign")
+    reported_by_name = {
+        str(item["name"]): dict(item)
+        for item in source_report.get("characters", [])
+    }
+    if set(reported_by_name) != {str(profile["name"]) for profile in profiles}:
+        raise ValueError(
+            "existing party report actors do not exactly match the audited profiles"
+        )
+
+    repaired: list[dict[str, Any]] = []
+    all_changes: list[dict[str, Any]] = []
+    for profile in profiles:
+        report_actor = reported_by_name[str(profile["name"])]
+        actor_id = str(report_actor["actor_id"])
+        actor = dict(
+            _facade_value(
+                await client.domain(
+                    "character_query",
+                    {"view": "get", "payload": {"character_id": actor_id}},
+                )
+            )
+        )
+        if (
+            str(actor.get("campaign_id") or "") != campaign_id
+            or str(actor.get("name") or "") != str(profile["name"])
+        ):
+            raise ValueError(f"reported actor identity mismatch for {profile['name']}")
+
+        desired_items = _source_linked_starting_items(profile, catalog)
+        desired_by_id = {str(item["id"]): item for item in desired_items}
+        pack_name = _class_pack_name(profile)
+        pack_items = _pack_contents(profile, pack_name)
+        pack_item_ids = {str(item["id"]) for item in pack_items}
+        prefix = _profile_item_prefix(profile)
+        legacy_pack_slug = re.sub(
+            r"[^a-z0-9]+",
+            "-",
+            pack_name.casefold().replace("'", ""),
+        ).strip("-")
+        legacy_pack_id = f"{prefix}-{legacy_pack_slug}"
+        inventory = list(actor["sheet"]["inventory"]["items"])
+        legacy_pack = next(
+            (
+                item
+                for item in inventory
+                if str(item.get("id") or "") == legacy_pack_id
+                or str(item.get("name") or "").casefold() == pack_name.casefold()
+            ),
+            None,
+        )
+        had_pack_evidence = legacy_pack is not None or any(
+            str(item.get("id") or "") in pack_item_ids for item in inventory
+        )
+        actor_changes: list[dict[str, Any]] = []
+        if legacy_pack is not None:
+            removed = await client.domain(
+                "inventory_change",
+                {
+                    "owner": "character",
+                    "action": "remove",
+                    "owner_id": actor_id,
+                    "payload": {"item_id": str(legacy_pack["id"])},
+                    "expected_revision": actor["revision"],
+                    "idempotency_key": (
+                        f"full-party-equipment-v2-remove-{_token(actor_id)}-"
+                        f"{_token(str(legacy_pack['id']))}"
+                    ),
+                },
+            )
+            actor = _mutation_actor(removed)
+            actor_changes.append(
+                {
+                    "action": "remove_opaque_pack",
+                    "item_id": str(legacy_pack["id"]),
+                    "name": str(legacy_pack["name"]),
+                }
+            )
+
+        existing_by_id = {
+            str(item["id"]): item
+            for item in actor["sheet"]["inventory"]["items"]
+        }
+        for item_id, desired in desired_by_id.items():
+            existing = existing_by_id.get(item_id)
+            if existing is None:
+                if item_id not in pack_item_ids or not had_pack_evidence:
+                    continue
+                added = await client.domain(
+                    "inventory_change",
+                    {
+                        "owner": "character",
+                        "action": "add",
+                        "owner_id": actor_id,
+                        "payload": {"item": desired},
+                        "expected_revision": actor["revision"],
+                        "idempotency_key": (
+                            f"full-party-equipment-v2-add-{_token(actor_id)}-"
+                            f"{_token(item_id)}"
+                        ),
+                    },
+                )
+                actor = _mutation_actor(added)
+                existing_by_id = {
+                    str(entry["id"]): entry
+                    for entry in actor["sheet"]["inventory"]["items"]
+                }
+                actor_changes.append(
+                    {
+                        "action": "add_pack_content",
+                        "item_id": item_id,
+                        "name": str(desired["name"]),
+                        "quantity": int(desired["quantity"]),
+                    }
+                )
+                continue
+
+            patch: dict[str, Any] = {}
+            if existing.get("weight_oz") != desired.get("weight_oz"):
+                patch["weight_oz"] = desired["weight_oz"]
+            if item_id in pack_item_ids:
+                for field in ("description", "mechanics", "source_key"):
+                    if existing.get(field) != desired.get(field):
+                        patch[field] = deepcopy(desired[field])
+            if not patch:
+                continue
+            updated = await client.domain(
+                "inventory_change",
+                {
+                    "owner": "character",
+                    "action": "update",
+                    "owner_id": actor_id,
+                    "payload": {"item_id": item_id, "patch": patch},
+                    "expected_revision": actor["revision"],
+                    "idempotency_key": (
+                        f"full-party-equipment-v2-update-{_token(actor_id)}-"
+                        f"{_token(item_id)}-{_token(json.dumps(patch, sort_keys=True))}"
+                    ),
+                },
+            )
+            actor = _mutation_actor(updated)
+            existing_by_id = {
+                str(entry["id"]): entry
+                for entry in actor["sheet"]["inventory"]["items"]
+            }
+            actor_changes.append(
+                {
+                    "action": "repair_item",
+                    "item_id": item_id,
+                    "name": str(desired["name"]),
+                    "patch": patch,
+                }
+            )
+
+        final_items = list(actor["sheet"]["inventory"]["items"])
+        if any(
+            str(item.get("id") or "") == legacy_pack_id
+            or str(item.get("name") or "").casefold() == pack_name.casefold()
+            for item in final_items
+        ):
+            raise RuntimeError(f"opaque pack remained for {profile['name']}")
+        if had_pack_evidence and not pack_item_ids <= {
+            str(item["id"]) for item in final_items
+        }:
+            raise RuntimeError(f"pack expansion is incomplete for {profile['name']}")
+
+        derived_inventory = dict(actor["derived"]["inventory"])
+        repaired.append(
+            {
+                "actor_id": actor_id,
+                "name": str(actor["name"]),
+                "revision": int(actor["revision"]),
+                "inventory_item_ids": [str(item["id"]) for item in final_items],
+                "total_weight_oz": derived_inventory["total_weight_oz"],
+                "encumbrance": deepcopy(derived_inventory["encumbrance"]),
+            }
+        )
+        all_changes.append(
+            {
+                "actor_id": actor_id,
+                "name": str(actor["name"]),
+                "legacy_pack_id": legacy_pack_id,
+                "pack_name": pack_name,
+                "changes": actor_changes,
+            }
+        )
+    return repaired, all_changes
 
 
 async def _apply_artifact(
@@ -1491,6 +1879,12 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
         actor_name=args.actor_name,
         campaign_line_id=args.party,
     )
+    if args.repair_existing_party_report is not None and (
+        args.profile_name or args.actor_name
+    ):
+        raise ValueError(
+            "existing party equipment repair requires the complete audited party"
+        )
     async with stdio_client(_server_parameters(args)) as (read, write):
         async with ClientSession(read, write) as session:
             await session.initialize()
@@ -1502,7 +1896,11 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             )
             if entry_phase == "combat":
                 raise RuntimeError("party construction cannot run during active combat")
-            if len(profiles) > 1 and entry_phase != "lobby":
+            if (
+                len(profiles) > 1
+                and entry_phase != "lobby"
+                and args.repair_existing_party_report is None
+            ):
                 raise RuntimeError("full party construction requires the public Lobby profile")
             return_phase = args.return_phase or entry_phase
             if return_phase not in {"lobby", "play"}:
@@ -1527,17 +1925,30 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                 current_phase = "lobby"
             try:
                 catalog = await _catalog(client, args.campaign_id)
-                characters = [
-                    await _build_character(
-                        client,
-                        campaign_id=args.campaign_id,
-                        run_id=args.run_id,
-                        campaign_line_id=args.party,
-                        profile=profile,
-                        catalog=catalog,
+                repair_changes: list[dict[str, Any]] = []
+                if args.repair_existing_party_report is not None:
+                    characters, repair_changes = (
+                        await _repair_existing_party_equipment(
+                            client,
+                            campaign_id=args.campaign_id,
+                            run_id=args.run_id,
+                            profiles=profiles,
+                            catalog=catalog,
+                            report_path=args.repair_existing_party_report,
+                        )
                     )
-                    for profile in profiles
-                ]
+                else:
+                    characters = [
+                        await _build_character(
+                            client,
+                            campaign_id=args.campaign_id,
+                            run_id=args.run_id,
+                            campaign_line_id=args.party,
+                            profile=profile,
+                            catalog=catalog,
+                        )
+                        for profile in profiles
+                    ]
             except Exception:
                 if entry_phase == "play" and current_phase == "lobby":
                     await _switch_phase(
@@ -1561,7 +1972,11 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                 if changed is not None:
                     phase_changes.append(changed)
             return {
-                "action": "build-campaign-party",
+                "action": (
+                    "repair-campaign-party-equipment"
+                    if args.repair_existing_party_report is not None
+                    else "build-campaign-party"
+                ),
                 "transport": "stdio",
                 "campaign_id": args.campaign_id,
                 "campaign_line_id": args.party,
@@ -1570,11 +1985,26 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                 "entry_phase": entry_phase,
                 "return_phase": return_phase,
                 "phase_changes": phase_changes,
+                "equipment_repairs": repair_changes,
                 "manifest_members": [
-                    {
-                        key: character[key]
-                        for key in ("actor_id", "source", "source_asset_path", "status")
-                    }
+                    (
+                        {
+                            "actor_id": character["actor_id"],
+                            "source": "generated",
+                            "source_asset_path": "",
+                            "status": "active",
+                        }
+                        if args.repair_existing_party_report is not None
+                        else {
+                            key: character[key]
+                            for key in (
+                                "actor_id",
+                                "source",
+                                "source_asset_path",
+                                "status",
+                            )
+                        }
+                    )
                     for character in characters
                 ],
             }
