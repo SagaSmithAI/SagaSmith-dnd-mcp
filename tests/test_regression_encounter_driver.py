@@ -468,25 +468,32 @@ def test_party_defeat_does_not_invent_a_source_defined_aftermath() -> None:
     )
 
 
-def test_source_flee_count_threshold_targets_only_the_designated_actor() -> None:
+def test_source_flee_count_threshold_targets_every_designated_survivor() -> None:
     defeated = ["bugbear-1", "bugbear-3"]
     assert _source_flee_ready(
         acting_actor_id="vhalak",
-        flee_actor_id="vhalak",
+        flee_actor_ids={"vhalak", "bugbear-2"},
+        defeated_hostile_ids=defeated,
+        flee_after_defeated=2,
+        trigger_defeated_actor_id="",
+    )
+    assert _source_flee_ready(
+        acting_actor_id="bugbear-2",
+        flee_actor_ids={"vhalak", "bugbear-2"},
         defeated_hostile_ids=defeated,
         flee_after_defeated=2,
         trigger_defeated_actor_id="",
     )
     assert not _source_flee_ready(
-        acting_actor_id="bugbear-2",
-        flee_actor_id="vhalak",
+        acting_actor_id="bugbear-4",
+        flee_actor_ids={"vhalak", "bugbear-2"},
         defeated_hostile_ids=defeated,
         flee_after_defeated=2,
         trigger_defeated_actor_id="",
     )
     assert not _source_flee_ready(
         acting_actor_id="vhalak",
-        flee_actor_id="vhalak",
+        flee_actor_ids={"vhalak", "bugbear-2"},
         defeated_hostile_ids=["bugbear-1"],
         flee_after_defeated=2,
         trigger_defeated_actor_id="",

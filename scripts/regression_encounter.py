@@ -145,7 +145,15 @@ def _arguments() -> argparse.Namespace:
         ),
     )
     parser.add_argument("--flee-after-defeated", type=int, default=0)
-    parser.add_argument("--flee-actor-id", default="")
+    parser.add_argument(
+        "--flee-actor-id",
+        action="append",
+        default=[],
+        help=(
+            "Source-designated actor that attempts to flee after the trigger; "
+            "repeat when the source directs every surviving member of a group to flee"
+        ),
+    )
     parser.add_argument("--flee-trigger-defeated-actor-id", default="")
     parser.add_argument("--flee-on-start-actor-id", default="")
     parser.add_argument("--flee-destination-location-key", default="")
@@ -2237,14 +2245,14 @@ def _source_outcome(
 def _source_flee_ready(
     *,
     acting_actor_id: str,
-    flee_actor_id: str,
+    flee_actor_ids: set[str],
     defeated_hostile_ids: list[str],
     flee_after_defeated: int,
     trigger_defeated_actor_id: str,
 ) -> bool:
     """Return whether the source-designated actor must now attempt to leave."""
 
-    if not flee_actor_id or acting_actor_id != flee_actor_id:
+    if acting_actor_id not in flee_actor_ids:
         return False
     if trigger_defeated_actor_id:
         return trigger_defeated_actor_id in defeated_hostile_ids
@@ -2548,7 +2556,7 @@ async def _auto_run(
         raise RuntimeError("auto-run requires an active combat")
     branch = await _current_branch(client, args.campaign_id)
     source_flee_ids = {
-        str(args.flee_actor_id or ""),
+        *(str(actor_id) for actor_id in args.flee_actor_id),
         str(args.flee_trigger_defeated_actor_id or ""),
         str(args.flee_on_start_actor_id or ""),
     } - {""}
@@ -2577,7 +2585,7 @@ async def _auto_run(
             "--flee-source-excerpt"
         )
     if args.flee_actor_id and (
-        args.flee_actor_id == args.flee_trigger_defeated_actor_id
+        args.flee_trigger_defeated_actor_id in args.flee_actor_id
         or args.flee_on_start_actor_id
     ):
         raise ValueError(
@@ -2879,7 +2887,7 @@ async def _auto_run(
         if (
             _source_flee_ready(
                 acting_actor_id=actor_id,
-                flee_actor_id=str(args.flee_actor_id or ""),
+                flee_actor_ids=set(args.flee_actor_id),
                 defeated_hostile_ids=defeated_hostiles,
                 flee_after_defeated=args.flee_after_defeated,
                 trigger_defeated_actor_id=str(
