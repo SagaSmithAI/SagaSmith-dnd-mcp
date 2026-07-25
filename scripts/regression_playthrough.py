@@ -28,6 +28,7 @@ from scripts.regression_modules import PRINCIPAL_ID, ExposureClient, _token
 DEFERRED_CHECKPOINT_ACTIONS = frozenset(
     {
         "advance-time",
+        "apply-damage",
         "roll-source",
         "resolve-check",
         "initialize-source-state",
@@ -35,7 +36,6 @@ DEFERRED_CHECKPOINT_ACTIONS = frozenset(
         "use-activity",
         "record-event",
         "record-outcome",
-        "register-replacement",
         "prepare-narrative-npc",
         "provision-source-item",
         "transfer-source-item",
@@ -117,6 +117,14 @@ def _arguments() -> argparse.Namespace:
     )
     parser.add_argument("--checkpoint-label", default="")
     parser.add_argument(
+        "--occurrence-id",
+        default="",
+        help=(
+            "Stable unique id for one occurrence of a repeatable mutation; "
+            "reuse it only when retrying that exact occurrence"
+        ),
+    )
+    parser.add_argument(
         "--defer-checkpoint",
         action="store_true",
         help=(
@@ -156,6 +164,11 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--success-knowledge", default="")
     parser.add_argument("--failure-knowledge", default="")
     parser.add_argument("--damage-actor-id", default="")
+    parser.add_argument(
+        "--damage-event-id",
+        default="",
+        help="Stable occurrence id for one source-authored environmental damage event",
+    )
     parser.add_argument("--damage-expression", default="")
     parser.add_argument("--damage-type", default="")
     parser.add_argument("--damage-reason", default="")
@@ -179,6 +192,11 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--source-state-reason", default="")
     parser.add_argument("--activity-actor-id", default="")
     parser.add_argument("--activity-id", default="")
+    parser.add_argument(
+        "--activity-event-id",
+        default="",
+        help="Stable occurrence id for one use of the selected activity",
+    )
     parser.add_argument("--activity-declaration-json", type=json.loads)
     parser.add_argument("--activity-reason", default="")
     parser.add_argument("--snapshot-slot", type=int)
@@ -596,33 +614,38 @@ def _idempotency_request_hash(payload: dict[str, Any]) -> str:
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
-def _manifest_payload_identity(manifest: dict[str, Any]) -> str:
-    serialized = json.dumps(
-        manifest,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-    return _token(serialized, length=24)
-
-
-def _short_rest_identity(
-    members: list[dict[str, Any]],
+def _module_refresh_identity(
     *,
-    duration_minutes: int,
-    reason: str,
+    old_module_id: str,
+    source_key: str,
+    source_path: Path,
+    title: str,
 ) -> str:
+    digest = hashlib.sha256()
+    with source_path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
     serialized = json.dumps(
         {
-            "members": members,
-            "duration_minutes": duration_minutes,
-            "reason": reason.strip(),
+            "old_module_id": old_module_id,
+            "source_key": source_key,
+            "source_sha256": digest.hexdigest(),
+            "title": title,
         },
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
     )
     return _token(serialized, length=24)
+
+
+def _occurrence_identity(value: str, action: str) -> str:
+    normalized = value.strip()
+    if not normalized:
+        raise ValueError(f"{action} requires --occurrence-id")
+    if len(normalized) > 200:
+        raise ValueError("occurrence id must not exceed 200 characters")
+    return normalized
 
 
 def _validate_recovered_long_rest(
@@ -688,128 +711,18 @@ def _validate_recovered_long_rest(
     return deepcopy(response)
 
 
-def _stable_recovery_identity(actor_ids: list[str], reason: str) -> str:
-    serialized = json.dumps(
-        {
-            "actor_ids": actor_ids,
-            "reason": reason.strip(),
-        },
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-    return _token(serialized, length=24)
-
-
-def _stand_identity(
-    *,
-    scene_id: str,
-    location_key: str,
-    actor_id: str,
-    reason: str,
-    source_ref: dict[str, Any] | None,
-) -> str:
-    serialized = json.dumps(
-        {
-            "scene_id": scene_id,
-            "location_key": location_key,
-            "actor_id": actor_id,
-            "reason": reason.strip(),
-            "source_ref": source_ref,
-        },
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-    return _token(serialized, length=24)
-
-
-def _source_state_identity(
-    *,
-    scene_id: str,
-    location_key: str,
-    actor_id: str,
-    state: str,
-    reason: str,
-    source_ref: dict[str, Any],
-) -> str:
-    serialized = json.dumps(
-        {
-            "scene_id": scene_id,
-            "location_key": location_key,
-            "actor_id": actor_id,
-            "state": state,
-            "reason": reason.strip(),
-            "source_ref": source_ref,
-        },
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-    return _token(serialized, length=24)
-
-
 def _check_knowledge_key(
     run_id: str,
-    scene_id: str,
-    location_key: str,
-    kind: str,
-    ability: str,
-    actor_id: str,
-    dc: int,
-    proficient: bool,
-    advantage: bool,
-    disadvantage: bool,
-    source_ref: dict[str, Any],
+    occurrence_id: str,
 ) -> str:
-    identity = _check_identity(
-        scene_id=scene_id,
-        location_key=location_key,
-        kind=kind,
-        ability=ability,
-        actor_id=actor_id,
-        dc=dc,
-        proficient=proficient,
-        advantage=advantage,
-        disadvantage=disadvantage,
-        source_ref=source_ref,
+    return (
+        f"playthrough.{_token(run_id)}.check."
+        f"{_token(_occurrence_identity(occurrence_id, 'resolve-check'), length=32)}"
     )
-    return f"playthrough.{_token(run_id)}.check.{_token(identity, length=32)}"
 
 
-def _check_identity(
-    *,
-    scene_id: str,
-    location_key: str,
-    kind: str,
-    ability: str,
-    actor_id: str,
-    dc: int,
-    proficient: bool,
-    advantage: bool,
-    disadvantage: bool,
-    source_ref: dict[str, Any],
-) -> str:
-    source_identity = str(
-        source_ref.get("chunk_id")
-        or source_ref.get("content_sha256")
-        or source_ref.get("chunk_content_sha256")
-        or ""
-    )
-    return ":".join(
-        (
-            scene_id,
-            location_key,
-            kind,
-            ability,
-            actor_id,
-            str(dc),
-            f"proficient={int(proficient)}",
-            f"advantage={int(advantage)}",
-            f"disadvantage={int(disadvantage)}",
-            source_identity,
-        )
-    )
+def _check_identity(occurrence_id: str) -> str:
+    return _occurrence_identity(occurrence_id, "resolve-check")
 
 
 def _committed_check_result(settled: dict[str, Any]) -> dict[str, Any]:
@@ -826,6 +739,7 @@ def _matching_check_progress(
     progress: dict[str, Any] | None,
     *,
     run_id: str,
+    occurrence_id: str,
     location_key: str,
     actor_id: str,
     kind: str,
@@ -843,6 +757,7 @@ def _matching_check_progress(
     return bool(
         str(progress.get("current_location_key") or "") == location_key
         and check.get("run_id") == run_id
+        and check.get("occurrence_id") == occurrence_id
         and check.get("actor_id") == actor_id
         and check.get("kind") == kind
         and check.get("ability") == ability
@@ -913,15 +828,18 @@ async def _checkpoint(
     campaign_id: str,
     run_id: str,
     label: str,
+    checkpoint_id: str,
 ) -> dict[str, Any]:
     if not label.strip():
         raise ValueError("checkpoint label must not be empty")
+    checkpoint_identity = _occurrence_identity(checkpoint_id, "checkpoint")
+    snapshot_key = _mutation_key(run_id, "snapshot", checkpoint_identity)
     synced = await _manifest_mutation(
         client,
         campaign_id=campaign_id,
         action="sync",
         run_id=run_id,
-        identity=f"checkpoint-sync:{label}",
+        identity=f"checkpoint-sync:{checkpoint_identity}",
     )
     branches = await client.domain(
         "branch_query",
@@ -938,29 +856,55 @@ async def _checkpoint(
                 "label": label,
                 "expected_revision": synced["campaign_revision"],
                 "expected_head_snapshot_id": current_branch.get("head_snapshot_id") or "",
-                "idempotency_key": _mutation_key(run_id, "snapshot", label),
+                "idempotency_key": snapshot_key,
             },
         )
         reused = False
     except Exception as error:
         if "idempotency key reused with a different request" not in str(error):
             raise
+        receipt = await client.domain(
+            "state_revision",
+            {
+                "campaign_id": campaign_id,
+                "action": "receipt",
+                "payload": {"idempotency_key": snapshot_key},
+            },
+        )
+        if str(receipt.get("branch_id") or "") != str(current_branch["id"]):
+            raise RuntimeError("checkpoint recovery receipt is from another branch")
+        recovered = dict(receipt.get("response") or {})
+        expected_request_hash = _idempotency_request_hash(
+            {
+                "label": label,
+                "expected_head_snapshot_id": str(recovered.get("parent_id") or ""),
+            }
+        )
+        if (
+            str(receipt.get("request_hash") or "") != expected_request_hash
+            or str(recovered.get("label") or "") != label
+            or str(recovered.get("branch_id") or "") != str(current_branch["id"])
+            or str(recovered.get("id") or "")
+            != str(current_branch.get("head_snapshot_id") or "")
+        ):
+            raise RuntimeError("checkpoint recovery receipt does not match the current branch head")
         snapshots = await client.domain(
             "snapshot_query",
             {"campaign_id": campaign_id, "view": "list"},
         )
-        existing = next(
+        snapshot = next(
             (
                 item
                 for item in snapshots
-                if str(item.get("branch_id") or "") == str(current_branch["id"])
-                and str(item.get("label") or "") == label
+                if str(item.get("id") or "") == str(recovered["id"])
+                and str(item.get("branch_id") or "") == str(current_branch["id"])
             ),
             None,
         )
-        if existing is None:
-            raise error
-        snapshot = existing
+        if snapshot is None or int(snapshot.get("slot", 0) or 0) != int(
+            recovered.get("slot", 0) or 0
+        ):
+            raise RuntimeError("checkpoint recovery receipt snapshot is unavailable")
         reused = True
     verification = await client.domain(
         "snapshot_query",
@@ -1324,6 +1268,7 @@ async def _register_replacement(
                 "Full playthrough replacement: "
                 f"{replacement['name']} succeeds {predecessor['name']}"
             ),
+            checkpoint_id=f"replacement:{predecessor_id}:{replacement_id}",
         )
 
     replacement_knowledge_after = list(
@@ -1391,12 +1336,14 @@ async def _advance_scene(
     *,
     campaign_id: str,
     run_id: str,
+    occurrence_id: str,
     scene_id: str,
     objective: str,
     mark_visited: bool,
     reachable_scene_ids: list[str],
     excluded_scenes: list[dict[str, Any]],
 ) -> dict[str, Any]:
+    scene_identity = _occurrence_identity(occurrence_id, "advance-scene")
     if not scene_id:
         raise ValueError("advance-scene requires --scene-id")
     scene = await client.domain(
@@ -1454,7 +1401,7 @@ async def _advance_scene(
         campaign_id=campaign_id,
         action="replace",
         run_id=run_id,
-        identity=f"advance-scene:{_manifest_payload_identity(manifest)}",
+        identity=f"advance-scene:{scene_identity}",
         payload={"manifest": manifest},
     )
 
@@ -1551,6 +1498,7 @@ async def _branch_from_snapshot(
             f"Preserve source branch before forking snapshot slot {snapshot_slot}: "
             f"{branch_name.strip()}"
         ),
+        checkpoint_id=f"branch-source:{snapshot_slot}:{branch_name.strip()}",
     )
     campaign = await _campaign(client, campaign_id)
     branch_action = "create_core_upgrade" if conversion_required else "create"
@@ -1600,6 +1548,7 @@ async def _branch_from_snapshot(
             checkpoint_label.strip()
             or f"Branch {branch_name.strip()} restored from snapshot slot {snapshot_slot}"
         ),
+        checkpoint_id=f"branch-restored:{snapshot_slot}:{branch_name.strip()}",
     )
     return {
         "source_branch": source_branch,
@@ -1624,6 +1573,7 @@ async def _resolve_check(
     location_key: str,
     source_excerpt: str,
     source_ref: dict[str, Any] | None,
+    occurrence_id: str,
     actor_id: str,
     kind: str,
     ability: str,
@@ -1636,6 +1586,7 @@ async def _resolve_check(
     failure_knowledge: str,
     defer_checkpoint: bool = False,
 ) -> dict[str, Any]:
+    check_identity = _check_identity(occurrence_id)
     if not all((scene_id, location_key, source_excerpt, actor_id, kind, ability)):
         raise ValueError(
             "resolve-check requires scene, location, excerpt, actor, kind, and ability"
@@ -1675,22 +1626,11 @@ async def _resolve_check(
     progress_matches = _matching_check_progress(
         progress_before,
         run_id=run_id,
+        occurrence_id=check_identity,
         location_key=location_key,
         actor_id=actor_id,
         kind=kind,
         ability=ability,
-        dc=dc,
-        proficient=proficient,
-        advantage=advantage,
-        disadvantage=disadvantage,
-        source_ref=exact_ref,
-    )
-    check_identity = _check_identity(
-        scene_id=scene_id,
-        location_key=location_key,
-        kind=kind,
-        ability=ability,
-        actor_id=actor_id,
         dc=dc,
         proficient=proficient,
         advantage=advantage,
@@ -1711,6 +1651,7 @@ async def _resolve_check(
                     **deepcopy(dict((progress_before or {}).get("state") or {})),
                     "full_playthrough_check": {
                         "run_id": run_id,
+                        "occurrence_id": check_identity,
                         "actor_id": actor_id,
                         "kind": kind,
                         "ability": ability,
@@ -1787,6 +1728,7 @@ async def _resolve_check(
             "payload": {
                 "scene_id": scene_id,
                 "location_key": location_key,
+                "occurrence_id": check_identity,
                 "kind": kind,
                 "ability": ability,
                 "dc": dc,
@@ -1800,19 +1742,7 @@ async def _resolve_check(
         "actor_knowledge": [
             {
                 "actor_id": recipient,
-                "knowledge_key": _check_knowledge_key(
-                    run_id,
-                    scene_id,
-                    location_key,
-                    kind,
-                    ability,
-                    actor_id,
-                    dc,
-                    proficient,
-                    advantage,
-                    disadvantage,
-                    exact_ref,
-                ),
+                "knowledge_key": _check_knowledge_key(run_id, check_identity),
                 "proposition": proposition,
                 "disclosure_scope": "owner",
             }
@@ -1847,6 +1777,7 @@ async def _resolve_check(
             "source_ref": exact_ref,
         },
         "actor": {"id": actor_id, "name": actor["name"]},
+        "occurrence_id": check_identity,
         "progress": progress,
         "check": check_result,
         "check_recovered": recovered is not None,
@@ -1865,6 +1796,7 @@ async def _record_event(
     location_key: str,
     source_excerpt: str,
     source_ref: dict[str, Any] | None,
+    occurrence_id: str,
     event_type: str,
     summary: str,
     knowledge: str,
@@ -1875,6 +1807,7 @@ async def _record_event(
     defer_checkpoint: bool = False,
     knowledge_cause: str = "witnessed",
 ) -> dict[str, Any]:
+    event_identity = _occurrence_identity(occurrence_id, "record-event")
     if not all((scene_id, location_key, source_excerpt, event_type, summary)):
         raise ValueError("record-event requires scene, location, excerpt, event type, and summary")
     if bool(knowledge.strip()) != bool(knowledge_actor_ids):
@@ -1922,9 +1855,9 @@ async def _record_event(
     )
     state = deepcopy(dict((progress_before or {}).get("state") or {}))
     events = deepcopy(dict(state.get("full_playthrough_events") or {}))
-    event_identity = f"{scene_id}:{event_type}:{summary.strip()}"
     event_key = _token(f"{run_id}:{event_identity}", length=24)
     events[event_key] = {
+        "occurrence_id": event_identity,
         "event_type": event_type,
         "summary": summary.strip(),
         "source_ref": exact_ref,
@@ -1964,6 +1897,7 @@ async def _record_event(
                 "scene_id": scene_id,
                 "source_scene_id": cited_scene_id,
                 "location_key": location_key,
+                "occurrence_id": event_identity,
                 "source_excerpt": source_excerpt,
                 "source_ref": exact_ref,
             },
@@ -2006,6 +1940,7 @@ async def _record_event(
             "source_ref": exact_ref,
         },
         "progress": progress,
+        "occurrence_id": event_identity,
         "continuity": committed,
         "knowledge_actor_ids": list(dict.fromkeys(knowledge_actor_ids)),
         "sync": synced,
@@ -2040,6 +1975,7 @@ async def _prepare_narrative_npc(
     *,
     campaign_id: str,
     run_id: str,
+    occurrence_id: str,
     initial_phase: str,
     scene_id: str,
     location_key: str,
@@ -2052,6 +1988,7 @@ async def _prepare_narrative_npc(
     relationship: str,
     defer_checkpoint: bool = False,
 ) -> dict[str, Any]:
+    npc_identity = _occurrence_identity(occurrence_id, "prepare-narrative-npc")
     normalized_name = name.strip()
     normalized_role = role.strip()
     normalized_summary = summary.strip()
@@ -2128,7 +2065,7 @@ async def _prepare_narrative_npc(
                 "idempotency_key": _mutation_key(
                     run_id,
                     "narrative-npc",
-                    (f"{normalized_name}:{exact_ref['module_id']}:{exact_ref['chunk_id']}"),
+                    npc_identity,
                 ),
             },
         )
@@ -2228,9 +2165,11 @@ async def _prepare_narrative_npc(
             campaign_id=campaign_id,
             run_id=run_id,
             label=f"Narrative NPC prepared: {normalized_name}",
+            checkpoint_id=f"narrative-npc:{actor['id']}",
         )
     )
     return {
+        "occurrence_id": npc_identity,
         "actor": verified_actor,
         "narrative_npc": provenance,
         "scene": {
@@ -2477,6 +2416,7 @@ async def _record_outcome(
             campaign_id=campaign_id,
             run_id=run_id,
             label=f"Full playthrough outcome: {outcome_id.strip()}",
+            checkpoint_id=f"outcome:{outcome_id.strip()}",
         )
     )
     return {
@@ -2694,28 +2634,34 @@ async def _apply_source_damage(
     source_excerpt: str,
     source_ref: dict[str, Any] | None,
     actor_id: str,
+    damage_event_id: str,
     expression: str,
     damage_type: str,
     reason: str,
     half_damage: bool,
     knock_prone: bool,
     knowledge_actor_ids: list[str],
+    defer_checkpoint: bool = False,
 ) -> dict[str, Any]:
+    normalized_event_id = damage_event_id.strip()
     if not all(
         (
             scene_id,
             location_key,
             source_excerpt,
             actor_id,
+            normalized_event_id,
             expression,
             damage_type,
             reason,
         )
     ):
         raise ValueError(
-            "apply-damage requires scene, location, excerpt, actor, expression, "
-            "damage type, and reason"
+            "apply-damage requires scene, location, excerpt, actor, damage event id, "
+            "expression, damage type, and reason"
         )
+    if len(normalized_event_id) > 200:
+        raise ValueError("damage event id must not exceed 200 characters")
     scene = await client.domain(
         "module_query",
         {
@@ -2750,7 +2696,7 @@ async def _apply_source_damage(
             "branch_id": str(branch["id"]),
             "expected_campaign_revision": campaign["revision"],
             "idempotency_key": _mutation_key(
-                run_id, "source-damage-roll", f"{scene_id}:{actor_id}:{expression}"
+                run_id, "source-damage-roll", normalized_event_id
             ),
         },
     )
@@ -2767,7 +2713,7 @@ async def _apply_source_damage(
             },
             "expected_revision": actor["revision"],
             "idempotency_key": _mutation_key(
-                run_id, "source-damage", f"{scene_id}:{actor_id}:{amount}"
+                run_id, "source-damage", normalized_event_id
             ),
         },
     )
@@ -2791,66 +2737,72 @@ async def _apply_source_damage(
                 "action": "knock_prone",
                 "expected_revision": character_after["revision"],
                 "idempotency_key": _mutation_key(
-                    run_id, "source-damage-prone", f"{scene_id}:{actor_id}"
+                    run_id, "source-damage-prone", normalized_event_id
                 ),
             },
         )
         character_after = dict(prone_result["character"])
     recipients = list(dict.fromkeys([actor_id, *knowledge_actor_ids]))
     campaign = await _campaign(client, campaign_id)
+    checkpoint_deferred = bool(defer_checkpoint and hp > 0)
+    continuity_payload: dict[str, Any] = {
+        "event": {
+            "summary": (
+                f"{actor['name']} took {amount} {damage_type} damage"
+                f"{f' (half of {rolled_amount})' if half_damage else ''}: "
+                f"{reason.strip()}"
+            ),
+            "event_type": "environmental_damage",
+            "audience_scope": "party",
+            "payload": {
+                "scene_id": scene_id,
+                "location_key": location_key,
+                "damage_event_id": normalized_event_id,
+                "actor_id": actor_id,
+                "damage_expression": expression,
+                "damage_roll": roll_result,
+                "damage_type": damage_type,
+                "amount": amount,
+                "half_damage": half_damage,
+                "knock_prone": knock_prone,
+                "reason": reason.strip(),
+                "source_excerpt": source_excerpt,
+                "source_ref": exact_ref,
+            },
+        },
+        "actor_knowledge": [
+            {
+                "actor_id": recipient,
+                "knowledge_key": (
+                    f"playthrough.{_token(run_id)}.{_token(scene_id)}."
+                    f"{_token(actor_id)}.environmental_damage."
+                    f"{_token(normalized_event_id)}"
+                ),
+                "proposition": (
+                    f"{actor['name']} took {amount} {damage_type} damage "
+                    f"from {reason.strip()}."
+                ),
+                "disclosure_scope": "owner",
+            }
+            for recipient in recipients
+        ],
+        "branch_id": str(branch["id"]),
+    }
+    if not checkpoint_deferred:
+        continuity_payload["snapshot"] = {
+            "label": (
+                f"Full playthrough environmental damage: "
+                f"{actor['name']} at {location_key}"
+            )
+        }
     committed = await client.domain(
         "continuity_commit",
         {
             "campaign_id": campaign_id,
-            "payload": {
-                "event": {
-                    "summary": (
-                        f"{actor['name']} took {amount} {damage_type} damage"
-                        f"{f' (half of {rolled_amount})' if half_damage else ''}: "
-                        f"{reason.strip()}"
-                    ),
-                    "event_type": "environmental_damage",
-                    "audience_scope": "party",
-                    "payload": {
-                        "scene_id": scene_id,
-                        "location_key": location_key,
-                        "actor_id": actor_id,
-                        "damage_expression": expression,
-                        "damage_roll": roll_result,
-                        "damage_type": damage_type,
-                        "amount": amount,
-                        "half_damage": half_damage,
-                        "knock_prone": knock_prone,
-                        "reason": reason.strip(),
-                        "source_excerpt": source_excerpt,
-                        "source_ref": exact_ref,
-                    },
-                },
-                "actor_knowledge": [
-                    {
-                        "actor_id": recipient,
-                        "knowledge_key": (
-                            f"playthrough.{_token(run_id)}.{_token(scene_id)}."
-                            f"{_token(actor_id)}.environmental_damage"
-                        ),
-                        "proposition": (
-                            f"{actor['name']} took {amount} {damage_type} damage "
-                            f"from {reason.strip()}."
-                        ),
-                        "disclosure_scope": "owner",
-                    }
-                    for recipient in recipients
-                ],
-                "snapshot": {
-                    "label": (
-                        f"Full playthrough environmental damage: {actor['name']} at {location_key}"
-                    )
-                },
-                "branch_id": str(branch["id"]),
-            },
+            "payload": continuity_payload,
             "expected_revision": campaign["revision"],
             "idempotency_key": _mutation_key(
-                run_id, "source-damage-continuity", f"{scene_id}:{actor_id}"
+                run_id, "source-damage-continuity", normalized_event_id
             ),
         },
     )
@@ -2859,7 +2811,7 @@ async def _apply_source_damage(
         campaign_id=campaign_id,
         action="sync",
         run_id=run_id,
-        identity=f"source-damage-sync:{scene_id}:{actor_id}",
+        identity=f"source-damage-sync:{normalized_event_id}",
     )
     return {
         "scene": {
@@ -2868,11 +2820,13 @@ async def _apply_source_damage(
             "source_ref": exact_ref,
         },
         "actor": {"id": actor_id, "name": actor["name"]},
+        "damage_event_id": normalized_event_id,
         "roll": rolled,
         "damage": damaged,
         "prone": prone_result,
         "character": character_after,
         "knowledge_actor_ids": recipients,
+        "checkpoint_deferred": checkpoint_deferred,
         "continuity": committed,
         "sync": synced,
     }
@@ -2887,11 +2841,13 @@ async def _stand_after_source_event(
     location_key: str,
     source_excerpt: str,
     source_ref: dict[str, Any] | None,
+    occurrence_id: str,
     actor_id: str,
     knowledge_actor_ids: list[str],
     reason: str = "",
     defer_checkpoint: bool = False,
 ) -> dict[str, Any]:
+    stand_identity = _occurrence_identity(occurrence_id, "stand-up")
     if not all((scene_id, location_key, actor_id, reason.strip())):
         raise ValueError("stand-up requires scene, location, actor, and reason")
     scene = await client.domain(
@@ -2911,13 +2867,6 @@ async def _stand_after_source_event(
     )
     if location_key not in {str(item.get("key") or "") for item in _scene_locations(scene)}:
         raise ValueError("stand-up location is not present in the scene atlas")
-    stand_identity = _stand_identity(
-        scene_id=scene_id,
-        location_key=location_key,
-        actor_id=actor_id,
-        reason=reason,
-        source_ref=exact_ref,
-    )
     actor = await client.domain(
         "character_query",
         {"view": "get", "payload": {"character_id": actor_id}},
@@ -2952,6 +2901,7 @@ async def _stand_after_source_event(
             "payload": {
                 "scene_id": scene_id,
                 "location_key": location_key,
+                "occurrence_id": stand_identity,
                 "actor_id": actor_id,
                 **(
                     {
@@ -3003,6 +2953,7 @@ async def _stand_after_source_event(
             "source_ref": exact_ref,
         },
         "actor": {"id": actor_id, "name": actor["name"]},
+        "occurrence_id": stand_identity,
         "stand": stood,
         "knowledge_actor_ids": recipients,
         "continuity": committed,
@@ -3020,12 +2971,14 @@ async def _initialize_source_state(
     location_key: str,
     source_excerpt: str,
     source_ref: dict[str, Any] | None,
+    occurrence_id: str,
     actor_id: str,
     state: str,
     reason: str,
     knowledge_actor_ids: list[str],
     defer_checkpoint: bool,
 ) -> dict[str, Any]:
+    identity = _occurrence_identity(occurrence_id, "initialize-source-state")
     if not all(
         (
             scene_id,
@@ -3069,14 +3022,6 @@ async def _initialize_source_state(
     )
     if actor.get("campaign_id") != campaign_id:
         raise ValueError("source-state actor does not belong to the campaign")
-    identity = _source_state_identity(
-        scene_id=scene_id,
-        location_key=location_key,
-        actor_id=actor_id,
-        state=state,
-        reason=reason,
-        source_ref=exact_ref,
-    )
     initialized = await client.domain(
         "character_state_change",
         {
@@ -3109,6 +3054,7 @@ async def _initialize_source_state(
                 "scene_id": scene_id,
                 "source_scene_id": cited_scene_id,
                 "location_key": location_key,
+                "occurrence_id": identity,
                 "actor_id": actor_id,
                 "state": state,
                 "source_excerpt": source_excerpt,
@@ -3154,6 +3100,7 @@ async def _initialize_source_state(
             "source_ref": exact_ref,
         },
         "actor": {"id": actor_id, "name": actor["name"]},
+        "occurrence_id": identity,
         "state": initialized,
         "knowledge_actor_ids": recipients,
         "continuity": committed,
@@ -3166,11 +3113,13 @@ async def _short_rest(
     *,
     campaign_id: str,
     run_id: str,
+    occurrence_id: str,
     members: list[dict[str, Any]],
     start_clock: dict[str, Any] | None,
     duration_minutes: int,
     reason: str,
 ) -> dict[str, Any]:
+    rest_identity = _occurrence_identity(occurrence_id, "short-rest")
     if duration_minutes < 60:
         raise ValueError("short-rest requires at least 60 minutes")
     if not members or not reason.strip():
@@ -3285,11 +3234,6 @@ async def _short_rest(
         for item in normalized
     ):
         raise ValueError("Song of Rest applies only to members who spend one or more Hit Dice")
-    rest_identity = _short_rest_identity(
-        normalized,
-        duration_minutes=duration_minutes,
-        reason=reason,
-    )
     actors = []
     for actor_id in actor_ids:
         actor = await client.domain(
@@ -3433,6 +3377,7 @@ async def _short_rest(
                     "audience_scope": "party",
                     "payload": {
                         "member_ids": actor_ids,
+                        "occurrence_id": rest_identity,
                         "member_choices": normalized,
                         "duration_minutes": duration_minutes,
                         "clock_set": clock_set is not None,
@@ -3465,6 +3410,7 @@ async def _short_rest(
         identity=f"short-rest-sync:{rest_identity}",
     )
     return {
+        "occurrence_id": rest_identity,
         "member_ids": actor_ids,
         "clock_set": clock_set,
         "clock_advanced": clock_advanced,
@@ -3483,13 +3429,29 @@ async def _use_activity(
     location_key: str,
     actor_id: str,
     activity_id: str,
+    activity_event_id: str,
     declaration: dict[str, Any] | None,
     reason: str,
     knowledge_actor_ids: list[str],
     defer_checkpoint: bool = False,
 ) -> dict[str, Any]:
-    if not all((scene_id, location_key, actor_id, activity_id, reason.strip())):
-        raise ValueError("use-activity requires scene, location, actor, activity id, and reason")
+    normalized_event_id = activity_event_id.strip()
+    if not all(
+        (
+            scene_id,
+            location_key,
+            actor_id,
+            activity_id,
+            normalized_event_id,
+            reason.strip(),
+        )
+    ):
+        raise ValueError(
+            "use-activity requires scene, location, actor, activity id, "
+            "activity event id, and reason"
+        )
+    if len(normalized_event_id) > 200:
+        raise ValueError("activity event id must not exceed 200 characters")
     scene = await client.domain(
         "module_query",
         {
@@ -3517,7 +3479,7 @@ async def _use_activity(
             "payload": payload,
             "expected_revision": actor["revision"],
             "idempotency_key": _mutation_key(
-                run_id, "play-activity", f"{scene_id}:{actor_id}:{activity_id}"
+                run_id, "play-activity", normalized_event_id
             ),
         },
     )
@@ -3543,6 +3505,7 @@ async def _use_activity(
             "payload": {
                 "scene_id": scene_id,
                 "location_key": location_key,
+                "activity_event_id": normalized_event_id,
                 "actor_id": actor_id,
                 "activity_id": activity_id,
                 "declaration": deepcopy(declaration or {}),
@@ -3555,7 +3518,8 @@ async def _use_activity(
                 "actor_id": recipient,
                 "knowledge_key": (
                     f"playthrough.{_token(run_id)}.{_token(scene_id)}."
-                    f"{_token(actor_id)}.{_token(activity_id)}"
+                    f"{_token(actor_id)}.{_token(activity_id)}."
+                    f"{_token(normalized_event_id)}"
                 ),
                 "proposition": reason.strip(),
                 "disclosure_scope": "owner",
@@ -3580,7 +3544,7 @@ async def _use_activity(
             "idempotency_key": _mutation_key(
                 run_id,
                 "play-activity-continuity",
-                f"{scene_id}:{actor_id}:{activity_id}",
+                normalized_event_id,
             ),
         },
     )
@@ -3589,13 +3553,14 @@ async def _use_activity(
         campaign_id=campaign_id,
         action="sync",
         run_id=run_id,
-        identity=f"play-activity-sync:{scene_id}:{actor_id}:{activity_id}",
+        identity=f"play-activity-sync:{normalized_event_id}",
     )
     return {
         "scene_id": scene_id,
         "location_key": location_key,
         "actor": {"id": actor_id, "name": actor["name"]},
         "activity_id": activity_id,
+        "activity_event_id": normalized_event_id,
         "action": acted,
         "knowledge_actor_ids": recipients,
         "continuity": committed,
@@ -3608,11 +3573,13 @@ async def _long_rest(
     *,
     campaign_id: str,
     run_id: str,
+    occurrence_id: str,
     members: list[dict[str, Any]],
     start_clock: dict[str, Any] | None,
     duration_minutes: int,
     reason: str,
 ) -> dict[str, Any]:
+    rest_identity = _occurrence_identity(occurrence_id, "long-rest")
     if duration_minutes < 240:
         raise ValueError(
             "long-rest requires at least 480 minutes, or 240 minutes for "
@@ -3693,11 +3660,6 @@ async def _long_rest(
     actor_ids = [item["actor_id"] for item in normalized]
     if len(actor_ids) != len(set(actor_ids)):
         raise ValueError("long-rest member actor ids must be unique")
-    rest_identity = _short_rest_identity(
-        normalized,
-        duration_minutes=duration_minutes,
-        reason=reason,
-    )
     branches = await client.domain(
         "branch_query",
         {"campaign_id": campaign_id, "view": "list"},
@@ -3725,7 +3687,9 @@ async def _long_rest(
                 },
                 "branch_id": str(branch["id"]),
                 "expected_revision": campaign["revision"],
-                "idempotency_key": _mutation_key(run_id, "long-rest-clock-set", reason),
+                "idempotency_key": _mutation_key(
+                    run_id, "long-rest-clock-set", rest_identity
+                ),
             },
         )
     elif start_clock is not None:
@@ -3747,7 +3711,7 @@ async def _long_rest(
         if member["hit_dice_recovery"] is not None:
             party_member["hit_dice_recovery"] = member["hit_dice_recovery"]
         party_members.append(party_member)
-    party_rest_key = _mutation_key(run_id, "long-rest-party", reason)
+    party_rest_key = _mutation_key(run_id, "long-rest-party", rest_identity)
     rest_recovered = False
     try:
         rested = await client.domain(
@@ -3849,6 +3813,7 @@ async def _long_rest(
                     "audience_scope": "party",
                     "payload": {
                         "member_ids": actor_ids,
+                        "occurrence_id": rest_identity,
                         "member_choices": normalized,
                         "duration_minutes": duration_minutes,
                         "clock_set": clock_set is not None,
@@ -3870,7 +3835,9 @@ async def _long_rest(
                 "branch_id": str(branch["id"]),
             },
             "expected_revision": campaign["revision"],
-            "idempotency_key": _mutation_key(run_id, "long-rest-continuity", reason),
+            "idempotency_key": _mutation_key(
+                run_id, "long-rest-continuity", rest_identity
+            ),
         },
     )
     synced = await _manifest_mutation(
@@ -3881,6 +3848,7 @@ async def _long_rest(
         identity=f"long-rest-sync:{rest_identity}",
     )
     return {
+        "occurrence_id": rest_identity,
         "member_ids": actor_ids,
         "clock_set": clock_set,
         "rest": rested,
@@ -3895,6 +3863,7 @@ async def _advance_time(
     *,
     campaign_id: str,
     run_id: str,
+    occurrence_id: str,
     scene_id: str,
     source_excerpt: str,
     source_ref: dict[str, Any] | None,
@@ -3905,6 +3874,7 @@ async def _advance_time(
     knowledge_actor_ids: list[str],
     defer_checkpoint: bool = False,
 ) -> dict[str, Any]:
+    identity = _occurrence_identity(occurrence_id, "advance-time")
     normalized_reason = reason.strip()
     if (
         not scene_id
@@ -3944,7 +3914,6 @@ async def _advance_time(
     if branch is None:
         raise RuntimeError("campaign has no current branch")
     branch_id = str(branch["id"])
-    identity = f"{scene_id}:{period}:{count}:{normalized_reason}"
     campaign = await _campaign(client, campaign_id)
     before = deepcopy(dict(dict(campaign.get("state") or {}).get("world_time") or {}))
     clock_set = None
@@ -4001,6 +3970,7 @@ async def _advance_time(
             "audience_scope": "party",
             "payload": {
                 "scene_id": scene_id,
+                "occurrence_id": identity,
                 "period": period,
                 "count": count,
                 "elapsed_minutes": expected_minutes,
@@ -4044,6 +4014,7 @@ async def _advance_time(
         identity=f"advance-time-sync:{identity}",
     )
     return {
+        "occurrence_id": identity,
         "scene_id": scene_id,
         "source_ref": exact_ref,
         "clock_set": clock_set,
@@ -4061,14 +4032,15 @@ async def _recover_stable_party(
     *,
     campaign_id: str,
     run_id: str,
+    occurrence_id: str,
     actor_ids: list[str],
     knowledge_actor_ids: list[str],
     reason: str,
 ) -> dict[str, Any]:
+    recovery_identity = _occurrence_identity(occurrence_id, "recover-stable")
     member_ids = list(dict.fromkeys(actor_ids))
     if not member_ids or len(member_ids) != len(actor_ids) or not reason.strip():
         raise ValueError("recover-stable requires unique actor ids and a non-empty --rest-reason")
-    recovery_identity = _stable_recovery_identity(member_ids, reason)
     actors = []
     for actor_id in member_ids:
         actor = await client.domain(
@@ -4120,6 +4092,7 @@ async def _recover_stable_party(
                     "audience_scope": "party",
                     "payload": {
                         "member_ids": member_ids,
+                        "occurrence_id": recovery_identity,
                         "elapsed_hours": recovered["elapsed_hours"],
                         "recoveries": deepcopy(recovered["recoveries"]),
                         "random_stream_receipt": deepcopy(recovered.get("random_stream_receipt")),
@@ -4154,6 +4127,7 @@ async def _recover_stable_party(
         identity=f"stable-recovery-sync:{recovery_identity}",
     )
     return {
+        "occurrence_id": recovery_identity,
         "member_ids": member_ids,
         "knowledge_actor_ids": recipients,
         "recovery": recovered,
@@ -4332,6 +4306,7 @@ async def _provision_source_item(
                 checkpoint_label.strip()
                 or f"Full playthrough source item: {requested_item['name']} — {normalized_reason}"
             ),
+            checkpoint_id=f"source-item:{normalized_actor_id}:{item_id}",
         )
     )
     return {
@@ -4357,6 +4332,7 @@ async def _transfer_source_item_to_party(
     *,
     campaign_id: str,
     run_id: str,
+    occurrence_id: str,
     scene_id: str,
     location_key: str,
     source_excerpt: str,
@@ -4368,6 +4344,7 @@ async def _transfer_source_item_to_party(
     checkpoint_label: str,
     defer_checkpoint: bool = False,
 ) -> dict[str, Any]:
+    transfer_identity = _occurrence_identity(occurrence_id, "transfer-source-item")
     normalized_character_id = character_id.strip()
     normalized_item_id = item_id.strip()
     normalized_reason = reason.strip()
@@ -4469,7 +4446,7 @@ async def _transfer_source_item_to_party(
                         "idempotency_key": _mutation_key(
                             run_id,
                             "source-item-transfer",
-                            f"{normalized_character_id}:{normalized_item_id}:{quantity or 'all'}",
+                            transfer_identity,
                         ),
                     },
                 )
@@ -4489,12 +4466,16 @@ async def _transfer_source_item_to_party(
                 checkpoint_label.strip()
                 or f"Full playthrough source item transferred: {normalized_item_id}"
             ),
+            checkpoint_id=(
+                f"source-item-transfer:{transfer_identity}"
+            ),
         )
     )
     return {
         "character_id": normalized_character_id,
         "item_id": normalized_item_id,
         "quantity": quantity,
+        "occurrence_id": transfer_identity,
         "reason": normalized_reason,
         "source_ref": exact_ref,
         "transfer": transferred,
@@ -5249,12 +5230,14 @@ async def _award_experience(
     *,
     campaign_id: str,
     run_id: str,
+    occurrence_id: str,
     scene_id: str,
     source_ref: dict[str, Any] | None,
     actor_ids: list[str],
     amount: int | None,
     reason: str,
 ) -> dict[str, Any]:
+    award_identity = _occurrence_identity(occurrence_id, "award-xp")
     if not scene_id or not actor_ids or amount is None or amount <= 0 or not reason.strip():
         raise ValueError("award-xp requires scene, one or more actors, positive amount, and reason")
     if len(actor_ids) != len(set(actor_ids)):
@@ -5277,7 +5260,6 @@ async def _award_experience(
         if actor.get("campaign_id") != campaign_id:
             raise ValueError("award-xp actor does not belong to the campaign")
         actors.append(actor)
-    recipient_identity = ",".join(sorted(actor_ids))
     campaign = await _campaign(client, campaign_id)
     awarded = await client.domain(
         "campaign_change",
@@ -5302,7 +5284,7 @@ async def _award_experience(
             "idempotency_key": _mutation_key(
                 run_id,
                 "experience-award",
-                f"{scene_id}:{amount}:{recipient_identity}",
+                award_identity,
             ),
         },
     )
@@ -5311,9 +5293,10 @@ async def _award_experience(
         campaign_id=campaign_id,
         action="sync",
         run_id=run_id,
-        identity=f"award-xp-sync:{scene_id}:{amount}:{recipient_identity}",
+        identity=f"award-xp-sync:{award_identity}",
     )
     return {
+        "occurrence_id": award_identity,
         "scene_id": scene_id,
         "source_ref": exact_ref,
         "award": awarded,
@@ -5431,6 +5414,7 @@ async def _start_play(
         client,
         campaign_id=campaign_id,
         run_id=run_id,
+        occurrence_id=f"start-play:{scene_id}",
         scene_id=scene_id,
         objective=objective,
         mark_visited=True,
@@ -6303,6 +6287,7 @@ async def _advance_level(
             campaign_id=campaign_id,
             run_id=run_id,
             label=label,
+            checkpoint_id=f"level:{actor_id}:{target_level}",
         )
     return {
         "actor": verified_actor,
@@ -6431,6 +6416,14 @@ async def _refresh_module(
         )
     if not source_key:
         raise ValueError("refresh-module could not identify the logical module source key")
+    resolved_source_path = source_path.expanduser().resolve()
+    resolved_title = title.strip() or resolved_source_path.stem
+    refresh_identity = _module_refresh_identity(
+        old_module_id=old_module_id,
+        source_key=source_key,
+        source_path=resolved_source_path,
+        title=resolved_title,
+    )
     branches = await client.domain(
         "branch_query",
         {"campaign_id": campaign_id, "view": "list"},
@@ -6465,11 +6458,13 @@ async def _refresh_module(
             "campaign_id": campaign_id,
             "action": "stage",
             "payload": {
-                "source_path": str(source_path.expanduser().resolve()),
+                "source_path": str(resolved_source_path),
                 "source_key": source_key,
-                "title": title.strip() or Path(source_path).stem,
+                "title": resolved_title,
             },
-            "idempotency_key": _mutation_key(run_id, "module-refresh-stage", source_key),
+            "idempotency_key": _mutation_key(
+                run_id, "module-refresh-stage", refresh_identity
+            ),
         },
     )
     job_id = str(staged["job"]["id"])
@@ -6572,6 +6567,7 @@ async def _refresh_module(
         "old_module_id": old_module_id,
         "new_module_id": new_module_id,
         "source_key": source_key,
+        "refresh_identity": refresh_identity,
         "job_id": job_id,
         "inspection": {
             "parser_profile": preview.get("parser_profile"),
@@ -6666,6 +6662,8 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError(
             f"--defer-checkpoint is unsupported for {args.action}; supported: {supported}"
         )
+    if args.action in {"advance-scene", "checkpoint", "sync", "transfer-source-item"}:
+        _occurrence_identity(args.occurrence_id, args.action)
     server = _server_parameters(args)
     report: dict[str, Any] = {
         "action": args.action,
@@ -6717,6 +6715,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                         client,
                         campaign_id=args.campaign_id,
                         run_id=args.run_id,
+                        occurrence_id=args.occurrence_id,
                         initial_phase=phase,
                         scene_id=str(args.scene_id or ""),
                         location_key=args.location_key,
@@ -6813,6 +6812,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     client,
                     campaign_id=args.campaign_id,
                     run_id=args.run_id,
+                    occurrence_id=args.occurrence_id,
                     scene_id=str(args.scene_id or ""),
                     objective=args.objective,
                     mark_visited=args.mark_visited,
@@ -6838,6 +6838,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     client,
                     campaign_id=args.campaign_id,
                     run_id=args.run_id,
+                    occurrence_id=args.occurrence_id,
                     scene_id=str(args.scene_id or ""),
                     source_excerpt=args.source_excerpt,
                     source_ref=args.source_ref_json,
@@ -6878,6 +6879,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     location_key=args.location_key,
                     source_excerpt=args.source_excerpt,
                     source_ref=args.source_ref_json,
+                    occurrence_id=args.occurrence_id,
                     actor_id=args.check_actor_id,
                     kind=args.check_kind,
                     ability=args.check_ability,
@@ -6901,6 +6903,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     location_key=args.location_key,
                     source_excerpt=args.source_excerpt,
                     source_ref=args.source_ref_json,
+                    occurrence_id=args.occurrence_id,
                     event_type=args.event_type,
                     summary=args.event_summary,
                     knowledge=args.event_knowledge,
@@ -6952,12 +6955,14 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     source_excerpt=args.source_excerpt,
                     source_ref=args.source_ref_json,
                     actor_id=args.damage_actor_id,
+                    damage_event_id=args.damage_event_id,
                     expression=args.damage_expression,
                     damage_type=args.damage_type,
                     reason=args.damage_reason,
                     half_damage=args.damage_half,
                     knock_prone=args.damage_knock_prone,
                     knowledge_actor_ids=args.knowledge_actor_id,
+                    defer_checkpoint=args.defer_checkpoint,
                 )
             elif args.action == "initialize-source-state":
                 if phase != "play":
@@ -6972,6 +6977,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     location_key=args.location_key,
                     source_excerpt=args.source_excerpt,
                     source_ref=args.source_ref_json,
+                    occurrence_id=args.occurrence_id,
                     actor_id=args.source_state_actor_id,
                     state=args.source_state,
                     reason=args.source_state_reason,
@@ -6990,6 +6996,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     location_key=args.location_key,
                     source_excerpt=args.source_excerpt,
                     source_ref=args.source_ref_json,
+                    occurrence_id=args.occurrence_id,
                     actor_id=args.stand_actor_id,
                     knowledge_actor_ids=args.knowledge_actor_id,
                     reason=args.stand_reason,
@@ -7003,6 +7010,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     client,
                     campaign_id=args.campaign_id,
                     run_id=args.run_id,
+                    occurrence_id=args.occurrence_id,
                     members=args.rest_member_json,
                     start_clock=args.rest_start_clock_json,
                     duration_minutes=args.rest_duration_minutes,
@@ -7020,6 +7028,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     location_key=args.location_key,
                     actor_id=args.activity_actor_id,
                     activity_id=args.activity_id,
+                    activity_event_id=args.activity_event_id,
                     declaration=args.activity_declaration_json,
                     reason=args.activity_reason,
                     knowledge_actor_ids=args.knowledge_actor_id,
@@ -7033,6 +7042,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     client,
                     campaign_id=args.campaign_id,
                     run_id=args.run_id,
+                    occurrence_id=args.occurrence_id,
                     members=args.rest_member_json,
                     start_clock=args.rest_start_clock_json,
                     duration_minutes=args.rest_duration_minutes,
@@ -7046,6 +7056,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     client,
                     campaign_id=args.campaign_id,
                     run_id=args.run_id,
+                    occurrence_id=args.occurrence_id,
                     actor_ids=args.recovery_actor_id,
                     knowledge_actor_ids=args.knowledge_actor_id,
                     reason=args.rest_reason,
@@ -7076,6 +7087,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     client,
                     campaign_id=args.campaign_id,
                     run_id=args.run_id,
+                    occurrence_id=args.occurrence_id,
                     scene_id=str(args.scene_id or ""),
                     location_key=args.location_key,
                     source_excerpt=args.source_excerpt,
@@ -7169,6 +7181,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     client,
                     campaign_id=args.campaign_id,
                     run_id=args.run_id,
+                    occurrence_id=args.occurrence_id,
                     scene_id=str(args.scene_id or ""),
                     source_ref=args.source_ref_json,
                     actor_ids=args.xp_actor_id,
@@ -7203,6 +7216,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     campaign_id=args.campaign_id,
                     run_id=args.run_id,
                     label=label,
+                    checkpoint_id=args.occurrence_id,
                 )
             elif args.action == "configure-ending":
                 if phase == "combat":
@@ -7235,15 +7249,17 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                         label=(
                             args.checkpoint_label or f"Formal campaign ending: {args.condition_id}"
                         ),
+                        checkpoint_id=f"ending:{args.condition_id}",
                     )
                 report["result"] = {"ending": ended, "checkpoint": checkpoint}
             elif args.action == "sync":
+                sync_identity = _occurrence_identity(args.occurrence_id, "sync")
                 report["result"] = await _manifest_mutation(
                     client,
                     campaign_id=args.campaign_id,
                     action="sync",
                     run_id=args.run_id,
-                    identity="manual-sync",
+                    identity=f"manual-sync:{sync_identity}",
                 )
             else:
                 report["result"] = await _manifest_get(client, args.campaign_id)

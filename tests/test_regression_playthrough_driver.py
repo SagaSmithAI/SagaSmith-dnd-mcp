@@ -35,7 +35,9 @@ from scripts.regression_playthrough import (
     _level_spell_choice_counts,
     _long_rest,
     _matching_check_progress,
+    _module_refresh_identity,
     _mutation_key,
+    _occurrence_identity,
     _party_member,
     _party_selections,
     _phase_groups,
@@ -55,13 +57,9 @@ from scripts.regression_playthrough import (
     _roll_source_table,
     _scene_progress_percent,
     _short_rest,
-    _short_rest_identity,
-    _source_state_identity,
     _spend_source_currency,
     _spend_source_item,
-    _stable_recovery_identity,
     _stand_after_source_event,
-    _stand_identity,
     _start_play,
     _transfer_source_item_to_party,
     _use_activity,
@@ -113,11 +111,23 @@ def test_playthrough_rejects_deferred_checkpoint_for_key_rest() -> None:
         asyncio.run(regression_playthrough._run(args))
 
 
+@pytest.mark.parametrize("action", ["checkpoint", "sync"])
+def test_explicit_checkpoint_and_sync_require_an_occurrence_id(action: str) -> None:
+    args = argparse.Namespace(
+        defer_checkpoint=False,
+        action=action,
+        occurrence_id="",
+    )
+
+    with pytest.raises(ValueError, match=rf"{action} requires --occurrence-id"):
+        asyncio.run(regression_playthrough._run(args))
+
+
 def test_scene_resource_actions_support_deferred_checkpoint_batching() -> None:
     assert {
         "advance-level",
+        "apply-damage",
         "roll-source",
-        "register-replacement",
         "spend-coins",
         "spend-item",
         "use-activity",
@@ -254,11 +264,12 @@ def test_advance_scene_identity_supports_exact_retry_and_later_revisit() -> None
                 }
             raise AssertionError((tool_id, arguments))
 
-    async def advance(client: Client) -> None:
+    async def advance(client: Client, occurrence_id: str) -> None:
         await _advance_scene(
             client,
             campaign_id="campaign-1",
             run_id="run-1",
+            occurrence_id=occurrence_id,
             scene_id="scene-town",
             objective="Return the rescued family.",
             mark_visited=True,
@@ -267,8 +278,8 @@ def test_advance_scene_identity_supports_exact_retry_and_later_revisit() -> None
         )
 
     client = Client()
-    asyncio.run(advance(client))
-    asyncio.run(advance(client))
+    asyncio.run(advance(client, "town-visit-1"))
+    asyncio.run(advance(client, "town-visit-1"))
     first_key, retry_key = [item["idempotency_key"] for item in client.replace_calls]
     assert first_key == retry_key
     assert (
@@ -277,7 +288,7 @@ def test_advance_scene_identity_supports_exact_retry_and_later_revisit() -> None
     )
 
     client.manifest["world_state"]["visit_marker"] = 2
-    asyncio.run(advance(client))
+    asyncio.run(advance(client, "town-visit-2"))
     revisit_key = client.replace_calls[2]["idempotency_key"]
     assert revisit_key != first_key
 
@@ -380,6 +391,42 @@ def test_failed_module_refresh_restores_its_entry_phase() -> None:
     assert result == {"tool_profile": "play", "campaign_revision": 13}
     assert client.phase == "play"
     assert client.loaded[-1] == ("play.scene_control", "play.scene")
+
+
+def test_module_refresh_identity_is_retry_stable_and_revision_sensitive(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "module.md"
+    source.write_text("# First revision", encoding="utf-8")
+    first = _module_refresh_identity(
+        old_module_id="module-1",
+        source_key="campaign",
+        source_path=source,
+        title="Campaign",
+    )
+    assert first == _module_refresh_identity(
+        old_module_id="module-1",
+        source_key="campaign",
+        source_path=source,
+        title="Campaign",
+    )
+
+    source.write_text("# Second revision", encoding="utf-8")
+    changed_content = _module_refresh_identity(
+        old_module_id="module-1",
+        source_key="campaign",
+        source_path=source,
+        title="Campaign",
+    )
+    changed_parent = _module_refresh_identity(
+        old_module_id="module-2",
+        source_key="campaign",
+        source_path=source,
+        title="Campaign",
+    )
+
+    assert changed_content != first
+    assert changed_parent != changed_content
 
 
 @pytest.mark.parametrize("defer_checkpoint", [False, True])
@@ -535,6 +582,7 @@ def test_narrative_npc_driver_round_trips_lobby_and_registers_manifest(
             client,
             campaign_id="campaign-1",
             run_id="run-1",
+            occurrence_id="qelline-alderleaf-introduction",
             initial_phase="play",
             scene_id="scene-1",
             location_key="alderleaf-farm",
@@ -550,6 +598,7 @@ def test_narrative_npc_driver_round_trips_lobby_and_registers_manifest(
     )
 
     assert client.phase == "play"
+    assert result["occurrence_id"] == "qelline-alderleaf-introduction"
     assert result["actor"]["id"] == "npc-1"
     assert result["narrative_npc"]["combat_eligible"] is False
     assert client.manifest["npcs"][0]["actor_id"] == "npc-1"
@@ -942,6 +991,7 @@ def test_source_item_transfer_driver_uses_atomic_character_to_party_public_tool(
             client,
             campaign_id="campaign-1",
             run_id="run-1",
+            occurrence_id="staff-handoff-1",
             scene_id="scene-1",
             location_key="iarno-quarters",
             source_excerpt="Iarno also wields a staff of defense.",
@@ -959,6 +1009,11 @@ def test_source_item_transfer_driver_uses_atomic_character_to_party_public_tool(
     assert client.transfer_arguments["mode"] == "character_to_party"
     assert client.transfer_arguments["payload"]["expected_campaign_revision"] == 20
     assert client.transfer_arguments["payload"]["expected_character_revision"] == 4
+    assert client.transfer_arguments["idempotency_key"] == _mutation_key(
+        "run-1",
+        "source-item-transfer",
+        _occurrence_identity("staff-handoff-1", "transfer-source-item"),
+    )
     assert result["transfer"]["item"]["id"] == "staff-of-defense"
     assert checkpoint_calls == (0 if defer_checkpoint else 1)
     if defer_checkpoint:
@@ -1406,6 +1461,7 @@ def test_stable_party_recovery_uses_one_public_campaign_transition() -> None:
             client,
             campaign_id="campaign-1",
             run_id="run-1",
+            occurrence_id="stable-recovery-after-hideout",
             actor_ids=["actor-1", "actor-2"],
             knowledge_actor_ids=["witness"],
             reason="Both stable adventurers recovered while the party waited.",
@@ -1414,9 +1470,9 @@ def test_stable_party_recovery_uses_one_public_campaign_transition() -> None:
 
     assert result["recovery"]["elapsed_hours"] == 4
     assert client.tools.count("campaign_change") == 1
-    identity = _stable_recovery_identity(
-        ["actor-1", "actor-2"],
-        "Both stable adventurers recovered while the party waited.",
+    identity = _occurrence_identity(
+        "stable-recovery-after-hideout",
+        "recover-stable",
     )
     assert client.keys == {
         "recovery": _mutation_key("run-1", "stable-recovery", identity),
@@ -1425,19 +1481,19 @@ def test_stable_party_recovery_uses_one_public_campaign_transition() -> None:
     }
 
 
-def test_stable_recovery_identity_separates_later_occurrence_for_same_actor() -> None:
-    first = _stable_recovery_identity(
-        ["actor-1"],
-        "Actor One recovered after the first battle.",
-    )
+def test_occurrence_identity_separates_repeated_equivalent_mutations() -> None:
+    first = _occurrence_identity("stable-recovery-1", "recover-stable")
 
-    assert first == _stable_recovery_identity(
-        ["actor-1"],
-        "Actor One recovered after the first battle.",
-    )
-    assert first != _stable_recovery_identity(
-        ["actor-1"],
-        "Actor One recovered after the later battle.",
+    assert first == _occurrence_identity("stable-recovery-1", "recover-stable")
+    assert first != _occurrence_identity("stable-recovery-2", "recover-stable")
+    with pytest.raises(ValueError, match="requires --occurrence-id"):
+        _occurrence_identity(" ", "recover-stable")
+    with pytest.raises(ValueError, match="must not exceed 200"):
+        _occurrence_identity("x" * 201, "recover-stable")
+    first_checkpoint = _occurrence_identity("scene-visit-1", "checkpoint")
+    second_checkpoint = _occurrence_identity("scene-visit-2", "checkpoint")
+    assert _mutation_key("run", "snapshot", first_checkpoint) != _mutation_key(
+        "run", "snapshot", second_checkpoint
     )
 
 
@@ -2232,6 +2288,7 @@ def test_checkpoint_uses_only_public_manifest_branch_and_snapshot_tools() -> Non
             campaign_id="campaign-1",
             run_id="run-1",
             label="Scene checkpoint",
+            checkpoint_id="scene-checkpoint-1",
         )
     )
 
@@ -2271,6 +2328,23 @@ def test_checkpoint_recovers_verified_same_branch_snapshot_after_retry_revision_
                 raise RuntimeError(
                     "idempotency key reused with a different request: checkpoint-key"
                 )
+            if tool_id == "state_revision" and arguments["action"] == "receipt":
+                return {
+                    "branch_id": "branch-1",
+                    "request_hash": regression_playthrough._idempotency_request_hash(
+                        {
+                            "label": "Scene checkpoint",
+                            "expected_head_snapshot_id": "snapshot-1",
+                        }
+                    ),
+                    "response": {
+                        "id": "snapshot-2",
+                        "branch_id": "branch-1",
+                        "parent_id": "snapshot-1",
+                        "slot": 2,
+                        "label": "Scene checkpoint",
+                    },
+                }
             if tool_id == "snapshot_query" and arguments["view"] == "list":
                 return [
                     {
@@ -2307,6 +2381,7 @@ def test_checkpoint_recovers_verified_same_branch_snapshot_after_retry_revision_
             campaign_id="campaign-1",
             run_id="run-1",
             label="Scene checkpoint",
+            checkpoint_id="scene-checkpoint-1",
         )
     )
 
@@ -2317,6 +2392,7 @@ def test_checkpoint_recovers_verified_same_branch_snapshot_after_retry_revision_
         "playthrough_manifest",
         "branch_query",
         "snapshot_create",
+        "state_revision",
         "snapshot_query",
         "snapshot_query",
         "playthrough_manifest",
@@ -2438,18 +2514,7 @@ def test_source_cited_check_persists_result_and_explicit_knowledge(
         "heading_path": ["Goblin Trail"],
         "content_sha256": "abc",
     }
-    expected_identity = _check_identity(
-        scene_id="scene-1",
-        location_key="ambush",
-        kind="ability",
-        ability="survival",
-        actor_id="actor-1",
-        dc=10,
-        proficient=True,
-        advantage=False,
-        disadvantage=True,
-        source_ref=source_ref,
-    )
+    expected_identity = _check_identity("trail-survival-1")
 
     class Client:
         def __init__(self) -> None:
@@ -2504,19 +2569,7 @@ def test_source_cited_check_persists_result_and_explicit_knowledge(
                 )
                 assert all(
                     item["knowledge_key"]
-                    == _check_knowledge_key(
-                        "run-1",
-                        "scene-1",
-                        "ambush",
-                        "ability",
-                        "survival",
-                        "actor-1",
-                        10,
-                        True,
-                        False,
-                        True,
-                        source_ref,
-                    )
+                    == _check_knowledge_key("run-1", expected_identity)
                     for item in arguments["payload"]["actor_knowledge"]
                 )
                 assert arguments["payload"]["event"]["payload"]["source_ref"] == source_ref
@@ -2551,6 +2604,7 @@ def test_source_cited_check_persists_result_and_explicit_knowledge(
             location_key="ambush",
             source_excerpt="A DC 10 Wisdom (Survival) check reveals the trail.",
             source_ref=source_ref,
+            occurrence_id=expected_identity,
             actor_id="actor-1",
             kind="ability",
             ability="survival",
@@ -2568,51 +2622,13 @@ def test_source_cited_check_persists_result_and_explicit_knowledge(
     assert result["knowledge_actor_ids"] == ["actor-1", "actor-2"]
     assert result["sync"]["campaign_revision"] == 7
     assert _check_knowledge_key(
-        "run-1",
-        "scene-1",
-        "ambush",
-        "ability",
-        "survival",
-        "actor-1",
-        10,
-        True,
-        False,
-        True,
-        source_ref,
-    ) != _check_knowledge_key(
-        "run-1",
-        "scene-1",
-        "ambush",
-        "ability",
-        "perception",
-        "actor-1",
-        10,
-        True,
-        False,
-        True,
-        source_ref,
-    )
+        "run-1", "trail-survival-1"
+    ) != _check_knowledge_key("run-1", "trail-survival-2")
 
 
-def test_check_identity_separates_same_scene_checks_by_location_dc_and_source() -> None:
-    base = {
-        "scene_id": "scene-1",
-        "location_key": "6-armory",
-        "kind": "ability",
-        "ability": "dexterity",
-        "actor_id": "rogue-1",
-        "dc": 10,
-        "proficient": True,
-        "advantage": False,
-        "disadvantage": False,
-        "source_ref": {"chunk_id": "armory-lock"},
-    }
-    identity = _check_identity(**base)
-
-    assert identity != _check_identity(**{**base, "location_key": "5-slave-pens"})
-    assert identity != _check_identity(**{**base, "dc": 22})
-    assert identity != _check_identity(**{**base, "source_ref": {"chunk_id": "slave-pens-lock"}})
-    assert identity != _check_identity(**{**base, "proficient": False})
+def test_check_identity_uses_explicit_occurrence_not_mutable_check_content() -> None:
+    assert _check_identity("armory-lock-1") == "armory-lock-1"
+    assert _check_identity("armory-lock-1") != _check_identity("armory-lock-2")
 
 
 def test_source_cited_check_rejects_unsupported_kind_before_tools() -> None:
@@ -2626,6 +2642,7 @@ def test_source_cited_check_rejects_unsupported_kind_before_tools() -> None:
                 location_key="ambush",
                 source_excerpt="Source",
                 source_ref={},
+                occurrence_id="unsupported-check-1",
                 actor_id="actor-1",
                 kind="survival",
                 ability="wisdom",
@@ -2654,6 +2671,7 @@ def test_check_recovery_identity_includes_actor_and_roll_mode() -> None:
         "state": {
             "full_playthrough_check": {
                 "run_id": "run-1",
+                "occurrence_id": "bridge-stealth-1",
                 "actor_id": "fighter",
                 "kind": "ability",
                 "ability": "stealth",
@@ -2669,6 +2687,7 @@ def test_check_recovery_identity_includes_actor_and_roll_mode() -> None:
     assert _matching_check_progress(
         progress,
         run_id="run-1",
+        occurrence_id="bridge-stealth-1",
         location_key="bridge",
         actor_id="fighter",
         kind="ability",
@@ -2682,6 +2701,21 @@ def test_check_recovery_identity_includes_actor_and_roll_mode() -> None:
     assert not _matching_check_progress(
         progress,
         run_id="run-1",
+        occurrence_id="bridge-stealth-2",
+        location_key="bridge",
+        actor_id="fighter",
+        kind="ability",
+        ability="stealth",
+        dc=9,
+        proficient=True,
+        advantage=False,
+        disadvantage=True,
+        source_ref=source_ref,
+    )
+    assert not _matching_check_progress(
+        progress,
+        run_id="run-1",
+        occurrence_id="bridge-stealth-1",
         location_key="bridge",
         actor_id="rogue",
         kind="ability",
@@ -2695,6 +2729,7 @@ def test_check_recovery_identity_includes_actor_and_roll_mode() -> None:
     assert not _matching_check_progress(
         progress,
         run_id="run-1",
+        occurrence_id="bridge-stealth-1",
         location_key="bridge",
         actor_id="fighter",
         kind="ability",
@@ -2707,10 +2742,14 @@ def test_check_recovery_identity_includes_actor_and_roll_mode() -> None:
     )
 
 
+@pytest.mark.parametrize("defer_checkpoint", [False, True])
+@pytest.mark.parametrize("force_zero_hp", [False, True])
 @pytest.mark.parametrize(("half_damage", "expected_amount"), [(False, 4), (True, 2)])
 def test_source_damage_rolls_then_damages_and_knocks_prone_through_public_tools(
     half_damage: bool,
     expected_amount: int,
+    force_zero_hp: bool,
+    defer_checkpoint: bool,
 ) -> None:
     source_ref = {
         "module_id": "module-1",
@@ -2727,6 +2766,7 @@ def test_source_damage_rolls_then_damages_and_knocks_prone_through_public_tools(
             self.campaign_revision = 10
             self.character_revision = 3
             self.calls: list[str] = []
+            self.keys: list[str] = []
 
         async def core(self, tool_id: str, arguments: dict):
             assert tool_id == "campaign_query"
@@ -2739,6 +2779,8 @@ def test_source_damage_rolls_then_damages_and_knocks_prone_through_public_tools(
 
         async def domain(self, tool_id: str, arguments: dict):
             self.calls.append(tool_id)
+            if arguments.get("idempotency_key"):
+                self.keys.append(arguments["idempotency_key"])
             if tool_id == "module_query":
                 return {
                     "module_id": "module-1",
@@ -2768,8 +2810,9 @@ def test_source_damage_rolls_then_damages_and_knocks_prone_through_public_tools(
                 self.campaign_revision += 1
                 self.character_revision += 1
                 sheet = default_character_sheet()
+                after_hp = 0 if force_zero_hp else 10 - expected_amount
                 sheet["combat"]["hp"] = {
-                    "value": 10 - expected_amount,
+                    "value": after_hp,
                     "max": 10,
                     "temp": 0,
                 }
@@ -2779,7 +2822,7 @@ def test_source_damage_rolls_then_damages_and_knocks_prone_through_public_tools(
                         "revision": self.character_revision,
                         "sheet": sheet,
                     },
-                    "result": {"after_hp": 10 - expected_amount},
+                    "result": {"after_hp": after_hp},
                 }
             if tool_id == "character_state_change" and arguments["action"] == "knock_prone":
                 assert arguments["expected_revision"] == 4
@@ -2805,9 +2848,15 @@ def test_source_damage_rolls_then_damages_and_knocks_prone_through_public_tools(
                 assert event["payload"]["amount"] == expected_amount
                 assert event["payload"]["damage_roll"]["total"] == 4
                 assert event["payload"]["half_damage"] is half_damage
+                assert event["payload"]["damage_event_id"] == "chimney-fall-1"
                 assert event["payload"]["source_ref"] == source_ref
+                checkpoint_deferred = defer_checkpoint and not force_zero_hp
+                assert ("snapshot" in arguments["payload"]) is not checkpoint_deferred
                 self.campaign_revision += 1
-                return {"event": {"id": "event-1"}, "snapshot": {"slot": 2}}
+                return {
+                    "event": {"id": "event-1"},
+                    **({} if checkpoint_deferred else {"snapshot": {"slot": 2}}),
+                }
             if tool_id == "playthrough_manifest":
                 assert arguments["action"] == "sync"
                 return {
@@ -2816,9 +2865,10 @@ def test_source_damage_rolls_then_damages_and_knocks_prone_through_public_tools(
                 }
             raise AssertionError((tool_id, arguments))
 
+    client = Client()
     result = asyncio.run(
         _apply_source_damage(
-            Client(),
+            client,
             campaign_id="campaign-1",
             run_id="run-1",
             scene_id="scene-1",
@@ -2826,19 +2876,36 @@ def test_source_damage_rolls_then_damages_and_knocks_prone_through_public_tools(
             source_excerpt="On a result of 5 or less, the character falls.",
             source_ref=source_ref,
             actor_id="actor-1",
+            damage_event_id="chimney-fall-1",
             expression="1d6",
             damage_type="bludgeoning",
             reason="falling 10 feet in the chimney",
             half_damage=half_damage,
             knock_prone=True,
             knowledge_actor_ids=["actor-2"],
+            defer_checkpoint=defer_checkpoint,
         )
     )
 
-    assert result["damage"]["result"]["after_hp"] == 10 - expected_amount
-    assert result["prone"]["status"] == "knocked_prone"
-    assert result["character"]["sheet"]["conditions"] == ["prone"]
+    expected_after_hp = 0 if force_zero_hp else 10 - expected_amount
+    assert result["damage"]["result"]["after_hp"] == expected_after_hp
+    if force_zero_hp:
+        assert result["prone"] is None
+        assert result["checkpoint_deferred"] is False
+        assert result["continuity"]["snapshot"]["slot"] == 2
+    else:
+        assert result["prone"]["status"] == "knocked_prone"
+        assert result["character"]["sheet"]["conditions"] == ["prone"]
+        assert result["checkpoint_deferred"] is defer_checkpoint
+        assert ("snapshot" in result["continuity"]) is not defer_checkpoint
     assert result["knowledge_actor_ids"] == ["actor-1", "actor-2"]
+    assert _mutation_key(
+        "run-1", "source-damage-roll", "chimney-fall-1"
+    ) in client.keys
+    assert _mutation_key("run-1", "source-damage", "chimney-fall-1") in client.keys
+    assert _mutation_key(
+        "run-1", "source-damage-continuity", "chimney-fall-1"
+    ) in client.keys
 
 
 @pytest.mark.parametrize("defer_checkpoint", [False, True])
@@ -2914,6 +2981,7 @@ def test_source_event_stand_uses_validated_public_character_action(
             location_key="3-kennel",
             source_excerpt="The character lands prone at the base of the shaft.",
             source_ref=source_ref,
+            occurrence_id="scout-stand-after-kennel-fall",
             actor_id="actor-1",
             knowledge_actor_ids=["actor-2"],
             reason="Scout stood after recovering from the source-cited fall.",
@@ -2923,13 +2991,7 @@ def test_source_event_stand_uses_validated_public_character_action(
 
     assert result["stand"]["status"] == "stood"
     assert result["knowledge_actor_ids"] == ["actor-1", "actor-2"]
-    identity = _stand_identity(
-        scene_id="scene-1",
-        location_key="3-kennel",
-        actor_id="actor-1",
-        reason="Scout stood after recovering from the source-cited fall.",
-        source_ref=source_ref,
-    )
+    identity = "scout-stand-after-kennel-fall"
     assert client.keys == {
         "stand": _mutation_key("run-1", "source-event-stand", identity),
         "continuity": _mutation_key("run-1", "source-event-stand-continuity", identity),
@@ -3021,6 +3083,7 @@ def test_source_state_initialization_uses_cited_public_action_without_fake_damag
             location_key="14-king-s-uarters",
             source_excerpt="Gundren lies unconscious and stable at 0 hit points.",
             source_ref=source_ref,
+            occurrence_id="gundren-stable-at-scene-start",
             actor_id="gundren",
             state="stable_unconscious",
             reason="Gundren begins the scene unconscious and stable.",
@@ -3031,44 +3094,12 @@ def test_source_state_initialization_uses_cited_public_action_without_fake_damag
 
     assert result["state"]["result"]["source_state"] == "stable_unconscious"
     assert result["knowledge_actor_ids"] == []
-    identity = _source_state_identity(
-        scene_id="scene-1",
-        location_key="14-king-s-uarters",
-        actor_id="gundren",
-        state="stable_unconscious",
-        reason="Gundren begins the scene unconscious and stable.",
-        source_ref=source_ref,
-    )
+    identity = "gundren-stable-at-scene-start"
     assert client.keys == {
         "source_state": _mutation_key("run-1", "source-state", identity),
         "continuity": _mutation_key("run-1", "source-state-continuity", identity),
         "sync": _mutation_key("run-1", "sync", f"source-state-sync:{identity}"),
     }
-
-
-def test_stand_identity_separates_later_occurrence_for_same_actor_and_scene() -> None:
-    first = _stand_identity(
-        scene_id="scene-1",
-        location_key="room-1",
-        actor_id="actor-1",
-        reason="Actor One stood after the first fall.",
-        source_ref=None,
-    )
-
-    assert first == _stand_identity(
-        scene_id="scene-1",
-        location_key="room-1",
-        actor_id="actor-1",
-        reason="Actor One stood after the first fall.",
-        source_ref=None,
-    )
-    assert first != _stand_identity(
-        scene_id="scene-1",
-        location_key="room-2",
-        actor_id="actor-1",
-        reason="Actor One stood after a later fall.",
-        source_ref=None,
-    )
 
 
 def test_short_rest_advances_clock_and_applies_only_explicit_resource_choices() -> None:
@@ -3195,6 +3226,7 @@ def test_short_rest_advances_clock_and_applies_only_explicit_resource_choices() 
             client,
             campaign_id="campaign-1",
             run_id="run-1",
+            occurrence_id="hideout-short-rest-1",
             members=[
                 {
                     "actor_id": "fighter",
@@ -3213,39 +3245,7 @@ def test_short_rest_advances_clock_and_applies_only_explicit_resource_choices() 
     assert result["member_ids"] == ["fighter", "wizard"]
     assert result["clock_advanced"]["world_time"]["hour"] == 15
     assert len(result["rests"]) == 2
-    normalized = [
-        {
-            "actor_id": "fighter",
-            "arcane_recovery": {},
-            "natural_recovery": {},
-            "song_of_rest_source_actor_id": "wizard",
-            "hit_dice_spends": [{"key": "fighter:d10", "count": 1}],
-            "rest_activity_minutes": {"meditation": 30},
-            "rest_schedule": {
-                "sleep_minutes": 0,
-                "light_activity_minutes": 60,
-                "strenuous_activity_minutes": 0,
-            },
-        },
-        {
-            "actor_id": "wizard",
-            "arcane_recovery": {"1": 1},
-            "natural_recovery": {},
-            "song_of_rest_source_actor_id": None,
-            "hit_dice_spends": [],
-            "rest_activity_minutes": {},
-            "rest_schedule": {
-                "sleep_minutes": 0,
-                "light_activity_minutes": 60,
-                "strenuous_activity_minutes": 0,
-            },
-        },
-    ]
-    identity = _short_rest_identity(
-        normalized,
-        duration_minutes=60,
-        reason="The party regrouped outside the flooded passage.",
-    )
+    identity = "hideout-short-rest-1"
     assert client.keys["clock_set"] == [_mutation_key("run-1", "short-rest-clock-set", identity)]
     assert client.keys["clock_advance"] == [
         _mutation_key("run-1", "short-rest-clock-advance", identity)
@@ -3256,38 +3256,6 @@ def test_short_rest_advances_clock_and_applies_only_explicit_resource_choices() 
     ]
     assert client.keys["continuity"] == [_mutation_key("run-1", "short-rest-continuity", identity)]
     assert client.keys["sync"] == [_mutation_key("run-1", "sync", f"short-rest-sync:{identity}")]
-
-
-def test_short_rest_identity_separates_later_rest_choices() -> None:
-    members = [
-        {
-            "actor_id": "fighter",
-            "arcane_recovery": {},
-            "hit_dice_spends": [{"key": "d10", "count": 1}],
-        }
-    ]
-    first = _short_rest_identity(
-        members,
-        duration_minutes=60,
-        reason="First rest.",
-    )
-    assert first == _short_rest_identity(
-        deepcopy(members),
-        duration_minutes=60,
-        reason="First rest.",
-    )
-    assert first != _short_rest_identity(
-        members,
-        duration_minutes=60,
-        reason="Later rest.",
-    )
-    changed = deepcopy(members)
-    changed[0]["hit_dice_spends"][0]["count"] = 2
-    assert first != _short_rest_identity(
-        changed,
-        duration_minutes=60,
-        reason="First rest.",
-    )
 
 
 @pytest.mark.parametrize("defer_checkpoint", [False, True])
@@ -3385,6 +3353,7 @@ def test_source_bound_time_advance_commits_clock_knowledge_and_snapshot(
             Client(),
             campaign_id="campaign-1",
             run_id="run-1",
+            occurrence_id="travel-to-phandalin-1",
             scene_id="scene-1",
             source_excerpt="The characters arrive late in the day.",
             source_ref=source_ref,
@@ -3417,6 +3386,7 @@ def test_play_activity_records_structured_effect_and_random_receipt(
 
     class Client:
         revision = 8
+        keys: list[str] = []
 
         async def core(self, tool_id: str, arguments: dict):
             assert tool_id == "campaign_query"
@@ -3429,6 +3399,8 @@ def test_play_activity_records_structured_effect_and_random_receipt(
             }
 
         async def domain(self, tool_id: str, arguments: dict):
+            if arguments.get("idempotency_key"):
+                self.keys.append(arguments["idempotency_key"])
             if tool_id == "module_query":
                 return {
                     "scene_id": "scene-1",
@@ -3461,6 +3433,7 @@ def test_play_activity_records_structured_effect_and_random_receipt(
             if tool_id == "continuity_commit":
                 payload = arguments["payload"]["event"]["payload"]
                 assert payload["core_effect"]["kind"] == "second_wind"
+                assert payload["activity_event_id"] == "second-wind-before-pursuit"
                 assert payload["random_stream_receipt"] == receipt
                 assert ("snapshot" in arguments["payload"]) is not defer_checkpoint
                 self.revision += 1
@@ -3484,6 +3457,7 @@ def test_play_activity_records_structured_effect_and_random_receipt(
             location_key="6-goblin-den",
             actor_id="fighter",
             activity_id="fighter-second-wind",
+            activity_event_id="second-wind-before-pursuit",
             declaration=None,
             reason="The fighter used Second Wind before pursuing the hostage bargain.",
             knowledge_actor_ids=["cleric"],
@@ -3494,6 +3468,12 @@ def test_play_activity_records_structured_effect_and_random_receipt(
     assert result["action"]["result"]["core_effect"]["after_hp"] == 10
     assert result["knowledge_actor_ids"] == ["fighter", "cleric"]
     assert ("snapshot" in result["continuity"]) is not defer_checkpoint
+    assert _mutation_key(
+        "run-1", "play-activity", "second-wind-before-pursuit"
+    ) in Client.keys
+    assert _mutation_key(
+        "run-1", "play-activity-continuity", "second-wind-before-pursuit"
+    ) in Client.keys
 
 
 def test_dm_event_keeps_enemy_knowledge_out_of_party_event_stream() -> None:
@@ -3548,6 +3528,7 @@ def test_dm_event_keeps_enemy_knowledge_out_of_party_event_stream() -> None:
             Client(),
             campaign_id="campaign-1",
             run_id="run-1",
+            occurrence_id="enemy-alerted-1",
             scene_id="scene-1",
             location_key="8-cave",
             source_excerpt="A messenger warned the leader.",
@@ -3570,6 +3551,8 @@ def test_long_rest_uses_atomic_party_rest_and_unique_occurrence_knowledge() -> N
             self.revision = 5
             self.knowledge_keys: list[str] = []
             self.sync_keys: list[str] = []
+            self.party_rest_keys: list[str] = []
+            self.continuity_keys: list[str] = []
             self.world_time = {
                 "day": 1,
                 "hour": 16,
@@ -3600,6 +3583,7 @@ def test_long_rest_uses_atomic_party_rest_and_unique_occurrence_knowledge() -> N
                 return [{"id": "branch-1", "is_current": True}]
             if tool_id == "campaign_change":
                 assert arguments["action"] == "party_rest"
+                self.party_rest_keys.append(arguments["idempotency_key"])
                 assert arguments["payload"]["duration_minutes"] == 480
                 assert arguments["payload"]["members"] == [
                     {
@@ -3638,6 +3622,7 @@ def test_long_rest_uses_atomic_party_rest_and_unique_occurrence_knowledge() -> N
                     "member_ids": ["fighter", "cleric"],
                 }
             if tool_id == "continuity_commit":
+                self.continuity_keys.append(arguments["idempotency_key"])
                 event = arguments["payload"]["event"]
                 assert event["event_type"] == "long_rest"
                 assert event["payload"]["duration_minutes"] == 480
@@ -3655,11 +3640,13 @@ def test_long_rest_uses_atomic_party_rest_and_unique_occurrence_knowledge() -> N
             raise AssertionError((tool_id, arguments))
 
     client = Client()
+    shared_reason = "The party completed an uninterrupted long rest."
     result = asyncio.run(
         _long_rest(
             client,
             campaign_id="campaign-1",
             run_id="run-1",
+            occurrence_id="hideout-long-rest-1",
             members=[
                 {
                     "actor_id": "fighter",
@@ -3670,7 +3657,7 @@ def test_long_rest_uses_atomic_party_rest_and_unique_occurrence_knowledge() -> N
             ],
             start_clock=None,
             duration_minutes=480,
-            reason="The party withdrew and completed an uninterrupted long rest.",
+            reason=shared_reason,
         )
     )
 
@@ -3683,6 +3670,7 @@ def test_long_rest_uses_atomic_party_rest_and_unique_occurrence_knowledge() -> N
             client,
             campaign_id="campaign-1",
             run_id="run-1",
+            occurrence_id="hideout-long-rest-2",
             members=[
                 {
                     "actor_id": "fighter",
@@ -3693,7 +3681,7 @@ def test_long_rest_uses_atomic_party_rest_and_unique_occurrence_knowledge() -> N
             ],
             start_clock=None,
             duration_minutes=480,
-            reason="After the next expedition, the party completed another long rest.",
+            reason=shared_reason,
         )
     )
 
@@ -3701,6 +3689,8 @@ def test_long_rest_uses_atomic_party_rest_and_unique_occurrence_knowledge() -> N
     assert len(set(client.knowledge_keys)) == 4
     assert len(client.sync_keys) == 2
     assert len(set(client.sync_keys)) == 2
+    assert len(set(client.party_rest_keys)) == 2
+    assert len(set(client.continuity_keys)) == 2
 
 
 def test_long_rest_recovers_committed_receipt_without_advancing_time_twice() -> None:
@@ -3845,6 +3835,7 @@ def test_long_rest_recovers_committed_receipt_without_advancing_time_twice() -> 
             client,
             campaign_id="campaign-1",
             run_id="run-1",
+            occurrence_id="recovered-long-rest-1",
             members=[
                 {"actor_id": "fighter", "food_and_drink": True},
                 {"actor_id": "cleric", "prepared_spell_ids": ["cure-wounds"]},
@@ -3959,6 +3950,7 @@ def test_xp_award_uses_source_ref_and_keeps_dead_participant_share() -> None:
             Client(),
             campaign_id="campaign-1",
             run_id="run-1",
+            occurrence_id="hideout-xp-award-1",
             scene_id="scene-1",
             source_ref=source_ref,
             actor_ids=["actor-1", "actor-2"],
@@ -3970,7 +3962,7 @@ def test_xp_award_uses_source_ref_and_keeps_dead_participant_share() -> None:
     assert [item["new_xp"] for item in result["award"]["awards"]] == [75, 75]
 
 
-def test_xp_award_idempotency_identity_includes_exact_recipient_set() -> None:
+def test_xp_award_idempotency_identity_uses_explicit_occurrence() -> None:
     source_ref = {
         "module_id": "module-1",
         "scene_id": "scene-1",
@@ -4012,21 +4004,22 @@ def test_xp_award_idempotency_identity_includes_exact_recipient_set() -> None:
                 return {"manifest": {"status": "in_progress"}, "campaign_revision": 5}
             raise AssertionError((tool_id, arguments))
 
-    async def award(client: Client, actor_id: str) -> None:
+    async def award(client: Client, occurrence_id: str) -> None:
         await _award_experience(
             client,
             campaign_id="campaign-1",
             run_id="run-1",
+            occurrence_id=occurrence_id,
             scene_id="scene-1",
             source_ref=source_ref,
-            actor_ids=[actor_id],
+            actor_ids=["actor-1"],
             amount=75,
             reason="Reached the hideout",
         )
 
     client = Client()
-    asyncio.run(award(client, "actor-1"))
-    asyncio.run(award(client, "actor-2"))
+    asyncio.run(award(client, "hideout-award-1"))
+    asyncio.run(award(client, "hideout-award-2"))
 
     assert len(set(client.award_keys)) == 2
     assert len(set(client.sync_keys)) == 2
@@ -4088,6 +4081,7 @@ def test_source_cited_automatic_event_does_not_roll() -> None:
             client,
             campaign_id="campaign-1",
             run_id="run-1",
+            occurrence_id="snare-detected-1",
             scene_id="scene-1",
             location_key="ambush",
             source_excerpt="The lead character spots the snare automatically.",
@@ -4172,6 +4166,7 @@ def test_record_event_preserves_prior_scene_events_in_same_run() -> None:
             client,
             campaign_id="campaign-1",
             run_id="run-1",
+            occurrence_id="yeemik-ransom-demand-1",
             scene_id="scene-1",
             location_key="goblin-den",
             source_excerpt="Yeemik demands a rich ransom.",
