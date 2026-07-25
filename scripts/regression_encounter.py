@@ -1607,6 +1607,12 @@ def _preferred_multiattack_option_id(
         item
         for item in dict(actor.get("derived") or {}).get("multiattack_options", [])
         if isinstance(item, dict) and str(item.get("id") or "")
+        and sum(
+            int(attack.get("count", 0) or 0)
+            for attack in item.get("attacks", [])
+            if isinstance(attack, dict)
+        )
+        >= 2
     ]
     if not options:
         return ""

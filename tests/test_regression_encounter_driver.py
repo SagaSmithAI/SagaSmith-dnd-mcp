@@ -1524,6 +1524,14 @@ def test_hostile_multiattack_selection_follows_the_preferred_weapon() -> None:
         == "ranged"
     )
 
+    actor["derived"]["multiattack_options"] = [
+        {
+            "id": "mixed-special-action",
+            "attacks": [{"weapon_id": "claws", "attack_mode": "melee", "count": 1}],
+        }
+    ]
+    assert _preferred_multiattack_option_id(actor, preferred_weapon_id="claws") == ""
+
 
 def test_structured_multiattack_followup_prevents_early_end_turn() -> None:
     active = {
