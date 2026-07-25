@@ -4905,9 +4905,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         initiatives = [
             int(item.get("initiative", 0) or 0) for item in encounter.get("combatants", [])
         ]
-        start_boundary_ids = (
-            ["dnd5e.core.initiative.tie"] if len(initiatives) != len(set(initiatives)) else []
-        )
+        start_boundary_ids = list(encounter.get("rule_boundary_ids") or [])
+        if len(initiatives) != len(set(initiatives)):
+            start_boundary_ids.append("dnd5e.core.initiative.tie")
+        start_boundary_ids = sorted(set(start_boundary_ids))
         start_receipts = core_receipts(
             effective_rule_context(campaign_id),
             start_boundary_ids,
@@ -5041,9 +5042,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 *list(next_encounter.get("reinforcements") or []),
             ]
         )
+        join_boundary_ids = list(queued.get("rule_boundary_ids") or [])
+        if tied:
+            join_boundary_ids.append("dnd5e.core.initiative.tie")
         receipts = core_receipts(
             effective_rule_context(campaign_id),
-            ["dnd5e.core.initiative.tie"] if tied else [],
+            sorted(set(join_boundary_ids)),
             "combat.join",
         )
         next_state = {**dict(campaign.state or {}), "combat": next_encounter}

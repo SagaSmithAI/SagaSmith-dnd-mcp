@@ -223,6 +223,95 @@ def test_invalid_branch_is_rejected_before_noncombat_check_rolls(
     assert rolled is False
 
 
+def test_jack_of_all_trades_is_applied_and_receipted_by_public_tools(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        server = create_server(_config(tmp_path))
+        campaign = await _call(
+            server,
+            "campaign_create",
+            {"name": "Jack audit", "edition": "2014", "idempotency_key": "campaign"},
+        )
+        sheet = default_character_sheet()
+        sheet["progression"] = {
+            "level": 2,
+            "classes": [{"name": "Bard", "level": 2, "hit_die": 8}],
+        }
+        sheet["abilities"]["charisma"]["score"] = 16
+        sheet["abilities"]["dexterity"]["score"] = 14
+        sheet["content"]["features"] = [
+            {
+                "id": "dnd5e.content.srd2014.feature.bard-jack-of-all-trades",
+                "name": "Jack of All Trades",
+                "source_key": "Bard",
+            }
+        ]
+        actor = await _call(
+            server,
+            "character_create",
+            {
+                "campaign_id": campaign["id"],
+                "name": "Bard",
+                "sheet": sheet,
+                "idempotency_key": "actor",
+            },
+        )
+        campaign = await _call(server, "campaign_get", {"campaign_id": campaign["id"]})
+        checked = await _call(
+            server,
+            "character_check",
+            {
+                "campaign_id": campaign["id"],
+                "actor_id": actor["id"],
+                "kind": "check",
+                "ability": "intimidation",
+                "dc": 0,
+                "expected_revision": campaign["revision"],
+                "idempotency_key": "untrained-check",
+            },
+        )
+        assert checked["ability_modifier"] == 3
+        assert checked["bonus"] == 1
+        assert [
+            item["mechanic_id"] for item in checked["rule_receipts"]
+        ] == ["dnd5e.core.check.jack_of_all_trades"]
+
+        campaign = await _call(server, "campaign_get", {"campaign_id": campaign["id"]})
+        started = await _call(
+            server,
+            "combat_start",
+            {
+                "campaign_id": campaign["id"],
+                "participant_ids": [actor["id"]],
+                "expected_revision": campaign["revision"],
+                "idempotency_key": "combat-start",
+            },
+        )
+        combatant = started["combat"]["combatants"][0]
+        assert combatant["initiative_bonus"] == 3
+        assert started["combat"]["rule_boundary_ids"] == [
+            "dnd5e.core.check.jack_of_all_trades"
+        ]
+
+        receipts = await _call(
+            server,
+            "campaign_rule_receipts",
+            {"campaign_id": campaign["id"]},
+        )
+        jack_receipts = [
+            item
+            for item in receipts
+            if item["mechanic_id"] == "dnd5e.core.check.jack_of_all_trades"
+        ]
+        assert {item["receipt"]["event"] for item in jack_receipts} == {
+            "check.resolve",
+            "combat.start",
+        }
+
+    asyncio.run(exercise())
+
+
 def test_action_surge_is_settled_without_a_manual_ruling(tmp_path: Path) -> None:
     async def exercise() -> None:
         server = create_server(_config(tmp_path))
