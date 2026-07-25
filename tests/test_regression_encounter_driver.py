@@ -69,9 +69,27 @@ def test_status_uses_play_character_exposure_before_combat() -> None:
                     "sheet": {
                         "combat": {"hp": {"value": 8, "max": 8}},
                         "conditions": [],
-                        "spellcasting": {"spell_slots": {}},
+                        "resources": {
+                            "test": {
+                                "value": 1,
+                                "max": 1,
+                                "recovers_on": "short_rest",
+                            }
+                        },
+                        "spellcasting": {
+                            "spell_slots": {
+                                "1": {
+                                    "value": 2,
+                                    "max": 2,
+                                    "recovers_on": "long_rest",
+                                }
+                            }
+                        },
                     },
-                    "derived": {"armor_class": 12},
+                    "derived": {
+                        "armor_class": 12,
+                        "spellcasting": {"prepared_spell_ids": ["spell-1"]},
+                    },
                 }
                 for actor_id in arguments["payload"]["character_ids"]
             ]
@@ -85,6 +103,9 @@ def test_status_uses_play_character_exposure_before_combat() -> None:
     assert result["combat"] is None
     assert client.loaded == [("play.characters",)]
     assert [actor["id"] for actor in result["actors"]] == ["pc-1", "pc-2"]
+    assert result["actors"][0]["resources"]["test"]["value"] == 1
+    assert result["actors"][0]["spell_slots"]["1"]["value"] == 2
+    assert result["actors"][0]["prepared_spell_ids"] == ["spell-1"]
 
 
 def test_party_ids_combine_public_party_reports_and_require_global_uniqueness(

@@ -1041,6 +1041,13 @@ def _character_summary(actor: dict[str, Any]) -> dict[str, Any]:
         "name": actor["name"],
         "hp": dict(derived.get("hit_points") or {}),
         "conditions": list(sheet.get("conditions") or []),
+        "resources": deepcopy(dict(sheet.get("resources") or {})),
+        "spell_slots": deepcopy(
+            dict(dict(sheet.get("spellcasting") or {}).get("spell_slots") or {})
+        ),
+        "prepared_spell_ids": list(
+            dict(derived.get("spellcasting") or {}).get("prepared_spell_ids") or []
+        ),
         "weapons": [
             {
                 "item_id": item.get("item_id"),
