@@ -68,6 +68,7 @@ def _arguments() -> argparse.Namespace:
             "stand-up",
             "use-activity",
             "branch-from-snapshot",
+            "initialize-clock",
             "advance-time",
             "short-rest",
             "long-rest",
@@ -4035,6 +4036,87 @@ async def _advance_time(
     }
 
 
+async def _initialize_clock(
+    client: ExposureClient,
+    *,
+    campaign_id: str,
+    run_id: str,
+    occurrence_id: str,
+    start_clock: dict[str, Any] | None,
+) -> dict[str, Any]:
+    identity = _occurrence_identity(occurrence_id, "initialize-clock")
+    if not isinstance(start_clock, dict):
+        raise ValueError("initialize-clock requires --time-start-clock-json")
+    day = start_clock.get("day")
+    hour = start_clock.get("hour", 0)
+    minute = start_clock.get("minute", 0)
+    label = str(start_clock.get("label") or "").strip()
+    if (
+        isinstance(day, bool)
+        or not isinstance(day, int)
+        or day < 1
+        or isinstance(hour, bool)
+        or not isinstance(hour, int)
+        or not 0 <= hour <= 23
+        or isinstance(minute, bool)
+        or not isinstance(minute, int)
+        or not 0 <= minute <= 59
+        or not label
+    ):
+        raise ValueError(
+            "initialize-clock requires a positive day, hour 0-23, minute 0-59, "
+            "and a non-empty DM anchor label"
+        )
+    campaign = await _campaign(client, campaign_id)
+    existing = dict(dict(campaign.get("state") or {}).get("world_time") or {})
+    requested_elapsed = (day - 1) * 1440 + hour * 60 + minute
+    if existing:
+        if (
+            int(existing.get("elapsed_minutes", -1)) != requested_elapsed
+            or str(existing.get("label") or "") != label
+        ):
+            raise ValueError(
+                "campaign clock is already initialized to a different DM anchor"
+            )
+        return {
+            "occurrence_id": identity,
+            "already_initialized": True,
+            "world_time": existing,
+            "clock_set": None,
+        }
+    branches = await client.domain(
+        "branch_query",
+        {"campaign_id": campaign_id, "view": "list"},
+    )
+    branch = next((item for item in branches if item.get("is_current")), None)
+    if branch is None:
+        raise RuntimeError("campaign has no current branch")
+    clock_set = await client.domain(
+        "campaign_change",
+        {
+            "campaign_id": campaign_id,
+            "action": "clock_set",
+            "payload": {
+                "day": day,
+                "hour": hour,
+                "minute": minute,
+                "label": label,
+            },
+            "branch_id": str(branch["id"]),
+            "expected_revision": campaign["revision"],
+            "idempotency_key": _mutation_key(
+                run_id, "initialize-clock", identity
+            ),
+        },
+    )
+    return {
+        "occurrence_id": identity,
+        "already_initialized": False,
+        "world_time": deepcopy(clock_set["world_time"]),
+        "clock_set": clock_set,
+    }
+
+
 async def _recover_stable_party(
     client: ExposureClient,
     *,
@@ -6856,6 +6938,17 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     start_clock=args.time_start_clock_json,
                     knowledge_actor_ids=args.knowledge_actor_id,
                     defer_checkpoint=args.defer_checkpoint,
+                )
+            elif args.action == "initialize-clock":
+                if phase != "play":
+                    raise RuntimeError("initialize-clock requires the play phase")
+                await client.load("play.scene_control")
+                report["result"] = await _initialize_clock(
+                    client,
+                    campaign_id=args.campaign_id,
+                    run_id=args.run_id,
+                    occurrence_id=args.occurrence_id,
+                    start_clock=args.time_start_clock_json,
                 )
             elif args.action == "roll-source":
                 if phase != "play":

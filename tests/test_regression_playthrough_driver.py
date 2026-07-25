@@ -31,6 +31,7 @@ from scripts.regression_playthrough import (
     _configure_advancement,
     _configure_ending_conditions,
     _extend_manifest_for_module_revision,
+    _initialize_clock,
     _initialize_source_state,
     _level_spell_choice_counts,
     _long_rest,
@@ -1429,7 +1430,13 @@ def test_stable_party_recovery_uses_one_public_campaign_transition() -> None:
 
         async def core(self, tool_id: str, arguments: dict):
             assert tool_id == "campaign_query"
-            return {"result": {"id": "campaign-1", "revision": 8}}
+            return {
+                "result": {
+                    "id": "campaign-1",
+                    "revision": 8,
+                    "state": {"world_time": {"day": 1, "elapsed_minutes": 1080}},
+                }
+            }
 
         async def domain(self, tool_id: str, arguments: dict):
             self.tools.append(tool_id)
@@ -1486,6 +1493,76 @@ def test_stable_party_recovery_uses_one_public_campaign_transition() -> None:
         "continuity": _mutation_key("run-1", "stable-recovery-continuity", identity),
         "sync": _mutation_key("run-1", "sync", f"stable-recovery-sync:{identity}"),
     }
+
+
+def test_initialize_clock_commits_one_public_dm_anchor_and_replays_from_state() -> None:
+    class Client:
+        def __init__(self) -> None:
+            self.world_time: dict = {}
+            self.calls = 0
+
+        async def core(self, tool_id: str, arguments: dict):
+            assert tool_id == "campaign_query"
+            return {
+                "result": {
+                    "id": "campaign-1",
+                    "revision": 8,
+                    "state": {"world_time": self.world_time},
+                }
+            }
+
+        async def domain(self, tool_id: str, arguments: dict):
+            if tool_id == "branch_query":
+                return [{"id": "branch-1", "is_current": True}]
+            if tool_id == "campaign_change":
+                assert arguments["action"] == "clock_set"
+                assert arguments["payload"] == {
+                    "day": 1,
+                    "hour": 18,
+                    "minute": 0,
+                    "label": "Yawning Portal opening",
+                }
+                self.calls += 1
+                self.world_time = {
+                    "schema_version": 1,
+                    **arguments["payload"],
+                    "elapsed_minutes": 1080,
+                }
+                return {"status": "committed", "world_time": self.world_time}
+            raise AssertionError((tool_id, arguments))
+
+    client = Client()
+    first = asyncio.run(
+        _initialize_clock(
+            client,
+            campaign_id="campaign-1",
+            run_id="run-1",
+            occurrence_id="waterdeep-opening-clock",
+            start_clock={
+                "day": 1,
+                "hour": 18,
+                "label": "Yawning Portal opening",
+            },
+        )
+    )
+    replay = asyncio.run(
+        _initialize_clock(
+            client,
+            campaign_id="campaign-1",
+            run_id="run-1",
+            occurrence_id="waterdeep-opening-clock",
+            start_clock={
+                "day": 1,
+                "hour": 18,
+                "label": "Yawning Portal opening",
+            },
+        )
+    )
+
+    assert first["already_initialized"] is False
+    assert replay["already_initialized"] is True
+    assert replay["world_time"]["elapsed_minutes"] == 1080
+    assert client.calls == 1
 
 
 def test_occurrence_identity_separates_repeated_equivalent_mutations() -> None:
