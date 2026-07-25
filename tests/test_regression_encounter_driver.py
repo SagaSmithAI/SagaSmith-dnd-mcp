@@ -142,6 +142,30 @@ def test_party_ids_combine_public_party_reports_and_require_global_uniqueness(
         raise AssertionError("duplicate actor ids must be rejected")
 
 
+def test_party_ids_accept_playthrough_status_and_exclude_inactive_members(tmp_path) -> None:
+    status = tmp_path / "status.json"
+    status.write_text(
+        json.dumps(
+            {
+                "result": {
+                    "manifest": {
+                        "party": {
+                            "members": [
+                                {"actor_id": "pc-active", "status": "active"},
+                                {"actor_id": "pc-dead", "status": "dead"},
+                                {"actor_id": "pc-left", "status": "departed"},
+                            ]
+                        }
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert _party_ids([status]) == ["pc-active"]
+
+
 def test_prepared_actor_reports_support_batched_rule_actors_and_module_actors(
     tmp_path,
 ) -> None:

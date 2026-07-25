@@ -269,12 +269,33 @@ def _read_report(path: Path) -> dict[str, Any]:
 
 
 def _party_ids(paths: list[Path]) -> list[str]:
-    values = [
-        str(item.get("actor_id") or "")
-        for path in paths
-        for item in _read_report(path).get("characters", [])
-        if isinstance(item, dict)
-    ]
+    values: list[str] = []
+    for path in paths:
+        report = _read_report(path)
+        characters = report.get("characters")
+        if isinstance(characters, list):
+            members = characters
+        else:
+            result = report.get("result")
+            manifest = (
+                result.get("manifest")
+                if isinstance(result, dict)
+                else report.get("manifest")
+            )
+            party = manifest.get("party") if isinstance(manifest, dict) else None
+            members = party.get("members") if isinstance(party, dict) else None
+            if not isinstance(members, list):
+                members = []
+            members = [
+                item
+                for item in members
+                if isinstance(item, dict) and item.get("status") == "active"
+            ]
+        values.extend(
+            str(item.get("actor_id") or "")
+            for item in members
+            if isinstance(item, dict)
+        )
     if not values or any(not item for item in values) or len(values) != len(set(values)):
         raise ValueError("party report must contain unique character actor_id values")
     return values
