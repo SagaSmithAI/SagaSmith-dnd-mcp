@@ -36,6 +36,7 @@ DEFERRED_CHECKPOINT_ACTIONS = frozenset(
         "use-activity",
         "record-event",
         "record-outcome",
+        "register-replacement",
         "prepare-narrative-npc",
         "provision-source-item",
         "transfer-source-item",

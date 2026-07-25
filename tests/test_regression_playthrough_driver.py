@@ -130,6 +130,7 @@ def test_scene_resource_actions_support_deferred_checkpoint_batching() -> None:
         "advance-level",
         "apply-damage",
         "roll-source",
+        "register-replacement",
         "spend-coins",
         "spend-item",
         "use-activity",
