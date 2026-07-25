@@ -1241,11 +1241,6 @@ async def _register_replacement(
                     },
                 },
                 "actor_knowledge": actor_knowledge,
-                "snapshot": {
-                    "label": (
-                        f"Replacement handoff: {replacement['name']} succeeds {predecessor['name']}"
-                    )
-                },
                 "branch_id": branch_id,
             },
             "expected_revision": campaign["revision"],

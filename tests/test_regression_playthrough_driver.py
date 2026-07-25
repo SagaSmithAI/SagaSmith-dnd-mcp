@@ -1780,6 +1780,7 @@ def test_replacement_join_preserves_predecessor_and_only_hands_off_explicit_know
             if tool_id == "actor_knowledge_query":
                 return deepcopy(self.knowledge[arguments["actor_id"]])
             if tool_id == "continuity_commit":
+                assert "snapshot" not in arguments["payload"]
                 rows = arguments["payload"]["actor_knowledge"]
                 assert [item["actor_id"] for item in rows] == [
                     "replacement",
@@ -1792,32 +1793,30 @@ def test_replacement_join_preserves_predecessor_and_only_hands_off_explicit_know
                     }
                     for index, item in enumerate(rows)
                 ]
-                self.head_snapshot_id = "snapshot-1"
                 self.revision += 1
                 return {
                     "event": {"id": "event-join"},
-                    "snapshot": {"id": "snapshot-1", "slot": 1},
                 }
             if tool_id == "snapshot_create":
-                assert arguments["expected_head_snapshot_id"] == "snapshot-1"
-                self.head_snapshot_id = "snapshot-2"
+                assert arguments["expected_head_snapshot_id"] == ""
+                self.head_snapshot_id = "snapshot-1"
                 self.revision += 1
                 self.manifest["snapshot_dag"] = {
                     "active_branch_id": "branch-1",
-                    "head_snapshot_id": "snapshot-2",
+                    "head_snapshot_id": "snapshot-1",
                     "nodes": [
                         {
-                            "id": "snapshot-2",
-                            "parent_id": "snapshot-1",
+                            "id": "snapshot-1",
+                            "parent_id": "",
                             "branch_id": "branch-1",
-                            "slot": 2,
+                            "slot": 1,
                             "label": arguments["label"],
                             "checksum": "b" * 64,
                             "is_head": True,
                         }
                     ],
                 }
-                return {"id": "snapshot-2", "slot": 2}
+                return {"id": "snapshot-1", "slot": 1}
             if tool_id == "snapshot_query":
                 return {"valid": True}
             raise AssertionError((tool_id, arguments))
@@ -1854,9 +1853,9 @@ def test_replacement_join_preserves_predecessor_and_only_hands_off_explicit_know
     ]
     if defer_checkpoint:
         assert result["checkpoint"] is None
-        assert client.head_snapshot_id == "snapshot-1"
+        assert client.head_snapshot_id == ""
     else:
-        assert result["checkpoint"]["snapshot"]["slot"] == 2
+        assert result["checkpoint"]["snapshot"]["slot"] == 1
 
 
 def test_phase_and_idempotency_namespaces_are_stable() -> None:
