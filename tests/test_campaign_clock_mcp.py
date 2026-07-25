@@ -148,6 +148,134 @@ def test_campaign_clock_and_elapsed_effects_advance_atomically(tmp_path: Path) -
     asyncio.run(exercise())
 
 
+def test_minute_clock_advances_accumulate_for_hour_effects(tmp_path: Path) -> None:
+    async def exercise() -> None:
+        server = create_server(_config(tmp_path))
+        campaign = await _call(
+            server,
+            "campaign_create",
+            {"name": "Split clock", "edition": "2014", "idempotency_key": "campaign"},
+        )
+        sheet = default_character_sheet()
+        sheet["conditions"] = ["poisoned", "paralyzed", "turned", "invisible"]
+        sheet["content"]["spells"] = [
+            {"id": "invisibility", "name": "Invisibility", "level": 2}
+        ]
+        sheet["effects"] = [
+            {
+                "id": "giant-spider-poison",
+                "name": "Giant Spider Poison",
+                "kind": "timed_conditions",
+                "active": True,
+                "duration": {"period": "hour", "remaining": 1},
+                "changes": [
+                    {
+                        "path": "conditions",
+                        "mode": "add",
+                        "value": ["poisoned", "paralyzed"],
+                    }
+                ],
+            },
+            {
+                "id": "turn-undead",
+                "name": "Turn Undead",
+                "kind": "turn_undead",
+                "active": True,
+                "duration": {"period": "minute", "remaining": 1},
+            },
+            {
+                "id": "invisibility",
+                "name": "Invisibility",
+                "kind": "concentration",
+                "source_spell_id": "invisibility",
+                "active": True,
+                "concentration": True,
+                "duration": {"period": "hour", "remaining": 1},
+                "changes": [],
+            },
+        ]
+        actor = await _call(
+            server,
+            "character_create_from",
+            {
+                "mode": "direct",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "name": "Poisoned Actor",
+                    "sheet": sheet,
+                },
+                "idempotency_key": "actor",
+            },
+        )
+        current = await _call(
+            server,
+            "campaign_query",
+            {"view": "get", "payload": {"campaign_id": campaign["id"]}},
+        )
+        clock = await _call(
+            server,
+            "campaign_change",
+            {
+                "campaign_id": campaign["id"],
+                "action": "clock_set",
+                "payload": {"day": 1, "hour": 9},
+                "expected_revision": current["revision"],
+                "idempotency_key": "clock",
+            },
+        )
+        first = await _call(
+            server,
+            "campaign_change",
+            {
+                "campaign_id": campaign["id"],
+                "action": "clock_advance",
+                "payload": {"period": "minute", "count": 30},
+                "expected_revision": clock["campaign_revision"],
+                "idempotency_key": "first-half-hour",
+            },
+        )
+        halfway = await _call(
+            server,
+            "character_query",
+            {"view": "get", "payload": {"character_id": actor["id"]}},
+        )
+        assert halfway["sheet"]["effects"][0]["duration"] == {
+            "period": "hour",
+            "remaining": 1,
+            "elapsed_minutes_remainder": 30,
+        }
+        assert halfway["sheet"]["effects"][1]["active"] is False
+        assert set(halfway["sheet"]["conditions"]) == {
+            "invisible",
+            "paralyzed",
+            "poisoned",
+        }
+
+        second = await _call(
+            server,
+            "campaign_change",
+            {
+                "campaign_id": campaign["id"],
+                "action": "clock_advance",
+                "payload": {"period": "minute", "count": 30},
+                "expected_revision": first["campaign_revision"],
+                "idempotency_key": "second-half-hour",
+            },
+        )
+        assert second["expired"] == {
+            actor["id"]: ["giant-spider-poison", "invisibility"]
+        }
+        finished = await _call(
+            server,
+            "character_query",
+            {"view": "get", "payload": {"character_id": actor["id"]}},
+        )
+        assert finished["sheet"]["conditions"] == []
+        assert finished["sheet"]["effects"][0]["active"] is False
+
+    asyncio.run(exercise())
+
+
 def test_campaign_clock_must_be_set_before_time_advance(tmp_path: Path) -> None:
     async def exercise() -> None:
         server = create_server(_config(tmp_path))

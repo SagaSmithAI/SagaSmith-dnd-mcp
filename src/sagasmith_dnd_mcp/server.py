@@ -91,6 +91,7 @@ from sagasmith_dnd.combat_engine import (
     available_attack_defenses,
     available_reactions,
     current_combatant,
+    end_concentration_for_incapacitating_conditions,
     end_turn,
     pay_activity_activation,
     pay_attack_action,
@@ -130,6 +131,8 @@ from sagasmith_dnd.core_rule_pack import get_core_rule_pack
 from sagasmith_dnd.engine import resolve_check, roll
 from sagasmith_dnd.lifecycle import (
     advance_effect_durations,
+    advance_elapsed_effect_durations,
+    advance_elapsed_world_effect_durations,
     advance_world_effect_durations,
     allows_trance_rest,
     apply_rest,
@@ -4306,6 +4309,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 added_by_encounter = condition not in existing_conditions
                 if added_by_encounter:
                     sheet.setdefault("conditions", []).append(condition)
+                    end_concentration_for_incapacitating_conditions(sheet)
                 source_condition_records.append(
                     {
                         "actor_id": actor_id_value,
@@ -5240,7 +5244,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             }
             if condition not in conditions:
                 updated_sheet.setdefault("conditions", []).append(condition)
+            end_concentration_for_incapacitating_conditions(updated_sheet)
             sync_combatant_conditions(next_encounter, target_id, updated_sheet)
+            reconcile_readied_spells(next_encounter, target_id, updated_sheet)
             ongoing_effect = {
                 "id": str(choice_id),
                 "kind": "on_hit_condition",
@@ -5667,7 +5673,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 sheet = rounded["sheet"]
                 expired.extend(rounded["expired"])
             if minute_changed:
-                minutes = advance_effect_durations(sheet, period="minute")
+                minutes = advance_elapsed_effect_durations(sheet, elapsed_minutes=1)
                 sheet = minutes["sheet"]
                 expired.extend(minutes["expired"])
             extension = apply_rule_event(
@@ -5948,22 +5954,33 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "label": str(current_clock.get("label") or ""),
             }
             next_state["world_time"] = world_time
-        effect_steps = {
-            "minute": {"minute": count},
-            "hour": {"minute": count * 60, "hour": count},
-            "day": {"minute": count * 1440, "hour": count * 24, "day": count},
-            "round": {"round": count},
-            "encounter": {"encounter": count},
-        }[normalized_period]
+        elapsed_minutes = time_minutes.get(normalized_period, 0) * count
+        effect_steps = (
+            {}
+            if elapsed_minutes
+            else {
+                "round": {"round": count},
+                "encounter": {"encounter": count},
+            }[normalized_period]
+        )
         world_advanced: list[str] = []
         world_expired: list[str] = []
-        for effect_period, amount in effect_steps.items():
-            world_result = advance_world_effect_durations(
-                next_state, period=effect_period, amount=amount
+        if elapsed_minutes:
+            world_result = advance_elapsed_world_effect_durations(
+                next_state,
+                elapsed_minutes=elapsed_minutes,
             )
             next_state = world_result["state"]
             world_advanced.extend(world_result["advanced"])
             world_expired.extend(world_result["expired"])
+        else:
+            for effect_period, amount in effect_steps.items():
+                world_result = advance_world_effect_durations(
+                    next_state, period=effect_period, amount=amount
+                )
+                next_state = world_result["state"]
+                world_advanced.extend(world_result["advanced"])
+                world_expired.extend(world_result["expired"])
         world_state_changed = bool(world_advanced or world_expired)
         updates: list[CharacterStateUpdate] = []
         advanced: dict[str, list[str]] = {}
@@ -5974,22 +5991,44 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             sheet = character.sheet
             character_advanced: list[str] = []
             character_expired: list[str] = []
-            for effect_period, amount in effect_steps.items():
-                result = advance_effect_durations(sheet, period=effect_period, amount=amount)
+            if elapsed_minutes:
+                result = advance_elapsed_effect_durations(
+                    sheet,
+                    elapsed_minutes=elapsed_minutes,
+                )
                 extension = apply_rule_event(
                     result["sheet"],
                     "duration.advance",
                     context_with_facts(
                         rule_context,
                         actor_id=character.id,
-                        period=effect_period,
-                        amount=amount,
+                        period="minute",
+                        amount=elapsed_minutes,
                     ),
                 )
                 rule_receipts.extend(extension.receipts)
                 sheet = extension.sheet
                 character_advanced.extend(result["advanced"])
                 character_expired.extend(result["expired"])
+            else:
+                for effect_period, amount in effect_steps.items():
+                    result = advance_effect_durations(
+                        sheet, period=effect_period, amount=amount
+                    )
+                    extension = apply_rule_event(
+                        result["sheet"],
+                        "duration.advance",
+                        context_with_facts(
+                            rule_context,
+                            actor_id=character.id,
+                            period=effect_period,
+                            amount=amount,
+                        ),
+                    )
+                    rule_receipts.extend(extension.receipts)
+                    sheet = extension.sheet
+                    character_advanced.extend(result["advanced"])
+                    character_expired.extend(result["expired"])
             if not character_advanced and not character_expired and sheet == character.sheet:
                 continue
             updates.append(
@@ -10996,16 +11035,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         next_state["world_time"] = next_world_time
         world_advanced: list[str] = []
         world_expired: list[str] = []
-        for effect_period, amount in (
-            ("minute", recovery_hours * 60),
-            ("hour", recovery_hours),
-        ):
-            world_result = advance_world_effect_durations(
-                next_state, period=effect_period, amount=amount
-            )
-            next_state = world_result["state"]
-            world_advanced.extend(world_result["advanced"])
-            world_expired.extend(world_result["expired"])
+        elapsed_minutes = recovery_hours * 60
+        world_result = advance_elapsed_world_effect_durations(
+            next_state,
+            elapsed_minutes=elapsed_minutes,
+        )
+        next_state = world_result["state"]
+        world_advanced.extend(world_result["advanced"])
+        world_expired.extend(world_result["expired"])
         rules = effective_rule_context(
             current.campaign_id,
             facts={"actor_id": character_id, "recovery_hours": recovery_hours},
@@ -11019,27 +11056,24 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             sheet = character.sheet
             character_advanced: list[str] = []
             character_expired: list[str] = []
-            for effect_period, amount in (
-                ("minute", recovery_hours * 60),
-                ("hour", recovery_hours),
-            ):
-                duration_result = advance_effect_durations(
-                    sheet, period=effect_period, amount=amount
-                )
-                extension = apply_rule_event(
-                    duration_result["sheet"],
-                    "duration.advance",
-                    context_with_facts(
-                        rules,
-                        actor_id=character.id,
-                        period=effect_period,
-                        amount=amount,
-                    ),
-                )
-                receipts.extend(extension.receipts)
-                sheet = extension.sheet
-                character_advanced.extend(duration_result["advanced"])
-                character_expired.extend(duration_result["expired"])
+            duration_result = advance_elapsed_effect_durations(
+                sheet,
+                elapsed_minutes=elapsed_minutes,
+            )
+            extension = apply_rule_event(
+                duration_result["sheet"],
+                "duration.advance",
+                context_with_facts(
+                    rules,
+                    actor_id=character.id,
+                    period="minute",
+                    amount=elapsed_minutes,
+                ),
+            )
+            receipts.extend(extension.receipts)
+            sheet = extension.sheet
+            character_advanced.extend(duration_result["advanced"])
+            character_expired.extend(duration_result["expired"])
             if character.id == character_id:
                 applied = recover_stable_creature(sheet, recovery_hours=recovery_hours)
                 sheet = applied["sheet"]
@@ -11237,16 +11271,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         next_state["world_time"] = next_world_time
         world_advanced: list[str] = []
         world_expired: list[str] = []
-        for effect_period, amount in (
-            ("minute", elapsed_hours * 60),
-            ("hour", elapsed_hours),
-        ):
-            world_result = advance_world_effect_durations(
-                next_state, period=effect_period, amount=amount
-            )
-            next_state = world_result["state"]
-            world_advanced.extend(world_result["advanced"])
-            world_expired.extend(world_result["expired"])
+        elapsed_minutes = elapsed_hours * 60
+        world_result = advance_elapsed_world_effect_durations(
+            next_state,
+            elapsed_minutes=elapsed_minutes,
+        )
+        next_state = world_result["state"]
+        world_advanced.extend(world_result["advanced"])
+        world_expired.extend(world_result["expired"])
 
         rules = effective_rule_context(campaign_id)
         receipts: list[dict[str, Any]] = []
@@ -11258,27 +11290,24 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             sheet = current.sheet
             character_advanced: list[str] = []
             character_expired: list[str] = []
-            for effect_period, amount in (
-                ("minute", elapsed_hours * 60),
-                ("hour", elapsed_hours),
-            ):
-                duration_result = advance_effect_durations(
-                    sheet, period=effect_period, amount=amount
-                )
-                extension = apply_rule_event(
-                    duration_result["sheet"],
-                    "duration.advance",
-                    context_with_facts(
-                        rules,
-                        actor_id=current.id,
-                        period=effect_period,
-                        amount=amount,
-                    ),
-                )
-                receipts.extend(extension.receipts)
-                sheet = extension.sheet
-                character_advanced.extend(duration_result["advanced"])
-                character_expired.extend(duration_result["expired"])
+            duration_result = advance_elapsed_effect_durations(
+                sheet,
+                elapsed_minutes=elapsed_minutes,
+            )
+            extension = apply_rule_event(
+                duration_result["sheet"],
+                "duration.advance",
+                context_with_facts(
+                    rules,
+                    actor_id=current.id,
+                    period="minute",
+                    amount=elapsed_minutes,
+                ),
+            )
+            receipts.extend(extension.receipts)
+            sheet = extension.sheet
+            character_advanced.extend(duration_result["advanced"])
+            character_expired.extend(duration_result["expired"])
             member = member_by_id.get(current.id)
             if member is not None:
                 applied = recover_stable_creature(sheet, recovery_hours=recovery_hours[current.id])
@@ -11890,21 +11919,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         f"the rest schedule records {available_minutes}"
                     )
 
-        effect_steps = {
-            "minute": duration_minutes,
-            "hour": duration_minutes // 60,
-            "day": duration_minutes // 1440,
-        }
-        effect_steps = {key: amount for key, amount in effect_steps.items() if amount > 0}
         world_advanced: list[str] = []
         world_expired: list[str] = []
-        for effect_period, amount in effect_steps.items():
-            world_result = advance_world_effect_durations(
-                next_state, period=effect_period, amount=amount
-            )
-            next_state = world_result["state"]
-            world_advanced.extend(world_result["advanced"])
-            world_expired.extend(world_result["expired"])
+        world_result = advance_elapsed_world_effect_durations(
+            next_state,
+            elapsed_minutes=duration_minutes,
+        )
+        next_state = world_result["state"]
+        world_advanced.extend(world_result["advanced"])
+        world_expired.extend(world_result["expired"])
         next_state["world_time"] = completed_clock
 
         member_by_id = {item["character_id"]: item for item in normalized_members}
@@ -11919,26 +11942,28 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             sheet = current.sheet
             actor_advanced: list[str] = []
             actor_expired: list[str] = []
-            for effect_period, amount in effect_steps.items():
-                duration = advance_effect_durations(sheet, period=effect_period, amount=amount)
-                extension = apply_rule_event(
-                    duration["sheet"],
-                    "duration.advance",
-                    context_with_facts(
-                        rule_context,
-                        actor_id=current.id,
-                        period=effect_period,
-                        amount=amount,
-                    ),
+            duration = advance_elapsed_effect_durations(
+                sheet,
+                elapsed_minutes=duration_minutes,
+            )
+            extension = apply_rule_event(
+                duration["sheet"],
+                "duration.advance",
+                context_with_facts(
+                    rule_context,
+                    actor_id=current.id,
+                    period="minute",
+                    amount=duration_minutes,
+                ),
+            )
+            if extension.status != "committed":
+                raise CombatEngineError(
+                    f"party rest duration for {current.id} requires an unresolved rule choice"
                 )
-                if extension.status != "committed":
-                    raise CombatEngineError(
-                        f"party rest duration for {current.id} requires an unresolved rule choice"
-                    )
-                sheet = extension.sheet
-                actor_advanced.extend(duration["advanced"])
-                actor_expired.extend(duration["expired"])
-                rule_receipts.extend(extension.receipts)
+            sheet = extension.sheet
+            actor_advanced.extend(duration["advanced"])
+            actor_expired.extend(duration["expired"])
+            rule_receipts.extend(extension.receipts)
             member = member_by_id.get(current.id)
             if member is not None:
                 rest_rules = effective_rule_context(
@@ -16643,16 +16668,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
 
         world_advanced: list[str] = []
         world_expired: list[str] = []
-        world_duration_periods = [("minute", minutes)]
-        if minutes % 60 == 0:
-            world_duration_periods.append(("hour", minutes // 60))
-        for effect_period, amount in world_duration_periods:
-            world_result = advance_world_effect_durations(
-                next_state, period=effect_period, amount=amount
-            )
-            next_state = world_result["state"]
-            world_advanced.extend(world_result["advanced"])
-            world_expired.extend(world_result["expired"])
+        world_result = advance_elapsed_world_effect_durations(
+            next_state,
+            elapsed_minutes=minutes,
+        )
+        next_state = world_result["state"]
+        world_advanced.extend(world_result["advanced"])
+        world_expired.extend(world_result["expired"])
 
         branch_id = require_current_branch(campaign_id, None)
         request_payload = {
@@ -16684,25 +16706,24 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             updated_sheet = sheet if character.id == current.id else character.sheet
             character_advanced: list[str] = []
             character_expired: list[str] = []
-            duration_periods = [("minute", minutes)]
-            if minutes % 60 == 0:
-                duration_periods.append(("hour", minutes // 60))
-            for period, amount in duration_periods:
-                duration = advance_effect_durations(updated_sheet, period=period, amount=amount)
-                extension = apply_rule_event(
-                    duration["sheet"],
-                    "duration.advance",
-                    context_with_facts(
-                        rule_context,
-                        actor_id=character.id,
-                        period=period,
-                        amount=amount,
-                    ),
-                )
-                receipts.extend(extension.receipts)
-                updated_sheet = extension.sheet
-                character_advanced.extend(duration["advanced"])
-                character_expired.extend(duration["expired"])
+            duration = advance_elapsed_effect_durations(
+                updated_sheet,
+                elapsed_minutes=minutes,
+            )
+            extension = apply_rule_event(
+                duration["sheet"],
+                "duration.advance",
+                context_with_facts(
+                    rule_context,
+                    actor_id=character.id,
+                    period="minute",
+                    amount=minutes,
+                ),
+            )
+            receipts.extend(extension.receipts)
+            updated_sheet = extension.sheet
+            character_advanced.extend(duration["advanced"])
+            character_expired.extend(duration["expired"])
             if updated_sheet != character.sheet:
                 updates.append(
                     CharacterStateUpdate(
