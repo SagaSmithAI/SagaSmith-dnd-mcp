@@ -17,6 +17,7 @@ from scripts.regression_encounter import (
     _observable_target_ids,
     _participant_config,
     _participant_manifest,
+    _party_ids,
     _preferred_hostile_weapon_id,
     _preferred_multiattack_option_id,
     _reinforcement_config,
@@ -41,6 +42,25 @@ from scripts.regression_encounter import (
     _validate_hostile_attacks,
     _wound_priority,
 )
+
+
+def test_party_ids_combine_public_party_reports_and_require_global_uniqueness(
+    tmp_path,
+) -> None:
+    first = tmp_path / "first.json"
+    second = tmp_path / "second.json"
+    first.write_text(json.dumps({"characters": [{"actor_id": "pc-1"}]}), encoding="utf-8")
+    second.write_text(json.dumps({"characters": [{"actor_id": "pc-2"}]}), encoding="utf-8")
+
+    assert _party_ids([first, second]) == ["pc-1", "pc-2"]
+
+    second.write_text(json.dumps({"characters": [{"actor_id": "pc-1"}]}), encoding="utf-8")
+    try:
+        _party_ids([first, second])
+    except ValueError as exc:
+        assert "unique character actor_id" in str(exc)
+    else:
+        raise AssertionError("duplicate actor ids must be rejected")
 
 
 def test_character_reads_are_batched_per_encounter_step() -> None:

@@ -33,7 +33,7 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--action", choices=("start", "status", "auto-run"), required=True)
     parser.add_argument("--run-id", default="full-playthrough-encounter-v1")
-    parser.add_argument("--party-report", type=Path, required=True)
+    parser.add_argument("--party-report", type=Path, action="append", required=True)
     parser.add_argument("--hostile-report", type=Path, action="append", default=[])
     parser.add_argument(
         "--additional-hostile-report",
@@ -207,11 +207,11 @@ def _read_report(path: Path) -> dict[str, Any]:
     return json.loads(path.expanduser().resolve().read_text(encoding="utf-8"))
 
 
-def _party_ids(path: Path) -> list[str]:
-    report = _read_report(path)
+def _party_ids(paths: list[Path]) -> list[str]:
     values = [
         str(item.get("actor_id") or "")
-        for item in report.get("characters", [])
+        for path in paths
+        for item in _read_report(path).get("characters", [])
         if isinstance(item, dict)
     ]
     if not values or any(not item for item in values) or len(values) != len(set(values)):
