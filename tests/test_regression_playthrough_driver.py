@@ -116,6 +116,7 @@ def test_scene_resource_actions_support_deferred_checkpoint_batching() -> None:
     assert {
         "advance-level",
         "roll-source",
+        "register-replacement",
         "spend-coins",
         "spend-item",
         "use-activity",
@@ -1445,7 +1446,10 @@ def test_party_projection_keeps_knowledge_bound_to_the_new_actor() -> None:
     assert member["hit_points"]["current"] == 7
 
 
-def test_replacement_join_preserves_predecessor_and_only_hands_off_explicit_knowledge() -> None:
+@pytest.mark.parametrize("defer_checkpoint", [False, True])
+def test_replacement_join_preserves_predecessor_and_only_hands_off_explicit_knowledge(
+    defer_checkpoint: bool,
+) -> None:
     source_ref = {
         "module_id": "module-1",
         "scene_id": "scene-1",
@@ -1615,6 +1619,7 @@ def test_replacement_join_preserves_predecessor_and_only_hands_off_explicit_know
             summary="New Wizard joined the party at the inn.",
             handoff_knowledge=["Gundren was taken to Cragmaw Castle."],
             witness_actor_ids=["replacement"],
+            defer_checkpoint=defer_checkpoint,
         )
     )
 
@@ -1629,7 +1634,11 @@ def test_replacement_join_preserves_predecessor_and_only_hands_off_explicit_know
             "handoff_event_id": "event-join",
         }
     ]
-    assert result["checkpoint"]["snapshot"]["slot"] == 2
+    if defer_checkpoint:
+        assert result["checkpoint"] is None
+        assert client.head_snapshot_id == "snapshot-1"
+    else:
+        assert result["checkpoint"]["snapshot"]["slot"] == 2
 
 
 def test_phase_and_idempotency_namespaces_are_stable() -> None:

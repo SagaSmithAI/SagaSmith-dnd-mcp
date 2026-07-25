@@ -35,6 +35,7 @@ DEFERRED_CHECKPOINT_ACTIONS = frozenset(
         "use-activity",
         "record-event",
         "record-outcome",
+        "register-replacement",
         "prepare-narrative-npc",
         "provision-source-item",
         "transfer-source-item",
@@ -1081,6 +1082,7 @@ async def _register_replacement(
     summary: str,
     handoff_knowledge: list[str],
     witness_actor_ids: list[str],
+    defer_checkpoint: bool = False,
 ) -> dict[str, Any]:
     predecessor_id = predecessor_actor_id.strip()
     replacement_id = replacement_actor_id.strip()
@@ -1304,14 +1306,17 @@ async def _register_replacement(
         identity=f"replacement-manifest:{predecessor_id}:{replacement_id}",
         payload={"manifest": prospective},
     )
-    checkpoint = await _checkpoint(
-        client,
-        campaign_id=campaign_id,
-        run_id=run_id,
-        label=(
-            f"Full playthrough replacement: {replacement['name']} succeeds {predecessor['name']}"
-        ),
-    )
+    checkpoint = None
+    if not defer_checkpoint:
+        checkpoint = await _checkpoint(
+            client,
+            campaign_id=campaign_id,
+            run_id=run_id,
+            label=(
+                "Full playthrough replacement: "
+                f"{replacement['name']} succeeds {predecessor['name']}"
+            ),
+        )
 
     replacement_knowledge_after = list(
         await client.domain(
@@ -6645,6 +6650,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     summary=args.event_summary,
                     handoff_knowledge=args.replacement_knowledge,
                     witness_actor_ids=args.knowledge_actor_id,
+                    defer_checkpoint=args.defer_checkpoint,
                 )
             elif args.action == "prepare-narrative-npc":
                 try:
