@@ -378,6 +378,32 @@ async def _query_source(
     )
     if not isinstance(hits, list) or any(not isinstance(hit, dict) for hit in hits):
         raise RuntimeError("module_search returned an invalid result collection")
+    manifest_result = await client.domain(
+        "playthrough_manifest",
+        {"campaign_id": campaign_id, "action": "get"},
+    )
+    preferred_module_id = str(
+        dict(dict(manifest_result.get("manifest") or {}).get("current") or {}).get(
+            "module_id"
+        )
+        or ""
+    )
+    if preferred_module_id:
+        hits = [
+            hit
+            for _, hit in sorted(
+                enumerate(hits),
+                key=lambda item: (
+                    str(
+                        item[1].get("source_id")
+                        or dict(item[1].get("metadata") or {}).get("module_id")
+                        or ""
+                    )
+                    != preferred_module_id,
+                    item[0],
+                ),
+            )
+        ]
     expanded = []
     if expand:
         for hit in hits:
@@ -393,6 +419,7 @@ async def _query_source(
     return {
         "query": normalized_query,
         "top_k": top_k,
+        "preferred_module_id": preferred_module_id,
         "hits": hits,
         "expanded_chunks": expanded,
     }

@@ -1341,6 +1341,12 @@ def test_query_source_searches_and_expands_only_public_mcp_results() -> None:
             self.calls.append((tool_id, arguments))
             if tool_id == "module_search":
                 return {"result": [{"id": "chunk-1", "content": "A captured character..."}]}
+            if tool_id == "playthrough_manifest":
+                return {
+                    "manifest": {
+                        "current": {"module_id": "module-1"},
+                    }
+                }
             if tool_id == "module_expand":
                 return {
                     "chunk_id": "chunk-1",
@@ -1370,6 +1376,7 @@ def test_query_source_searches_and_expands_only_public_mcp_results() -> None:
     )
 
     assert result["query"] == "captured defeated characters"
+    assert result["preferred_module_id"] == "module-1"
     assert result["expanded_chunks"][0]["chunk_id"] == "chunk-1"
     assert result["expanded_chunks"][0]["source_ref"]["content_sha256"] == "a" * 64
     assert client.calls == [
@@ -1381,7 +1388,55 @@ def test_query_source_searches_and_expands_only_public_mcp_results() -> None:
                 "top_k": 4,
             },
         ),
+        (
+            "playthrough_manifest",
+            {"campaign_id": "campaign-1", "action": "get"},
+        ),
         ("module_expand", {"chunk_id": "chunk-1"}),
+    ]
+
+
+def test_query_source_prefers_the_current_manifest_module_revision() -> None:
+    class Client:
+        async def domain(self, tool_id: str, arguments: dict):
+            if tool_id == "module_search":
+                return {
+                    "result": [
+                        {"id": "old-chunk", "source_id": "old-module", "score": 1.0},
+                        {"id": "new-chunk", "source_id": "new-module", "score": 1.0},
+                        {"id": "other-chunk", "source_id": "other-module", "score": 0.5},
+                    ]
+                }
+            if tool_id == "playthrough_manifest":
+                return {
+                    "manifest": {
+                        "current": {"module_id": "new-module"},
+                    }
+                }
+            if tool_id == "module_expand":
+                chunk_id = arguments["chunk_id"]
+                return {"chunk_id": chunk_id}
+            raise AssertionError((tool_id, arguments))
+
+    result = asyncio.run(
+        _query_source(
+            Client(),
+            campaign_id="campaign-1",
+            query="level advancement",
+            top_k=3,
+            expand=True,
+        )
+    )
+
+    assert [item["id"] for item in result["hits"]] == [
+        "new-chunk",
+        "old-chunk",
+        "other-chunk",
+    ]
+    assert [item["chunk_id"] for item in result["expanded_chunks"]] == [
+        "new-chunk",
+        "old-chunk",
+        "other-chunk",
     ]
 
 
