@@ -21,6 +21,7 @@ from scripts.regression_encounter import (
     _participant_config,
     _participant_manifest,
     _party_ids,
+    _postcombat_stabilization_target,
     _preferred_hostile_weapon_id,
     _preferred_multiattack_option_id,
     _prepared_actor_ids,
@@ -1531,6 +1532,58 @@ def test_hostile_multiattack_selection_follows_the_preferred_weapon() -> None:
         }
     ]
     assert _preferred_multiattack_option_id(actor, preferred_weapon_id="claws") == ""
+
+
+def test_conscious_party_member_stabilizes_after_all_hostiles_are_resolved() -> None:
+    actors = {
+        "helper": {
+            "sheet": {
+                "combat": {"hp": {"value": 5, "max": 8}},
+                "conditions": [],
+            }
+        },
+        "dying": {
+            "sheet": {
+                "combat": {"hp": {"value": 0, "max": 8}},
+                "conditions": ["prone", "unconscious"],
+            }
+        },
+    }
+
+    assert (
+        _postcombat_stabilization_target(
+            actor_id="helper",
+            party_ids=["helper", "dying"],
+            actors=actors,
+            defeated_hostiles=2,
+            fled_hostiles=0,
+            hostile_count=2,
+        )
+        == "dying"
+    )
+    assert (
+        _postcombat_stabilization_target(
+            actor_id="helper",
+            party_ids=["helper", "dying"],
+            actors=actors,
+            defeated_hostiles=1,
+            fled_hostiles=0,
+            hostile_count=2,
+        )
+        is None
+    )
+    actors["dying"]["sheet"]["conditions"].append("stable")
+    assert (
+        _postcombat_stabilization_target(
+            actor_id="helper",
+            party_ids=["helper", "dying"],
+            actors=actors,
+            defeated_hostiles=2,
+            fled_hostiles=0,
+            hostile_count=2,
+        )
+        is None
+    )
 
 
 def test_structured_multiattack_followup_prevents_early_end_turn() -> None:

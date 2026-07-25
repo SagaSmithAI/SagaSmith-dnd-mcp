@@ -2269,6 +2269,39 @@ def _source_outcome(
     return None
 
 
+def _postcombat_stabilization_target(
+    *,
+    actor_id: str,
+    party_ids: list[str],
+    actors: dict[str, dict[str, Any]],
+    defeated_hostiles: int,
+    fled_hostiles: int,
+    hostile_count: int,
+) -> str | None:
+    """Choose a dying ally only after every source hostile is resolved."""
+
+    actor = actors[actor_id]
+    if (
+        actor_id not in party_ids
+        or _hit_points(actor) <= 0
+        or _conditions(actor)
+        & {"dead", "unconscious", "stunned", "incapacitated", "paralyzed", "petrified"}
+        or hostile_count <= 0
+        or defeated_hostiles + fled_hostiles < hostile_count
+    ):
+        return None
+    return next(
+        (
+            ally_id
+            for ally_id in party_ids
+            if ally_id != actor_id
+            and _hit_points(actors[ally_id]) == 0
+            and not _conditions(actors[ally_id]) & {"dead", "stable"}
+        ),
+        None,
+    )
+
+
 def _source_flee_ready(
     *,
     acting_actor_id: str,
@@ -3056,6 +3089,118 @@ async def _auto_run(
                     "actor_id": actor_id,
                     "result": stood,
                 }
+            )
+            continue
+        stabilization_target_id = _postcombat_stabilization_target(
+            actor_id=actor_id,
+            party_ids=party_ids,
+            actors=actors,
+            defeated_hostiles=len(defeated_hostiles),
+            fled_hostiles=len(fled_hostile_ids),
+            hostile_count=len(hostile_ids),
+        )
+        if stabilization_target_id is not None:
+            combatants = {
+                str(item.get("actor_id") or ""): item
+                for item in combat.get("combatants", [])
+                if isinstance(item, dict)
+            }
+            actor_position = dict(combatants[actor_id].get("position") or {})
+            target_position = dict(
+                combatants[stabilization_target_id].get("position") or {}
+            )
+            distance_ft = (
+                _distance(actor_position, target_position) * 5
+                if set(actor_position) == {"x", "y"}
+                and set(target_position) == {"x", "y"}
+                else 0
+            )
+            moved = None
+            if distance_ft > 5:
+                destination = _choose_destination(
+                    combat,
+                    actor_id,
+                    stabilization_target_id,
+                )
+                if destination is None:
+                    await _end_turn(
+                        client,
+                        args,
+                        str(branch["id"]),
+                        actor_id,
+                        sequence,
+                    )
+                    continue
+                campaign = await _campaign(client, args.campaign_id)
+                moved = await client.domain(
+                    "combat_movement",
+                    {
+                        "campaign_id": args.campaign_id,
+                        "actor_id": actor_id,
+                        "action": "move",
+                        "payload": {
+                            "distance": destination[1],
+                            "destination": destination[0],
+                        },
+                        "branch_id": branch["id"],
+                        "expected_revision": campaign["revision"],
+                        "idempotency_key": (
+                            "encounter-stabilize-move-"
+                            + _token(
+                                f"{args.run_id}:{sequence}:{actor_id}",
+                                length=24,
+                            )
+                        ),
+                    },
+                )
+                if _has_blocking_pending(dict(moved.get("combat") or {})):
+                    turns.append(
+                        {
+                            "sequence": sequence,
+                            "kind": "stabilize_move",
+                            "actor_id": actor_id,
+                            "target_id": stabilization_target_id,
+                            "result": moved,
+                        }
+                    )
+                    continue
+            campaign = await _campaign(client, args.campaign_id)
+            stabilized = await client.domain(
+                "combat_check",
+                {
+                    "campaign_id": args.campaign_id,
+                    "actor_id": actor_id,
+                    "target_id": stabilization_target_id,
+                    "kind": "stabilize",
+                    "ability": "wisdom",
+                    "branch_id": branch["id"],
+                    "expected_revision": campaign["revision"],
+                    "idempotency_key": (
+                        "encounter-stabilize-"
+                        + _token(
+                            f"{args.run_id}:{sequence}:{actor_id}:"
+                            f"{stabilization_target_id}",
+                            length=24,
+                        )
+                    ),
+                },
+            )
+            turns.append(
+                {
+                    "sequence": sequence,
+                    "kind": "stabilize",
+                    "actor_id": actor_id,
+                    "target_id": stabilization_target_id,
+                    "move": moved,
+                    "result": stabilized,
+                }
+            )
+            await _end_turn(
+                client,
+                args,
+                str(branch["id"]),
+                actor_id,
+                sequence,
             )
             continue
         escape_effect = next(
