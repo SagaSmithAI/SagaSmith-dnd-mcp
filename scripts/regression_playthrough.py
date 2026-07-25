@@ -472,6 +472,14 @@ def _scene_groups(phase: str) -> tuple[str, ...]:
     raise RuntimeError("scene progression cannot advance during active combat")
 
 
+def _source_groups(phase: str) -> tuple[str, ...]:
+    return {
+        "lobby": ("lobby.modules",),
+        "play": ("play.scene",),
+        "combat": ("combat.observe",),
+    }[phase]
+
+
 def _scene_locations(scene: dict[str, Any]) -> list[dict[str, Any]]:
     spatial = scene.get("spatial") if isinstance(scene.get("spatial"), dict) else {}
     values = spatial.get("locations") or scene.get("locations") or []
@@ -6789,6 +6797,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     )
                     raise
             elif args.action == "query-source":
+                await client.load(*_source_groups(phase))
                 report["result"] = await _query_source(
                     client,
                     campaign_id=args.campaign_id,
@@ -6797,8 +6806,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     expand=args.source_expand,
                 )
             elif args.action == "read-scene":
-                if phase == "lobby":
-                    await client.load("lobby.modules")
+                await client.load(*_source_groups(phase))
                 report["result"] = await _read_scene(
                     client,
                     campaign_id=args.campaign_id,

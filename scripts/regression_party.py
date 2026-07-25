@@ -41,7 +41,7 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--run-id", default="full-playthrough-v1")
     parser.add_argument(
         "--party",
-        choices=("lost-mine-of-phandelver",),
+        choices=("lost-mine-of-phandelver", "waterdeep-dragon-heist"),
         default="lost-mine-of-phandelver",
     )
     parser.add_argument(
@@ -102,12 +102,13 @@ def _weapon(
     normal_range: int = 0,
     long_range: int = 0,
     ammunition_item_id: str | None = None,
+    quantity: int = 1,
 ) -> dict[str, Any]:
     return {
         "id": identifier,
         "name": name,
         "kind": "weapon",
-        "quantity": 1,
+        "quantity": quantity,
         "source_key": source_key,
         "mechanics": {
             "category": category,
@@ -173,21 +174,244 @@ def _equipment(
     kind: str = "equipment",
     quantity: int = 1,
     mechanics: dict[str, Any] | None = None,
+    description: str = "",
+    source_kind: str = "item",
 ) -> dict[str, Any]:
-    return {
+    item = {
         "id": identifier,
         "name": name,
         "kind": kind,
         "quantity": quantity,
         "source_key": source_key,
         "mechanics": deepcopy(mechanics or {}),
+        "description": description,
     }
+    if source_kind != "item":
+        item["_source_kind"] = source_kind
+    return item
+
+
+def _profile_item_prefix(profile: dict[str, Any]) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", str(profile["name"]).casefold()).strip("-")
+
+
+def _class_starting_supplements(profile: dict[str, Any]) -> list[dict[str, Any]]:
+    prefix = _profile_item_prefix(profile)
+    class_name = str(profile["class"]).casefold()
+    if class_name == "fighter":
+        return [
+            _equipment(
+                f"{prefix}-explorers-pack",
+                "Explorer's Pack",
+                str(profile["class"]),
+                source_kind="class",
+            )
+        ]
+    if class_name == "rogue":
+        return [
+            _weapon(
+                f"{prefix}-daggers",
+                "Dagger",
+                "Dagger",
+                category="simple",
+                damage="1d4",
+                damage_type="piercing",
+                attack_ability="dexterity",
+                properties=["finesse", "light", "thrown"],
+                normal_range=20,
+                long_range=60,
+                quantity=2,
+            ),
+            _equipment(
+                f"{prefix}-burglars-pack",
+                "Burglar's Pack",
+                str(profile["class"]),
+                source_kind="class",
+            ),
+        ]
+    if class_name == "wizard":
+        return [
+            _equipment(
+                f"{prefix}-scholars-pack",
+                "Scholar's Pack",
+                str(profile["class"]),
+                source_kind="class",
+            )
+        ]
+    if class_name == "cleric":
+        bolts_id = f"{prefix}-class-bolts"
+        return [
+            _equipment(
+                bolts_id,
+                "Crossbow bolts",
+                "Crossbow bolts (20)",
+                kind="ammunition",
+                quantity=20,
+            ),
+            _weapon(
+                f"{prefix}-class-crossbow",
+                "Crossbow, light",
+                "Crossbow, light",
+                category="simple",
+                damage="1d8",
+                damage_type="piercing",
+                attack_type="ranged",
+                attack_ability="dexterity",
+                properties=["ammunition", "loading", "two-handed"],
+                normal_range=80,
+                long_range=320,
+                ammunition_item_id=bolts_id,
+            ),
+            _equipment(
+                f"{prefix}-priests-pack",
+                "Priest's Pack",
+                str(profile["class"]),
+                source_kind="class",
+            ),
+        ]
+    if class_name == "bard":
+        return [
+            _equipment(
+                f"{prefix}-diplomats-pack",
+                "Diplomat's Pack",
+                str(profile["class"]),
+                source_kind="class",
+            )
+        ]
+    raise ValueError(f"no audited starting-equipment supplement for {profile['class']}")
+
+
+def _background_starting_items(profile: dict[str, Any]) -> list[dict[str, Any]]:
+    if str(profile.get("background_base") or profile["background"]) != "Acolyte":
+        raise ValueError("campaign regression profiles require an audited background package")
+    prefix = _profile_item_prefix(profile)
+    source = "Acolyte"
+    profiles = [
+        _equipment(
+            f"{prefix}-background-holy-symbol",
+            "Holy symbol",
+            source,
+            source_kind="background",
+        ),
+        _equipment(
+            f"{prefix}-background-prayer-book",
+            "Prayer book",
+            source,
+            source_kind="background",
+        ),
+        _equipment(
+            f"{prefix}-background-incense",
+            "Incense",
+            source,
+            quantity=5,
+            source_kind="background",
+        ),
+        _equipment(
+            f"{prefix}-background-vestments",
+            "Vestments",
+            source,
+            source_kind="background",
+        ),
+        _equipment(
+            f"{prefix}-background-common-clothes",
+            "Common clothes",
+            source,
+            source_kind="background",
+        ),
+        _equipment(
+            f"{prefix}-background-pouch",
+            "Pouch",
+            source,
+            description="Contains the 15 gp granted by the Acolyte equipment package.",
+            source_kind="background",
+        ),
+    ]
+    return profiles
+
+
+CORE_BACKGROUND_CUSTOMIZATIONS = {
+    "Dorn Thistle": {
+        "name": "Militia Chaplain",
+        "skills": ["insight", "religion"],
+        "personality_traits": [
+            "I measure plans against lessons from old campaign journals.",
+            "I make time to tend the frightened before celebrating victory.",
+        ],
+        "ideal": "Duty. Power is worthwhile only when it protects the vulnerable.",
+        "bond": "My old militia chapel sheltered me when I had nowhere else to go.",
+        "flaw": "I assume discipline can solve problems that really require trust.",
+    },
+    "Pip Underbough": {
+        "name": "Street Penitent",
+        "skills": ["deception", "perception"],
+        "personality_traits": [
+            "I notice exits and unattended purses without meaning to.",
+            "I deflect uncomfortable questions with an easy joke.",
+        ],
+        "ideal": "Redemption. A past mistake does not have to decide the next choice.",
+        "bond": "A small shrine once hid me from people I had wronged.",
+        "flaw": "I keep contingency plans secret even from allies.",
+    },
+    "Aelar Quill": {
+        "name": "Cloistered Researcher",
+        "skills": ["insight", "investigation"],
+        "personality_traits": [
+            "I annotate every mystery before I offer a theory.",
+            "I become animated when someone challenges my evidence.",
+        ],
+        "ideal": "Knowledge. Truth should survive the institutions that guard it.",
+        "bond": "My mentor entrusted me with an unfinished catalogue of dangerous lore.",
+        "flaw": "I delay decisions while looking for one more corroborating source.",
+    },
+    "Brynja Stonefaith": {
+        "name": "Temple Warden",
+        "skills": ["insight", "religion"],
+        "personality_traits": [
+            "I quietly check whether everyone has eaten and rested.",
+            "I speak plainly when ritual or rank obscures immediate harm.",
+        ],
+        "ideal": "Stewardship. Sacred power exists to preserve life.",
+        "bond": "I promised to return a stolen relic to the community that forged it.",
+        "flaw": "I take responsibility for wounds no one could have prevented.",
+    },
+    "Seraphine Vale": {
+        "name": "Sacred Envoy",
+        "skills": ["insight", "religion"],
+        "personality_traits": [
+            "I remember the names and customs people use to describe themselves.",
+            "I look for the sentence both sides can honestly agree to.",
+        ],
+        "ideal": "Concord. Lasting peace begins with accurate understanding.",
+        "bond": "A network of humble shrines carried my messages through dangerous country.",
+        "flaw": "I sometimes promise compromise where a clear refusal is needed.",
+    },
+}
+
+
+def _customize_core_backgrounds(
+    profiles: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    result = deepcopy(profiles)
+    for profile in result:
+        customization = CORE_BACKGROUND_CUSTOMIZATIONS.get(str(profile["name"]))
+        if customization is None:
+            raise ValueError(f"missing audited custom background for {profile['name']}")
+        profile["background_base"] = str(profile["background"])
+        profile["background"] = str(customization["name"])
+        profile["background_skills"] = list(customization["skills"])
+        profile["background_characteristics"] = {
+            "personality_traits": list(customization["personality_traits"]),
+            "ideals": [str(customization["ideal"])],
+            "bonds": [str(customization["bond"])],
+            "flaws": [str(customization["flaw"])],
+        }
+    return result
 
 
 def lost_mine_party_profiles() -> list[dict[str, Any]]:
     """Return five deliberately varied, level-one 2014 Core character plans."""
 
-    return [
+    profiles = [
         {
             "name": "Dorn Thistle",
             "class": "Fighter",
@@ -565,11 +789,70 @@ def lost_mine_party_profiles() -> list[dict[str, Any]]:
             "main_hand": "seraphine-rapier",
         },
     ]
+    return _customize_core_backgrounds(profiles)
 
 
-def audit_profiles(profiles: list[dict[str, Any]]) -> dict[str, Any]:
-    if len(profiles) != 5:
-        raise ValueError("Lost Mine of Phandelver must use the source maximum of five PCs")
+def waterdeep_party_profiles() -> list[dict[str, Any]]:
+    """Return the four-PC party approved by Waterdeep's explicit DM review.
+
+    Dragon Heist itself specifies the level span but no player-count range. The
+    corpus review therefore uses the 2014 Core CR baseline of an appropriately
+    equipped and well-rested party of four instead of representing four as a
+    module-authored recommendation. These four existing, source-audited plans
+    cover manual, point-buy, and standard-array ability generation plus known,
+    prepared, and spellbook casting.
+    """
+
+    selected_classes = {"Rogue", "Wizard", "Cleric", "Bard"}
+    return [
+        deepcopy(profile)
+        for profile in lost_mine_party_profiles()
+        if str(profile["class"]) in selected_classes
+    ]
+
+
+def audit_profiles(
+    profiles: list[dict[str, Any]],
+    *,
+    campaign_line_id: str = "lost-mine-of-phandelver",
+) -> dict[str, Any]:
+    if campaign_line_id == "lost-mine-of-phandelver":
+        expected_size = 5
+        size_basis = {
+            "kind": "module_source_maximum",
+            "source_minimum": 4,
+            "source_maximum": 5,
+            "selected": 5,
+        }
+        pregen_review = {
+            "module_mentions_included_characters": True,
+            "official_sheets_present_in_corpus": False,
+            "associated_pc_smalls_disposition": (
+                "reviewed and excluded: non-module, incomplete, and requires "
+                "unconfirmed Artificer/Gunsmith content"
+            ),
+        }
+    elif campaign_line_id == "waterdeep-dragon-heist":
+        expected_size = 4
+        size_basis = {
+            "kind": "explicit_dm_review",
+            "module_party_size_status": "not_stated_after_text_and_visual_review",
+            "core_fallback": "2014 SRD Challenge baseline: party of four adventurers",
+            "selected": 4,
+            "represented_as_module_recommendation": False,
+        }
+        pregen_review = {
+            "module_mentions_included_characters": False,
+            "official_sheets_present_in_corpus": False,
+            "associated_templates_present": 0,
+            "disposition": "legally generate all four DM-reviewed seats",
+        }
+    else:
+        raise ValueError(f"unsupported campaign party profile: {campaign_line_id}")
+    if len(profiles) != expected_size:
+        raise ValueError(
+            f"{campaign_line_id} must use its reviewed party size of {expected_size} PCs"
+        )
     for profile in profiles:
         if set(profile["abilities"]) != set(ABILITY_NAMES):
             raise ValueError(f"{profile['name']} does not assign all six abilities")
@@ -590,26 +873,47 @@ def audit_profiles(profiles: list[dict[str, Any]]) -> dict[str, Any]:
     if not {"known", "prepared", "spellbook"}.issubset(spell_modes):
         raise ValueError("party must cover known, prepared, and spellbook casting")
     backgrounds = sorted({str(item["background"]) for item in profiles})
+    if len(backgrounds) != len(profiles):
+        raise ValueError("party custom backgrounds must be distinct")
+    for profile in profiles:
+        background_skills = list(profile.get("background_skills") or [])
+        background_languages = list(profile.get("background_languages") or [])
+        characteristics = dict(profile.get("background_characteristics") or {})
+        if len(background_skills) != 2 or len(set(background_skills)) != 2:
+            raise ValueError("custom backgrounds must choose exactly two distinct skills")
+        if len(background_languages) != 2 or len(set(background_languages)) != 2:
+            raise ValueError(
+                "Core custom backgrounds must choose exactly two distinct languages"
+            )
+        if len(characteristics.get("personality_traits") or []) != 2:
+            raise ValueError("custom backgrounds must choose two personality traits")
+        if any(
+            len(characteristics.get(field) or []) != 1
+            for field in ("ideals", "bonds", "flaws")
+        ):
+            raise ValueError("custom backgrounds must choose one ideal, bond, and flaw")
     return {
         "selected_size": len(profiles),
-        "source_maximum": 5,
+        "source_maximum": (
+            int(size_basis["source_maximum"])
+            if "source_maximum" in size_basis
+            else None
+        ),
+        "party_size_basis": size_basis,
         "classes_unique": True,
         "species_unique": True,
         "ability_methods": sorted(set(methods)),
         "spell_resource_models": sorted(spell_modes - {""}),
         "backgrounds": backgrounds,
-        "background_diversity_exception": (
-            "The enabled 2014 Core structured catalog exposes only Acolyte; "
-            "no unconfirmed extension background was invented."
-        ),
-        "pregenerated_first": {
-            "module_mentions_included_characters": True,
-            "official_sheets_present_in_corpus": False,
-            "associated_pc_smalls_disposition": (
-                "reviewed and excluded: non-module, incomplete, and requires "
-                "unconfirmed Artificer/Gunsmith content"
-            ),
+        "backgrounds_unique": True,
+        "background_customization": {
+            "base_artifact": "Acolyte",
+            "rule": "2014 Core: Customizing a Background",
+            "feature_disposition": "retain Shelter of the Faithful",
+            "equipment_disposition": "retain the complete Acolyte package",
+            "unconfirmed_extensions_used": False,
         },
+        "pregenerated_first": pregen_review,
     }
 
 
@@ -618,6 +922,7 @@ def select_profiles(
     *,
     profile_name: str,
     actor_name: str,
+    campaign_line_id: str = "lost-mine-of-phandelver",
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Select a full party or one independently named replacement plan."""
     requested = profile_name.strip()
@@ -625,7 +930,10 @@ def select_profiles(
     if not requested:
         if replacement_name:
             raise ValueError("--actor-name requires --profile-name")
-        return [deepcopy(item) for item in profiles], audit_profiles(profiles)
+        return [deepcopy(item) for item in profiles], audit_profiles(
+            profiles,
+            campaign_line_id=campaign_line_id,
+        )
     matches = [
         item for item in profiles if str(item["name"]).casefold() == requested.casefold()
     ]
@@ -681,19 +989,21 @@ def _catalog_match(
 def _catalog_source(
     catalog: list[dict[str, Any]],
     name: str,
+    *,
+    kind: str = "item",
 ) -> str:
     expected = _normalized_catalog_name(name)
     match = next(
         (
             item
             for item in catalog
-            if item["kind"] == "item"
+            if item["kind"] == kind
             and _normalized_catalog_name(str(item["name"])) == expected
         ),
         None,
     )
     if match is None:
-        raise RuntimeError(f"active catalog has no source-linked item: {name}")
+        raise RuntimeError(f"active catalog has no source-linked {kind}: {name}")
     return str(match["id"])
 
 
@@ -739,10 +1049,23 @@ def _configure_base_sheet(
         profile.get("tool_proficiencies") or []
     )
     sheet["resources"] = deepcopy(profile.get("resources") or {})
-    items = deepcopy(list(profile["items"]))
+    background_items = _background_starting_items(profile)
+    items = deepcopy(
+        [
+            *list(profile["items"]),
+            *_class_starting_supplements(profile),
+            *background_items,
+        ]
+    )
     for item in items:
-        item["source_key"] = _catalog_source(item_catalog, str(item["source_key"]))
+        source_kind = str(item.pop("_source_kind", "item"))
+        item["source_key"] = _catalog_source(
+            item_catalog,
+            str(item["source_key"]),
+            kind=source_kind,
+        )
     sheet["inventory"]["items"] = items
+    sheet["inventory"]["wallet"]["gp"] = 15
     sheet["inventory"]["equipment_slots"]["armor"] = next(
         (item["id"] for item in items if item["kind"] == "armor" and item.get("equipped")),
         None,
@@ -791,6 +1114,16 @@ def _configure_base_sheet(
     return sheet
 
 
+def _configure_notes(actor: dict[str, Any], profile: dict[str, Any]) -> dict[str, Any]:
+    notes = deepcopy(actor["notes"])
+    characteristics = dict(profile["background_characteristics"])
+    notes["profile"]["personality_traits"] = list(characteristics["personality_traits"])
+    notes["profile"]["ideals"] = list(characteristics["ideals"])
+    notes["profile"]["bonds"] = list(characteristics["bonds"])
+    notes["profile"]["flaws"] = list(characteristics["flaws"])
+    return notes
+
+
 async def _catalog(client: ExposureClient, campaign_id: str) -> list[dict[str, Any]]:
     return list(
         _facade_value(
@@ -836,6 +1169,7 @@ async def _build_character(
     *,
     campaign_id: str,
     run_id: str,
+    campaign_line_id: str,
     profile: dict[str, Any],
     catalog: list[dict[str, Any]],
 ) -> dict[str, Any]:
@@ -849,7 +1183,7 @@ async def _build_character(
                     "campaign_id": campaign_id,
                     "name": profile["name"],
                     "summary": (
-                        "Generated fallback PC for Lost Mine of Phandelver after "
+                        f"Generated source-audited PC for {campaign_line_id} after "
                         "the corpus pregen-first review found no usable official sheet."
                     ),
                 },
@@ -878,6 +1212,7 @@ async def _build_character(
                 {
                     "character_id": actor["id"],
                     "sheet": _configure_base_sheet(actor, profile, catalog),
+                    "notes": _configure_notes(actor, profile),
                     "expected_revision": actor["revision"],
                     "idempotency_key": f"full-party-{slug}-class-sheet",
                 },
@@ -899,13 +1234,23 @@ async def _build_character(
         key=f"full-party-{slug}-species",
     )
     background = _catalog_match(
-        catalog, kind="background", name=str(profile["background"])
+        catalog,
+        kind="background",
+        name=str(profile.get("background_base") or profile["background"]),
     )
+    background_item_ids = [
+        str(item["id"]) for item in _background_starting_items(profile)
+    ]
     actor = await _apply_artifact(
         client,
         actor=actor,
         artifact=background,
-        selection={"languages": list(profile["background_languages"])},
+        selection={
+            "custom_name": str(profile["background"]),
+            "skills": list(profile["background_skills"]),
+            "languages": list(profile["background_languages"]),
+            "equipment_item_ids": background_item_ids,
+        },
         key=f"full-party-{slug}-background",
     )
     class_features = [
@@ -1038,6 +1383,25 @@ async def _build_character(
         "class": profile["class"],
         "species": actor["sheet"]["progression"]["species"],
         "background": actor["sheet"]["progression"]["background"],
+        "background_base": actor["sheet"]["progression"]["background_grants"][
+            "choices"
+        ]["base_background"],
+        "background_skill_ids": list(
+            actor["sheet"]["progression"]["background_grants"]["choices"][
+                "selected_skills"
+            ]
+        ),
+        "background_equipment_item_ids": list(
+            actor["sheet"]["progression"]["background_grants"][
+                "equipment_item_ids"
+            ]
+        ),
+        "background_characteristics": {
+            "personality_traits": list(actor["notes"]["profile"]["personality_traits"]),
+            "ideals": list(actor["notes"]["profile"]["ideals"]),
+            "bonds": list(actor["notes"]["profile"]["bonds"]),
+            "flaws": list(actor["notes"]["profile"]["flaws"]),
+        },
         "ability_method": actor["sheet"]["ability_generation"]["method"],
         "level": actor["sheet"]["progression"]["level"],
         "hp": deepcopy(actor["derived"]["hit_points"]),
@@ -1049,6 +1413,7 @@ async def _build_character(
         "inventory_item_ids": [
             str(item["id"]) for item in actor["sheet"]["inventory"]["items"]
         ],
+        "wallet": deepcopy(actor["sheet"]["inventory"]["wallet"]),
         "applied_feature_ids": applied_features,
         "source": "generated",
         "source_asset_path": "",
@@ -1116,10 +1481,15 @@ async def _switch_phase(
 
 
 async def _run(args: argparse.Namespace) -> dict[str, Any]:
+    profile_factories = {
+        "lost-mine-of-phandelver": lost_mine_party_profiles,
+        "waterdeep-dragon-heist": waterdeep_party_profiles,
+    }
     profiles, profile_audit = select_profiles(
-        lost_mine_party_profiles(),
+        profile_factories[args.party](),
         profile_name=args.profile_name,
         actor_name=args.actor_name,
+        campaign_line_id=args.party,
     )
     async with stdio_client(_server_parameters(args)) as (read, write):
         async with ClientSession(read, write) as session:
@@ -1162,6 +1532,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                         client,
                         campaign_id=args.campaign_id,
                         run_id=args.run_id,
+                        campaign_line_id=args.party,
                         profile=profile,
                         catalog=catalog,
                     )

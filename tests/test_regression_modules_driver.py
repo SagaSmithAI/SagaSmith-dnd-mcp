@@ -19,6 +19,7 @@ from scripts.regression_modules import (
     _create_baseline_snapshot,
     _domain_value,
     _facade_value,
+    _module_import_identity,
 )
 
 
@@ -53,6 +54,47 @@ def test_exposure_domain_preserves_random_stream_receipt() -> None:
         "result": {"kind": "second_wind"},
         "random_stream_receipt": receipt,
     }
+
+
+def test_module_stage_identity_changes_with_source_or_normalizer() -> None:
+    common = {
+        "run_id": "run-1",
+        "relative_path": "Campaign.pdf",
+        "source_checksum": "a" * 64,
+        "title": "Campaign",
+    }
+    v13 = _module_import_identity(
+        **common,
+        normalizer="sagasmith-core/pdf-layout-v13",
+        parser="dnd5e-v11",
+    )
+    v14 = _module_import_identity(
+        **common,
+        normalizer="sagasmith-core/pdf-layout-v14",
+        parser="dnd5e-v11",
+    )
+    parser_v12 = _module_import_identity(
+        **common,
+        normalizer="sagasmith-core/pdf-layout-v14",
+        parser="dnd5e-v12",
+    )
+    changed_source = _module_import_identity(
+        **{**common, "source_checksum": "b" * 64},
+        normalizer="sagasmith-core/pdf-layout-v14",
+        parser="dnd5e-v12",
+    )
+
+    assert v13 != v14
+    assert v14 != parser_v12
+    assert parser_v12 != changed_source
+    assert (
+        parser_v12
+        == _module_import_identity(
+            **common,
+            normalizer="sagasmith-core/pdf-layout-v14",
+            parser="dnd5e-v12",
+        )
+    )
 
 
 def test_campaign_baseline_reuses_existing_public_snapshot() -> None:
@@ -167,6 +209,41 @@ def test_full_campaign_creation_configures_selected_advancement_mode() -> None:
     ]
 
 
+def test_full_campaign_creation_retry_keeps_existing_advancement_receipt() -> None:
+    class Client:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        async def open(self, campaign_id: str | None = None) -> None:
+            self.calls.append("open")
+
+        async def load(self, *group_ids: str) -> None:
+            self.calls.append("load")
+
+        async def domain(self, tool_id: str, arguments: dict):
+            self.calls.append(tool_id)
+            if tool_id == "campaign_create":
+                return {
+                    "id": "campaign-1",
+                    "revision": 7,
+                    "settings": {"advancement": {"mode": "milestone"}},
+                }
+            raise AssertionError("retry must not resubmit a completed advancement change")
+
+    args = argparse.Namespace(run_id="run-1", edition="2014", locale="en")
+    line = {
+        "id": "line-1",
+        "title": "Line One",
+        "play_requirements": {"advancement": {"selected": "milestone"}},
+    }
+    client = Client()
+
+    campaign = asyncio.run(_create_campaign(client, line=line, args=args))
+
+    assert campaign["revision"] == 7
+    assert client.calls == ["open", "load", "campaign_create", "open", "load"]
+
+
 def test_full_campaign_manifest_verifies_checksums_and_selection(tmp_path: Path) -> None:
     root = tmp_path / "corpus"
     root.mkdir()
@@ -275,6 +352,29 @@ def test_reviewed_non_module_character_material_does_not_block_fallback_party() 
     assert _line_review_blocks(line, player_documents) == []
 
 
+def test_completed_party_size_dm_review_unblocks_only_with_evidence() -> None:
+    line = {
+        "id": "waterdeep-dragon-heist",
+        "play_requirements": {
+            "recommended_party_size": {
+                "status": "dm_review_completed",
+                "minimum": 4,
+                "maximum": 4,
+                "selected": 4,
+                "review": {
+                    "module_party_size_status": "not_stated",
+                    "represented_as_module_recommendation": False,
+                },
+            }
+        },
+    }
+
+    assert _line_review_blocks(line, []) == []
+    del line["play_requirements"]["recommended_party_size"]["review"]
+    with pytest.raises(ValueError, match="completed party-size DM review"):
+        _line_review_blocks(line, [])
+
+
 def test_playthrough_manifest_builder_preserves_unknown_party_size_review() -> None:
     line = {
         "id": "line-1",
@@ -307,5 +407,7 @@ def test_playthrough_manifest_builder_preserves_unknown_party_size_review() -> N
     )
 
     assert manifest["party"]["selected_size"] is None
+    assert manifest["party"]["party_size_status"] == "dm_review_required"
+    assert manifest["party"]["party_size_review"] == {}
     assert manifest["party"]["use_pregenerated_first"] is True
     assert manifest["review_blocks"] == review

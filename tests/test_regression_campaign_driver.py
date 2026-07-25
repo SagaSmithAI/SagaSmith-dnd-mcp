@@ -288,6 +288,9 @@ def test_full_campaign_corpus_accounts_for_every_asset_and_uses_max_party_size()
         party_size = line["play_requirements"]["recommended_party_size"]
         if party_size["status"] == "source_confirmed":
             assert party_size["selected"] == party_size["maximum"]
+        elif party_size["status"] == "dm_review_completed":
+            assert party_size["selected"] == party_size["maximum"]
+            assert party_size["review"]["represented_as_module_recommendation"] is False
         else:
             assert party_size["status"] == "dm_review_required"
             assert party_size["selected"] is None
@@ -302,3 +305,12 @@ def test_full_campaign_corpus_accounts_for_every_asset_and_uses_max_party_size()
     )
     assert [module["sequence"] for module in tyranny["modules"]] == [1, 2]
     assert tyranny["play_requirements"]["continuity"]["preserve_party"] is True
+    waterdeep = next(
+        line
+        for line in manifest["campaign_lines"]
+        if line["id"] == "waterdeep-dragon-heist"
+    )
+    reviewed_size = waterdeep["play_requirements"]["recommended_party_size"]
+    assert reviewed_size["status"] == "dm_review_completed"
+    assert reviewed_size["selected"] == 4
+    assert reviewed_size["review"]["module_party_size_status"] == "not_stated"

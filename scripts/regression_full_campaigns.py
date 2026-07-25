@@ -146,6 +146,14 @@ async def _create_campaign(
         raise ValueError(
             f"campaign line {line_id} must select xp or milestone advancement"
         )
+    current_advancement = str(
+        dict(dict(campaign.get("settings") or {}).get("advancement") or {}).get(
+            "mode"
+        )
+        or ""
+    )
+    if current_advancement == selected_advancement:
+        return campaign
     configured = await client.domain(
         "campaign_change",
         {
@@ -153,7 +161,10 @@ async def _create_campaign(
             "action": "advancement_configure",
             "payload": {"mode": selected_advancement},
             "expected_revision": campaign["revision"],
-            "idempotency_key": f"full-campaign-advancement-{identity}",
+            "idempotency_key": (
+                f"full-campaign-advancement-{identity}-"
+                f"r{campaign['revision']}-{selected_advancement}"
+            ),
         },
     )
     return dict(configured["campaign"])
@@ -248,7 +259,8 @@ def _line_review_blocks(
 ) -> list[dict[str, Any]]:
     blocks: list[dict[str, Any]] = []
     party_size = line["play_requirements"]["recommended_party_size"]
-    if party_size["status"] != "source_confirmed":
+    party_size_status = str(party_size["status"])
+    if party_size_status == "dm_review_required":
         blocks.append(
             {
                 "kind": "recommended_party_size",
@@ -256,6 +268,19 @@ def _line_review_blocks(
                 "reason": party_size["reason"],
             }
         )
+    elif party_size_status == "dm_review_completed":
+        if (
+            party_size.get("minimum") is None
+            or party_size.get("maximum") is None
+            or party_size.get("selected") is None
+            or not isinstance(party_size.get("review"), dict)
+        ):
+            raise ValueError(
+                "completed party-size DM review requires minimum, maximum, "
+                "selected, and review evidence"
+            )
+    elif party_size_status != "source_confirmed":
+        raise ValueError(f"unsupported party-size status: {party_size_status}")
     for document in player_documents:
         inspection = dict(document.get("character_document") or {})
         declared = dict(document.get("declared_player_material") or {})
@@ -307,9 +332,11 @@ def _build_playthrough_manifest(
             "branch_decisions": [],
         },
         "party": {
+            "party_size_status": party_size.get("status"),
             "recommended_minimum": party_size.get("minimum"),
             "recommended_maximum": party_size.get("maximum"),
             "selected_size": party_size.get("selected"),
+            "party_size_review": deepcopy(dict(party_size.get("review") or {})),
             "use_pregenerated_first": True,
             "members": [],
             "replacements": [],

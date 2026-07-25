@@ -5,11 +5,14 @@ import asyncio
 import pytest
 
 from scripts.regression_party import (
+    _background_starting_items,
     _catalog_source,
+    _class_starting_supplements,
     _switch_phase,
     audit_profiles,
     lost_mine_party_profiles,
     select_profiles,
+    waterdeep_party_profiles,
 )
 
 
@@ -30,8 +33,46 @@ def test_party_profiles_have_source_linked_gear_and_complete_ability_input() -> 
 
     assert all(profile["items"] for profile in profiles)
     assert all(item["source_key"] for profile in profiles for item in profile["items"])
-    assert {profile["background"] for profile in profiles} == {"Acolyte"}
+    assert {profile["background_base"] for profile in profiles} == {"Acolyte"}
+    assert len({profile["background"] for profile in profiles}) == len(profiles)
+    assert all(
+        len(profile["background_skills"]) == 2
+        for profile in profiles
+    )
+    assert all(
+        len(_background_starting_items(profile)) == 6
+        for profile in profiles
+    )
+    assert all(_class_starting_supplements(profile) for profile in profiles)
     assert all(len(profile["abilities"]) == 6 for profile in profiles)
+
+
+def test_waterdeep_party_uses_explicit_dm_review_not_a_fake_module_range() -> None:
+    profiles = waterdeep_party_profiles()
+    audit = audit_profiles(profiles, campaign_line_id="waterdeep-dragon-heist")
+
+    assert audit["selected_size"] == 4
+    assert audit["source_maximum"] is None
+    assert audit["party_size_basis"] == {
+        "kind": "explicit_dm_review",
+        "module_party_size_status": "not_stated_after_text_and_visual_review",
+        "core_fallback": "2014 SRD Challenge baseline: party of four adventurers",
+        "selected": 4,
+        "represented_as_module_recommendation": False,
+    }
+    assert audit["classes_unique"] is True
+    assert audit["species_unique"] is True
+    assert audit["ability_methods"] == ["manual", "point_buy", "standard_array"]
+    assert audit["spell_resource_models"] == ["known", "prepared", "spellbook"]
+    assert audit["backgrounds_unique"] is True
+    assert audit["background_customization"] == {
+        "base_artifact": "Acolyte",
+        "rule": "2014 Core: Customizing a Background",
+        "feature_disposition": "retain Shelter of the Faithful",
+        "equipment_disposition": "retain the complete Acolyte package",
+        "unconfirmed_extensions_used": False,
+    }
+    assert audit["pregenerated_first"]["official_sheets_present_in_corpus"] is False
 
 
 def test_catalog_source_normalizes_srd_table_markers_but_never_invents_items() -> None:

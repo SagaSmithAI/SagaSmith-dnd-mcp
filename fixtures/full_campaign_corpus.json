@@ -117,11 +117,41 @@
       "assets": [],
       "play_requirements": {
         "recommended_party_size": {
-          "status": "dm_review_required",
-          "minimum": null,
-          "maximum": null,
-          "selected": null,
-          "reason": "The imported module states the level span but no recommended player-count range was found by source search. Do not default to four."
+          "status": "dm_review_completed",
+          "minimum": 4,
+          "maximum": 4,
+          "selected": 4,
+          "reason": "Text extraction, full-document search, and visual review of the module's introduction and character-creation pages found no module-authored player-count range. The explicit DM review selects four from the enabled 2014 Core Challenge baseline; this is not represented as a module recommendation.",
+          "review": {
+            "reviewed_at": "2026-07-25",
+            "module_party_size_status": "not_stated",
+            "module_reviewed_pages": [
+              6,
+              13,
+              15
+            ],
+            "module_text_searches": [
+              "ideal party size",
+              "adventure for four characters",
+              "adventure for five characters",
+              "adventure for six characters",
+              "four to six characters",
+              "party of",
+              "designed for"
+            ],
+            "decision": "Use four PCs as the exact enabled-Core CR baseline, without treating it as a source-recommended range.",
+            "rules_source": {
+              "path": "full/skills/dnd-dm/srd/references-2014-en/10_Monsters/Monsters.md",
+              "sha256": "48958a814f64d64c988699d2ae64a67f9f692cf3dcb2e3051c07eae2b64b2c4d",
+              "heading_path": [
+                "Monster Statistics",
+                "Challenge"
+              ],
+              "excerpt_sha256": "2c3510add6ee10f691a2b2fbaae3687291807814987af1d537695f86959dbc15",
+              "basis": "An appropriately equipped and well-rested party of four adventurers is the 2014 Core Challenge baseline."
+            },
+            "represented_as_module_recommendation": false
+          }
         },
         "starting_level": {
           "minimum": 1,

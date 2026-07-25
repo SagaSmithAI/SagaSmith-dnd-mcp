@@ -348,6 +348,13 @@ def test_core_srd_content_catalog_is_structured_and_selectable(tmp_path: Path) -
             {"campaign_id": campaign["id"], "kind": "background", "query": "Acolyte"},
         )
         acolyte = next(item for item in backgrounds if item["name"] == "Acolyte")
+        assert acolyte["selection_requirements"]["customizable"] is True
+        assert acolyte["selection_requirements"]["customization_fields"] == [
+            "custom_name",
+            "skills",
+            "languages",
+            "equipment_item_ids",
+        ]
         novice = await call(
             server,
             "character_create",
@@ -393,6 +400,60 @@ def test_core_srd_content_catalog_is_structured_and_selectable(tmp_path: Path) -
         )
         assert background["sheet"]["skills"]["insight"]["proficiency"] == "proficient"
         assert background["sheet"]["traits"]["languages"] == ["Celestial", "Elvish"]
+
+        custom_sheet = default_character_sheet()
+        custom_sheet["inventory"]["items"] = [
+            {
+                "id": "custom-vestments",
+                "name": "Vestments",
+                "kind": "equipment",
+                "quantity": 1,
+                "source_key": acolyte["id"],
+                "mechanics": {},
+            }
+        ]
+        envoy = await call(
+            server,
+            "character_create",
+            {
+                "campaign_id": campaign["id"],
+                "name": "Envoy",
+                "sheet": custom_sheet,
+                "idempotency_key": "catalog-envoy",
+            },
+        )
+        custom_background = await call(
+            server,
+            "character_content_apply",
+            {
+                "character_id": envoy["id"],
+                "artifact_id": acolyte["id"],
+                "selection": {
+                    "custom_name": "Temple Envoy",
+                    "skills": ["persuasion", "history"],
+                    "languages": ["Celestial", "Elvish"],
+                    "equipment_item_ids": ["custom-vestments"],
+                },
+                "expected_revision": envoy["revision"],
+                "idempotency_key": "catalog-custom-background",
+            },
+        )
+        custom_sheet = custom_background["sheet"]
+        assert custom_sheet["progression"]["background"] == "Temple Envoy"
+        assert custom_sheet["progression"]["background_grants"]["feature"] == (
+            "Shelter of the Faithful"
+        )
+        assert custom_sheet["progression"]["background_grants"]["equipment_item_ids"] == [
+            "custom-vestments"
+        ]
+        assert custom_sheet["progression"]["background_grants"]["choices"][
+            "base_background"
+        ] == "Acolyte"
+        assert custom_sheet["progression"]["background_grants"]["choices"][
+            "customized"
+        ] is True
+        assert custom_sheet["skills"]["persuasion"]["proficiency"] == "proficient"
+        assert custom_sheet["skills"]["history"]["proficiency"] == "proficient"
 
         feats = await call(
             server,

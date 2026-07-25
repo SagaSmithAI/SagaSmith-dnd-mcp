@@ -57,6 +57,7 @@ from scripts.regression_playthrough import (
     _roll_source_table,
     _scene_progress_percent,
     _short_rest,
+    _source_groups,
     _spend_source_currency,
     _spend_source_item,
     _stand_after_source_event,
@@ -133,6 +134,12 @@ def test_scene_resource_actions_support_deferred_checkpoint_batching() -> None:
         "use-activity",
         "use-consumable",
     } <= regression_playthrough.DEFERRED_CHECKPOINT_ACTIONS
+
+
+def test_source_queries_load_the_phase_specific_public_group() -> None:
+    assert _source_groups("lobby") == ("lobby.modules",)
+    assert _source_groups("play") == ("play.scene",)
+    assert _source_groups("combat") == ("combat.observe",)
 
 
 def test_configure_ending_uses_public_manifest_replace_and_rejects_redefinition() -> None:

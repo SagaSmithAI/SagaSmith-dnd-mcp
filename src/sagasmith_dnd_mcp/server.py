@@ -2632,6 +2632,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "stage_inputs": ["source_path", "name+content", "module-scoped asset"],
                 "managed_types": ["pdf", "markdown", "text", "image", "html", "svg"],
                 "normalizer": f"sagasmith-core/pdf-layout-v{DOCUMENT_NORMALIZER_VERSION}",
+                "parser": f"{DndModuleProfile.name}-v{DndModuleProfile.version}",
                 "normalization_cache": "content-addressed",
                 "page_extraction_cache": "content-addressed",
                 "text_extractor": "pypdfium2",
@@ -16450,6 +16451,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "fields": ["languages"] if choices.get("language_count") else [],
                     "language_count": int(choices.get("language_count", 0) or 0),
                     "skill_proficiencies": list(card.get("skill_proficiencies") or []),
+                    "customizable": True,
+                    "customization_fields": [
+                        "custom_name",
+                        "skills",
+                        "languages",
+                        "equipment_item_ids",
+                    ],
                 }
             elif artifact_kind == "feat":
                 selection_requirements = {
@@ -17102,10 +17110,20 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 ]
         elif kind == "background":
             existing_background = str(sheet["progression"].get("background") or "")
-            selected_background = str(card.get("name") or artifact_id)
+            base_background = str(card.get("name") or artifact_id)
+            custom_name = str(selection.get("custom_name") or "").strip()
+            custom_skills_raw = selection.get("skills")
+            if bool(custom_name) != (custom_skills_raw is not None):
+                return {
+                    "status": "pending_ruling",
+                    "reason": (
+                        "custom background requires both custom_name and exactly "
+                        "two skill choices"
+                    ),
+                }
+            selected_background = custom_name or base_background
             if existing_background and existing_background != selected_background:
                 raise ValueError("character already has a different background")
-            sheet["progression"]["background"] = str(card.get("name") or artifact_id)
             grants = dict(card.get("background_grants") or {})
             requirements = dict(grants.get("choices") or {})
             language_count = int(requirements.get("language_count", 0) or 0)
@@ -17119,7 +17137,77 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 }
             if len({item.casefold() for item in selected_languages}) != len(selected_languages):
                 raise ValueError("background language choices must be distinct")
+            if custom_skills_raw is None:
+                selected_skills = [
+                    str(item).casefold() for item in card.get("skill_proficiencies", [])
+                ]
+            else:
+                if not isinstance(custom_skills_raw, list):
+                    raise ValueError("custom background skills must be an array")
+                selected_skills = [
+                    str(item).strip().casefold() for item in custom_skills_raw
+                ]
+                if len(selected_skills) != 2 or any(not item for item in selected_skills):
+                    return {
+                        "status": "pending_ruling",
+                        "reason": "custom background requires exactly two skill choices",
+                    }
+                if len(set(selected_skills)) != 2:
+                    raise ValueError("custom background skill choices must be distinct")
+                unknown_skills = [
+                    skill for skill in selected_skills if skill not in sheet["skills"]
+                ]
+                if unknown_skills:
+                    raise ValueError(
+                        "custom background references unknown skills: "
+                        + ", ".join(unknown_skills)
+                    )
+                duplicate_skills = [
+                    skill
+                    for skill in selected_skills
+                    if sheet["skills"][skill]["proficiency"] != "none"
+                ]
+                if duplicate_skills:
+                    return {
+                        "status": "pending_ruling",
+                        "reason": (
+                            "custom background skill choices must replace proficiencies "
+                            "already granted by another source: "
+                            + ", ".join(duplicate_skills)
+                        ),
+                    }
+            equipment_item_ids_raw = selection.get("equipment_item_ids", [])
+            if not isinstance(equipment_item_ids_raw, list):
+                raise ValueError("background equipment_item_ids must be an array")
+            equipment_item_ids = [
+                str(item).strip() for item in equipment_item_ids_raw
+            ]
+            if any(not item for item in equipment_item_ids):
+                raise ValueError("background equipment item ids must not be empty")
+            if len(equipment_item_ids) != len(set(equipment_item_ids)):
+                raise ValueError("background equipment item ids must be distinct")
+            inventory_item_ids = {
+                str(item["id"]) for item in sheet["inventory"]["items"]
+            }
+            missing_equipment = [
+                item_id
+                for item_id in equipment_item_ids
+                if item_id not in inventory_item_ids
+            ]
+            if missing_equipment:
+                raise ValueError(
+                    "background equipment references unknown inventory items: "
+                    + ", ".join(missing_equipment)
+                )
+            sheet["progression"]["background"] = selected_background
             grants["languages"] = selected_languages
+            grants["equipment_item_ids"] = equipment_item_ids
+            grants["choices"] = {
+                **requirements,
+                "base_background": base_background,
+                "customized": bool(custom_name),
+                "selected_skills": selected_skills,
+            }
             sheet["progression"]["background_grants"] = {
                 **sheet["progression"]["background_grants"],
                 **grants,
@@ -17127,8 +17215,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             sheet["traits"]["languages"] = list(
                 dict.fromkeys([*sheet["traits"]["languages"], *selected_languages])
             )
-            for skill in card.get("skill_proficiencies", []):
-                skill_key = str(skill).casefold()
+            for skill_key in selected_skills:
                 if skill_key not in sheet["skills"]:
                     raise ValueError(f"background references an unknown skill: {skill_key}")
                 sheet["skills"][skill_key]["proficiency"] = "proficient"

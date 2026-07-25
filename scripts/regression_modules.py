@@ -265,6 +265,23 @@ def _scene_summary(scene: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _module_import_identity(
+    *,
+    run_id: str,
+    relative_path: str,
+    source_checksum: str,
+    title: str,
+    normalizer: str,
+    parser: str,
+) -> str:
+    """Bind staged import retries to both source content and parser behavior."""
+
+    return _token(
+        f"{run_id}\0{relative_path}\0{source_checksum}\0{title}\0"
+        f"{normalizer}\0{parser}"
+    )
+
+
 async def _import_document(
     client: ExposureClient,
     *,
@@ -277,7 +294,6 @@ async def _import_document(
     total: int,
 ) -> dict[str, Any]:
     relative = path.relative_to(root).as_posix()
-    identity = _token(f"{args.run_id}\0{relative}")
     print(f"[{index}/{total}] {relative}", file=sys.stderr, flush=True)
     started = perf_counter()
 
@@ -324,6 +340,23 @@ async def _import_document(
             },
             "seconds": round(perf_counter() - started, 3),
         }
+    capabilities = await client.core("server_capabilities", {})
+    normalizer = str(dict(capabilities.get("module_import") or {}).get("normalizer") or "")
+    parser = str(dict(capabilities.get("module_import") or {}).get("parser") or "")
+    if not normalizer or not parser:
+        raise RuntimeError(
+            "server capabilities do not publish the module normalizer and parser"
+        )
+    with path.open("rb") as source_stream:
+        source_checksum = hashlib.file_digest(source_stream, "sha256").hexdigest()
+    identity = _module_import_identity(
+        run_id=args.run_id,
+        relative_path=relative,
+        source_checksum=source_checksum,
+        title=path.stem,
+        normalizer=normalizer,
+        parser=parser,
+    )
     stage_started = perf_counter()
     staged = await client.domain(
         "module_import",
