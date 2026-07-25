@@ -1095,7 +1095,6 @@ def _source_outcome(
     defeated_hostiles: int,
     fled_hostiles: int = 0,
     hostile_count: int,
-    flee_after_defeated: int,
     unresolved_party: bool,
     party_down: bool,
 ) -> tuple[str, str] | None:
@@ -1112,12 +1111,6 @@ def _source_outcome(
             "victory",
             f"All {hostile_count} source-defined hostiles were defeated.",
         )
-    if flee_after_defeated and defeated_hostiles >= flee_after_defeated:
-        return (
-            "victory",
-            f"{defeated_hostiles} source-defined hostiles were defeated; "
-            "the last surviving hostile followed the source instruction and fled.",
-        )
     if party_down:
         return (
             "defeat",
@@ -1125,6 +1118,26 @@ def _source_outcome(
             "characters; their later treatment requires explicit source support or DM review.",
         )
     return None
+
+
+def _source_flee_ready(
+    *,
+    acting_actor_id: str,
+    flee_actor_id: str,
+    defeated_hostile_ids: list[str],
+    flee_after_defeated: int,
+    trigger_defeated_actor_id: str,
+) -> bool:
+    """Return whether the source-designated actor must now attempt to leave."""
+
+    if not flee_actor_id or acting_actor_id != flee_actor_id:
+        return False
+    if trigger_defeated_actor_id:
+        return trigger_defeated_actor_id in defeated_hostile_ids
+    return (
+        flee_after_defeated > 0
+        and len(defeated_hostile_ids) >= flee_after_defeated
+    )
 
 
 def _source_truce_outcome(
@@ -1314,11 +1327,22 @@ async def _auto_run(
         str(args.flee_trigger_defeated_actor_id or ""),
         str(args.flee_on_start_actor_id or ""),
     } - {""}
-    if bool(args.flee_actor_id) != bool(args.flee_trigger_defeated_actor_id):
+    triggered_flee_configured = bool(
+        args.flee_actor_id
+        or args.flee_trigger_defeated_actor_id
+        or args.flee_after_defeated
+    )
+    if triggered_flee_configured and (
+        not args.flee_actor_id
+        or bool(args.flee_trigger_defeated_actor_id)
+        == bool(args.flee_after_defeated)
+    ):
         raise ValueError(
-            "source-specific flee requires both --flee-actor-id and "
-            "--flee-trigger-defeated-actor-id"
+            "source-specific triggered flee requires --flee-actor-id and exactly one "
+            "of --flee-trigger-defeated-actor-id or positive --flee-after-defeated"
         )
+    if args.flee_after_defeated < 0:
+        raise ValueError("--flee-after-defeated must not be negative")
     if source_flee_ids and (
         not source_flee_ids <= set(hostile_ids)
         or not str(args.flee_source_excerpt or "").strip()
@@ -1497,17 +1521,12 @@ async def _auto_run(
                 defeated_hostiles=len(defeated_hostiles),
                 fled_hostiles=len(fled_hostile_ids),
                 hostile_count=len(hostile_ids),
-                flee_after_defeated=args.flee_after_defeated,
                 unresolved_party=bool(unresolved_party),
                 party_down=party_down,
             )
         if outcome is not None:
             outcome_status, outcome_summary = outcome
             break
-        flee_triggered = bool(
-            args.flee_after_defeated
-            and len(defeated_hostiles) >= args.flee_after_defeated
-        )
         pending_result = await _resolve_pending(
             client,
             args,
@@ -1527,8 +1546,15 @@ async def _auto_run(
         actor = actors[actor_id]
         actor_conditions = _conditions(actor)
         if (
-            actor_id == args.flee_actor_id
-            and args.flee_trigger_defeated_actor_id in defeated_hostiles
+            _source_flee_ready(
+                acting_actor_id=actor_id,
+                flee_actor_id=str(args.flee_actor_id or ""),
+                defeated_hostile_ids=defeated_hostiles,
+                flee_after_defeated=args.flee_after_defeated,
+                trigger_defeated_actor_id=str(
+                    args.flee_trigger_defeated_actor_id or ""
+                ),
+            )
             and _hit_points(actor) > 0
             and actor_id not in fled_hostile_ids
         ):
@@ -1569,7 +1595,12 @@ async def _auto_run(
                     "sequence": sequence,
                     "kind": "source_flee",
                     "actor_id": actor_id,
-                    "trigger_actor_id": args.flee_trigger_defeated_actor_id,
+                    "trigger_actor_id": (
+                        args.flee_trigger_defeated_actor_id or None
+                    ),
+                    "trigger_defeated_count": (
+                        args.flee_after_defeated or None
+                    ),
                     "source_excerpt": str(args.flee_source_excerpt).strip(),
                     "map_patch": escaped,
                     "end_turn": ended_turn,
@@ -1684,8 +1715,7 @@ async def _auto_run(
             await _end_turn(client, args, str(branch["id"]), actor_id, sequence)
             continue
         if (
-            flee_triggered
-            or actor_id in fled_hostile_ids
+            actor_id in fled_hostile_ids
             or party_down
             or _hit_points(actor) <= 0
             or "attack" not in available_actions

@@ -20,6 +20,7 @@ from scripts.regression_encounter import (
     _source_declared_conditions,
     _source_declared_surprise,
     _source_departure_patch,
+    _source_flee_ready,
     _source_opening_casts,
     _source_outcome,
     _source_surrender_outcome,
@@ -183,7 +184,6 @@ def test_all_source_hostiles_defeated_is_victory_without_flee_rule() -> None:
     assert _source_outcome(
         defeated_hostiles=2,
         hostile_count=2,
-        flee_after_defeated=0,
         unresolved_party=False,
         party_down=False,
     ) == ("victory", "All 2 source-defined hostiles were defeated.")
@@ -194,7 +194,6 @@ def test_specific_source_flee_counts_only_that_hostile_as_resolved() -> None:
         defeated_hostiles=3,
         fled_hostiles=1,
         hostile_count=4,
-        flee_after_defeated=0,
         unresolved_party=False,
         party_down=False,
     ) == (
@@ -206,7 +205,6 @@ def test_specific_source_flee_counts_only_that_hostile_as_resolved() -> None:
             defeated_hostiles=2,
             fled_hostiles=1,
             hostile_count=4,
-            flee_after_defeated=0,
             unresolved_party=False,
             party_down=False,
         )
@@ -218,13 +216,50 @@ def test_party_defeat_does_not_invent_a_source_defined_aftermath() -> None:
     assert _source_outcome(
         defeated_hostiles=1,
         hostile_count=4,
-        flee_after_defeated=0,
         unresolved_party=False,
         party_down=True,
     ) == (
         "defeat",
         "The party was defeated. Combat ended with resolved unconscious or dead "
         "characters; their later treatment requires explicit source support or DM review.",
+    )
+
+
+def test_source_flee_count_threshold_targets_only_the_designated_actor() -> None:
+    defeated = ["bugbear-1", "bugbear-3"]
+    assert _source_flee_ready(
+        acting_actor_id="vhalak",
+        flee_actor_id="vhalak",
+        defeated_hostile_ids=defeated,
+        flee_after_defeated=2,
+        trigger_defeated_actor_id="",
+    )
+    assert not _source_flee_ready(
+        acting_actor_id="bugbear-2",
+        flee_actor_id="vhalak",
+        defeated_hostile_ids=defeated,
+        flee_after_defeated=2,
+        trigger_defeated_actor_id="",
+    )
+    assert not _source_flee_ready(
+        acting_actor_id="vhalak",
+        flee_actor_id="vhalak",
+        defeated_hostile_ids=["bugbear-1"],
+        flee_after_defeated=2,
+        trigger_defeated_actor_id="",
+    )
+
+
+def test_source_flee_does_not_end_while_other_hostiles_remain() -> None:
+    assert (
+        _source_outcome(
+            defeated_hostiles=2,
+            fled_hostiles=1,
+            hostile_count=4,
+            unresolved_party=False,
+            party_down=False,
+        )
+        is None
     )
 
 
