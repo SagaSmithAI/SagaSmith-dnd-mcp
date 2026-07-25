@@ -2898,6 +2898,40 @@ async def _start_or_resume_auto_run(
     return completed
 
 
+async def _status(
+    client: ExposureClient,
+    *,
+    campaign_id: str,
+    actor_ids: list[str],
+) -> dict[str, Any]:
+    opened = await client.open(campaign_id)
+    phase = str(opened.get("phase") or "")
+    combat = None
+    if phase == "combat":
+        await client.load("combat.observe")
+        combat = await client.domain(
+            "combat_query",
+            {"campaign_id": campaign_id, "view": "status"},
+        )
+    elif phase == "play":
+        await client.load("play.characters")
+    else:
+        raise RuntimeError(
+            "encounter status requires the play phase or an active combat; "
+            f"campaign is in {phase or 'an unknown phase'}"
+        )
+    actor_values = await _characters(client, campaign_id, actor_ids)
+    return {
+        "exposure": opened,
+        "phase": phase,
+        "combat": combat,
+        "actors": [
+            _character_summary(actor_values[actor_id])
+            for actor_id in actor_ids
+        ],
+    }
+
+
 async def _run(args: argparse.Namespace) -> dict[str, Any]:
     party_ids = _party_ids(args.party_report)
     hostile_ids = _hostile_ids(args.hostile_report)
@@ -2962,25 +2996,12 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     reinforcement_hostile_ids,
                 )
             else:
-                opened = await client.open(args.campaign_id)
-                await client.load("combat.observe")
                 actor_ids = [*party_ids, *all_hostile_ids]
-                actor_values = await _characters(
+                report["result"] = await _status(
                     client,
-                    args.campaign_id,
-                    actor_ids,
+                    campaign_id=args.campaign_id,
+                    actor_ids=actor_ids,
                 )
-                report["result"] = {
-                    "exposure": opened,
-                    "combat": await client.domain(
-                        "combat_query",
-                        {"campaign_id": args.campaign_id, "view": "status"},
-                    ),
-                    "actors": [
-                        _character_summary(actor_values[actor_id])
-                        for actor_id in actor_ids
-                    ],
-                }
     report["passed"] = True
     return report
 

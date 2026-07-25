@@ -37,11 +37,54 @@ from scripts.regression_encounter import (
     _source_surrender_outcome,
     _source_truce_outcome,
     _start_or_resume_auto_run,
+    _status,
     _surprise_from_check_report,
     _surprise_from_hostile_stealth_totals,
     _validate_hostile_attacks,
     _wound_priority,
 )
+
+
+def test_status_uses_play_character_exposure_before_combat() -> None:
+    class Client:
+        def __init__(self) -> None:
+            self.loaded: list[tuple[str, ...]] = []
+            self.calls: list[tuple[str, dict]] = []
+
+        async def open(self, campaign_id: str) -> dict:
+            assert campaign_id == "campaign-1"
+            return {"phase": "play"}
+
+        async def load(self, *group_ids: str) -> None:
+            self.loaded.append(group_ids)
+
+        async def domain(self, tool_id: str, arguments: dict) -> list[dict]:
+            self.calls.append((tool_id, arguments))
+            assert tool_id == "character_query"
+            return [
+                {
+                    "id": actor_id,
+                    "name": actor_id,
+                    "character_type": "pc",
+                    "sheet": {
+                        "combat": {"hp": {"value": 8, "max": 8}},
+                        "conditions": [],
+                        "spellcasting": {"spell_slots": {}},
+                    },
+                    "derived": {"armor_class": 12},
+                }
+                for actor_id in arguments["payload"]["character_ids"]
+            ]
+
+    client = Client()
+    result = asyncio.run(
+        _status(client, campaign_id="campaign-1", actor_ids=["pc-1", "pc-2"])
+    )
+
+    assert result["phase"] == "play"
+    assert result["combat"] is None
+    assert client.loaded == [("play.characters",)]
+    assert [actor["id"] for actor in result["actors"]] == ["pc-1", "pc-2"]
 
 
 def test_party_ids_combine_public_party_reports_and_require_global_uniqueness(
