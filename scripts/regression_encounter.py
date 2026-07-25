@@ -150,8 +150,9 @@ def _arguments() -> argparse.Namespace:
         type=json.loads,
         default=[],
         help=(
-            "Reviewed descriptive attack settlement with actor_id, weapon_id, "
-            "condition, escape_dc, escape_abilities, and exact source_excerpt"
+            "Reviewed attack settlement with actor_id, weapon_id, exact "
+            "source_excerpt, and either condition/escape terms or "
+            "id=saving_throw_damage plus save/damage/zero-HP terms"
         ),
     )
     parser.add_argument(
