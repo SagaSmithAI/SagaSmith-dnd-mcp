@@ -241,7 +241,7 @@ def test_server_capabilities_publish_the_rulebook_import_contract(tmp_path: Path
         assert capabilities["module_import"]["normalizer"].startswith(
             "sagasmith-core/pdf-layout-v"
         )
-        assert capabilities["module_import"]["parser"] == "dnd5e-v15"
+        assert capabilities["module_import"]["parser"] == "dnd5e-v16"
         assert capabilities["features"]["player_safe_scene_scopes"] is True
         assert capabilities["features"]["player_safe_combat_maps"] is True
         assert capabilities["features"]["stable_campaign_fact_identity"] is True
