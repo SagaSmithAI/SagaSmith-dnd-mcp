@@ -20336,8 +20336,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "path": "combat",
                 "operator": "not_active",
                 "expected": False,
-                "actual": bool(campaign.state.get("combat")),
-                "passed": not bool(campaign.state.get("combat")),
+                "actual": bool(
+                    dict(campaign.state.get("combat") or {}).get("active", False)
+                ),
+                "passed": not bool(
+                    dict(campaign.state.get("combat") or {}).get("active", False)
+                ),
             }
         )
         return results

@@ -270,6 +270,52 @@ def test_manifest_syncs_canonical_state_and_verifies_source_defined_ending(
                 "idempotency_key": "actor",
             },
         )
+        before_play = await _call(
+            server,
+            "campaign_query",
+            {"view": "get", "payload": {"campaign_id": campaign_id}},
+        )
+        play = await _call(
+            server,
+            "game_phase",
+            {
+                "campaign_id": campaign_id,
+                "action": "set",
+                "tool_profile": "play",
+                "expected_revision": before_play["revision"],
+                "idempotency_key": "play",
+            },
+        )
+        started = await _call(
+            server,
+            "combat_start",
+            {
+                "campaign_id": campaign_id,
+                "participant_ids": [actor["id"]],
+                "participant_config": [
+                    {
+                        "actor_id": actor["id"],
+                        "initiative": 10,
+                        "tie_breaker": 0,
+                    }
+                ],
+                "expected_revision": play["campaign_revision"],
+                "idempotency_key": "historical-combat-start",
+            },
+        )
+        await _call(
+            server,
+            "combat_end",
+            {
+                "campaign_id": campaign_id,
+                "outcome": {
+                    "status": "victory",
+                    "summary": "The test encounter is complete.",
+                },
+                "expected_revision": started["campaign_revision"],
+                "idempotency_key": "historical-combat-end",
+            },
+        )
         updated_manifest = deepcopy(initialized["manifest"])
         updated_manifest["party"]["members"] = [
             {
