@@ -3467,13 +3467,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if not idempotency_key:
             raise ValueError("idempotency_key is required for rulebook indexing")
         job = require_import_job(campaign_id, job_id, "rulebook")
-        if job.state not in {"inspected", "failed"}:
-            raise ValueError("rule import job must be inspected before indexing")
-        warnings = list(dict(job.inspection or {}).get("warnings") or [])
-        if warnings and not acknowledge_warnings:
-            raise ValueError(
-                "rule import inspection has warnings; DM must set acknowledge_warnings=true"
-            )
         payload = {
             "job_id": job_id,
             "operation": "ingest",
@@ -3483,6 +3476,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         replay = replay_idempotent(scope, idempotency_key, payload)
         if replay is not None:
             return replay
+        if job.state not in {"inspected", "failed"}:
+            raise ValueError("rule import job must be inspected before indexing")
+        warnings = list(dict(job.inspection or {}).get("warnings") or [])
+        if warnings and not acknowledge_warnings:
+            raise ValueError(
+                "rule import inspection has warnings; DM must set acknowledge_warnings=true"
+            )
         values = dict(job.payload)
         embedder, vectors = storage.dense_components()
         result = rules.ingest_path(
@@ -16272,10 +16272,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if not idempotency_key:
             raise ValueError("idempotency_key is required for pack compilation")
         job = require_import_job(campaign_id, job_id, "rulebook")
-        if not job.source_id:
-            raise ValueError("rule import job must be indexed before pack compilation")
-        if job.state not in {"reviewed", "compiled", "validated", "failed"}:
-            raise ValueError("all content candidates must be reviewed before pack compilation")
         pack_id = str(manifest.get("id") or "").strip()
         if not pack_id:
             raise ValueError("manifest.id is required")
@@ -16290,6 +16286,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         replay = replay_idempotent(scope, idempotency_key, payload)
         if replay is not None:
             return replay
+        if not job.source_id:
+            raise ValueError("rule import job must be indexed before pack compilation")
+        if job.state not in {"reviewed", "compiled", "validated", "failed"}:
+            raise ValueError("all content candidates must be reviewed before pack compilation")
         artifacts = compiled_artifacts_from_candidates(job.candidates, pack_id=pack_id)
         draft = rule_pack_draft_from_source(
             source_id=job.source_id,
@@ -16322,8 +16322,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             raise ValueError("idempotency_key is required for pack installation")
         job = require_import_job(campaign_id, job_id, "rulebook")
         draft = dict(job.validation.get("draft") or {})
-        if job.state not in {"compiled", "installed"} or draft.get("status") != "validated":
-            raise ValueError("import job has no validated pack draft to install")
         pack_id = str(draft.get("pack_id") or "")
         version = str(draft.get("version") or "")
         payload = {"job_id": job_id, "operation": "install", "pack_id": pack_id, "version": version}
@@ -16331,6 +16329,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         replay = replay_idempotent(scope, idempotency_key, payload)
         if replay is not None:
             return replay
+        if job.state not in {"compiled", "installed"} or draft.get("status") != "validated":
+            raise ValueError("import job has no validated pack draft to install")
         installed = asdict(rule_packs.install(pack_id, version))
         updated = import_jobs.record_result(
             job_id,
@@ -16357,8 +16357,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         require_write_contract(expected_revision, idempotency_key)
         job = require_import_job(campaign_id, job_id, "rulebook")
         installed = dict(job.result.get("installed_pack") or {})
-        if job.state not in {"installed", "activated"}:
-            raise ValueError("import job must install its pack before activation")
         pack_id = str(installed.get("pack_id") or "")
         version = str(installed.get("version") or "")
         payload = {
@@ -16372,6 +16370,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         replay = replay_idempotent(scope, idempotency_key, payload)
         if replay is not None:
             return replay
+        if job.state not in {"installed", "activated"}:
+            raise ValueError("import job must install its pack before activation")
         activation = campaign_rule_pack_set(
             campaign_id=campaign_id,
             pack_id=pack_id,

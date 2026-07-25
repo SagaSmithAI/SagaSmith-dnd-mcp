@@ -246,14 +246,15 @@ def test_rule_and_module_import_jobs_are_reviewable_and_activation_safe(tmp_path
             },
         )
         assert inspected["job"]["state"] == "inspected"
+        ingest_arguments = {
+            "campaign_id": campaign["id"],
+            "job_id": rule_job_id,
+            "idempotency_key": "rule-job-ingest",
+        }
         indexed = await call(
             server,
             "rule_import_job_ingest",
-            {
-                "campaign_id": campaign["id"],
-                "job_id": rule_job_id,
-                "idempotency_key": "rule-job-ingest",
-            },
+            ingest_arguments,
         )
         assert indexed["source"]["edition"] == "2014"
         extracted = await call(
@@ -292,32 +293,34 @@ def test_rule_and_module_import_jobs_are_reviewable_and_activation_safe(tmp_path
             },
         )
         assert reviewed["job"]["state"] == "reviewed"
+        compile_arguments = {
+            "campaign_id": campaign["id"],
+            "job_id": rule_job_id,
+            "manifest": {
+                "id": "dnd5e.xgte.import-job",
+                "version": "1.0.0",
+                "title": "Xanathar import job",
+                "namespace": "dnd5e.xgte.import-job",
+                "system_id": "dnd5e",
+                "editions": ["2014"],
+            },
+            "idempotency_key": "rule-job-compile",
+        }
         compiled = await call(
             server,
             "rule_import_job_compile",
-            {
-                "campaign_id": campaign["id"],
-                "job_id": rule_job_id,
-                "manifest": {
-                    "id": "dnd5e.xgte.import-job",
-                    "version": "1.0.0",
-                    "title": "Xanathar import job",
-                    "namespace": "dnd5e.xgte.import-job",
-                    "system_id": "dnd5e",
-                    "editions": ["2014"],
-                },
-                "idempotency_key": "rule-job-compile",
-            },
+            compile_arguments,
         )
         assert compiled["draft"]["status"] == "validated"
+        install_arguments = {
+            "campaign_id": campaign["id"],
+            "job_id": rule_job_id,
+            "idempotency_key": "rule-job-install",
+        }
         installed = await call(
             server,
             "rule_import_job_install",
-            {
-                "campaign_id": campaign["id"],
-                "job_id": rule_job_id,
-                "idempotency_key": "rule-job-install",
-            },
+            install_arguments,
         )
         assert installed["job"]["state"] == "installed"
         profile = await call(
@@ -330,17 +333,22 @@ def test_rule_and_module_import_jobs_are_reviewable_and_activation_safe(tmp_path
                 "idempotency_key": "profile",
             },
         )
+        activate_arguments = {
+            "campaign_id": campaign["id"],
+            "job_id": rule_job_id,
+            "expected_revision": profile["campaign_revision"],
+            "idempotency_key": "rule-job-activate",
+        }
         activated = await call(
             server,
             "rule_import_job_activate",
-            {
-                "campaign_id": campaign["id"],
-                "job_id": rule_job_id,
-                "expected_revision": profile["campaign_revision"],
-                "idempotency_key": "rule-job-activate",
-            },
+            activate_arguments,
         )
         assert activated["job"]["state"] == "activated"
+        assert await call(server, "rule_import_job_ingest", ingest_arguments) == indexed
+        assert await call(server, "rule_import_job_compile", compile_arguments) == compiled
+        assert await call(server, "rule_import_job_install", install_arguments) == installed
+        assert await call(server, "rule_import_job_activate", activate_arguments) == activated
         catalog = await call(
             server,
             "content_catalog_list",

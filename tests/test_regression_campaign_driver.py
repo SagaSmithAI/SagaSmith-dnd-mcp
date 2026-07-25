@@ -20,6 +20,7 @@ from scripts.regression_campaign import (
     _load_json_object,
     _load_review_override,
     _prepare_rule_statblock,
+    _prepare_rule_statblock_with_recovery,
     _prepare_statblock,
     _restore_statblock_preparation_context,
     _statblock_creation_key,
@@ -383,6 +384,41 @@ def test_prepare_rule_statblock_discovers_chunks_by_source_page_and_text(
     )
     assert create_call["payload"]["chunk_ids"] == ["kenku-chunk"]
     assert report["selected_source_chunks"][0]["page_start"] == 195
+
+
+def test_failed_rule_statblock_preparation_uses_shared_phase_recovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = _RuleStatblockClient()
+    _patch_rule_statblock_transport(monkeypatch, client)
+    original = {"phase": "play", "branch_id": "branch-1"}
+    restored: list[dict] = []
+
+    async def context(_client, _campaign_id):
+        return original
+
+    async def fail(_args):
+        raise RuntimeError("malformed source selection")
+
+    async def restore(_client, **arguments):
+        restored.append(arguments)
+        return {"phase_changes": []}
+
+    monkeypatch.setattr(campaign_driver, "_statblock_preparation_context", context)
+    monkeypatch.setattr(campaign_driver, "_prepare_rule_statblock", fail)
+    monkeypatch.setattr(campaign_driver, "_restore_statblock_preparation_context", restore)
+    args = _rule_statblock_args(tmp_path, defer_checkpoint=True)
+
+    with pytest.raises(RuntimeError, match="malformed source selection"):
+        asyncio.run(_prepare_rule_statblock_with_recovery(args))
+
+    assert restored == [
+        {
+            "campaign_id": "campaign-1",
+            "original": original,
+            "token": "waterdeep-stirge",
+        }
+    ]
 
 
 def test_failed_statblock_preparation_restores_original_play_phase() -> None:

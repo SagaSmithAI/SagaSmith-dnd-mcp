@@ -2430,6 +2430,19 @@ async def _restore_statblock_preparation_context(
 
 
 async def _prepare_statblock_with_recovery(args: argparse.Namespace) -> dict[str, Any]:
+    return await _statblock_preparation_with_recovery(args, _prepare_statblock)
+
+
+async def _prepare_rule_statblock_with_recovery(
+    args: argparse.Namespace,
+) -> dict[str, Any]:
+    return await _statblock_preparation_with_recovery(args, _prepare_rule_statblock)
+
+
+async def _statblock_preparation_with_recovery(
+    args: argparse.Namespace,
+    operation: Any,
+) -> dict[str, Any]:
     token = _idempotency_token(args.run_id)
     async with stdio_client(_server_parameters(args)) as (read, write):
         async with ClientSession(read, write) as session:
@@ -2440,7 +2453,7 @@ async def _prepare_statblock_with_recovery(args: argparse.Namespace) -> dict[str
                 args.campaign_id,
             )
     try:
-        return await _prepare_statblock(args)
+        return await operation(args)
     except BaseException:
         async with stdio_client(_server_parameters(args)) as (read, write):
             async with ClientSession(read, write) as session:
@@ -4909,7 +4922,7 @@ def main() -> int:
         "restore-regression": _restore_regression,
         "relock-core": _relock_core,
         "prepare-statblock": _prepare_statblock_with_recovery,
-        "prepare-rule-statblock": _prepare_rule_statblock,
+        "prepare-rule-statblock": _prepare_rule_statblock_with_recovery,
         "prepare-core-wizard": _prepare_core_wizard,
         "noncombat-check": _noncombat_check,
         "branch-continuity": _branch_continuity,
