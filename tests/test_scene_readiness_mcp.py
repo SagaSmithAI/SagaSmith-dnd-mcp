@@ -26,6 +26,12 @@ def test_scene_readiness_blocks_missing_combatants_and_reserves(tmp_path: Path) 
 
     async def exercise() -> None:
         server = create_server(config)
+        long_evidence = (
+            "The encounter record preserves the complete authored sequence, "
+            "including starting hit points, exact participant counts, target "
+            "priorities, delayed arrivals, allied actions, and the stated ending "
+            "condition. "
+        ) * 4
         campaign = await _call(
             server,
             "campaign_create",
@@ -39,7 +45,8 @@ def test_scene_readiness_blocks_missing_combatants_and_reserves(tmp_path: Path) 
                 "content": (
                     "# Chapter\n## Ambush\n"
                     "Captain Rusk\u2019s two band\u00adits attack the party. "
-                    "A tavern guard can be persuaded to join on the next round."
+                    "A tavern guard can be persuaded to join on the next round. "
+                    f"{long_evidence}"
                 ),
             },
         )
@@ -281,6 +288,22 @@ def test_scene_readiness_blocks_missing_combatants_and_reserves(tmp_path: Path) 
         ]
         assert ready["reinforcement_actor_ids"] == [actors["guard"]["id"]]
         assert ready["checksum"]
+        long_manifest = deepcopy(complete_manifest)
+        long_manifest["groups"][0]["source_excerpt"] = long_evidence.strip()
+        long_ready = await _call(
+            server,
+            "module_query",
+            {
+                "campaign_id": campaign["id"],
+                "view": "readiness",
+                "payload": {
+                    "scene_id": scene["scene_id"],
+                    "participant_manifest": long_manifest,
+                },
+            },
+        )
+        assert len(long_manifest["groups"][0]["source_excerpt"]) > 500
+        assert long_ready["ready"] is True
 
         original_bandit_notes = deepcopy(actors["bandit1"]["notes"])
         incomplete_notes = deepcopy(original_bandit_notes)

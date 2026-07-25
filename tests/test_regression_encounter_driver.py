@@ -3,6 +3,8 @@ import json
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
+
 from scripts.regression_encounter import (
     GUIDING_BOLT_ID,
     GUIDING_BOLT_ON_HIT,
@@ -39,7 +41,11 @@ from scripts.regression_encounter import (
     _source_precombat_casts,
     _source_surrender_outcome,
     _source_target_priorities,
+    _source_traits,
     _source_truce_outcome,
+    _source_zero_hp_finisher,
+    _source_zero_hp_finisher_stage,
+    _source_zero_hp_stabilization,
     _start_or_resume_auto_run,
     _status,
     _surprise_from_check_report,
@@ -61,6 +67,11 @@ def test_status_uses_play_character_exposure_before_combat() -> None:
 
         async def load(self, *group_ids: str) -> None:
             self.loaded.append(group_ids)
+
+        async def core(self, tool_id: str, arguments: dict) -> dict:
+            assert tool_id == "campaign_query"
+            assert arguments["payload"]["campaign_id"] == "campaign-1"
+            return {"id": "campaign-1", "state": {}}
 
         async def domain(self, tool_id: str, arguments: dict) -> list[dict]:
             self.calls.append((tool_id, arguments))
@@ -599,6 +610,114 @@ def test_source_declared_conditions_are_scoped_to_cited_participants() -> None:
     assert by_actor["ruffian-1"]["source_conditions"][0]["condition"] == "poisoned"
 
 
+def test_source_traits_and_allied_npcs_preserve_distinct_zero_hp_rules() -> None:
+    traits = _source_traits(
+        [
+            {
+                "actor_id": "troll",
+                "kind": "regeneration",
+                "feature_id": "regeneration-passive",
+                "source_excerpt": (
+                    "The troll regains 10 hit points at the start of its turn."
+                ),
+            }
+        ],
+        participant_ids=["pc-1", "durnan", "troll"],
+    )
+
+    config = _participant_config(
+        ["pc-1"],
+        ["troll"],
+        ally_ids=["durnan"],
+        surprise_by_actor={},
+        source_traits_by_actor=traits,
+    )
+    by_actor = {item["actor_id"]: item for item in config}
+
+    assert by_actor["pc-1"]["death_saves"] is True
+    assert by_actor["durnan"]["disposition"] == "friendly"
+    assert by_actor["durnan"]["death_saves"] is False
+    assert by_actor["troll"]["death_saves"] is False
+    assert by_actor["troll"]["source_traits"] == [
+        {
+            "kind": "regeneration",
+            "feature_id": "regeneration-passive",
+            "source_excerpt": (
+                "The troll regains 10 hit points at the start of its turn."
+            ),
+        }
+    ]
+
+
+def test_source_zero_hp_finisher_requires_module_and_oil_rule_evidence() -> None:
+    source = (
+        "Durnan calls on the characters to focus on slaying the stirges and then "
+        "douse the troll with lamp oil and set it on fire when it falls."
+    )
+    oil_rule = (
+        "If the target takes any fire damage before the oil dries (after 1 minute), "
+        "the target takes an additional 5 fire damage from the burning oil."
+    )
+    finisher = _source_zero_hp_finisher(
+        {
+            "target_id": "troll",
+            "actor_ids": ["pc-1", "pc-2"],
+            "source_excerpt": (
+                "douse the troll with lamp oil and set it on fire when it falls"
+            ),
+            "oil_rule_excerpt": oil_rule,
+        },
+        participant_ids=["pc-1", "pc-2", "troll"],
+        encounter_source_excerpt=source,
+    )
+
+    assert finisher is not None
+    assert finisher["fire_damage"] == 5
+    assert _source_zero_hp_finisher_stage(
+        {"round": 3, "log": []},
+        finisher,
+    ) == ("douse", None)
+    douse_event = {
+        "type": "common_action",
+        "payload": {
+            "source_finisher_id": finisher["id"],
+            "stage": "douse",
+            "round": 3,
+        },
+    }
+    assert _source_zero_hp_finisher_stage(
+        {"round": 4, "log": [douse_event]},
+        finisher,
+    ) == ("ignite", douse_event)
+    assert _source_zero_hp_finisher_stage(
+        {"round": 13, "log": [douse_event]},
+        finisher,
+    ) == ("douse", douse_event)
+
+
+def test_source_zero_hp_stabilization_requires_exact_pc_only_instruction() -> None:
+    excerpt = (
+        "If any of the characters are reduced to 0 hit points during the fight, "
+        "employees of the Yawning Portal step forward to stabilize them."
+    )
+
+    assert _source_zero_hp_stabilization(
+        {"actor_ids": ["pc-1", "pc-2"], "source_excerpt": excerpt},
+        participant_ids=["pc-1", "pc-2"],
+    ) == {
+        "actor_ids": ["pc-1", "pc-2"],
+        "source_excerpt": excerpt,
+    }
+    with pytest.raises(ValueError, match="unique participant PCs"):
+        _source_zero_hp_stabilization(
+            {
+                "actor_ids": ["pc-1", "anonymous-employee"],
+                "source_excerpt": excerpt,
+            },
+            participant_ids=["pc-1", "pc-2"],
+        )
+
+
 def test_source_target_priorities_preserve_authored_roles_and_tactical_order() -> None:
     excerpt = (
         "The stirges attack the nearest characters as Durnan confronts the monster. "
@@ -714,6 +833,26 @@ def test_source_authored_precombat_and_attack_tactics_are_structured() -> None:
     rulings = _source_on_hit_rulings(
         [
             {
+                "actor_id": "durnan",
+                "weapon_id": "grimvault",
+                "id": "critical_followup",
+                "target_has_limbs": True,
+                "source_excerpt": (
+                    "If the target is a creature and Durnan rolls a 20 on the "
+                    "d20 for the attack roll, the target takes an extra 14 "
+                    "slashing damage, and Durnan rolls another d20."
+                ),
+            },
+            {
+                "actor_id": "stirge",
+                "weapon_id": "blood-drain",
+                "id": "attachment",
+                "source_excerpt": (
+                    "the stirge attaches to the target. While attached, the "
+                    "stirge doesn't attack."
+                ),
+            },
+            {
                 "actor_id": "spider-1",
                 "weapon_id": "web",
                 "condition": "restrained",
@@ -748,7 +887,7 @@ def test_source_authored_precombat_and_attack_tactics_are_structured() -> None:
                 ),
             },
         ],
-        participant_ids=["nezznar", "spider-1"],
+        participant_ids=["nezznar", "spider-1", "durnan", "stirge"],
     )
     delayed = _source_delayed_actions(
         [
@@ -768,6 +907,8 @@ def test_source_authored_precombat_and_attack_tactics_are_structured() -> None:
     assert rulings[("spider-1", "web")]["escape_dc"] == 12
     assert rulings[("spider-1", "bite")]["id"] == "saving_throw_damage"
     assert rulings[("spider-1", "bite")]["zero_hp_effect"]["stable"] is True
+    assert rulings[("durnan", "grimvault")]["target_has_limbs"] is True
+    assert rulings[("stirge", "blood-drain")]["id"] == "attachment"
     assert delayed["nezznar"]["until_round"] == 2
 
 
@@ -874,6 +1015,78 @@ def test_interrupted_guiding_bolt_ruling_resumes_with_exact_effect() -> None:
         "id": "next_attack_advantage",
         "source_excerpt": GUIDING_BOLT_ON_HIT,
     }
+
+
+def test_interrupted_source_attachment_resumes_with_declared_settlement() -> None:
+    calls: list[tuple[str, dict]] = []
+    excerpt = (
+        "the stirge attaches to the target. While attached, the stirge doesn't attack."
+    )
+
+    class Client:
+        async def core(self, tool_id: str, arguments: dict) -> dict:
+            assert tool_id == "campaign_query"
+            return {"revision": 18}
+
+        async def domain(self, tool_id: str, arguments: dict) -> dict:
+            calls.append((tool_id, arguments))
+            return {"status": "committed"}
+
+    result = asyncio.run(
+        _resolve_pending(
+            Client(),
+            SimpleNamespace(
+                campaign_id="campaign-1",
+                source_on_hit_ruling_json=[
+                    {
+                        "actor_id": "stirge-1",
+                        "weapon_id": "blood-drain",
+                        "id": "attachment",
+                        "source_excerpt": excerpt,
+                    }
+                ],
+            ),
+            "branch-1",
+            {
+                "pending": [
+                    {
+                        "id": "choice-2",
+                        "kind": "ruling",
+                        "actor_id": "target-1",
+                        "attacker_id": "stirge-1",
+                        "target_id": "target-1",
+                        "weapon_id": "blood-drain",
+                        "trigger": "attack_on_hit_effect",
+                        "effect": excerpt,
+                        "status": "pending",
+                    }
+                ]
+            },
+        )
+    )
+
+    assert result == {"status": "committed"}
+    assert calls == [
+        (
+            "combat_on_hit_ruling",
+            {
+                "campaign_id": "campaign-1",
+                "target_id": "target-1",
+                "choice_id": "choice-2",
+                "selection": {
+                    "id": "attachment",
+                    "source_excerpt": excerpt,
+                },
+                "branch_id": "branch-1",
+                "expected_revision": 18,
+                "idempotency_key": (
+                    calls[0][1]["idempotency_key"]
+                    if calls
+                    else ""
+                ),
+            },
+        )
+    ]
 
 
 def test_source_surrender_requires_threshold_life_no_escape_and_resolved_party() -> None:

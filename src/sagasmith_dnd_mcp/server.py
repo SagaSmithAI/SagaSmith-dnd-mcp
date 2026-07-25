@@ -86,11 +86,13 @@ from sagasmith_dnd.combat_engine import (
     apply_damage_parts_to_sheet,
     apply_damage_to_sheet,
     apply_healing_to_sheet,
+    apply_hit_point_loss_to_sheet,
     arm_readied_spell,
     available_actions,
     available_attack_defenses,
     available_reactions,
     current_combatant,
+    detach_attachment,
     end_concentration_for_incapacitating_conditions,
     end_turn,
     pay_activity_activation,
@@ -110,6 +112,7 @@ from sagasmith_dnd.combat_engine import (
     resolve_turn_undead_to_sheets,
     roll_attack_action,
     settle_core_activity_effect,
+    settle_start_turn_regeneration,
     spend_movement,
     stabilize_sheet,
     stand_up,
@@ -1515,6 +1518,481 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     combatant.pop("turned", None)
                 return
 
+    def combatant_zero_hp_buffered(combatant: dict[str, Any]) -> bool:
+        return bool(
+            combatant.get("death_saves", False)
+            or combatant.get("zero_hp_recovery", False)
+        )
+
+    def source_regeneration_trait(character: Any, raw: dict[str, Any]) -> dict[str, Any]:
+        allowed = {"kind", "feature_id", "source_excerpt"}
+        unknown = set(raw) - allowed
+        if unknown:
+            raise ValueError(f"unsupported source trait fields: {sorted(unknown)}")
+        if str(raw.get("kind") or "").strip().casefold() != "regeneration":
+            raise ValueError("only a source-recorded regeneration trait is supported")
+        feature_id = str(raw.get("feature_id") or "").strip()
+        excerpt = str(raw.get("source_excerpt") or "").strip()
+        feature = next(
+            (
+                item
+                for item in dict(character.sheet.get("content") or {}).get(
+                    "features", []
+                )
+                if str(item.get("id") or "") == feature_id
+                and str(item.get("name") or "").strip().casefold()
+                == "regeneration"
+            ),
+            None,
+        )
+        if feature is None:
+            raise ValueError(
+                "source regeneration feature_id is not recorded on the actor card"
+            )
+        description = str(feature.get("description") or "").strip()
+        if not excerpt or " ".join(excerpt.split()) not in " ".join(description.split()):
+            raise ValueError(
+                "source regeneration excerpt is not contained in the recorded feature"
+            )
+        structured = dict(
+            dict(feature.get("choices") or {}).get("source_trait") or {}
+        )
+        if structured:
+            amount = structured.get("amount")
+            damage_types = structured.get("suppressed_by_damage_types")
+            valid_structured = (
+                structured.get("kind") == "regeneration"
+                and structured.get("trigger") == "turn_start"
+                and isinstance(amount, int)
+                and not isinstance(amount, bool)
+                and amount > 0
+                and isinstance(damage_types, list)
+                and damage_types
+                and all(str(item).strip() for item in damage_types)
+                and structured.get("dies_at_zero_when_suppressed") is True
+            )
+            if not valid_structured:
+                raise ValueError("recorded regeneration source trait is malformed")
+            suppressed_by = [
+                str(item).strip().casefold() for item in damage_types
+            ]
+        else:
+            amount_match = re.search(
+                r"(?i)\bregains\s+(\d+)\s+hit points at the start of "
+                r"(?:its|his|her|their)\s+turn\b",
+                description,
+            )
+            suppression_match = re.search(
+                r"(?i)\btakes\s+([a-z]+(?:\s+or\s+[a-z]+)+)\s+damage,\s+"
+                r"this trait doesn't function at the start of "
+                r"(?:(?:its|his|her|their)|the\s+[a-z][a-z '\-]*'s)\s+"
+                r"next turn\b",
+                description,
+            )
+            death_match = re.search(
+                r"(?i)\bdies only if (?:it|he|she|they) starts? "
+                r"(?:its|his|her|their)\s+turn with 0 hit points and "
+                r"doesn't regenerate\b",
+                description,
+            )
+            if not amount_match or not suppression_match or not death_match:
+                raise ValueError(
+                    "recorded regeneration text is not mechanically complete"
+                )
+            amount = int(amount_match.group(1))
+            suppressed_by = [
+                item.strip().casefold()
+                for item in re.split(r"\s+or\s+", suppression_match.group(1))
+                if item.strip()
+            ]
+        if len(suppressed_by) != len(set(suppressed_by)):
+            raise ValueError("regeneration suppression damage types must be unique")
+        return {
+            "kind": "regeneration",
+            "actor_id": str(character.id),
+            "feature_id": feature_id,
+            "amount": int(amount),
+            "suppressed_by_damage_types": suppressed_by,
+            "suppressed_at_next_turn": False,
+            "source_excerpt": excerpt,
+            "active": True,
+        }
+
+    def source_attachment_effect(effect: str) -> dict[str, Any]:
+        attach_match = re.search(r"(?i)\battaches to the target\b", effect)
+        drain_match = re.search(
+            r"(?i)\bat the start of each of the [^.!?]+ turns,\s+"
+            r"the target loses\s+\d+\s+\(([^)]+)\)\s+hit points\b",
+            effect,
+        )
+        movement_match = re.search(
+            r"(?i)\bdetach itself by spending\s+(\d+)\s+feet of its movement\b",
+            effect,
+        )
+        threshold_match = re.search(
+            r"(?i)\bafter it drains\s+(\d+)\s+hit points of blood from the target "
+            r"or the target dies\b",
+            effect,
+        )
+        action_match = re.search(
+            r"(?i)\ba creature,\s+including the target,\s+can use its action "
+            r"to detach the [^.!?]+\b",
+            effect,
+        )
+        if not all(
+            (
+                attach_match,
+                drain_match,
+                movement_match,
+                threshold_match,
+                action_match,
+            )
+        ):
+            raise CombatEngineError(
+                "the reviewed attachment effect is not mechanically complete"
+            )
+        formula = str(drain_match.group(1)).replace(" ", "")
+        if re.fullmatch(r"\d+d\d+(?:[+\-]\d+)?", formula, re.IGNORECASE) is None:
+            raise CombatEngineError("attachment drain formula is unsupported")
+        return {
+            "drain_formula": formula,
+            "self_detach_movement_ft": int(movement_match.group(1)),
+            "detach_after_hit_point_loss": int(threshold_match.group(1)),
+            "other_creature_detach_action": True,
+        }
+
+    def add_critical_followup_window(
+        encounter: dict[str, Any],
+        *,
+        result: dict[str, Any],
+        attacker_id: str,
+        target_id: str,
+        weapon_id: str,
+    ) -> dict[str, Any] | None:
+        followup = dict(result.get("critical_followup") or {})
+        if not followup.get("requires_dm_ruling"):
+            return None
+        next_value = add_choice_window(
+            encounter,
+            kind="ruling",
+            actor_id_value=target_id,
+            event="attack.critical.anatomical_loss",
+            candidates=[
+                {
+                    "id": "critical_followup",
+                    "name": "Record the source-authored anatomical loss",
+                }
+            ],
+        )
+        encounter.clear()
+        encounter.update(next_value)
+        window = encounter["pending"][-1]
+        window.update(
+            trigger="critical_body_part_loss",
+            attacker_id=attacker_id,
+            target_id=target_id,
+            weapon_id=weapon_id,
+            effect=str(followup.get("source_excerpt") or ""),
+            critical_followup=followup,
+        )
+        result["pending_on_hit_ruling_id"] = window["id"]
+        return window
+
+    def add_attack_on_hit_window(
+        encounter: dict[str, Any],
+        *,
+        result: dict[str, Any],
+        attacker_id: str,
+        target_id: str,
+        weapon_id: str,
+    ) -> dict[str, Any] | None:
+        on_hit_ruling = dict(result.get("on_hit_ruling") or {})
+        effect = str(on_hit_ruling.get("effect") or "").strip()
+        if not result.get("hit") or not effect:
+            return None
+        next_attack_advantage = (
+            re.search(
+                r"(?i)\bthe next attack against the target before the end of "
+                r"the caster's next turn has advantage\b",
+                effect,
+            )
+            is not None
+        )
+        attachment = re.search(r"(?i)\battaches to the target\b", effect) is not None
+        next_value = add_choice_window(
+            encounter,
+            kind="ruling",
+            actor_id_value=target_id,
+            event="attack.on_hit.effect",
+            candidates=[
+                *(
+                    [
+                        {
+                            "id": "next_attack_advantage",
+                            "name": "Grant advantage to the next attack",
+                        }
+                    ]
+                    if next_attack_advantage
+                    else []
+                ),
+                *(
+                    [
+                        {
+                            "id": "attachment",
+                            "name": "Apply a structured attachment",
+                        }
+                    ]
+                    if attachment
+                    else []
+                ),
+                {
+                    "id": "apply_condition",
+                    "name": "Apply a structured condition",
+                },
+                {
+                    "id": "saving_throw_damage",
+                    "name": "Resolve a saving throw and damage",
+                },
+                {
+                    "id": "dismiss",
+                    "name": "No structured condition applies",
+                },
+            ],
+        )
+        encounter.clear()
+        encounter.update(next_value)
+        window = encounter["pending"][-1]
+        window.update(
+            trigger="attack_on_hit_effect",
+            attacker_id=attacker_id,
+            target_id=target_id,
+            weapon_id=weapon_id,
+            effect=effect,
+        )
+        result["pending_on_hit_ruling_id"] = window["id"]
+        return window
+
+    def record_source_trait_damage(
+        encounter: dict[str, Any],
+        *,
+        target_id: str,
+        damage: dict[str, Any] | None,
+    ) -> list[str]:
+        if not isinstance(damage, dict) or int(damage.get("applied_amount", 0) or 0) <= 0:
+            return []
+        parts = [
+            item
+            for item in damage.get("parts") or damage.get("roll_parts") or []
+            if isinstance(item, dict)
+            and int(item.get("applied_amount", item.get("amount", 0)) or 0) > 0
+        ]
+        damage_types = {
+            str(item.get("damage_type") or "").strip().casefold()
+            for item in parts
+            if str(item.get("damage_type") or "").strip()
+        }
+        if not damage_types:
+            damage_type = str(damage.get("damage_type") or "").strip().casefold()
+            if damage_type and damage_type != "mixed":
+                damage_types.add(damage_type)
+        suppressed: list[str] = []
+        for trait in encounter.get("source_traits", []):
+            if (
+                isinstance(trait, dict)
+                and trait.get("active", True)
+                and trait.get("kind") == "regeneration"
+                and str(trait.get("actor_id") or "") == target_id
+                and damage_types
+                & {
+                    str(item).casefold()
+                    for item in trait.get("suppressed_by_damage_types") or []
+                }
+            ):
+                trait["suppressed_at_next_turn"] = True
+                trait["last_suppressing_damage_types"] = sorted(
+                    damage_types
+                    & {
+                        str(item).casefold()
+                        for item in trait.get("suppressed_by_damage_types") or []
+                    }
+                )
+                suppressed.append(str(trait.get("feature_id") or ""))
+        return suppressed
+
+    def reconcile_source_attachments(
+        encounter: dict[str, Any],
+        *,
+        actor_id: str,
+        sheet: dict[str, Any],
+    ) -> list[str]:
+        hp = int(
+            dict(dict(sheet.get("combat") or {}).get("hp") or {}).get("value", 0)
+            or 0
+        )
+        conditions = {
+            str(item).strip().casefold() for item in sheet.get("conditions", [])
+        }
+        ended: list[str] = []
+        for effect in encounter.get("ongoing_effects", []):
+            if (
+                not isinstance(effect, dict)
+                or not effect.get("active", True)
+                or effect.get("kind") != "attachment"
+            ):
+                continue
+            reason = ""
+            if str(effect.get("source_actor_id") or "") == actor_id and (
+                hp <= 0 or "dead" in conditions
+            ):
+                reason = "source_incapacitated"
+            elif (
+                str(effect.get("target_id") or "") == actor_id
+                and "dead" in conditions
+            ):
+                reason = "target_dead"
+            if reason:
+                effect["active"] = False
+                effect["ended_reason"] = reason
+                ended.append(str(effect.get("id") or ""))
+        return ended
+
+    def settle_source_start_turn(
+        encounter: dict[str, Any],
+        *,
+        actor_id: str,
+        sheets: dict[str, dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        settlements: list[dict[str, Any]] = []
+        for trait in encounter.get("source_traits", []):
+            if (
+                not isinstance(trait, dict)
+                or not trait.get("active", True)
+                or trait.get("kind") != "regeneration"
+                or str(trait.get("actor_id") or "") != actor_id
+            ):
+                continue
+            suppressed = bool(trait.get("suppressed_at_next_turn", False))
+            result = settle_start_turn_regeneration(
+                sheets[actor_id],
+                amount=int(trait["amount"]),
+                suppressed=suppressed,
+            )
+            sheets[actor_id] = result["sheet"]
+            trait["suppressed_at_next_turn"] = False
+            trait["last_resolution"] = {
+                "round": int(encounter.get("round", 1) or 1),
+                "suppressed": suppressed,
+                "amount": int(result["amount"]),
+                "died": bool(result["died"]),
+            }
+            trait.pop("last_suppressing_damage_types", None)
+            settlement = {
+                "kind": "source_regeneration",
+                "actor_id": actor_id,
+                "feature_id": str(trait.get("feature_id") or ""),
+                "source_excerpt": str(trait.get("source_excerpt") or ""),
+                "result": {
+                    key: value for key, value in result.items() if key != "sheet"
+                },
+            }
+            settlements.append(settlement)
+            encounter["log"] = [
+                *list(encounter.get("log") or []),
+                settlement,
+            ][-100:]
+            reconcile_source_attachments(
+                encounter,
+                actor_id=actor_id,
+                sheet=sheets[actor_id],
+            )
+
+        for effect in encounter.get("ongoing_effects", []):
+            if (
+                not isinstance(effect, dict)
+                or not effect.get("active", True)
+                or effect.get("kind") != "attachment"
+                or str(effect.get("source_actor_id") or "") != actor_id
+            ):
+                continue
+            target_id = str(effect.get("target_id") or "")
+            if target_id not in sheets:
+                raise CombatEngineError(
+                    "attachment target is not an encounter combatant"
+                )
+            target_conditions = {
+                str(item).strip().casefold()
+                for item in sheets[target_id].get("conditions", [])
+            }
+            if "dead" in target_conditions:
+                effect["active"] = False
+                effect["ended_reason"] = "target_dead"
+                continue
+            drain_roll = asdict(roll(str(effect["drain_formula"])))
+            target_combatant = require_encounter_combatant(
+                encounter,
+                target_id,
+                role="attachment target",
+            )
+            drained = apply_hit_point_loss_to_sheet(
+                sheets[target_id],
+                amount=int(drain_roll["total"]),
+                death_saves=bool(target_combatant.get("death_saves", False)),
+                zero_hp_recovery=bool(
+                    target_combatant.get("zero_hp_recovery", False)
+                ),
+            )
+            sheets[target_id] = drained["sheet"]
+            effect["drained_hit_points"] = int(
+                effect.get("drained_hit_points", 0) or 0
+            ) + int(drained["hit_point_loss"])
+            target_conditions = {
+                str(item).strip().casefold()
+                for item in sheets[target_id].get("conditions", [])
+            }
+            detach_reason = ""
+            if "dead" in target_conditions:
+                detach_reason = "target_dead"
+            elif int(effect["drained_hit_points"]) >= int(
+                effect["detach_after_hit_point_loss"]
+            ):
+                detach_reason = "drain_threshold"
+            if detach_reason:
+                effect["active"] = False
+                effect["ended_reason"] = detach_reason
+                source_combatant = require_encounter_combatant(
+                    encounter,
+                    actor_id,
+                    role="attaching creature",
+                )
+                budget = dict(source_combatant.get("turn_budget") or {})
+                movement_cost = int(effect["self_detach_movement_ft"])
+                budget["movement"] = max(
+                    0,
+                    int(budget.get("movement", 0) or 0) - movement_cost,
+                )
+                source_combatant["turn_budget"] = budget
+            settlement = {
+                "kind": "attachment_drain",
+                "effect_id": str(effect.get("id") or ""),
+                "source_actor_id": actor_id,
+                "target_id": target_id,
+                "source_excerpt": str(effect.get("source_excerpt") or ""),
+                "roll": drain_roll,
+                "result": {
+                    key: value for key, value in drained.items() if key != "sheet"
+                },
+                "drained_hit_points": int(effect["drained_hit_points"]),
+                "detached": bool(detach_reason),
+                "detach_reason": detach_reason,
+            }
+            settlements.append(settlement)
+            encounter["log"] = [
+                *list(encounter.get("log") or []),
+                settlement,
+            ][-100:]
+            reconcile_readied_spells(encounter, target_id, sheets[target_id])
+        return settlements
+
     def consume_next_attack_advantage(
         encounter: dict[str, Any],
         plan: dict[str, Any],
@@ -2254,9 +2732,19 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     damage_type="force",
                     source=spell_id,
                     ruleset=str(value.get("ruleset") or "2014"),
-                    death_saves=bool(combatant.get("death_saves", False)),
+                    death_saves=combatant_zero_hp_buffered(combatant),
                 )
                 sheet = applied["sheet"]
+                record_source_trait_damage(
+                    value,
+                    target_id=target_id,
+                    damage=applied,
+                )
+                reconcile_source_attachments(
+                    value,
+                    actor_id=target_id,
+                    sheet=sheet,
+                )
                 concentration = applied.get("concentration")
                 if concentration:
                     concentration_windows.append(
@@ -4050,6 +4538,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "initiative",
                 "tie_breaker",
                 "source_conditions",
+                "source_traits",
             }
             unknown = set(entry) - allowed
             if unknown:
@@ -4066,6 +4555,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 or any(not isinstance(item, dict) for item in source_conditions)
             ):
                 raise ValueError("source_conditions must be a list of objects")
+            source_traits = entry.get("source_traits")
+            if source_traits is not None and (
+                not isinstance(source_traits, list)
+                or any(not isinstance(item, dict) for item in source_traits)
+            ):
+                raise ValueError("source_traits must be a list of objects")
             config_by_actor[actor_id_value] = dict(entry)
         current_scene_context = modules.current_scene(campaign_id, scope_id=scope_id)
         scene_context = None
@@ -4208,6 +4703,20 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         source_condition_records: list[dict[str, Any]] = []
         source_condition_sheets: dict[str, dict[str, Any]] = {}
         source_condition_characters = {character.id: character for character in participants}
+        source_trait_records: list[dict[str, Any]] = []
+        for actor_id_value, config_entry in config_by_actor.items():
+            actor = source_condition_characters[actor_id_value]
+            for raw_trait in config_entry.get("source_traits") or []:
+                trait = source_regeneration_trait(actor, raw_trait)
+                if any(
+                    str(item.get("actor_id") or "") == actor_id_value
+                    and str(item.get("feature_id") or "") == trait["feature_id"]
+                    for item in source_trait_records
+                ):
+                    raise ValueError(
+                        "source traits must identify unique actor feature records"
+                    )
+                source_trait_records.append(trait)
         supported_source_conditions = {
             "blinded",
             "charmed",
@@ -4326,6 +4835,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             actor = combat_actor_snapshot(character_id)
             actor_config = dict(config_by_actor.get(character_id, {}))
             actor_config.pop("source_conditions", None)
+            actor_config.pop("source_traits", None)
+            if any(
+                str(item.get("actor_id") or "") == character_id
+                and item.get("kind") == "regeneration"
+                for item in source_trait_records
+            ):
+                actor_config["zero_hp_recovery"] = True
             actor.update(actor_config)
             if character_id in source_condition_sheets:
                 actor["sheet"] = validate_character_sheet(
@@ -4344,6 +4860,26 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             encounter["participant_manifest"] = readiness
         if source_condition_records:
             encounter["source_conditions"] = source_condition_records
+        if source_trait_records:
+            encounter["source_traits"] = source_trait_records
+        initial_sheets = {
+            str(character.id): deepcopy(
+                source_condition_sheets.get(str(character.id), character.sheet)
+            )
+            for character in participants
+        }
+        first_combatant = current_combatant(encounter)
+        initial_source_turn = (
+            settle_source_start_turn(
+                encounter,
+                actor_id=str(first_combatant.get("actor_id") or ""),
+                sheets=initial_sheets,
+            )
+            if first_combatant is not None
+            else []
+        )
+        for actor_id_value, sheet in initial_sheets.items():
+            sync_combatant_conditions(encounter, actor_id_value, sheet)
         initiatives = [
             int(item.get("initiative", 0) or 0) for item in encounter.get("combatants", [])
         ]
@@ -4359,22 +4895,25 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         updated_state["combat"] = encounter
         updated_state["game_phase"] = PROFILE_COMBAT
         updated_state = validate_party_state(updated_state)
-        source_condition_updates = [
+        source_start_updates = [
             CharacterStateUpdate(
                 character_id=actor_id_value,
                 sheet=validate_character_sheet(
                     sheet,
                     rules=effective_rule_context(campaign_id),
                 ),
-                notes=validate_character_notes(source_condition_characters[actor_id_value].notes),
+                notes=validate_character_notes(
+                    source_condition_characters[actor_id_value].notes
+                ),
                 expected_revision=source_condition_characters[actor_id_value].revision,
             )
-            for actor_id_value, sheet in source_condition_sheets.items()
+            for actor_id_value, sheet in initial_sheets.items()
+            if sheet != source_condition_characters[actor_id_value].sheet
         ]
         revisions_result = StateMutationService(storage.database).replace(
             campaign_id,
             campaign_state=updated_state,
-            character_updates=source_condition_updates,
+            character_updates=source_start_updates,
             expected_campaign_revision=campaign.revision,
             operation="combat.start",
             actor=principal_id,
@@ -4384,6 +4923,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         response = {
             "combat": encounter,
+            "source_turn_start": initial_source_turn,
             "tool_profile": PROFILE_COMBAT,
             "campaign_revision": mutation_revision(campaign_id),
             "revisions": [asdict(item) for item in revisions_result or []],
@@ -4909,6 +5449,16 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         reconcile_readied_spells(next_encounter, target_id, updated_target["sheet"])
         damage_result = result.get("damage")
         if isinstance(damage_result, dict):
+            record_source_trait_damage(
+                next_encounter,
+                target_id=target_id,
+                damage=damage_result,
+            )
+            reconcile_source_attachments(
+                next_encounter,
+                actor_id=target_id,
+                sheet=updated_target["sheet"],
+            )
             add_concentration_window(
                 next_encounter,
                 target_id,
@@ -4936,6 +5486,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 )
                 is not None
             )
+            attachment = (
+                re.search(
+                    r"(?i)\battaches to the target\b",
+                    str(on_hit_ruling["effect"]),
+                )
+                is not None
+            )
             next_encounter = add_choice_window(
                 next_encounter,
                 kind="ruling",
@@ -4950,6 +5507,16 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                             }
                         ]
                         if next_attack_advantage
+                        else []
+                    ),
+                    *(
+                        [
+                            {
+                                "id": "attachment",
+                                "name": "Apply a structured attachment",
+                            }
+                        ]
+                        if attachment
                         else []
                     ),
                     {
@@ -4975,6 +5542,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 effect=str(on_hit_ruling["effect"]).strip(),
             )
             result["pending_on_hit_ruling_id"] = pending_on_hit_ruling["id"]
+        critical_followup_window = add_critical_followup_window(
+            next_encounter,
+            result=result,
+            attacker_id=actor_id,
+            target_id=target_id,
+            weapon_id=str(plan.get("weapon_id") or ""),
+        )
+        if critical_followup_window is not None:
+            pending_on_hit_ruling = critical_followup_window
         next_encounter["log"] = [
             *list(next_encounter.get("log") or []),
             {"type": "attack", "result": result},
@@ -5066,7 +5642,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if (
             not isinstance(window, dict)
             or window.get("kind") != "ruling"
-            or window.get("trigger") != "attack_on_hit_effect"
+            or window.get("trigger")
+            not in {"attack_on_hit_effect", "critical_body_part_loss"}
             or str(window.get("target_id") or "") != target_id
             or str(window.get("actor_id") or "") != target_id
         ):
@@ -5078,13 +5655,47 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "apply_condition",
             "saving_throw_damage",
             "next_attack_advantage",
+            "attachment",
+            "critical_followup",
             "dismiss",
         }:
             raise CombatEngineError(
                 "attack on-hit ruling must apply a condition, resolve save damage, "
-                "grant reviewed next-attack advantage, or dismiss it"
+                "grant reviewed next-attack advantage, apply an attachment, settle "
+                "a critical follow-up, or dismiss it"
             )
         effect = str(window.get("effect") or "").strip()
+        is_critical_body_part_loss = (
+            window.get("trigger") == "critical_body_part_loss"
+        )
+        if is_critical_body_part_loss:
+            allowed_fields = {"id", "source_excerpt", "target_has_limbs"}
+            source_excerpt = str(
+                normalized_selection.get("source_excerpt") or ""
+            ).strip()
+            target_has_limbs = normalized_selection.get("target_has_limbs")
+            followup = dict(window.get("critical_followup") or {})
+            if (
+                selection_id != "critical_followup"
+                or set(normalized_selection) - allowed_fields
+                or not isinstance(target_has_limbs, bool)
+                or not source_excerpt
+                or source_excerpt.casefold() != effect.casefold()
+                or not followup.get("anatomical_loss_triggered")
+                or int(
+                    dict(followup.get("followup_roll") or {}).get("total", 0)
+                    or 0
+                )
+                != int(followup.get("anatomical_loss_natural", 20) or 20)
+            ):
+                raise CombatEngineError(
+                    "critical anatomical loss requires the exact attack excerpt "
+                    "and an explicit DM ruling about whether the target has limbs"
+                )
+        elif selection_id == "critical_followup":
+            raise CombatEngineError(
+                "critical follow-up settlement requires its triggered d20 window"
+            )
         has_explicit_save_damage = (
             re.search(r"(?i)\bsaving throw\b", effect) is not None
             and re.search(r"(?i)\bdamage\b", effect) is not None
@@ -5133,6 +5744,27 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         "name": "Grant advantage to the next attack",
                     },
                 ]
+        elif selection_id == "attachment":
+            allowed_fields = {"id", "source_excerpt"}
+            unknown_fields = set(normalized_selection) - allowed_fields
+            source_excerpt = str(
+                normalized_selection.get("source_excerpt") or ""
+            ).strip()
+            candidate_ids = {
+                str(item.get("id") or "")
+                for item in window.get("candidates", [])
+                if isinstance(item, dict)
+            }
+            if (
+                unknown_fields
+                or "attachment" not in candidate_ids
+                or not source_excerpt
+                or source_excerpt.casefold() not in effect.casefold()
+            ):
+                raise CombatEngineError(
+                    "attachment requires the exact reviewed attack excerpt"
+                )
+            source_attachment_effect(effect)
         next_encounter = resolve_choice_window(
             encounter,
             choice_id=choice_id,
@@ -5143,7 +5775,48 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         ongoing_effect: dict[str, Any] | None = None
         settlement_result: dict[str, Any] | None = None
         rule_receipts: list[dict[str, Any]] = []
-        if selection_id == "next_attack_advantage":
+        if selection_id == "critical_followup":
+            source_excerpt = str(normalized_selection["source_excerpt"]).strip()
+            part_category = (
+                "limb"
+                if normalized_selection["target_has_limbs"]
+                else "body_portion"
+            )
+            effect_id = f"{choice_id}:anatomical-loss"
+            updated_sheet, _ = add_effect(
+                updated_sheet,
+                {
+                    "id": effect_id,
+                    "name": "Source-authored anatomical loss",
+                    "kind": "anatomical_loss",
+                    "source": str(window.get("weapon_id") or ""),
+                    "active": True,
+                    "changes": [],
+                    "description": source_excerpt,
+                },
+            )
+            ongoing_effect = {
+                "id": effect_id,
+                "kind": "anatomical_loss",
+                "source_actor_id": str(window.get("attacker_id") or ""),
+                "target_id": target_id,
+                "weapon_id": str(window.get("weapon_id") or ""),
+                "part_category": part_category,
+                "mechanical_effect": "dm_unspecified",
+                "source_excerpt": source_excerpt,
+                "active": True,
+            }
+            next_encounter["ongoing_effects"] = [
+                *list(next_encounter.get("ongoing_effects") or []),
+                ongoing_effect,
+            ]
+            settlement_result = {
+                "anatomical_loss": True,
+                "part_category": part_category,
+                "mechanical_effect": "dm_unspecified",
+                "effect_id": effect_id,
+            }
+        elif selection_id == "next_attack_advantage":
             source_excerpt = str(normalized_selection["source_excerpt"]).strip()
             ongoing_effect = {
                 "id": str(choice_id),
@@ -5161,6 +5834,41 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 *list(next_encounter.get("ongoing_effects") or []),
                 ongoing_effect,
             ]
+        elif selection_id == "attachment":
+            source_excerpt = str(normalized_selection["source_excerpt"]).strip()
+            attachment = source_attachment_effect(effect)
+            source_actor_id = str(window.get("attacker_id") or "")
+            if any(
+                isinstance(item, dict)
+                and item.get("active", True)
+                and item.get("kind") == "attachment"
+                and str(item.get("source_actor_id") or "") == source_actor_id
+                for item in next_encounter.get("ongoing_effects", [])
+            ):
+                raise CombatEngineError(
+                    "an attaching creature cannot maintain multiple attachments"
+                )
+            ongoing_effect = {
+                "id": str(choice_id),
+                "kind": "attachment",
+                "source_actor_id": source_actor_id,
+                "target_id": target_id,
+                "weapon_id": str(window.get("weapon_id") or ""),
+                "source_excerpt": source_excerpt,
+                "effect": effect,
+                "drained_hit_points": 0,
+                "active": True,
+                **attachment,
+            }
+            next_encounter["ongoing_effects"] = [
+                *list(next_encounter.get("ongoing_effects") or []),
+                ongoing_effect,
+            ]
+            settlement_result = {
+                "attached": True,
+                "source_actor_id": source_actor_id,
+                "target_id": target_id,
+            }
         elif selection_id == "apply_condition":
             allowed_fields = {
                 "id",
@@ -5443,9 +6151,19 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     damage_type=damage_type,
                     source=str(window.get("weapon_id") or "attack-on-hit"),
                     ruleset=str(next_encounter.get("ruleset") or "2014"),
-                    death_saves=bool(combatant.get("death_saves", False)),
+                    death_saves=combatant_zero_hp_buffered(combatant),
                 )
                 updated_sheet = damaged["sheet"]
+                record_source_trait_damage(
+                    next_encounter,
+                    target_id=target_id,
+                    damage=damaged,
+                )
+                reconcile_source_attachments(
+                    next_encounter,
+                    actor_id=target_id,
+                    sheet=updated_sheet,
+                )
                 damaged_result = {
                     key: value for key, value in damaged.items() if key != "sheet"
                 }
@@ -5643,6 +6361,31 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             elapsed_rounds = int(next_state["combat"].get("rounds_until_minute", 0) or 0) + 1
             minute_changed = elapsed_rounds >= 10
             next_state["combat"]["rounds_until_minute"] = 0 if minute_changed else elapsed_rounds
+        source_sheets = {
+            str(item.get("actor_id")): deepcopy(
+                duration["sheet"]
+                if str(item.get("actor_id")) == actor_id
+                else characters.get(str(item.get("actor_id"))).sheet
+            )
+            for item in next_state["combat"].get("combatants", [])
+        }
+        started_effects_by_actor: dict[str, dict[str, Any]] = {}
+        if next_combatant is not None:
+            next_actor_id = str(next_combatant.get("actor_id") or "")
+            started_effects_by_actor[next_actor_id] = advance_effect_durations(
+                source_sheets[next_actor_id],
+                period="turn_start",
+            )
+            source_sheets[next_actor_id] = started_effects_by_actor[next_actor_id][
+                "sheet"
+            ]
+            source_turn_start = settle_source_start_turn(
+                next_state["combat"],
+                actor_id=next_actor_id,
+                sheets=source_sheets,
+            )
+        else:
+            source_turn_start = []
         combat_updates: list[CharacterStateUpdate] = []
         expired_effects = {
             *duration["expired"],
@@ -5657,7 +6400,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         for combatant in next_state["combat"].get("combatants", []):
             target_id = str(combatant.get("actor_id"))
             target = characters.get(target_id)
-            sheet = deepcopy(duration["sheet"] if target_id == actor_id else target.sheet)
+            sheet = deepcopy(source_sheets[target_id])
             for readied in expired_readied:
                 if str(readied.get("actor_id")) != target_id:
                     continue
@@ -5665,10 +6408,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     if effect.get("id") == readied.get("holding_effect_id"):
                         effect["active"] = False
             expired: list[str] = []
-            if next_combatant and target_id == next_combatant.get("actor_id"):
-                started = advance_effect_durations(sheet, period="turn_start")
-                sheet = started["sheet"]
-                expired.extend(started["expired"])
+            if target_id in started_effects_by_actor:
+                expired.extend(started_effects_by_actor[target_id]["expired"])
             if round_changed:
                 rounded = advance_effect_durations(sheet, period="round")
                 sheet = rounded["sheet"]
@@ -5727,6 +6468,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "combat": next_state["combat"],
             "effects_expired": sorted(expired_effects),
             "readied_spells_expired": sorted(str(item.get("id")) for item in expired_readied),
+            "source_turn_start": source_turn_start,
             "rule_receipts": rule_receipts,
             "ruleset_fingerprint": rule_context.fingerprint,
             "campaign_revision": mutation_revision(campaign_id),
@@ -6348,6 +7090,16 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         reconcile_readied_spells(next_encounter, target_id, updated_target["sheet"])
         damage_result = result.get("damage")
         if isinstance(damage_result, dict):
+            record_source_trait_damage(
+                next_encounter,
+                target_id=target_id,
+                damage=damage_result,
+            )
+            reconcile_source_attachments(
+                next_encounter,
+                actor_id=target_id,
+                sheet=updated_target["sheet"],
+            )
             add_concentration_window(
                 next_encounter,
                 target_id,
@@ -6358,6 +7110,20 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             result["damage"] = {
                 key: value for key, value in result["damage"].items() if key != "sheet"
             }
+        on_hit_window = add_attack_on_hit_window(
+            next_encounter,
+            result=result,
+            attacker_id=actor_id,
+            target_id=target_id,
+            weapon_id=str(plan.get("weapon_id") or ""),
+        )
+        critical_followup_window = add_critical_followup_window(
+            next_encounter,
+            result=result,
+            attacker_id=actor_id,
+            target_id=target_id,
+            weapon_id=str(plan.get("weapon_id") or ""),
+        )
         next_encounter["log"] = [
             *list(next_encounter.get("log") or []),
             {"type": "reaction_attack", "choice_id": choice_id, "result": result},
@@ -6395,7 +7161,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             ],
         )
         response = {
-            "status": "committed",
+            "status": (
+                "pending_ruling"
+                if on_hit_window is not None
+                or critical_followup_window is not None
+                else "committed"
+            ),
             "result": result,
             "combat": next_encounter,
             "campaign_revision": mutation_revision(campaign_id),
@@ -6591,6 +7362,16 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         reconcile_readied_spells(next_encounter, actor_id, updated_target["sheet"])
         damage_result = result.get("damage")
         if isinstance(damage_result, dict):
+            record_source_trait_damage(
+                next_encounter,
+                target_id=actor_id,
+                damage=damage_result,
+            )
+            reconcile_source_attachments(
+                next_encounter,
+                actor_id=actor_id,
+                sheet=updated_target["sheet"],
+            )
             add_concentration_window(
                 next_encounter,
                 actor_id,
@@ -6600,6 +7381,20 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             result["damage"] = {
                 key: value for key, value in damage_result.items() if key != "sheet"
             }
+        on_hit_window = add_attack_on_hit_window(
+            next_encounter,
+            result=result,
+            attacker_id=attacker_id,
+            target_id=actor_id,
+            weapon_id=str(plan.get("weapon_id") or ""),
+        )
+        critical_followup_window = add_critical_followup_window(
+            next_encounter,
+            result=result,
+            attacker_id=attacker_id,
+            target_id=actor_id,
+            weapon_id=str(plan.get("weapon_id") or ""),
+        )
         spell_resolution_id = str(window.get("spell_resolution_id") or "")
         if spell_resolution_id:
             result["spell_resolution"] = advance_spell_attack_resolution(
@@ -6656,7 +7451,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             ],
         )
         response = {
-            "status": "committed",
+            "status": (
+                "pending_ruling"
+                if on_hit_window is not None
+                or critical_followup_window is not None
+                else "committed"
+            ),
             "result": result,
             "combat": next_encounter,
             "campaign_revision": mutation_revision(campaign_id),
@@ -6888,15 +7688,27 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             raise CombatEngineError("use combat_cast_spell for spell resource settlement")
         if target_id is not None:
             require_campaign_actor(campaign_id, target_id)
-        next_encounter = resolve_common_action(
-            encounter,
-            actor_id_value=actor_id,
-            action=action,
-            target_id=target_id,
-            trigger=trigger,
-            payload=payload,
-        )
         normalized_action = str(action).strip().lower().replace("-", "_")
+        if normalized_action == "detach_attachment":
+            effect_id = str(dict(payload or {}).get("effect_id") or "").strip()
+            if not effect_id:
+                raise CombatEngineError(
+                    "detach_attachment requires payload.effect_id"
+                )
+            next_encounter = detach_attachment(
+                encounter,
+                actor_id_value=actor_id,
+                effect_id=effect_id,
+            )
+        else:
+            next_encounter = resolve_common_action(
+                encounter,
+                actor_id_value=actor_id,
+                action=action,
+                target_id=target_id,
+                trigger=trigger,
+                payload=payload,
+            )
         boundary_ids: list[str] = []
         if normalized_action == "ready":
             boundary_ids.append("dnd5e.core.ready.action")
@@ -7712,9 +8524,19 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         damage_type=str(damage_spec["damage_type"]),
                         source=spell_id,
                         ruleset=str(next_encounter.get("ruleset") or "2014"),
-                        death_saves=bool(combatant.get("death_saves", False)),
+                        death_saves=combatant_zero_hp_buffered(combatant),
                     )
                     final_sheets[target_id] = damaged["sheet"]
+                    record_source_trait_damage(
+                        next_encounter,
+                        target_id=target_id,
+                        damage=damaged,
+                    )
+                    reconcile_source_attachments(
+                        next_encounter,
+                        actor_id=target_id,
+                        sheet=damaged["sheet"],
+                    )
                     sync_combatant_conditions(next_encounter, target_id, damaged["sheet"])
                     reconcile_readied_spells(next_encounter, target_id, damaged["sheet"])
                     add_concentration_window(
@@ -9422,6 +10244,137 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             remember_idempotent(scope, idempotency_key, payload, response, campaign_id),
         )
 
+    def combat_source_stabilize(
+        campaign_id: str,
+        target_id: str,
+        source_excerpt: str,
+        principal_id: str = "system:local",
+        expected_revision: int | None = None,
+        branch_id: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Apply an explicit module-authored stabilization without inventing an actor."""
+
+        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        require_write_contract(expected_revision, idempotency_key)
+        resolved_branch_id = require_current_branch(campaign_id, branch_id)
+        normalized_excerpt = " ".join(str(source_excerpt or "").split()).strip()
+        if not 8 <= len(normalized_excerpt) <= 4000:
+            raise ValueError(
+                "source stabilization excerpt must contain 8 to 4000 characters"
+            )
+        payload = {
+            "target_id": target_id,
+            "source_excerpt": normalized_excerpt,
+            "branch_id": resolved_branch_id,
+        }
+        scope = (
+            f"combat-source-stabilize:{campaign_id}:"
+            f"{resolved_branch_id}:{principal_id}"
+        )
+        replay = replay_idempotent(scope, idempotency_key, payload)
+        if replay is not None:
+            return combat_response(campaign_id, principal_id, replay)
+        campaign, encounter = active_encounter(campaign_id)
+        if campaign.revision != expected_revision:
+            raise ValueError(
+                "campaign revision conflict: "
+                f"expected {expected_revision}, found {campaign.revision}"
+            )
+        require_no_blocking_pending(encounter)
+        combatant = require_encounter_combatant(
+            encounter,
+            target_id,
+            role="source stabilization target",
+        )
+        if not combatant.get("death_saves", False):
+            raise CombatEngineError(
+                "source stabilization requires a combatant that uses death saves"
+            )
+        scene_id = str(encounter.get("scene_id") or "").strip()
+        if not scene_id:
+            raise CombatEngineError(
+                "source stabilization requires an encounter scene"
+            )
+        source_scene = modules.read_scene(campaign_id, scene_id)
+        if _normalize_source_evidence_text(
+            normalized_excerpt
+        ) not in _normalize_source_evidence_text(source_scene.get("content")):
+            raise ValueError(
+                "source stabilization excerpt is not present in the encounter scene"
+            )
+        target = combat_actor_snapshot(target_id)
+        applied = stabilize_sheet(target["sheet"])
+        updated_sheet = validate_character_sheet(applied["sheet"])
+        next_encounter = deepcopy(encounter)
+        sync_combatant_conditions(next_encounter, target_id, updated_sheet)
+        reconcile_readied_spells(next_encounter, target_id, updated_sheet)
+        result = {
+            key: value for key, value in applied.items() if key != "sheet"
+        }
+        result.update(
+            {
+                "kind": "source_stabilization",
+                "target_id": target_id,
+                "source_excerpt": normalized_excerpt,
+                "source_ref": f"module-scene:{scene_id}",
+            }
+        )
+        next_encounter["log"] = [
+            *list(next_encounter.get("log") or []),
+            {"type": "source_stabilization", "result": result},
+        ][-100:]
+        current = characters.get(target_id)
+        revisions_result = StateMutationService(storage.database).replace(
+            campaign_id,
+            campaign_state=validate_party_state(
+                {**dict(campaign.state or {}), "combat": next_encounter}
+            ),
+            character_updates=[
+                CharacterStateUpdate(
+                    character_id=target_id,
+                    sheet=updated_sheet,
+                    notes=validate_character_notes(current.notes),
+                    expected_revision=current.revision,
+                )
+            ],
+            expected_campaign_revision=campaign.revision,
+            operation="combat.source.stabilize",
+            actor=principal_id,
+            branch_id=resolved_branch_id,
+            idempotency_key=idempotency_key,
+            rule_receipts=core_receipts(
+                effective_rule_context(
+                    campaign_id,
+                    branch_id=resolved_branch_id,
+                    facts={
+                        "target_id": target_id,
+                        "source_ref": f"module-scene:{scene_id}",
+                    },
+                ),
+                ["dnd5e.core.damage.zero_hp"],
+                "combat.source.stabilize",
+            ),
+        )
+        response = {
+            "status": "committed",
+            "result": result,
+            "combat": next_encounter,
+            "campaign_revision": mutation_revision(campaign_id),
+            "revisions": [asdict(item) for item in revisions_result or []],
+        }
+        return combat_response(
+            campaign_id,
+            principal_id,
+            remember_idempotent(
+                scope,
+                idempotency_key,
+                payload,
+                response,
+                campaign_id,
+            ),
+        )
+
     @mcp.tool()
     def combat_apply_damage(
         campaign_id: str,
@@ -9468,7 +10421,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             target_combatant = require_encounter_combatant(
                 existing_encounter, target_id, role="damage target"
             )
-            target_uses_death_saves = bool(target_combatant.get("death_saves", False))
+            target_uses_death_saves = combatant_zero_hp_buffered(target_combatant)
         applied = apply_damage_parts_to_sheet(
             target["sheet"],
             parts,
@@ -9488,6 +10441,16 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         encounter = existing_encounter
         next_state = dict(campaign.state or {})
         if encounter:
+            record_source_trait_damage(
+                encounter,
+                target_id=target_id,
+                damage=applied,
+            )
+            reconcile_source_attachments(
+                encounter,
+                actor_id=target_id,
+                sheet=applied["sheet"],
+            )
             sync_combatant_conditions(encounter, target_id, applied["sheet"])
             reconcile_readied_spells(encounter, target_id, applied["sheet"])
             add_concentration_window(
@@ -14815,8 +15778,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             if str(source_scene.get("module_id")) != module_id:
                 raise ValueError("participant evidence must belong to the encounter module")
             source_excerpt = " ".join(str(raw_group.get("source_excerpt") or "").split()).strip()
-            if len(source_excerpt) < 8 or len(source_excerpt) > 500:
-                raise ValueError("participant source_excerpt must contain 8 to 500 characters")
+            if len(source_excerpt) < 8 or len(source_excerpt) > 4000:
+                raise ValueError(
+                    "participant source_excerpt must contain 8 to 4000 characters"
+                )
             normalized_excerpt = _normalize_source_evidence_text(source_excerpt)
             normalized_content = _normalize_source_evidence_text(source_scene.get("content"))
             if normalized_excerpt not in normalized_content:
@@ -21063,7 +22028,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     def combat_hp_change(
         campaign_id: str,
         target_id: str,
-        action: Literal["damage", "heal"],
+        action: Literal["damage", "heal", "stabilize"],
         payload: dict[str, Any],
         principal_id: str = "system:local",
         expected_revision: int | None = None,
@@ -21072,8 +22037,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     ) -> dict[str, Any]:
         """Apply structured damage or healing; damage parts and healing amounts stay distinct."""
         data = facade_payload(payload)
-        result = (
-            combat_apply_damage(
+        if action == "damage":
+            result = combat_apply_damage(
                 campaign_id,
                 target_id,
                 required(data, "parts"),
@@ -21085,8 +22050,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 knock_out=data.get("knock_out", False),
                 melee=data.get("melee", False),
             )
-            if action == "damage"
-            else combat_heal(
+        elif action == "heal":
+            result = combat_heal(
                 campaign_id,
                 target_id,
                 required(data, "amount"),
@@ -21098,7 +22063,16 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 spell_id=data.get("spell_id"),
                 spell_level=data.get("spell_level"),
             )
-        )
+        else:
+            result = combat_source_stabilize(
+                campaign_id,
+                target_id,
+                required(data, "source_excerpt"),
+                principal_id,
+                expected_revision,
+                branch_id,
+                idempotency_key,
+            )
         return facade_result(action, result)
 
     @mcp.tool()

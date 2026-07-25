@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import json
 import os
+import re
 import sys
 from copy import deepcopy
 from pathlib import Path
@@ -31,7 +32,11 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--home", type=Path, required=True)
     parser.add_argument("--campaign-id", required=True)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--action", choices=("start", "status", "auto-run"), required=True)
+    parser.add_argument(
+        "--action",
+        choices=("start", "status", "auto-run", "finalize"),
+        required=True,
+    )
     parser.add_argument("--run-id", default="full-playthrough-encounter-v1")
     parser.add_argument("--party-report", type=Path, action="append", required=True)
     parser.add_argument(
@@ -90,6 +95,16 @@ def _arguments() -> argparse.Namespace:
         help=(
             "Encounter-scoped source condition with condition, actor_ids, source_ref, "
             "and exact source_excerpt; repeat for independently cited conditions"
+        ),
+    )
+    parser.add_argument(
+        "--source-trait-json",
+        action="append",
+        type=json.loads,
+        default=[],
+        help=(
+            "Source-bound participant trait with actor_id, kind, feature_id, "
+            "and exact source_excerpt; currently supports regeneration"
         ),
     )
     parser.add_argument(
@@ -187,6 +202,24 @@ def _arguments() -> argparse.Namespace:
         help=(
             "Source-cited delayed participation with actor_id, until_round, and "
             "source_excerpt; the actor remains present but takes no earlier turn"
+        ),
+    )
+    parser.add_argument(
+        "--source-zero-hp-finisher-json",
+        type=json.loads,
+        default=None,
+        help=(
+            "Source-authored zero-HP finisher with target_id, eligible actor_ids, "
+            "the exact encounter source_excerpt, and the exact 2014 oil_rule_excerpt"
+        ),
+    )
+    parser.add_argument(
+        "--source-zero-hp-stabilization-json",
+        type=json.loads,
+        default=None,
+        help=(
+            "Module-authored stabilization with eligible PC actor_ids and an exact "
+            "scene source_excerpt; no anonymous helper actor is invented"
         ),
     )
     parser.add_argument("--surrender-actor-id", default="")
@@ -391,14 +424,35 @@ def _participant_config(
     party_ids: list[str],
     hostile_ids: list[str],
     *,
+    ally_ids: list[str] | None = None,
     surprise_by_actor: dict[str, bool],
     hostiles_hidden: bool = True,
     hidden_actor_ids: list[str] | None = None,
     visible_to_actor_ids_by_hostile: dict[str, list[str]] | None = None,
     source_conditions_by_actor: dict[str, list[dict[str, Any]]] | None = None,
+    source_traits_by_actor: dict[str, list[dict[str, Any]]] | None = None,
 ) -> list[dict[str, Any]]:
-    if len(party_ids) > 10 or len(hostile_ids) > 10:
-        raise ValueError("default encounter layout supports at most 10 PCs and 10 hostiles")
+    allies = list(ally_ids or [])
+    if len(party_ids) + len(allies) > 10 or len(hostile_ids) > 10:
+        raise ValueError(
+            "default encounter layout supports at most 10 friendly actors "
+            "and 10 hostiles"
+        )
+    if set(party_ids) & set(allies):
+        raise ValueError("PC and allied-NPC participant ids must be disjoint")
+
+    def source_fields(actor_id: str) -> dict[str, Any]:
+        fields: dict[str, Any] = {}
+        conditions = list(
+            dict(source_conditions_by_actor or {}).get(actor_id) or []
+        )
+        traits = list(dict(source_traits_by_actor or {}).get(actor_id) or [])
+        if conditions:
+            fields["source_conditions"] = conditions
+        if traits:
+            fields["source_traits"] = traits
+        return fields
+
     configs = [
         {
             "actor_id": actor_id,
@@ -406,9 +460,23 @@ def _participant_config(
             "disposition": "friendly",
             "surprised": bool(surprise_by_actor.get(actor_id, False)),
             "death_saves": True,
+            **source_fields(actor_id),
         }
         for index, actor_id in enumerate(party_ids)
     ]
+    configs.extend(
+        {
+            "actor_id": actor_id,
+            "position": {"x": 0, "y": index + 1},
+            "disposition": "friendly",
+            "surprised": bool(surprise_by_actor.get(actor_id, False)),
+            # NPCs and monsters die at 0 HP unless the DM explicitly elects
+            # to use death saves. A prepared allied NPC is not a PC.
+            "death_saves": False,
+            **source_fields(actor_id),
+        }
+        for index, actor_id in enumerate(allies)
+    )
     hostile_positions = (
         (2, 2),
         (2, 4),
@@ -441,15 +509,7 @@ def _participant_config(
             ),
             "surprised": bool(surprise_by_actor.get(actor_id, False)),
             "death_saves": False,
-            **(
-                {
-                    "source_conditions": list(
-                        dict(source_conditions_by_actor or {}).get(actor_id) or []
-                    )
-                }
-                if dict(source_conditions_by_actor or {}).get(actor_id)
-                else {}
-            ),
+            **source_fields(actor_id),
         }
         for index, actor_id in enumerate(hostile_ids)
     )
@@ -615,6 +675,164 @@ def _source_declared_conditions(
                 }
             )
     return by_actor
+
+
+def _source_traits(
+    declarations: list[dict[str, Any]],
+    *,
+    participant_ids: list[str],
+) -> dict[str, list[dict[str, Any]]]:
+    participants = set(participant_ids)
+    by_actor: dict[str, list[dict[str, Any]]] = {}
+    seen: set[tuple[str, str]] = set()
+    allowed = {"actor_id", "kind", "feature_id", "source_excerpt"}
+    for index, declaration in enumerate(declarations):
+        if not isinstance(declaration, dict):
+            raise ValueError(f"source trait {index} must be an object")
+        unknown = set(declaration) - allowed
+        if unknown:
+            raise ValueError(
+                f"source trait {index} has unsupported fields: {sorted(unknown)}"
+            )
+        actor_id = str(declaration.get("actor_id") or "").strip()
+        kind = str(declaration.get("kind") or "").strip().casefold()
+        feature_id = str(declaration.get("feature_id") or "").strip()
+        source_excerpt = str(declaration.get("source_excerpt") or "").strip()
+        identity = (actor_id, feature_id)
+        if (
+            actor_id not in participants
+            or kind != "regeneration"
+            or not feature_id
+            or not source_excerpt
+            or identity in seen
+        ):
+            raise ValueError(
+                f"source trait {index} requires one participant, regeneration kind, "
+                "unique feature_id, and exact source_excerpt"
+            )
+        seen.add(identity)
+        by_actor.setdefault(actor_id, []).append(
+            {
+                "kind": kind,
+                "feature_id": feature_id,
+                "source_excerpt": source_excerpt,
+            }
+        )
+    return by_actor
+
+
+def _source_zero_hp_finisher(
+    declaration: dict[str, Any] | None,
+    *,
+    participant_ids: list[str],
+    encounter_source_excerpt: str,
+) -> dict[str, Any] | None:
+    if declaration is None:
+        return None
+    if not isinstance(declaration, dict):
+        raise ValueError("source zero-HP finisher must be an object")
+    allowed = {
+        "target_id",
+        "actor_ids",
+        "source_excerpt",
+        "oil_rule_excerpt",
+    }
+    unknown = set(declaration) - allowed
+    if unknown:
+        raise ValueError(
+            "source zero-HP finisher has unsupported fields: "
+            + ", ".join(sorted(unknown))
+        )
+    target_id = str(declaration.get("target_id") or "").strip()
+    actor_ids = [
+        str(item).strip() for item in declaration.get("actor_ids") or []
+    ]
+    source_excerpt = str(declaration.get("source_excerpt") or "").strip()
+    oil_rule_excerpt = str(
+        declaration.get("oil_rule_excerpt") or ""
+    ).strip()
+    participants = set(participant_ids)
+    encounter_excerpt = _normalized_source_text(encounter_source_excerpt)
+    damage_match = re.search(
+        r"(?i)\btarget takes an additional\s+(\d+)\s+fire damage "
+        r"from the burning oil\b",
+        oil_rule_excerpt,
+    )
+    if (
+        not target_id
+        or target_id not in participants
+        or not actor_ids
+        or any(not item for item in actor_ids)
+        or len(actor_ids) != len(set(actor_ids))
+        or not set(actor_ids) <= participants
+        or target_id in actor_ids
+        or not source_excerpt
+        or _normalized_source_text(source_excerpt) not in encounter_excerpt
+        or re.search(
+            r"(?i)\bdouse the troll with lamp oil and set it on fire when it falls\b",
+            source_excerpt,
+        )
+        is None
+        or damage_match is None
+        or int(damage_match.group(1)) <= 0
+    ):
+        raise ValueError(
+            "source zero-HP finisher requires one participant target, unique "
+            "participant actors, the exact authored lamp-oil instruction, and "
+            "the exact positive 2014 Oil damage rule"
+        )
+    return {
+        "id": f"source-zero-hp-finisher:{target_id}",
+        "target_id": target_id,
+        "actor_ids": actor_ids,
+        "source_excerpt": source_excerpt,
+        "oil_rule_excerpt": oil_rule_excerpt,
+        "fire_damage": int(damage_match.group(1)),
+        "oil_duration_rounds": 10,
+    }
+
+
+def _source_zero_hp_stabilization(
+    declaration: dict[str, Any] | None,
+    *,
+    participant_ids: list[str],
+) -> dict[str, Any] | None:
+    if declaration is None:
+        return None
+    if not isinstance(declaration, dict):
+        raise ValueError("source zero-HP stabilization must be an object")
+    allowed = {"actor_ids", "source_excerpt"}
+    unknown = set(declaration) - allowed
+    if unknown:
+        raise ValueError(
+            "source zero-HP stabilization has unsupported fields: "
+            + ", ".join(sorted(unknown))
+        )
+    actor_ids = [
+        str(item).strip() for item in declaration.get("actor_ids") or []
+    ]
+    source_excerpt = str(declaration.get("source_excerpt") or "").strip()
+    if (
+        not actor_ids
+        or any(not item for item in actor_ids)
+        or len(actor_ids) != len(set(actor_ids))
+        or not set(actor_ids) <= set(participant_ids)
+        or not source_excerpt
+        or re.search(
+            r"(?i)\bcharacters are reduced to 0 hit points\b.*\bemployees "
+            r"of the yawning portal step forward to stabilize them\b",
+            _normalized_source_text(source_excerpt),
+        )
+        is None
+    ):
+        raise ValueError(
+            "source zero-HP stabilization requires unique participant PCs and "
+            "the exact authored Yawning Portal employee instruction"
+        )
+    return {
+        "actor_ids": actor_ids,
+        "source_excerpt": source_excerpt,
+    }
 
 
 def _normalized_source_text(value: Any) -> str:
@@ -895,6 +1113,7 @@ def _source_on_hit_rulings(
         "damage_type",
         "half_on_success",
         "zero_hp_effect",
+        "target_has_limbs",
         "source_excerpt",
     }
     normalized: dict[tuple[str, str], dict[str, Any]] = {}
@@ -916,7 +1135,12 @@ def _source_on_hit_rulings(
                 if raw.get("save_ability") is not None
                 else "apply_condition"
             )
-        if selection_id not in {"apply_condition", "saving_throw_damage"}:
+        if selection_id not in {
+            "apply_condition",
+            "saving_throw_damage",
+            "attachment",
+            "critical_followup",
+        }:
             raise ValueError(
                 f"source on-hit ruling {index} has unsupported id {selection_id!r}"
             )
@@ -932,6 +1156,63 @@ def _source_on_hit_rulings(
                 f"source on-hit ruling {index} requires one participant weapon "
                 "and exact excerpt"
             )
+        if selection_id == "critical_followup":
+            critical_fields = {
+                "condition",
+                "escape_dc",
+                "escape_abilities",
+                "save_ability",
+                "save_dc",
+                "damage_formula",
+                "damage_type",
+                "half_on_success",
+                "zero_hp_effect",
+            }
+            if (
+                any(raw.get(field) is not None for field in critical_fields)
+                or not isinstance(raw.get("target_has_limbs"), bool)
+            ):
+                raise ValueError(
+                    f"source on-hit ruling {index} critical_followup accepts only "
+                    "actor, weapon, id, target_has_limbs, and exact excerpt"
+                )
+            normalized[identity] = {
+                "actor_id": actor_id,
+                "weapon_id": weapon_id,
+                "id": selection_id,
+                "target_has_limbs": bool(raw["target_has_limbs"]),
+                "source_excerpt": source_excerpt,
+            }
+            continue
+        if raw.get("target_has_limbs") is not None:
+            raise ValueError(
+                f"source on-hit ruling {index} target_has_limbs is only valid "
+                "for critical_followup"
+            )
+        if selection_id == "attachment":
+            attachment_fields = {
+                "condition",
+                "escape_dc",
+                "escape_abilities",
+                "save_ability",
+                "save_dc",
+                "damage_formula",
+                "damage_type",
+                "half_on_success",
+                "zero_hp_effect",
+            }
+            if any(raw.get(field) is not None for field in attachment_fields):
+                raise ValueError(
+                    f"source on-hit ruling {index} attachment accepts only "
+                    "actor, weapon, id, and exact excerpt"
+                )
+            normalized[identity] = {
+                "actor_id": actor_id,
+                "weapon_id": weapon_id,
+                "id": selection_id,
+                "source_excerpt": source_excerpt,
+            }
+            continue
         if selection_id == "saving_throw_damage":
             condition_fields = {
                 "condition",
@@ -1355,6 +1636,15 @@ async def _start(
     if phase != "play":
         raise RuntimeError("encounter start requires the play phase")
     branch = await _current_branch(client, args.campaign_id)
+    ally_ids = (
+        _prepared_actor_ids(args.ally_report, report_kind="ally")
+        if args.ally_report
+        else []
+    )
+    ally_id_set = set(ally_ids)
+    pc_ids = [actor_id for actor_id in party_ids if actor_id not in ally_id_set]
+    if len(pc_ids) + len(ally_ids) != len(party_ids):
+        raise ValueError("friendly participant reports contain duplicate actor ids")
     initial_hostile_ids = [*hostile_ids, *additional_hostile_ids]
     all_hostile_ids = [*initial_hostile_ids, *reinforcement_hostile_ids]
     target_priorities = _source_target_priorities(
@@ -1366,6 +1656,25 @@ async def _start(
         args.source_condition_json,
         participant_ids=[*party_ids, *initial_hostile_ids],
     )
+    source_traits_by_actor = _source_traits(
+        args.source_trait_json,
+        participant_ids=[*party_ids, *initial_hostile_ids],
+    )
+    source_zero_hp_finisher = _source_zero_hp_finisher(
+        args.source_zero_hp_finisher_json,
+        participant_ids=[*party_ids, *initial_hostile_ids],
+        encounter_source_excerpt=str(args.source_excerpt or ""),
+    )
+    if source_zero_hp_finisher is not None and set(
+        source_zero_hp_finisher["actor_ids"]
+    ) & set(ally_ids):
+        raise ValueError(
+            "source zero-HP finisher actor_ids must be PCs, not allied NPCs"
+        )
+    source_zero_hp_stabilization = _source_zero_hp_stabilization(
+        args.source_zero_hp_stabilization_json,
+        participant_ids=pc_ids,
+    )
     actors = await _characters(
         client,
         args.campaign_id,
@@ -1373,27 +1682,30 @@ async def _start(
     )
     opening_weapons = _source_opening_weapons(
         args.source_opening_weapon_json,
-        participant_ids=all_hostile_ids,
+        participant_ids=[*party_ids, *all_hostile_ids],
     )
     on_hit_rulings = _source_on_hit_rulings(
         args.source_on_hit_ruling_json,
-        participant_ids=all_hostile_ids,
+        participant_ids=[*party_ids, *all_hostile_ids],
     )
     delayed_actions = _source_delayed_actions(
         args.source_delayed_action_json,
         participant_ids=initial_hostile_ids,
     )
-    for actor_id in all_hostile_ids:
+    for actor_id in set(all_hostile_ids) | {
+        ruling_actor_id for ruling_actor_id, _ in on_hit_rulings
+    }:
         attacks = list(
             dict(dict(actors[actor_id].get("derived") or {}).get("inventory") or {}).get(
                 "weapon_attacks", []
             )
         )
-        _validate_hostile_attacks(
-            actor_id,
-            attacks,
-            required_weapon_ids=args.required_hostile_weapon_id,
-        )
+        if actor_id in all_hostile_ids:
+            _validate_hostile_attacks(
+                actor_id,
+                attacks,
+                required_weapon_ids=args.required_hostile_weapon_id,
+            )
         attack_ids = {str(item.get("item_id") or "") for item in attacks}
         opening = opening_weapons.get(actor_id)
         if opening and opening["weapon_id"] not in attack_ids:
@@ -1567,8 +1879,9 @@ async def _start(
             "campaign_id": args.campaign_id,
             "participant_ids": [*party_ids, *initial_hostile_ids],
             "participant_config": _participant_config(
-                party_ids,
+                pc_ids,
                 initial_hostile_ids,
+                ally_ids=ally_ids,
                 surprise_by_actor=surprise,
                 hostiles_hidden=(
                     args.hostiles_hidden
@@ -1577,6 +1890,7 @@ async def _start(
                 hidden_actor_ids=selected_hidden_ids,
                 visible_to_actor_ids_by_hostile=visible_to_actor_ids_by_hostile,
                 source_conditions_by_actor=source_conditions_by_actor,
+                source_traits_by_actor=source_traits_by_actor,
             ),
             "participant_manifest": _participant_manifest(
                 hostile_ids,
@@ -1643,6 +1957,9 @@ async def _start(
         "visible_to_actor_ids_by_hostile": visible_to_actor_ids_by_hostile,
         "surprise": surprise,
         "source_conditions_by_actor": source_conditions_by_actor,
+        "source_traits_by_actor": source_traits_by_actor,
+        "source_zero_hp_finisher": source_zero_hp_finisher,
+        "source_zero_hp_stabilization": source_zero_hp_stabilization,
         "source_target_priorities": list(
             {
                 tuple(value["actor_ids"]): value
@@ -1981,6 +2298,48 @@ def _source_surrender_outcome(
     return None
 
 
+def _source_zero_hp_finisher_stage(
+    combat: dict[str, Any],
+    finisher: dict[str, Any],
+) -> tuple[str | None, dict[str, Any] | None]:
+    events = [
+        item
+        for item in combat.get("log", [])
+        if isinstance(item, dict)
+        and item.get("type") == "common_action"
+        and str(dict(item.get("payload") or {}).get("source_finisher_id") or "")
+        == str(finisher["id"])
+    ]
+    ignited = next(
+        (
+            item
+            for item in reversed(events)
+            if dict(item.get("payload") or {}).get("stage") == "ignite"
+        ),
+        None,
+    )
+    if ignited is not None:
+        return None, ignited
+    doused = next(
+        (
+            item
+            for item in reversed(events)
+            if dict(item.get("payload") or {}).get("stage") == "douse"
+        ),
+        None,
+    )
+    if doused is None:
+        return "douse", None
+    doused_round = int(
+        dict(doused.get("payload") or {}).get("round", 0)
+        or 0
+    )
+    current_round = int(combat.get("round", 1) or 1)
+    if current_round - doused_round >= int(finisher["oil_duration_rounds"]):
+        return "douse", doused
+    return "ignite", doused
+
+
 async def _resolve_pending(
     client: ExposureClient,
     args: argparse.Namespace,
@@ -2019,6 +2378,52 @@ async def _resolve_pending(
                 "expected_revision": campaign["revision"],
                 "idempotency_key": (
                     "encounter-guiding-bolt-on-hit-"
+                    + _token(identity, length=24)
+                ),
+            },
+        )
+    if pending.get("trigger") in {
+        "attack_on_hit_effect",
+        "critical_body_part_loss",
+    }:
+        declarations = list(args.source_on_hit_ruling_json or [])
+        declared_actor_ids = sorted(
+            {
+                str(item.get("actor_id") or "").strip()
+                for item in declarations
+                if isinstance(item, dict) and str(item.get("actor_id") or "").strip()
+            }
+        )
+        rulings = _source_on_hit_rulings(
+            declarations,
+            participant_ids=declared_actor_ids,
+        )
+        ruling = rulings.get(
+            (
+                str(pending.get("attacker_id") or ""),
+                str(pending.get("weapon_id") or ""),
+            )
+        )
+        if ruling is None:
+            raise RuntimeError(
+                "interrupted source attack has no matching on-hit settlement "
+                "declaration"
+            )
+        return await client.domain(
+            "combat_on_hit_ruling",
+            {
+                "campaign_id": args.campaign_id,
+                "target_id": str(pending.get("target_id") or actor_id),
+                "choice_id": str(pending["id"]),
+                "selection": {
+                    key: value
+                    for key, value in ruling.items()
+                    if key not in {"actor_id", "weapon_id"}
+                },
+                "branch_id": branch_id,
+                "expected_revision": campaign["revision"],
+                "idempotency_key": (
+                    "encounter-source-on-hit-resume-"
                     + _token(identity, length=24)
                 ),
             },
@@ -2199,11 +2604,15 @@ async def _auto_run(
     )
     opening_weapons = _source_opening_weapons(
         args.source_opening_weapon_json,
-        participant_ids=hostile_ids,
+        participant_ids=[*party_ids, *hostile_ids],
     )
     on_hit_rulings = _source_on_hit_rulings(
         args.source_on_hit_ruling_json,
-        participant_ids=hostile_ids,
+        participant_ids=[*party_ids, *hostile_ids],
+    )
+    _source_traits(
+        args.source_trait_json,
+        participant_ids=[*party_ids, *hostile_ids],
     )
     delayed_actions = _source_delayed_actions(
         args.source_delayed_action_json,
@@ -2213,6 +2622,28 @@ async def _auto_run(
         args.source_target_priority_json,
         participant_ids=[*party_ids, *hostile_ids],
         encounter_source_excerpt=str(args.source_excerpt or ""),
+    )
+    ally_ids = (
+        _prepared_actor_ids(args.ally_report, report_kind="ally")
+        if args.ally_report
+        else []
+    )
+    source_zero_hp_finisher = _source_zero_hp_finisher(
+        args.source_zero_hp_finisher_json,
+        participant_ids=[*party_ids, *hostile_ids],
+        encounter_source_excerpt=str(args.source_excerpt or ""),
+    )
+    if source_zero_hp_finisher is not None and set(
+        source_zero_hp_finisher["actor_ids"]
+    ) & set(ally_ids):
+        raise ValueError(
+            "source zero-HP finisher actor_ids must be PCs, not allied NPCs"
+        )
+    source_zero_hp_stabilization = _source_zero_hp_stabilization(
+        args.source_zero_hp_stabilization_json,
+        participant_ids=[
+            actor_id for actor_id in party_ids if actor_id not in set(ally_ids)
+        ],
     )
     surrender_configured = bool(
         args.surrender_actor_id
@@ -2318,10 +2749,23 @@ async def _auto_run(
             args.campaign_id,
             [*party_ids, *hostile_ids],
         )
+        combatants_by_actor = {
+            str(item.get("actor_id") or ""): item
+            for item in combat.get("combatants", [])
+            if isinstance(item, dict)
+        }
         defeated_hostiles = [
             actor_id
             for actor_id in hostile_ids
-            if _hit_points(actors[actor_id]) <= 0 or "dead" in _conditions(actors[actor_id])
+            if "dead" in _conditions(actors[actor_id])
+            or (
+                _hit_points(actors[actor_id]) <= 0
+                and not bool(
+                    dict(combatants_by_actor.get(actor_id) or {}).get(
+                        "zero_hp_recovery", False
+                    )
+                )
+            )
         ]
         unresolved_party = [
             actor_id
@@ -2377,6 +2821,55 @@ async def _auto_run(
                     "sequence": sequence,
                     "kind": "pending_resolution",
                     "result": pending_result,
+                }
+            )
+            continue
+        stabilization_target_id = (
+            next(
+                (
+                    actor_id
+                    for actor_id in source_zero_hp_stabilization["actor_ids"]
+                    if _hit_points(actors[actor_id]) == 0
+                    and not _conditions(actors[actor_id]) & {"dead", "stable"}
+                ),
+                None,
+            )
+            if source_zero_hp_stabilization is not None
+            else None
+        )
+        if stabilization_target_id is not None:
+            campaign = await _campaign(client, args.campaign_id)
+            stabilized = await client.domain(
+                "combat_hp_change",
+                {
+                    "campaign_id": args.campaign_id,
+                    "target_id": stabilization_target_id,
+                    "action": "stabilize",
+                    "payload": {
+                        "source_excerpt": source_zero_hp_stabilization[
+                            "source_excerpt"
+                        ]
+                    },
+                    "branch_id": branch["id"],
+                    "expected_revision": campaign["revision"],
+                    "idempotency_key": (
+                        "encounter-source-stabilize-"
+                        + _token(
+                            f"{args.run_id}:{stabilization_target_id}",
+                            length=24,
+                        )
+                    ),
+                },
+            )
+            turns.append(
+                {
+                    "sequence": sequence,
+                    "kind": "source_zero_hp_stabilization",
+                    "target_id": stabilization_target_id,
+                    "source_excerpt": source_zero_hp_stabilization[
+                        "source_excerpt"
+                    ],
+                    "result": stabilized,
                 }
             )
             continue
@@ -2590,6 +3083,127 @@ async def _auto_run(
                 sequence,
             )
             continue
+        if source_zero_hp_finisher is not None:
+            finisher_target_id = str(source_zero_hp_finisher["target_id"])
+            other_hostiles_defeated = all(
+                hostile_id == finisher_target_id
+                or hostile_id in defeated_hostiles
+                or hostile_id in fled_hostile_ids
+                for hostile_id in hostile_ids
+            )
+            finisher_target = actors[finisher_target_id]
+            if (
+                actor_id in source_zero_hp_finisher["actor_ids"]
+                and _hit_points(finisher_target) == 0
+                and "dead" not in _conditions(finisher_target)
+                and other_hostiles_defeated
+                and "use_object" in available_actions
+            ):
+                stage, prior_event = _source_zero_hp_finisher_stage(
+                    combat,
+                    source_zero_hp_finisher,
+                )
+                if stage is not None:
+                    round_number = int(combat.get("round", 1) or 1)
+                    campaign = await _campaign(client, args.campaign_id)
+                    source_action = await client.domain(
+                        "combat_common_action",
+                        {
+                            "campaign_id": args.campaign_id,
+                            "actor_id": actor_id,
+                            "action": "use_object",
+                            "target_id": finisher_target_id,
+                            "payload": {
+                                "source_finisher_id": source_zero_hp_finisher[
+                                    "id"
+                                ],
+                                "stage": stage,
+                                "round": round_number,
+                                "object": (
+                                    "lamp oil"
+                                    if stage == "douse"
+                                    else "burning lamp oil"
+                                ),
+                                "source_excerpt": source_zero_hp_finisher[
+                                    "source_excerpt"
+                                ],
+                                "oil_rule_excerpt": source_zero_hp_finisher[
+                                    "oil_rule_excerpt"
+                                ],
+                            },
+                            "branch_id": branch["id"],
+                            "expected_revision": campaign["revision"],
+                            "idempotency_key": (
+                                "encounter-source-finisher-action-"
+                                + _token(
+                                    f"{args.run_id}:{stage}:{round_number}:"
+                                    f"{actor_id}:{finisher_target_id}",
+                                    length=24,
+                                )
+                            ),
+                        },
+                    )
+                    fire_damage = None
+                    if stage == "ignite":
+                        campaign = await _campaign(client, args.campaign_id)
+                        fire_damage = await client.domain(
+                            "combat_hp_change",
+                            {
+                                "campaign_id": args.campaign_id,
+                                "target_id": finisher_target_id,
+                                "action": "damage",
+                                "payload": {
+                                    "parts": [
+                                        {
+                                            "amount": int(
+                                                source_zero_hp_finisher[
+                                                    "fire_damage"
+                                                ]
+                                            ),
+                                            "damage_type": "fire",
+                                            "source": "burning_oil",
+                                        }
+                                    ]
+                                },
+                                "branch_id": branch["id"],
+                                "expected_revision": campaign["revision"],
+                                "idempotency_key": (
+                                    "encounter-source-finisher-fire-"
+                                    + _token(
+                                        f"{args.run_id}:{round_number}:"
+                                        f"{actor_id}:{finisher_target_id}",
+                                        length=24,
+                                    )
+                                ),
+                            },
+                        )
+                    ended_turn = await _end_turn(
+                        client,
+                        args,
+                        str(branch["id"]),
+                        actor_id,
+                        sequence,
+                    )
+                    turns.append(
+                        {
+                            "sequence": sequence,
+                            "kind": f"source_zero_hp_finisher_{stage}",
+                            "actor_id": actor_id,
+                            "target_id": finisher_target_id,
+                            "round": round_number,
+                            "source_excerpt": source_zero_hp_finisher[
+                                "source_excerpt"
+                            ],
+                            "oil_rule_excerpt": source_zero_hp_finisher[
+                                "oil_rule_excerpt"
+                            ],
+                            "prior_event": prior_event,
+                            "action": source_action,
+                            "fire_damage": fire_damage,
+                            "end_turn": ended_turn,
+                        }
+                    )
+                    continue
         opening_cast = next(
             (
                 item
@@ -2806,29 +3420,30 @@ async def _auto_run(
             await _end_turn(client, args, str(branch["id"]), actor_id, sequence)
             continue
         if actor_id in party_ids and not living_targets:
-            campaign = await _campaign(client, args.campaign_id)
-            dodged = await client.domain(
-                "combat_common_action",
-                {
-                    "campaign_id": args.campaign_id,
-                    "actor_id": actor_id,
-                    "action": "dodge",
-                    "branch_id": branch["id"],
-                    "expected_revision": campaign["revision"],
-                    "idempotency_key": (
-                        f"encounter-unseen-dodge-"
-                        f"{_token(f'{args.run_id}:{sequence}', length=24)}"
-                    ),
-                },
-            )
-            turns.append(
-                {
-                    "sequence": sequence,
-                    "kind": "dodge_unseen",
-                    "actor_id": actor_id,
-                    "result": dodged,
-                }
-            )
+            if "dodge" in available_actions:
+                campaign = await _campaign(client, args.campaign_id)
+                dodged = await client.domain(
+                    "combat_common_action",
+                    {
+                        "campaign_id": args.campaign_id,
+                        "actor_id": actor_id,
+                        "action": "dodge",
+                        "branch_id": branch["id"],
+                        "expected_revision": campaign["revision"],
+                        "idempotency_key": (
+                            f"encounter-unseen-dodge-"
+                            f"{_token(f'{args.run_id}:{sequence}', length=24)}"
+                        ),
+                    },
+                )
+                turns.append(
+                    {
+                        "sequence": sequence,
+                        "kind": "dodge_unseen",
+                        "actor_id": actor_id,
+                        "result": dodged,
+                    }
+                )
             await _end_turn(client, args, str(branch["id"]), actor_id, sequence)
             continue
         source_opening_weapon = opening_weapons.get(actor_id)
@@ -2851,7 +3466,7 @@ async def _auto_run(
                 actor,
                 preferred_weapon_id=preferred_weapon_id,
             )
-            if actor_id in hostile_ids and not active_multiattack
+            if not active_multiattack
             else ""
         )
         plan = await _preflight_attack(
@@ -2989,7 +3604,7 @@ async def _auto_run(
             )
             if _has_blocking_pending(settlement_combat):
                 continue
-            if actor_id in hostile_ids and _has_multiattack_followup(
+            if _has_multiattack_followup(
                 dict(resolved.get("combat") or {}),
                 actor_id,
             ):
@@ -3017,6 +3632,7 @@ async def _auto_run(
         campaign_id=args.campaign_id,
         run_id=args.run_id,
         label=args.checkpoint_label,
+        checkpoint_id=f"encounter:{str(ended['combat']['id'])}",
     )
     final_actor_ids = [*party_ids, *hostile_ids]
     final_actor_values = await _characters(client, args.campaign_id, final_actor_ids)
@@ -3045,6 +3661,8 @@ async def _auto_run(
         ),
         "source_on_hit_rulings": list(on_hit_rulings.values()),
         "source_delayed_actions": list(delayed_actions.values()),
+        "source_zero_hp_finisher": source_zero_hp_finisher,
+        "source_zero_hp_stabilization": source_zero_hp_stabilization,
         "source_target_priorities": list(
             {
                 tuple(value["actor_ids"]): value
@@ -3065,6 +3683,56 @@ async def _auto_run(
         "play_exposure": opened_play,
         "checkpoint": checkpoint,
         "actors": final_actors,
+    }
+
+
+async def _finalize_ended_encounter(
+    client: ExposureClient,
+    args: argparse.Namespace,
+    actor_ids: list[str],
+) -> dict[str, Any]:
+    opened = await client.open(args.campaign_id)
+    if str(opened.get("phase") or "") != "play":
+        raise RuntimeError("encounter finalization requires the Play phase")
+    await client.load("play.scene", "play.scene_control", "play.characters")
+    campaign = await _campaign(client, args.campaign_id)
+    combat = dict(dict(campaign.get("state") or {}).get("combat") or {})
+    outcome = dict(combat.get("outcome") or {})
+    if (
+        not combat
+        or combat.get("active", True)
+        or outcome.get("status")
+        not in {
+            "victory",
+            "defeat",
+            "surrender",
+            "truce",
+            "withdrawal",
+            "interrupted",
+        }
+    ):
+        raise RuntimeError(
+            "campaign does not retain a completed encounter with a source outcome"
+        )
+    if args.scene_id and str(combat.get("scene_id") or "") != str(args.scene_id):
+        raise RuntimeError("completed encounter scene does not match --scene-id")
+    checkpoint = await _checkpoint(
+        client,
+        campaign_id=args.campaign_id,
+        run_id=args.run_id,
+        label=args.checkpoint_label,
+        checkpoint_id=f"encounter:{str(combat['id'])}",
+    )
+    actor_values = await _characters(client, args.campaign_id, actor_ids)
+    return {
+        "play_exposure": opened,
+        "recovered_after_postcombat_interruption": True,
+        "combat": combat,
+        "outcome": outcome,
+        "checkpoint": checkpoint,
+        "actors": [
+            _character_summary(actor_values[actor_id]) for actor_id in actor_ids
+        ],
     }
 
 
@@ -3125,6 +3793,9 @@ async def _status(
         )
     elif phase == "play":
         await client.load("play.characters")
+        campaign = await _campaign(client, campaign_id)
+        retained_combat = dict(dict(campaign.get("state") or {}).get("combat") or {})
+        combat = retained_combat or None
     else:
         raise RuntimeError(
             "encounter status requires the play phase or an active combat; "
@@ -3188,6 +3859,12 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     hostile_ids,
                     additional_hostile_ids,
                     reinforcement_hostile_ids,
+                )
+            elif args.action == "finalize":
+                report["result"] = await _finalize_ended_encounter(
+                    client,
+                    args,
+                    [*friendly_ids, *all_hostile_ids],
                 )
             else:
                 actor_ids = [*friendly_ids, *all_hostile_ids]
