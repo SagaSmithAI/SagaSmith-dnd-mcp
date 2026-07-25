@@ -2800,6 +2800,46 @@ async def _auto_run(
     }
 
 
+async def _start_or_resume_auto_run(
+    client: ExposureClient,
+    args: argparse.Namespace,
+    party_ids: list[str],
+    hostile_ids: list[str],
+    additional_hostile_ids: list[str],
+    reinforcement_hostile_ids: list[str],
+) -> dict[str, Any]:
+    opened = await client.open(args.campaign_id)
+    phase = str(opened.get("phase") or "")
+    started: dict[str, Any] | None = None
+    if phase == "play":
+        started = await _start(
+            client,
+            args,
+            party_ids,
+            hostile_ids,
+            additional_hostile_ids,
+            reinforcement_hostile_ids,
+        )
+    elif phase != "combat":
+        raise RuntimeError(
+            "auto-run requires the play phase or an active combat; "
+            f"campaign is in {phase or 'an unknown phase'}"
+        )
+    completed = await _auto_run(
+        client,
+        args,
+        party_ids,
+        [
+            *hostile_ids,
+            *additional_hostile_ids,
+            *reinforcement_hostile_ids,
+        ],
+    )
+    if started is not None:
+        completed["auto_start"] = started
+    return completed
+
+
 async def _run(args: argparse.Namespace) -> dict[str, Any]:
     party_ids = _party_ids(args.party_report)
     hostile_ids = _hostile_ids(args.hostile_report)
@@ -2855,8 +2895,13 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     reinforcement_hostile_ids,
                 )
             elif args.action == "auto-run":
-                report["result"] = await _auto_run(
-                    client, args, party_ids, all_hostile_ids
+                report["result"] = await _start_or_resume_auto_run(
+                    client,
+                    args,
+                    party_ids,
+                    hostile_ids,
+                    additional_hostile_ids,
+                    reinforcement_hostile_ids,
                 )
             else:
                 opened = await client.open(args.campaign_id)

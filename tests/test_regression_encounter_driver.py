@@ -1,5 +1,7 @@
 import asyncio
 import json
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from scripts.regression_encounter import (
     GUIDING_BOLT_ID,
@@ -31,6 +33,7 @@ from scripts.regression_encounter import (
     _source_precombat_casts,
     _source_surrender_outcome,
     _source_truce_outcome,
+    _start_or_resume_auto_run,
     _surprise_from_check_report,
     _surprise_from_hostile_stealth_totals,
     _validate_hostile_attacks,
@@ -541,6 +544,70 @@ def test_source_authored_precombat_and_attack_tactics_are_structured() -> None:
     assert rulings[("spider-1", "bite")]["id"] == "saving_throw_damage"
     assert rulings[("spider-1", "bite")]["zero_hp_effect"]["stable"] is True
     assert delayed["nezznar"]["until_round"] == 2
+
+
+def test_auto_run_starts_from_play_before_loading_combat_tools() -> None:
+    calls: list[tuple[str, object]] = []
+
+    class Client:
+        async def open(self, campaign_id: str) -> dict[str, str]:
+            calls.append(("open", campaign_id))
+            return {"phase": "play"}
+
+    async def start(
+        client: object,
+        args: object,
+        party_ids: list[str],
+        hostile_ids: list[str],
+        additional_hostile_ids: list[str],
+        reinforcement_hostile_ids: list[str],
+    ) -> dict[str, bool]:
+        calls.append(
+            (
+                "start",
+                (
+                    party_ids,
+                    hostile_ids,
+                    additional_hostile_ids,
+                    reinforcement_hostile_ids,
+                ),
+            )
+        )
+        return {"started": True}
+
+    async def auto_run(
+        client: object,
+        args: object,
+        party_ids: list[str],
+        hostile_ids: list[str],
+    ) -> dict[str, bool]:
+        calls.append(("auto_run", (party_ids, hostile_ids)))
+        return {"completed": True}
+
+    with (
+        patch("scripts.regression_encounter._start", start),
+        patch("scripts.regression_encounter._auto_run", auto_run),
+    ):
+        result = asyncio.run(
+            _start_or_resume_auto_run(
+                Client(),
+                SimpleNamespace(campaign_id="campaign-1"),
+                ["pc-1"],
+                ["hostile-1"],
+                ["hostile-2"],
+                ["hostile-3"],
+            )
+        )
+
+    assert calls == [
+        ("open", "campaign-1"),
+        ("start", (["pc-1"], ["hostile-1"], ["hostile-2"], ["hostile-3"])),
+        ("auto_run", (["pc-1"], ["hostile-1", "hostile-2", "hostile-3"])),
+    ]
+    assert result == {
+        "completed": True,
+        "auto_start": {"started": True},
+    }
 
 
 def test_source_surrender_requires_threshold_life_no_escape_and_resolved_party() -> None:
