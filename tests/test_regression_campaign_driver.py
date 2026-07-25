@@ -178,6 +178,16 @@ class _RuleStatblockClient:
                     "head_snapshot_id": "snapshot-0",
                 }
             ]
+        if tool_id == "rule_pack_query":
+            assert arguments["view"] == "source_chunks"
+            return [
+                {
+                    "id": "kenku-chunk",
+                    "content": "KENKU\nMedium humanoid (kenku), chaotic neutral",
+                    "page_start": 195,
+                    "page_end": 195,
+                }
+            ]
         if tool_id == "character_create_from":
             self.revision += 1
             result = {
@@ -234,6 +244,8 @@ def _rule_statblock_args(tmp_path: Path, *, defer_checkpoint: bool) -> argparse.
         defer_checkpoint=defer_checkpoint,
         statblock_variant=None,
         actor_type="monster",
+        source_query="",
+        source_page=None,
     )
 
 
@@ -339,6 +351,38 @@ def test_prepare_rule_statblock_applies_source_cited_variant_and_actor_type(
     assert report["variant"]["source_ref"] == "module-chunk:opening-chunk"
     assert report["variant_evidence"]["id"] == "opening-chunk"
     assert report["variant_path"] == str(variant_path.resolve())
+
+
+def test_prepare_rule_statblock_discovers_chunks_by_source_page_and_text(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = _RuleStatblockClient()
+    _patch_rule_statblock_transport(monkeypatch, client)
+    args = _rule_statblock_args(tmp_path, defer_checkpoint=True)
+    args.chunk_id = []
+    args.source_query = "Kenku"
+    args.source_page = 195
+
+    report = asyncio.run(_prepare_rule_statblock(args))
+
+    query_call = next(
+        arguments
+        for scope, tool_id, arguments in client.calls
+        if scope == "domain" and tool_id == "rule_pack_query"
+    )
+    assert query_call["payload"] == {
+        "source_id": "source-1",
+        "query": "Kenku",
+        "page": 195,
+        "limit": 200,
+    }
+    create_call = next(
+        arguments
+        for scope, tool_id, arguments in client.calls
+        if scope == "domain" and tool_id == "character_create_from"
+    )
+    assert create_call["payload"]["chunk_ids"] == ["kenku-chunk"]
+    assert report["selected_source_chunks"][0]["page_start"] == 195
 
 
 def test_failed_statblock_preparation_restores_original_play_phase() -> None:

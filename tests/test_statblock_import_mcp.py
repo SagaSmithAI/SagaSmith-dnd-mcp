@@ -162,6 +162,23 @@ def test_imported_rule_source_creates_a_source_bound_combat_actor(tmp_path: Path
                 "idempotency_key": "ingest-commoner",
             },
         )
+        chunks = await _call(
+            server,
+            "rule_pack_query",
+            {
+                "view": "source_chunks",
+                "payload": {
+                    "source_id": ingested["source_id"],
+                    "query": "commoner",
+                },
+            },
+        )
+        assert chunks
+        assert any(
+            "commoner"
+            in "\n".join([*item["heading_path"], item["content"]]).casefold()
+            for item in chunks
+        )
         arguments = {
             "mode": "statblock",
             "payload": {

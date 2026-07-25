@@ -130,6 +130,16 @@ def _arguments() -> argparse.Namespace:
         help="Optional source chunk selection for prepare-rule-statblock",
     )
     parser.add_argument(
+        "--source-query",
+        default="",
+        help="Case-insensitive source text filter for prepare-rule-statblock chunk discovery",
+    )
+    parser.add_argument(
+        "--source-page",
+        type=int,
+        help="One-based PDF page filter for prepare-rule-statblock chunk discovery",
+    )
+    parser.add_argument(
         "--ability-method",
         choices=("manual", "standard_array"),
         default="standard_array",
@@ -2454,6 +2464,15 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
         )
     if args.actor_count < 1:
         raise ValueError("--actor-count must be positive")
+    explicit_chunk_ids = (
+        [str(args.chunk_id)] if isinstance(args.chunk_id, str) else list(args.chunk_id)
+    )
+    source_query = str(getattr(args, "source_query", "") or "").strip()
+    source_page = getattr(args, "source_page", None)
+    if source_page is not None and source_page < 1:
+        raise ValueError("--source-page must be positive")
+    if explicit_chunk_ids and (source_query or source_page is not None):
+        raise ValueError("--chunk-id cannot be combined with source discovery filters")
     variant = None
     variant_path = None
     if args.statblock_variant is not None:
@@ -2569,6 +2588,35 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
             else:
                 source_id = str(args.source_id)
 
+            selected_source_chunks: list[dict[str, Any]] = []
+            selected_chunk_ids = explicit_chunk_ids
+            if source_query or source_page is not None:
+                chunk_query_payload: dict[str, Any] = {
+                    "source_id": source_id,
+                    "query": source_query,
+                    "limit": 200,
+                }
+                if source_page is not None:
+                    chunk_query_payload["page"] = source_page
+                selected_source_chunks = list(
+                    _facade_value(
+                        await client.domain(
+                            "rule_pack_query",
+                            {
+                                "view": "source_chunks",
+                                "payload": chunk_query_payload,
+                            },
+                        )
+                    )
+                )
+                selected_chunk_ids = [
+                    str(item["id"]) for item in selected_source_chunks
+                ]
+                if not selected_chunk_ids:
+                    raise RuntimeError(
+                        "rule statblock source discovery returned no matching chunks"
+                    )
+
             actors: list[dict[str, Any]] = []
             statblock_report: dict[str, Any] | None = None
             source_report: dict[str, Any] | None = None
@@ -2583,8 +2631,8 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
                     "character_type": args.actor_type,
                     "summary": "Strict source-bound encounter actor for campaign regression.",
                 }
-                if args.chunk_id:
-                    payload["chunk_ids"] = args.chunk_id
+                if selected_chunk_ids:
+                    payload["chunk_ids"] = selected_chunk_ids
                 if variant is not None:
                     payload["variant"] = variant
                 created = _facade_value(
@@ -2672,6 +2720,7 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
                 "source_id": source_id,
                 "import": import_report,
                 "source": source_report,
+                "selected_source_chunks": selected_source_chunks,
                 "statblock": statblock_report,
                 "actors": actors,
                 "variant": deepcopy(variant) if variant is not None else None,

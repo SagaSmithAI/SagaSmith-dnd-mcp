@@ -3082,6 +3082,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "rule_expand",
                     "rule_pack_compile(from_source)",
                     "rule_pack_query(test)",
+                    "rule_pack_query(source_chunks)",
                     "rule_pack_change(install)",
                     "campaign_rules(set_pack)",
                 ],
@@ -19840,7 +19841,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
 
     @mcp.tool()
     def rule_pack_query(
-        view: Literal["list", "inspect", "test", "content_catalog", "sources"] = "list",
+        view: Literal[
+            "list",
+            "inspect",
+            "test",
+            "content_catalog",
+            "sources",
+            "source_chunks",
+        ] = "list",
         payload: dict[str, Any] | None = None,
         principal_id: str = "system:local",
     ) -> dict[str, Any]:
@@ -19860,11 +19868,47 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 principal_id,
                 data.get("branch_id"),
             )
-        else:
+        elif view == "sources":
             result = rules.sources(
                 system_id=data.get("system_id", "dnd5e"),
                 edition=data.get("edition"),
             )
+        else:
+            source_id = str(required(data, "source_id"))
+            source = rules.source(source_id)
+            if str(source.get("system_id") or "") != "dnd5e":
+                raise ValueError("rule source must belong to the dnd5e rule corpus")
+            page = data.get("page")
+            if page is not None and (
+                isinstance(page, bool) or not isinstance(page, int) or page < 1
+            ):
+                raise ValueError("payload.page must be a positive integer")
+            query = str(data.get("query") or "").strip().casefold()
+            limit = data.get("limit", 50)
+            if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 200:
+                raise ValueError("payload.limit must be an integer between 1 and 200")
+            chunks = rules.source_chunks(source_id)
+            if page is not None:
+                chunks = [
+                    item
+                    for item in chunks
+                    if isinstance(item.get("page_start"), int)
+                    and isinstance(item.get("page_end"), int)
+                    and int(item["page_start"]) <= page <= int(item["page_end"])
+                ]
+            if query:
+                chunks = [
+                    item
+                    for item in chunks
+                    if query
+                    in "\n".join(
+                        [
+                            *[str(value) for value in item.get("heading_path", [])],
+                            str(item.get("content") or ""),
+                        ]
+                    ).casefold()
+                ]
+            result = chunks[:limit]
         return facade_result(view, result)
 
     @mcp.tool()
