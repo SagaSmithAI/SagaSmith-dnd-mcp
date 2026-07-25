@@ -6,10 +6,12 @@ import hashlib
 import io
 import json
 import sys
+from contextlib import AbstractAsyncContextManager
 from pathlib import Path
 
 import pytest
 
+import scripts.regression_campaign as campaign_driver
 from scripts.regression_campaign import (
     _arguments,
     _character_summary,
@@ -17,6 +19,7 @@ from scripts.regression_campaign import (
     _expanded_source_ref,
     _load_json_object,
     _load_review_override,
+    _prepare_rule_statblock,
     _prepare_statblock,
     _restore_statblock_preparation_context,
     _statblock_creation_key,
@@ -117,6 +120,225 @@ def test_prepare_statblock_rejects_deferred_isolated_branch() -> None:
 
     with pytest.raises(ValueError, match="cannot defer.*isolated branch"):
         asyncio.run(_prepare_statblock(args))
+
+
+class _RuleStatblockSession(AbstractAsyncContextManager):
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, traceback) -> None:
+        return None
+
+    async def initialize(self) -> None:
+        return None
+
+
+class _RuleStatblockTransport(AbstractAsyncContextManager):
+    async def __aenter__(self):
+        return object(), object()
+
+    async def __aexit__(self, exc_type, exc, traceback) -> None:
+        return None
+
+
+class _RuleStatblockClient:
+    def __init__(self) -> None:
+        self.revision = 10
+        self.calls: list[tuple[str, str, dict]] = []
+        self.loaded: list[tuple[str, ...]] = []
+
+    async def open(self) -> None:
+        self.calls.append(("client", "open", {}))
+
+    async def load(self, *group_ids: str) -> None:
+        self.loaded.append(group_ids)
+
+    async def core(self, tool_id: str, arguments: dict):
+        self.calls.append(("core", tool_id, arguments))
+        if tool_id == "game_phase" and arguments["action"] == "get":
+            return {"tool_profile": "play"}
+        if tool_id == "campaign_query":
+            return {"id": "campaign-1", "revision": self.revision}
+        if tool_id == "game_phase" and arguments["action"] == "set":
+            assert arguments["expected_revision"] == self.revision
+            self.revision += 1
+            return {
+                "tool_profile": arguments["tool_profile"],
+                "campaign_revision": self.revision,
+            }
+        raise AssertionError((tool_id, arguments))
+
+    async def domain(self, tool_id: str, arguments: dict):
+        self.calls.append(("domain", tool_id, arguments))
+        if tool_id == "branch_query":
+            return [
+                {
+                    "id": "branch-1",
+                    "is_current": True,
+                    "head_snapshot_id": "snapshot-0",
+                }
+            ]
+        if tool_id == "character_create_from":
+            self.revision += 1
+            result = {
+                "character": {
+                    "id": "actor-1",
+                    "name": "Stirge",
+                    "character_type": "monster",
+                    "revision": 1,
+                    "sheet": {
+                        "inventory": {
+                            "items": [
+                                {
+                                    "id": "blood-drain",
+                                    "source_key": "rule-source:source-1",
+                                }
+                            ]
+                        }
+                    },
+                    "derived": {
+                        "hit_points": {"value": 2, "max": 2, "temp": 0},
+                        "armor_class": 14,
+                        "inventory": {"weapon_attacks": [{"id": "blood-drain"}]},
+                    },
+                },
+                "statblock": {"challenge_rating": "1/8"},
+                "source": {"id": "source-1"},
+            }
+            if arguments["payload"].get("variant") is not None:
+                result["variant_evidence"] = {
+                    "kind": "module-chunk",
+                    "id": "opening-chunk",
+                }
+            return result
+        if tool_id == "snapshot_create":
+            assert arguments["expected_revision"] == self.revision
+            self.revision += 1
+            return {"id": "snapshot-1", "slot": 1}
+        if tool_id == "snapshot_query":
+            return {"valid": True}
+        raise AssertionError((tool_id, arguments))
+
+
+def _rule_statblock_args(tmp_path: Path, *, defer_checkpoint: bool) -> argparse.Namespace:
+    return argparse.Namespace(
+        campaign_id="campaign-1",
+        source_path=None,
+        source_id="source-1",
+        actor_count=1,
+        run_id="waterdeep-stirge",
+        actor_name="Stirge",
+        chunk_id="chunk-1",
+        home=tmp_path,
+        module_root=None,
+        defer_checkpoint=defer_checkpoint,
+        statblock_variant=None,
+        actor_type="monster",
+    )
+
+
+def _patch_rule_statblock_transport(
+    monkeypatch: pytest.MonkeyPatch, client: _RuleStatblockClient
+) -> None:
+    monkeypatch.setattr(
+        campaign_driver,
+        "stdio_client",
+        lambda _parameters: _RuleStatblockTransport(),
+    )
+    monkeypatch.setattr(
+        campaign_driver,
+        "ClientSession",
+        lambda _read, _write: _RuleStatblockSession(),
+    )
+    monkeypatch.setattr(
+        campaign_driver,
+        "CampaignMcp",
+        lambda _session, _campaign_id: client,
+    )
+
+
+def test_prepare_rule_statblock_can_defer_scene_batch_checkpoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = _RuleStatblockClient()
+    _patch_rule_statblock_transport(monkeypatch, client)
+
+    report = asyncio.run(
+        _prepare_rule_statblock(
+            _rule_statblock_args(tmp_path, defer_checkpoint=True)
+        )
+    )
+
+    assert report["snapshot"] is None
+    assert report["snapshot_verification"] is None
+    assert not any(
+        scope == "domain" and tool_id == "snapshot_create"
+        for scope, tool_id, _arguments in client.calls
+    )
+    assert ("play.scene", "play.scene_control", "play.characters") in client.loaded
+    phase_sets = [
+        arguments["tool_profile"]
+        for scope, tool_id, arguments in client.calls
+        if scope == "core" and tool_id == "game_phase" and arguments["action"] == "set"
+    ]
+    assert phase_sets == ["lobby", "play"]
+
+
+def test_prepare_rule_statblock_checkpoints_after_returning_to_play(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = _RuleStatblockClient()
+    _patch_rule_statblock_transport(monkeypatch, client)
+
+    report = asyncio.run(
+        _prepare_rule_statblock(
+            _rule_statblock_args(tmp_path, defer_checkpoint=False)
+        )
+    )
+
+    assert report["snapshot"]["id"] == "snapshot-1"
+    assert report["snapshot_verification"]["valid"] is True
+    call_names = [(scope, tool_id) for scope, tool_id, _arguments in client.calls]
+    return_to_play = max(
+        index
+        for index, (scope, tool_id) in enumerate(call_names)
+        if scope == "core" and tool_id == "game_phase"
+    )
+    checkpoint = call_names.index(("domain", "snapshot_create"))
+    assert return_to_play < checkpoint
+
+
+def test_prepare_rule_statblock_applies_source_cited_variant_and_actor_type(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = _RuleStatblockClient()
+    _patch_rule_statblock_transport(monkeypatch, client)
+    variant_path = tmp_path / "troll-variant.json"
+    variant_path.write_text(
+        json.dumps(
+            {
+                "source_ref": "module-chunk:opening-chunk",
+                "current_hit_points": 44,
+            }
+        ),
+        encoding="utf-8",
+    )
+    args = _rule_statblock_args(tmp_path, defer_checkpoint=True)
+    args.actor_type = "npc"
+    args.statblock_variant = variant_path
+
+    report = asyncio.run(_prepare_rule_statblock(args))
+
+    create_call = next(
+        arguments
+        for scope, tool_id, arguments in client.calls
+        if scope == "domain" and tool_id == "character_create_from"
+    )
+    assert create_call["payload"]["character_type"] == "npc"
+    assert create_call["payload"]["variant"]["current_hit_points"] == 44
+    assert report["variant"]["source_ref"] == "module-chunk:opening-chunk"
+    assert report["variant_evidence"]["id"] == "opening-chunk"
+    assert report["variant_path"] == str(variant_path.resolve())
 
 
 def test_failed_statblock_preparation_restores_original_play_phase() -> None:

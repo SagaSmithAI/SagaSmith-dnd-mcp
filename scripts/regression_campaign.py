@@ -89,8 +89,8 @@ def _arguments() -> argparse.Namespace:
         "--statblock-variant",
         type=Path,
         help=(
-            "Source-cited JSON variant for prepare-statblock, passed to the public "
-            "character_create_from tool"
+            "Source-cited JSON variant for statblock preparation actions, passed "
+            "to the public character_create_from tool"
         ),
     )
     parser.add_argument(
@@ -102,7 +102,7 @@ def _arguments() -> argparse.Namespace:
         "--actor-type",
         choices=("npc", "monster"),
         default="monster",
-        help="Actor type for prepare-statblock (default: monster)",
+        help="Actor type for statblock preparation actions (default: monster)",
     )
     parser.add_argument(
         "--actor-count",
@@ -114,9 +114,9 @@ def _arguments() -> argparse.Namespace:
         "--defer-checkpoint",
         action="store_true",
         help=(
-            "For main-timeline prepare-statblock actions, persist the actor without "
-            "creating an actor-local snapshot so a later public checkpoint can seal "
-            "the complete scene preparation batch"
+            "For main-timeline statblock preparation actions, persist the actors "
+            "without creating an actor-local snapshot so a later public checkpoint "
+            "can seal the complete scene preparation batch"
         ),
     )
     parser.add_argument(
@@ -2454,6 +2454,13 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
         )
     if args.actor_count < 1:
         raise ValueError("--actor-count must be positive")
+    variant = None
+    variant_path = None
+    if args.statblock_variant is not None:
+        variant, variant_path = _load_json_object(
+            args.statblock_variant,
+            "statblock variant",
+        )
     token = _idempotency_token(args.run_id)
     async with stdio_client(_server_parameters(args)) as (read, write):
         async with ClientSession(read, write) as session:
@@ -2573,11 +2580,13 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
                     "campaign_id": args.campaign_id,
                     "source_id": source_id,
                     "name": actor_name,
-                    "character_type": "monster",
+                    "character_type": args.actor_type,
                     "summary": "Strict source-bound encounter actor for campaign regression.",
                 }
                 if args.chunk_id:
                     payload["chunk_ids"] = args.chunk_id
+                if variant is not None:
+                    payload["variant"] = variant
                 created = _facade_value(
                     await client.domain(
                         "character_create_from",
@@ -2602,38 +2611,6 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
                     {"view": "get", "payload": {"campaign_id": args.campaign_id}},
                 )
             )
-            branches_after = _facade_value(
-                await client.domain(
-                    "branch_query", {"campaign_id": args.campaign_id, "view": "list"}
-                )
-            )
-            branch_after = next(item for item in branches_after if item.get("is_current"))
-            snapshot = await client.domain(
-                "snapshot_create",
-                {
-                    "campaign_id": args.campaign_id,
-                    "label": f"Prepared rule statblock actors: {args.actor_name}",
-                    "expected_revision": campaign_lobby["revision"],
-                    "expected_head_snapshot_id": branch_after.get("head_snapshot_id") or "",
-                    "idempotency_key": f"{token}-rule-statblock-snapshot",
-                },
-            )
-            verified = _facade_value(
-                await client.domain(
-                    "snapshot_query",
-                    {
-                        "campaign_id": args.campaign_id,
-                        "view": "verify",
-                        "payload": {"slot": snapshot["slot"]},
-                    },
-                )
-            )
-            campaign_at_return = _facade_value(
-                await client.core(
-                    "campaign_query",
-                    {"view": "get", "payload": {"campaign_id": args.campaign_id}},
-                )
-            )
             phase_change = _facade_value(
                 await client.core(
                     "game_phase",
@@ -2641,14 +2618,53 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
                         "campaign_id": args.campaign_id,
                         "action": "set",
                         "tool_profile": "play",
-                        "expected_revision": campaign_at_return["revision"],
+                        "expected_revision": campaign_lobby["revision"],
                         "branch_id": current_branch["id"],
                         "idempotency_key": _phase_transition_key(
-                            token, "rule-statblock-return-play", campaign_at_return
+                            token, "rule-statblock-return-play", campaign_lobby
                         ),
                     },
                 )
             )
+            await client.open()
+            await client.load("play.scene", "play.scene_control", "play.characters")
+            branches_after = _facade_value(
+                await client.domain(
+                    "branch_query", {"campaign_id": args.campaign_id, "view": "list"}
+                )
+            )
+            branch_after = next(item for item in branches_after if item.get("is_current"))
+            campaign_after = _facade_value(
+                await client.core(
+                    "campaign_query",
+                    {"view": "get", "payload": {"campaign_id": args.campaign_id}},
+                )
+            )
+            snapshot: dict[str, Any] | None = None
+            verified: dict[str, Any] | None = None
+            if not args.defer_checkpoint:
+                snapshot = await client.domain(
+                    "snapshot_create",
+                    {
+                        "campaign_id": args.campaign_id,
+                        "label": f"Prepared rule statblock actors: {args.actor_name}",
+                        "expected_revision": campaign_after["revision"],
+                        "expected_head_snapshot_id": (
+                            branch_after.get("head_snapshot_id") or ""
+                        ),
+                        "idempotency_key": f"{token}-rule-statblock-snapshot",
+                    },
+                )
+                verified = _facade_value(
+                    await client.domain(
+                        "snapshot_query",
+                        {
+                            "campaign_id": args.campaign_id,
+                            "view": "verify",
+                            "payload": {"slot": snapshot["slot"]},
+                        },
+                    )
+                )
             return {
                 "action": "prepare-rule-statblock",
                 "transport": "stdio",
@@ -2658,6 +2674,13 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
                 "source": source_report,
                 "statblock": statblock_report,
                 "actors": actors,
+                "variant": deepcopy(variant) if variant is not None else None,
+                "variant_evidence": (
+                    deepcopy(created.get("variant_evidence"))
+                    if isinstance(created.get("variant_evidence"), dict)
+                    else None
+                ),
+                "variant_path": str(variant_path) if variant_path is not None else None,
                 "snapshot": snapshot,
                 "snapshot_verification": verified,
                 "phase_change": phase_change,
@@ -4824,8 +4847,12 @@ async def _structured_combat(args: argparse.Namespace) -> dict[str, Any]:
 def main() -> int:
     _configure_utf8_streams(sys.stdout, sys.stderr)
     args = _arguments()
-    if args.defer_checkpoint and args.action != "prepare-statblock":
-        raise ValueError("--defer-checkpoint is only supported by prepare-statblock")
+    deferred_checkpoint_actions = {"prepare-statblock", "prepare-rule-statblock"}
+    if args.defer_checkpoint and args.action not in deferred_checkpoint_actions:
+        supported = ", ".join(sorted(deferred_checkpoint_actions))
+        raise ValueError(
+            f"--defer-checkpoint is unsupported for {args.action}; supported: {supported}"
+        )
     operation = {
         "audit": _audit,
         "discover-scenes": _discover_scenes,
