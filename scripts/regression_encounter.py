@@ -18,6 +18,10 @@ from scripts.regression_modules import PRINCIPAL_ID, ExposureClient, _token
 from scripts.regression_playthrough import _checkpoint
 
 GUIDING_BOLT_ID = "dnd5e.content.srd2014.spell.guiding-bolt"
+GUIDING_BOLT_ON_HIT = (
+    "The next attack against the target before the end of the caster's next "
+    "turn has advantage."
+)
 HEALING_WORD_ID = "dnd5e.content.srd2014.spell.healing-word"
 MAGIC_MISSILE_ID = "dnd5e.content.srd2014.spell.magic-missile"
 
@@ -1802,6 +1806,29 @@ async def _resolve_pending(
     campaign = await _campaign(client, args.campaign_id)
     actor_id = str(pending.get("actor_id") or "")
     identity = f"{pending.get('id')}:{campaign['revision']}"
+    if (
+        pending.get("trigger") == "attack_on_hit_effect"
+        and str(pending.get("effect") or "").strip().casefold()
+        == GUIDING_BOLT_ON_HIT.casefold()
+    ):
+        return await client.domain(
+            "combat_on_hit_ruling",
+            {
+                "campaign_id": args.campaign_id,
+                "target_id": str(pending.get("target_id") or actor_id),
+                "choice_id": str(pending["id"]),
+                "selection": {
+                    "id": "next_attack_advantage",
+                    "source_excerpt": GUIDING_BOLT_ON_HIT,
+                },
+                "branch_id": branch_id,
+                "expected_revision": campaign["revision"],
+                "idempotency_key": (
+                    "encounter-guiding-bolt-on-hit-"
+                    + _token(identity, length=24)
+                ),
+            },
+        )
     if pending.get("kind") == "concentration":
         return await client.domain(
             "combat_concentration_check",
@@ -2520,9 +2547,40 @@ async def _auto_run(
                 )
                 spell_result["settlement"] = settled
                 pending_reaction = settled.get("status") == "pending_reaction"
-                if settled.get("status") not in {"committed", "pending_reaction"}:
+                if settled.get("status") == "pending_ruling":
+                    campaign = await _campaign(client, args.campaign_id)
+                    ruling = await client.domain(
+                        "combat_on_hit_ruling",
+                        {
+                            "campaign_id": args.campaign_id,
+                            "target_id": spell_target_id,
+                            "choice_id": str(
+                                settled["result"]["pending_on_hit_ruling_id"]
+                            ),
+                            "selection": {
+                                "id": "next_attack_advantage",
+                                "source_excerpt": GUIDING_BOLT_ON_HIT,
+                            },
+                            "branch_id": branch["id"],
+                            "expected_revision": campaign["revision"],
+                            "idempotency_key": (
+                                "encounter-guiding-bolt-on-hit-"
+                                + _token(
+                                    f"{args.run_id}:{sequence}:"
+                                    f"{settled['result']['pending_on_hit_ruling_id']}",
+                                    length=24,
+                                )
+                            ),
+                        },
+                    )
+                    spell_result["on_hit_ruling"] = ruling
+                elif settled.get("status") not in {
+                    "committed",
+                    "pending_reaction",
+                }:
                     raise RuntimeError(
-                        "Guiding Bolt spell attack did not commit or open a reaction"
+                        "Guiding Bolt spell attack did not commit or open a supported "
+                        "reaction or on-hit ruling"
                     )
             elif cast.get("status") not in {"committed", "pending_reaction"}:
                 raise RuntimeError(

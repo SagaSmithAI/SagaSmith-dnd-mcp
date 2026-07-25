@@ -229,6 +229,238 @@ def test_public_on_hit_ruling_applies_and_escapes_web_condition(
     asyncio.run(exercise())
 
 
+def test_public_guiding_bolt_effect_grants_and_consumes_next_attack_advantage(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    original_attack_roll = server_module.roll_attack_action
+
+    def forced_hit(*, plan, rng=None):
+        result = original_attack_roll(plan=plan, rng=rng)
+        result.update(
+            natural=10,
+            total=max(int(plan["target_ac"]), int(result.get("total", 0) or 0)),
+            armor_class=int(plan["target_ac"]),
+            hit=True,
+            critical=False,
+            fumble=False,
+        )
+        return result
+
+    monkeypatch.setattr(server_module, "roll_attack_action", forced_hit)
+
+    async def exercise() -> None:
+        server = create_server(_config(tmp_path))
+
+        async def raw(name: str, arguments: dict):
+            _, result = await server.call_tool(name, arguments)
+            return result
+
+        async def call(name: str, arguments: dict):
+            result = await raw(name, arguments)
+            return result.get("result", result)
+
+        campaign = await call(
+            "campaign_create",
+            {
+                "name": "Guiding Bolt next attack advantage",
+                "edition": "2014",
+                "idempotency_key": "campaign",
+            },
+        )
+        caster = await call(
+            "character_create",
+            {
+                "campaign_id": campaign["id"],
+                "name": "Caster",
+                "character_type": "pc",
+                "idempotency_key": "caster",
+            },
+        )
+        ally = await call(
+            "character_create",
+            {
+                "campaign_id": campaign["id"],
+                "name": "Ally",
+                "character_type": "pc",
+                "idempotency_key": "ally",
+            },
+        )
+        target = await call(
+            "character_create",
+            {
+                "campaign_id": campaign["id"],
+                "name": "Target",
+                "character_type": "monster",
+                "idempotency_key": "target",
+            },
+        )
+        effect = (
+            "The next attack against the target before the end of the caster's "
+            "next turn has advantage."
+        )
+        for actor, key in (
+            (caster, "caster-sheet"),
+            (ally, "ally-sheet"),
+            (target, "target-sheet"),
+        ):
+            sheet = default_character_sheet()
+            sheet["combat"]["hp"] = {"value": 20, "max": 20, "temp": 0}
+            if actor["id"] == caster["id"]:
+                sheet["inventory"]["items"] = [
+                    {
+                        "id": "guiding-bolt-test",
+                        "name": "Guiding Bolt Test",
+                        "kind": "weapon",
+                        "equipped": True,
+                        "equipped_slot": "main_hand",
+                        "mechanics": {
+                            "attack_type": "ranged",
+                            "attack_ability": "spell",
+                            "damage_formula": "",
+                            "damage_type": "",
+                            "on_hit_effect": effect,
+                            "normal_range_ft": 120,
+                            "long_range_ft": 120,
+                            "attack_bonus_override": 99,
+                            "always_available": True,
+                        },
+                    }
+                ]
+                sheet["inventory"]["equipment_slots"]["main_hand"] = (
+                    "guiding-bolt-test"
+                )
+            await call(
+                "character_sheet_replace",
+                {
+                    "character_id": actor["id"],
+                    "sheet": sheet,
+                    "expected_revision": actor["revision"],
+                    "idempotency_key": key,
+                },
+            )
+        campaign = await call("campaign_get", {"campaign_id": campaign["id"]})
+        started = await raw(
+            "combat_start",
+            {
+                "campaign_id": campaign["id"],
+                "participant_ids": [caster["id"], ally["id"], target["id"]],
+                "participant_config": [
+                    {
+                        "actor_id": caster["id"],
+                        "initiative": 30,
+                        "position": {"x": 0, "y": 0},
+                        "disposition": "friendly",
+                    },
+                    {
+                        "actor_id": ally["id"],
+                        "initiative": 20,
+                        "position": {"x": 1, "y": 0},
+                        "disposition": "friendly",
+                    },
+                    {
+                        "actor_id": target["id"],
+                        "initiative": 10,
+                        "position": {"x": 2, "y": 0},
+                        "disposition": "hostile",
+                    },
+                ],
+                "expected_revision": campaign["revision"],
+                "idempotency_key": "start",
+            },
+        )
+        attacked = await raw(
+            "combat_resolve_attack",
+            {
+                "campaign_id": campaign["id"],
+                "actor_id": caster["id"],
+                "target_id": target["id"],
+                "action": {
+                    "weapon_id": "guiding-bolt-test",
+                    "attack_mode": "ranged",
+                },
+                "expected_revision": started["campaign_revision"],
+                "idempotency_key": "guiding-bolt",
+            },
+        )
+        assert attacked["status"] == "pending_ruling"
+        pending = next(
+            item
+            for item in attacked["combat"]["pending"]
+            if item["id"] == attacked["result"]["pending_on_hit_ruling_id"]
+        )
+        assert any(
+            candidate["id"] == "next_attack_advantage"
+            for candidate in pending["candidates"]
+        )
+        ruled = await raw(
+            "combat_on_hit_ruling",
+            {
+                "campaign_id": campaign["id"],
+                "target_id": target["id"],
+                "choice_id": attacked["result"]["pending_on_hit_ruling_id"],
+                "selection": {
+                    "id": "next_attack_advantage",
+                    "source_excerpt": effect,
+                },
+                "expected_revision": attacked["campaign_revision"],
+                "idempotency_key": "rule-guiding-bolt",
+            },
+        )
+        effect_id = ruled["ongoing_effect"]["id"]
+        assert ruled["ongoing_effect"]["expires_on_round"] == 2
+        ended = await raw(
+            "combat_end_turn",
+            {
+                "campaign_id": campaign["id"],
+                "actor_id": caster["id"],
+                "expected_revision": ruled["campaign_revision"],
+                "idempotency_key": "end-caster",
+            },
+        )
+        plan = await call(
+            "combat_preflight_attack",
+            {
+                "campaign_id": campaign["id"],
+                "actor_id": ally["id"],
+                "target_id": target["id"],
+                "action": {
+                    "weapon_id": "unarmed-strike",
+                    "attack_mode": "melee",
+                },
+            },
+        )
+        assert plan["advantage"] is True
+        assert plan["next_attack_advantage_effect_id"] == effect_id
+        consumed = await raw(
+            "combat_resolve_attack",
+            {
+                "campaign_id": campaign["id"],
+                "actor_id": ally["id"],
+                "target_id": target["id"],
+                "action": {
+                    "weapon_id": "unarmed-strike",
+                    "attack_mode": "melee",
+                },
+                "expected_revision": ended["campaign_revision"],
+                "idempotency_key": "consume-guiding-bolt",
+            },
+        )
+        assert (
+            consumed["result"]["consumed_next_attack_advantage_effect_id"]
+            == effect_id
+        )
+        stored = next(
+            item
+            for item in consumed["combat"]["ongoing_effects"]
+            if item["id"] == effect_id
+        )
+        assert stored["active"] is False
+        assert stored["resolution"]["kind"] == "attack_roll"
+
+    asyncio.run(exercise())
+
+
 @pytest.mark.parametrize(
     ("save_success", "starting_hp"),
     [(True, 20), (False, 4)],

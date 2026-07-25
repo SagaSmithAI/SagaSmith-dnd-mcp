@@ -1473,6 +1473,64 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     combatant.pop("turned", None)
                 return
 
+    def consume_next_attack_advantage(
+        encounter: dict[str, Any],
+        plan: dict[str, Any],
+        *,
+        attacker_id: str,
+        target_id: str,
+    ) -> str | None:
+        effect_id = str(plan.get("next_attack_advantage_effect_id") or "")
+        if not effect_id:
+            return None
+        effect = next(
+            (
+                item
+                for item in encounter.get("ongoing_effects", [])
+                if isinstance(item, dict)
+                and str(item.get("id") or "") == effect_id
+                and item.get("active", True)
+                and item.get("kind") == "next_attack_advantage"
+                and str(item.get("target_id") or "") == target_id
+            ),
+            None,
+        )
+        if effect is None:
+            raise CombatEngineError(
+                "next-attack advantage plan does not match an active target effect"
+            )
+        effect["active"] = False
+        effect["resolution"] = {
+            "kind": "attack_roll",
+            "attacker_id": attacker_id,
+            "target_id": target_id,
+        }
+        return effect_id
+
+    def expire_next_attack_advantage(
+        encounter: dict[str, Any],
+        *,
+        actor_id: str,
+        ended_round: int,
+    ) -> list[str]:
+        expired: list[str] = []
+        for effect in encounter.get("ongoing_effects", []):
+            if (
+                isinstance(effect, dict)
+                and effect.get("active", True)
+                and effect.get("kind") == "next_attack_advantage"
+                and str(effect.get("expires_on_actor_id") or "") == actor_id
+                and ended_round >= int(effect.get("expires_on_round", 0) or 0)
+            ):
+                effect["active"] = False
+                effect["resolution"] = {
+                    "kind": "duration_expired",
+                    "actor_id": actor_id,
+                    "round": ended_round,
+                }
+                expired.append(str(effect.get("id") or ""))
+        return expired
+
     def reveal_attacker_to_target(
         encounter: dict[str, Any], attacker_id: str, target_id: str
     ) -> None:
@@ -4626,6 +4684,16 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "combat.attack.payment",
             )
         attack_roll = roll_attack_action(plan=plan)
+        consumed_attack_advantage = consume_next_attack_advantage(
+            next_encounter,
+            plan,
+            attacker_id=actor_id,
+            target_id=target_id,
+        )
+        if consumed_attack_advantage:
+            attack_roll["consumed_next_attack_advantage_effect_id"] = (
+                consumed_attack_advantage
+            )
         if spell_resolution is not None:
             attack_roll.update(
                 spell_id=str(spell_resolution["spell_id"]),
@@ -4811,12 +4879,30 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         on_hit_ruling = dict(result.get("on_hit_ruling") or {})
         pending_on_hit_ruling: dict[str, Any] | None = None
         if attack_roll.get("hit") and str(on_hit_ruling.get("effect") or "").strip():
+            next_attack_advantage = (
+                re.search(
+                    r"(?i)\bthe next attack against the target before the end of "
+                    r"the caster's next turn has advantage\b",
+                    str(on_hit_ruling["effect"]),
+                )
+                is not None
+            )
             next_encounter = add_choice_window(
                 next_encounter,
                 kind="ruling",
                 actor_id_value=target_id,
                 event="attack.on_hit.effect",
                 candidates=[
+                    *(
+                        [
+                            {
+                                "id": "next_attack_advantage",
+                                "name": "Grant advantage to the next attack",
+                            }
+                        ]
+                        if next_attack_advantage
+                        else []
+                    ),
                     {
                         "id": "apply_condition",
                         "name": "Apply a structured condition",
@@ -4939,10 +5025,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "choice_id is not this target's pending attack on-hit ruling"
             )
         selection_id = str(normalized_selection.get("id") or "").strip().casefold()
-        if selection_id not in {"apply_condition", "saving_throw_damage", "dismiss"}:
+        if selection_id not in {
+            "apply_condition",
+            "saving_throw_damage",
+            "next_attack_advantage",
+            "dismiss",
+        }:
             raise CombatEngineError(
                 "attack on-hit ruling must apply a condition, resolve save damage, "
-                "or dismiss it"
+                "grant reviewed next-attack advantage, or dismiss it"
             )
         effect = str(window.get("effect") or "").strip()
         has_explicit_save_damage = (
@@ -4957,6 +5048,42 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             raise CombatEngineError(
                 "an explicit saving-throw damage effect requires save-and-damage settlement"
             )
+        states_next_attack_advantage = (
+            re.search(
+                r"(?i)\bthe next attack against the target before the end of "
+                r"the caster's next turn has advantage\b",
+                effect,
+            )
+            is not None
+        )
+        if selection_id == "next_attack_advantage":
+            allowed_fields = {"id", "source_excerpt"}
+            unknown_fields = set(normalized_selection) - allowed_fields
+            source_excerpt = str(
+                normalized_selection.get("source_excerpt") or ""
+            ).strip()
+            if (
+                unknown_fields
+                or not states_next_attack_advantage
+                or not source_excerpt
+                or source_excerpt.casefold() not in effect.casefold()
+            ):
+                raise CombatEngineError(
+                    "next-attack advantage requires the exact reviewed spell excerpt"
+                )
+            candidates = list(window.get("candidates") or [])
+            if not any(
+                str(item.get("id") or "") == "next_attack_advantage"
+                for item in candidates
+                if isinstance(item, dict)
+            ):
+                window["candidates"] = [
+                    *candidates,
+                    {
+                        "id": "next_attack_advantage",
+                        "name": "Grant advantage to the next attack",
+                    },
+                ]
         next_encounter = resolve_choice_window(
             encounter,
             choice_id=choice_id,
@@ -4967,7 +5094,25 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         ongoing_effect: dict[str, Any] | None = None
         settlement_result: dict[str, Any] | None = None
         rule_receipts: list[dict[str, Any]] = []
-        if selection_id == "apply_condition":
+        if selection_id == "next_attack_advantage":
+            source_excerpt = str(normalized_selection["source_excerpt"]).strip()
+            ongoing_effect = {
+                "id": str(choice_id),
+                "kind": "next_attack_advantage",
+                "source_actor_id": str(window.get("attacker_id") or ""),
+                "target_id": target_id,
+                "weapon_id": str(window.get("weapon_id") or ""),
+                "source_excerpt": source_excerpt,
+                "effect": effect,
+                "expires_on_actor_id": str(window.get("attacker_id") or ""),
+                "expires_on_round": int(next_encounter.get("round", 1) or 1) + 1,
+                "active": True,
+            }
+            next_encounter["ongoing_effects"] = [
+                *list(next_encounter.get("ongoing_effects") or []),
+                ongoing_effect,
+            ]
+        elif selection_id == "apply_condition":
             allowed_fields = {
                 "id",
                 "condition",
@@ -5427,6 +5572,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         duration = advance_effect_durations(current.sheet, period="turn_end")
         next_state = dict(campaign.state or {})
         next_state["combat"] = end_turn(encounter, actor_id_value=actor_id)
+        expired_attack_advantage = expire_next_attack_advantage(
+            next_state["combat"],
+            actor_id=actor_id,
+            ended_round=int(encounter.get("round", 1) or 1),
+        )
         remaining_readied_ids = {
             str(item.get("id")) for item in next_state["combat"].get("readied", [])
         }
@@ -5443,7 +5593,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             minute_changed = elapsed_rounds >= 10
             next_state["combat"]["rounds_until_minute"] = 0 if minute_changed else elapsed_rounds
         combat_updates: list[CharacterStateUpdate] = []
-        expired_effects = set(duration["expired"])
+        expired_effects = {
+            *duration["expired"],
+            *expired_attack_advantage,
+        }
         rule_context = effective_rule_context(campaign_id)
         rule_receipts: list[dict[str, Any]] = core_receipts(
             rule_context,
@@ -5974,6 +6127,16 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             actor_id_value=actor_id,
             selection={"id": "opportunity_attack"},
         )
+        consumed_attack_advantage = consume_next_attack_advantage(
+            next_encounter,
+            plan,
+            attacker_id=actor_id,
+            target_id=target_id,
+        )
+        if consumed_attack_advantage:
+            attack_roll["consumed_next_attack_advantage_effect_id"] = (
+                consumed_attack_advantage
+            )
         combatant = next(
             item for item in next_encounter["combatants"] if item.get("actor_id") == actor_id
         )

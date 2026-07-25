@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 from scripts.regression_encounter import (
     GUIDING_BOLT_ID,
+    GUIDING_BOLT_ON_HIT,
     HEALING_WORD_ID,
     MAGIC_MISSILE_ID,
     _characters,
@@ -19,6 +20,7 @@ from scripts.regression_encounter import (
     _preferred_hostile_weapon_id,
     _preferred_multiattack_option_id,
     _reinforcement_config,
+    _resolve_pending,
     _roll_total,
     _should_stand,
     _source_declared_conditions,
@@ -607,6 +609,47 @@ def test_auto_run_starts_from_play_before_loading_combat_tools() -> None:
     assert result == {
         "completed": True,
         "auto_start": {"started": True},
+    }
+
+
+def test_interrupted_guiding_bolt_ruling_resumes_with_exact_effect() -> None:
+    calls: list[tuple[str, dict]] = []
+
+    class Client:
+        async def core(self, tool_id: str, arguments: dict) -> dict:
+            assert tool_id == "campaign_query"
+            return {"revision": 17}
+
+        async def domain(self, tool_id: str, arguments: dict) -> dict:
+            calls.append((tool_id, arguments))
+            return {"status": "committed"}
+
+    result = asyncio.run(
+        _resolve_pending(
+            Client(),
+            SimpleNamespace(campaign_id="campaign-1"),
+            "branch-1",
+            {
+                "pending": [
+                    {
+                        "id": "choice-1",
+                        "kind": "ruling",
+                        "actor_id": "target-1",
+                        "target_id": "target-1",
+                        "trigger": "attack_on_hit_effect",
+                        "effect": GUIDING_BOLT_ON_HIT,
+                        "status": "pending",
+                    }
+                ]
+            },
+        )
+    )
+
+    assert result == {"status": "committed"}
+    assert calls[0][0] == "combat_on_hit_ruling"
+    assert calls[0][1]["selection"] == {
+        "id": "next_attack_advantage",
+        "source_excerpt": GUIDING_BOLT_ON_HIT,
     }
 
 
