@@ -26,6 +26,7 @@ from scripts.regression_campaign import (
     _restore_statblock_preparation_context,
     _review_override_page,
     _statblock_creation_key,
+    _statblock_replacement_fields,
     _validate_noncombat_scene,
 )
 
@@ -411,6 +412,16 @@ def test_prepare_rule_statblock_can_rebuild_an_existing_actor(
     )
     assert create_call["payload"]["replace_character_id"] == "actor-1"
     assert create_call["payload"]["expected_revision"] == 4
+
+
+def test_statblock_replacement_fields_are_shared_by_module_and_rule_preparation() -> None:
+    client = _RuleStatblockClient()
+
+    assert asyncio.run(_statblock_replacement_fields(client, None)) == {}
+    assert asyncio.run(_statblock_replacement_fields(client, "actor-1")) == {
+        "replace_character_id": "actor-1",
+        "expected_revision": 4,
+    }
 
 
 def test_prepare_rule_statblock_discovers_chunks_by_source_page_and_text(

@@ -713,11 +713,20 @@ def test_statblock_reconstruction_preserves_reaction_heading_paths(tmp_path: Pat
             for item in created["character"]["sheet"]["content"]["activities"]
             if item["name"] == "Parry"
         )
-        assert parry["activation"]["type"] == "reaction"
-        assert created["statblock"]["settlement"] == "mixed"
-        assert created["statblock"]["warnings"] == [
-            "Parry: descriptive reaction is not automatically settled"
-        ]
+        assert parry["activation"] == {
+            "type": "reaction",
+            "cost": 1,
+            "trigger": "hit by a melee attack",
+        }
+        assert parry["choices"]["reaction_defense"] == {
+            "kind": "armor_class_bonus",
+            "bonus": 2,
+            "attack_modes": ["melee"],
+            "requires_visible_attacker": False,
+            "requires_wielded_melee_weapon": False,
+        }
+        assert created["statblock"]["settlement"] == "automatic"
+        assert created["statblock"]["warnings"] == []
         variant = await _call(
             server,
             "character_create_from",

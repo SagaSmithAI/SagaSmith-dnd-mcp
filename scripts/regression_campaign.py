@@ -326,6 +326,27 @@ def _statblock_creation_key(
     return f"{_idempotency_token(run_id)}-create-statblock-{identity_token}"
 
 
+async def _statblock_replacement_fields(
+    client: CampaignMcp,
+    actor_id: str | None,
+) -> dict[str, Any]:
+    if not actor_id:
+        return {}
+    current_actor = _facade_value(
+        await client.domain(
+            "character_query",
+            {
+                "view": "get",
+                "payload": {"character_id": actor_id},
+            },
+        )
+    )
+    return {
+        "replace_character_id": str(actor_id),
+        "expected_revision": int(current_actor["revision"]),
+    }
+
+
 def _phase_transition_key(token: str, action: str, campaign: dict[str, Any]) -> str:
     """Make transient phase writes retryable without replaying a stale state change."""
 
@@ -2054,18 +2075,23 @@ async def _prepare_statblock(args: argparse.Namespace) -> dict[str, Any]:
                 )
             if review.get("content_kind") != "dnd5e_2014_statblock":
                 raise RuntimeError("review is not a D&D 2014 statblock")
+            creation_payload = {
+                "campaign_id": args.campaign_id,
+                "review_id": review["id"],
+                "name": args.actor_name,
+                "character_type": args.actor_type,
+                "variant": variant,
+                **await _statblock_replacement_fields(
+                    client,
+                    args.replace_actor_id,
+                ),
+            }
             created = _facade_value(
                 await client.domain(
                     "character_create_from",
                     {
                         "mode": "module_statblock",
-                        "payload": {
-                            "campaign_id": args.campaign_id,
-                            "review_id": review["id"],
-                            "name": args.actor_name,
-                            "character_type": args.actor_type,
-                            "variant": variant,
-                        },
+                        "payload": creation_payload,
                         "idempotency_key": _statblock_creation_key(
                             run_id=args.run_id,
                             review_id=str(review["id"]),
@@ -2723,18 +2749,12 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
                     "character_type": args.actor_type,
                     "summary": "Strict source-bound encounter actor for campaign regression.",
                 }
-                if args.replace_actor_id:
-                    current_actor = _facade_value(
-                        await client.domain(
-                            "character_query",
-                            {
-                                "view": "get",
-                                "payload": {"character_id": args.replace_actor_id},
-                            },
-                        )
+                payload.update(
+                    await _statblock_replacement_fields(
+                        client,
+                        args.replace_actor_id,
                     )
-                    payload["replace_character_id"] = str(args.replace_actor_id)
-                    payload["expected_revision"] = int(current_actor["revision"])
+                )
                 creation_mode = "statblock"
                 if rule_review is not None:
                     creation_mode = "reviewed_rule_statblock"
