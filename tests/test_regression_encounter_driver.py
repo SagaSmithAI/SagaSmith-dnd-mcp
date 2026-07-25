@@ -85,7 +85,7 @@ def test_party_spell_tactics_prioritize_recovery_then_supported_offense() -> Non
         party_ids=["cleric", "wizard", "ally"],
         actors=actors,
         living_targets=["goblin"],
-    ) == (HEALING_WORD_ID, "ally")
+    ) == (HEALING_WORD_ID, "ally", 1)
 
     actors["ally"]["sheet"]["combat"]["hp"]["value"] = 3
     assert _choose_party_spell(
@@ -93,13 +93,13 @@ def test_party_spell_tactics_prioritize_recovery_then_supported_offense() -> Non
         party_ids=["cleric", "wizard", "ally"],
         actors=actors,
         living_targets=["goblin"],
-    ) == (GUIDING_BOLT_ID, "goblin")
+    ) == (GUIDING_BOLT_ID, "goblin", 1)
     assert _choose_party_spell(
         "wizard",
         party_ids=["cleric", "wizard", "ally"],
         actors=actors,
         living_targets=["goblin"],
-    ) == (MAGIC_MISSILE_ID, "goblin")
+    ) == (MAGIC_MISSILE_ID, "goblin", 1)
     assert (
         _choose_party_spell(
             "cleric",
@@ -116,7 +116,39 @@ def test_party_spell_tactics_prioritize_recovery_then_supported_offense() -> Non
         party_ids=["cleric", "wizard", "ally"],
         actors=actors,
         living_targets=["wizard"],
-    ) == (MAGIC_MISSILE_ID, "wizard")
+    ) == (MAGIC_MISSILE_ID, "wizard", 1)
+
+
+def test_party_spell_tactics_respect_preparation_and_upcast_when_needed() -> None:
+    wizard = _spell_actor(MAGIC_MISSILE_ID, "unprepared-spell", slots=0)
+    wizard["sheet"]["spellcasting"].update(
+        {
+            "preparation": {
+                "mode": "spellbook",
+                "selected_spell_ids": [MAGIC_MISSILE_ID],
+            },
+            "spell_slots": {
+                "1": {"value": 0, "max": 4},
+                "2": {"value": 2, "max": 2},
+            },
+        }
+    )
+    wizard["sheet"]["content"]["spells"][1]["access"] = {
+        "known": False,
+        "prepared": False,
+        "in_spellbook": True,
+    }
+    wizard["derived"] = {
+        "spellcasting": {"prepared_spell_ids": [MAGIC_MISSILE_ID]}
+    }
+    actors = {"wizard": wizard, "goblin": _spell_actor(slots=0)}
+
+    assert _choose_party_spell(
+        "wizard",
+        party_ids=["wizard"],
+        actors=actors,
+        living_targets=["goblin"],
+    ) == (MAGIC_MISSILE_ID, "goblin", 2)
 
 
 def test_party_tactics_do_not_target_unobserved_hidden_combatants() -> None:

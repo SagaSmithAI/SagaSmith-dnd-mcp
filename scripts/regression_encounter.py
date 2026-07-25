@@ -1047,23 +1047,52 @@ def _choose_party_spell(
     actors: dict[str, dict[str, Any]],
     living_targets: list[str],
     leveled_spell_available: bool = True,
-) -> tuple[str, str] | None:
-    """Choose a supported level-1 combat spell with an explicit auditable target."""
+) -> tuple[str, str, int] | None:
+    """Choose a prepared/known supported spell and the lowest legal available slot."""
 
     if not leveled_spell_available:
         return None
     actor = actors[actor_id]
-    spells = {
-        str(item.get("id") or "")
-        for item in dict(actor.get("sheet") or {}).get("content", {}).get("spells", [])
+    sheet = dict(actor.get("sheet") or {})
+    spellcasting = dict(sheet.get("spellcasting") or {})
+    preparation = dict(spellcasting.get("preparation") or {})
+    spell_cards = [
+        item
+        for item in dict(sheet.get("content") or {}).get("spells", [])
+        if isinstance(item, dict) and str(item.get("id") or "")
+    ]
+    selected_ids = {
+        str(item)
+        for item in preparation.get("selected_spell_ids", [])
+        if str(item)
     }
-    slot = (
-        dict(dict(actor.get("sheet") or {}).get("spellcasting") or {})
-        .get("spell_slots", {})
-        .get("1", {})
+    derived_prepared_ids = {
+        str(item)
+        for item in dict(dict(actor.get("derived") or {}).get("spellcasting") or {}).get(
+            "prepared_spell_ids", []
+        )
+        if str(item)
+    }
+    known_ids = {
+        str(item["id"])
+        for item in spell_cards
+        if dict(item.get("access") or {}).get("known") is True
+        or dict(item.get("access") or {}).get("prepared") is True
+    }
+    if preparation:
+        spells = selected_ids | derived_prepared_ids | known_ids
+    else:
+        spells = {str(item["id"]) for item in spell_cards}
+    available_slot_levels = sorted(
+        int(level)
+        for level, slot in dict(spellcasting.get("spell_slots") or {}).items()
+        if str(level).isdigit()
+        and int(level) >= 1
+        and int(dict(slot).get("value", 0) or 0) > 0
     )
-    if int(dict(slot).get("value", 0) or 0) <= 0:
+    if not available_slot_levels:
         return None
+    cast_level = available_slot_levels[0]
     if actor_id in party_ids:
         downed_allies = [
             ally_id
@@ -1074,11 +1103,11 @@ def _choose_party_spell(
         ]
         downed_allies.sort(key=lambda item: "stable" in _conditions(actors[item]))
         if HEALING_WORD_ID in spells and downed_allies:
-            return HEALING_WORD_ID, downed_allies[0]
+            return HEALING_WORD_ID, downed_allies[0], cast_level
     if MAGIC_MISSILE_ID in spells and living_targets:
-        return MAGIC_MISSILE_ID, living_targets[0]
+        return MAGIC_MISSILE_ID, living_targets[0], cast_level
     if GUIDING_BOLT_ID in spells and living_targets:
-        return GUIDING_BOLT_ID, living_targets[0]
+        return GUIDING_BOLT_ID, living_targets[0], cast_level
     return None
 
 
@@ -1858,13 +1887,13 @@ async def _auto_run(
             ),
         )
         if spell_choice is not None:
-            spell_id, spell_target_id = spell_choice
+            spell_id, spell_target_id, cast_level = spell_choice
             campaign = await _campaign(client, args.campaign_id)
             cast_arguments: dict[str, Any] = {
                 "campaign_id": args.campaign_id,
                 "actor_id": actor_id,
                 "spell_id": spell_id,
-                "cast_level": 1,
+                "cast_level": cast_level,
                 "branch_id": branch["id"],
                 "expected_revision": campaign["revision"],
                 "idempotency_key": (
@@ -1874,7 +1903,7 @@ async def _auto_run(
             }
             if spell_id == MAGIC_MISSILE_ID:
                 cast_arguments["target_allocations"] = [
-                    {"target_id": spell_target_id, "darts": 3}
+                    {"target_id": spell_target_id, "darts": cast_level + 2}
                 ]
             elif spell_id == HEALING_WORD_ID:
                 cast_arguments["declaration"] = {"target_id": spell_target_id}
@@ -1920,6 +1949,7 @@ async def _auto_run(
                     "kind": "spell",
                     "actor_id": actor_id,
                     "spell_id": spell_id,
+                    "cast_level": cast_level,
                     "target_id": spell_target_id,
                     "result": spell_result,
                 }
