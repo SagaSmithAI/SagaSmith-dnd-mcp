@@ -118,6 +118,7 @@ def test_scene_resource_actions_support_deferred_checkpoint_batching() -> None:
         "roll-source",
         "spend-coins",
         "spend-item",
+        "use-activity",
         "use-consumable",
     } <= regression_playthrough.DEFERRED_CHECKPOINT_ACTIONS
 

@@ -32,6 +32,7 @@ DEFERRED_CHECKPOINT_ACTIONS = frozenset(
         "resolve-check",
         "initialize-source-state",
         "stand-up",
+        "use-activity",
         "record-event",
         "record-outcome",
         "prepare-narrative-npc",
