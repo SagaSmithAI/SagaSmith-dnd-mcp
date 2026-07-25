@@ -21,10 +21,14 @@ from scripts.regression_encounter import (
     _should_stand,
     _source_declared_conditions,
     _source_declared_surprise,
+    _source_delayed_actions,
     _source_departure_patch,
     _source_flee_ready,
+    _source_on_hit_rulings,
     _source_opening_casts,
+    _source_opening_weapons,
     _source_outcome,
+    _source_precombat_casts,
     _source_surrender_outcome,
     _source_truce_outcome,
     _surprise_from_check_report,
@@ -455,6 +459,66 @@ def test_source_opening_item_casts_preserve_authored_order_and_evidence() -> Non
     assert all(item["source_item_id"] == "staff-of-defense" for item in casts)
 
 
+def test_source_authored_precombat_and_attack_tactics_are_structured() -> None:
+    precombat = _source_precombat_casts(
+        [
+            {
+                "actor_id": "nezznar",
+                "spell_id": "invisibility",
+                "cast_level": 2,
+                "source_excerpt": "Nezznar casts invisibility on himself.",
+            }
+        ],
+        participant_ids=["nezznar", "spider-1"],
+    )
+    openings = _source_opening_weapons(
+        [
+            {
+                "actor_id": "spider-1",
+                "weapon_id": "web",
+                "source_excerpt": (
+                    "The spiders try to web the characters before closing to melee."
+                ),
+            }
+        ],
+        participant_ids=["nezznar", "spider-1"],
+    )
+    rulings = _source_on_hit_rulings(
+        [
+            {
+                "actor_id": "spider-1",
+                "weapon_id": "web",
+                "condition": "restrained",
+                "escape_dc": 12,
+                "escape_abilities": ["strength"],
+                "source_excerpt": (
+                    "The target is restrained by webbing. As an action, the restrained "
+                    "target can make a DC 12 Strength check, bursting the webbing on "
+                    "a success."
+                ),
+            }
+        ],
+        participant_ids=["nezznar", "spider-1"],
+    )
+    delayed = _source_delayed_actions(
+        [
+            {
+                "actor_id": "nezznar",
+                "until_round": 2,
+                "source_excerpt": (
+                    "Nezznar joins the fray in the round after the spiders attack."
+                ),
+            }
+        ],
+        participant_ids=["nezznar", "spider-1"],
+    )
+
+    assert precombat[0]["cast_level"] == 2
+    assert openings["spider-1"]["weapon_id"] == "web"
+    assert rulings[("spider-1", "web")]["escape_dc"] == 12
+    assert delayed["nezznar"]["until_round"] == 2
+
+
 def test_source_surrender_requires_threshold_life_no_escape_and_resolved_party() -> None:
     assert _source_surrender_outcome(
         actor_hit_points=8,
@@ -614,6 +678,23 @@ def test_hidden_hostile_visibility_preserves_each_observer_detection() -> None:
     assert by_actor["ruffian-1"]["visible_to_actor_ids"] == ["pc-1", "pc-2"]
     assert by_actor["ruffian-2"]["hidden"] is True
     assert by_actor["ruffian-2"]["visible_to_actor_ids"] == []
+
+
+def test_mixed_encounter_hides_only_source_selected_hostiles() -> None:
+    config = _participant_config(
+        ["pc-1"],
+        ["spider-1", "bugbear-1"],
+        surprise_by_actor={},
+        hostiles_hidden=False,
+        hidden_actor_ids=["spider-1"],
+        visible_to_actor_ids_by_hostile={"spider-1": []},
+    )
+    by_actor = {item["actor_id"]: item for item in config}
+
+    assert by_actor["spider-1"]["hidden"] is True
+    assert by_actor["spider-1"]["visible_to_actor_ids"] == []
+    assert by_actor["bugbear-1"]["hidden"] is False
+    assert by_actor["bugbear-1"]["visible_to_actor_ids"] is None
 
 
 def test_source_six_hostile_layout_keeps_every_actor_on_a_unique_space() -> None:

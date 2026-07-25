@@ -311,6 +311,7 @@ TOOL_GROUPS = (
         "write",
         "combat_preflight_attack",
         "combat_resolve_attack",
+        "combat_on_hit_ruling",
         "combat_reaction_attack",
         "combat_movement",
         "combat_common_action",

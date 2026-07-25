@@ -4808,6 +4808,34 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 resolution_id=spell_resolution_id,
                 result=result,
             )
+        on_hit_ruling = dict(result.get("on_hit_ruling") or {})
+        pending_on_hit_ruling: dict[str, Any] | None = None
+        if attack_roll.get("hit") and str(on_hit_ruling.get("effect") or "").strip():
+            next_encounter = add_choice_window(
+                next_encounter,
+                kind="ruling",
+                actor_id_value=target_id,
+                event="attack.on_hit.effect",
+                candidates=[
+                    {
+                        "id": "apply_condition",
+                        "name": "Apply a structured condition",
+                    },
+                    {
+                        "id": "dismiss",
+                        "name": "No structured condition applies",
+                    },
+                ],
+            )
+            pending_on_hit_ruling = next_encounter["pending"][-1]
+            pending_on_hit_ruling.update(
+                trigger="attack_on_hit_effect",
+                attacker_id=actor_id,
+                target_id=target_id,
+                weapon_id=str(plan.get("weapon_id") or ""),
+                effect=str(on_hit_ruling["effect"]).strip(),
+            )
+            result["pending_on_hit_ruling_id"] = pending_on_hit_ruling["id"]
         next_encounter["log"] = [
             *list(next_encounter.get("log") or []),
             {"type": "attack", "result": result},
@@ -4843,7 +4871,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             rule_receipts=list(result.get("rule_receipts") or []),
         )
         response = {
-            "status": "committed",
+            "status": "pending_ruling" if pending_on_hit_ruling else "committed",
             "result": result,
             "combat": next_encounter,
             "campaign_revision": mutation_revision(campaign_id),
@@ -4853,6 +4881,224 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             campaign_id,
             principal_id,
             remember_idempotent(scope, idempotency_key, payload, response, campaign_id=campaign_id),
+        )
+
+    @mcp.tool()
+    def combat_on_hit_ruling(
+        campaign_id: str,
+        target_id: str,
+        choice_id: str,
+        selection: dict[str, Any],
+        principal_id: str = "system:local",
+        expected_revision: int | None = None,
+        branch_id: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Settle a reviewed attack's descriptive on-hit condition and escape terms."""
+        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        require_write_contract(expected_revision, idempotency_key)
+        resolved_branch_id = require_current_branch(campaign_id, branch_id)
+        target_record = require_campaign_actor(campaign_id, target_id)
+        normalized_selection = deepcopy(dict(selection or {}))
+        payload = {
+            "target_id": target_id,
+            "choice_id": choice_id,
+            "selection": normalized_selection,
+            "branch_id": resolved_branch_id,
+        }
+        scope = f"combat-on-hit-ruling:{campaign_id}:{resolved_branch_id}:{principal_id}"
+        replay = replay_idempotent(scope, idempotency_key, payload)
+        if replay is not None:
+            return combat_response(campaign_id, principal_id, replay)
+        campaign, encounter = active_encounter(campaign_id)
+        if campaign.revision != expected_revision:
+            raise ValueError(
+                "campaign revision conflict: "
+                f"expected {expected_revision}, found {campaign.revision}"
+            )
+        window = next(
+            (
+                item
+                for item in encounter.get("pending", [])
+                if item.get("id") == choice_id
+            ),
+            None,
+        )
+        if (
+            not isinstance(window, dict)
+            or window.get("kind") != "ruling"
+            or window.get("trigger") != "attack_on_hit_effect"
+            or str(window.get("target_id") or "") != target_id
+            or str(window.get("actor_id") or "") != target_id
+        ):
+            raise CombatEngineError(
+                "choice_id is not this target's pending attack on-hit ruling"
+            )
+        selection_id = str(normalized_selection.get("id") or "").strip().casefold()
+        if selection_id not in {"apply_condition", "dismiss"}:
+            raise CombatEngineError(
+                "attack on-hit ruling must apply a structured condition or dismiss it"
+            )
+        next_encounter = resolve_choice_window(
+            encounter,
+            choice_id=choice_id,
+            actor_id_value=target_id,
+            selection={"id": selection_id},
+        )
+        updated_sheet = deepcopy(target_record.sheet)
+        ongoing_effect: dict[str, Any] | None = None
+        if selection_id == "apply_condition":
+            allowed_fields = {
+                "id",
+                "condition",
+                "escape_dc",
+                "escape_abilities",
+                "source_excerpt",
+            }
+            unknown_fields = set(normalized_selection) - allowed_fields
+            if unknown_fields:
+                raise CombatEngineError(
+                    "unsupported on-hit ruling fields: "
+                    + ", ".join(sorted(unknown_fields))
+                )
+            condition = str(
+                normalized_selection.get("condition") or ""
+            ).strip().casefold()
+            supported_conditions = {
+                "blinded",
+                "charmed",
+                "deafened",
+                "frightened",
+                "grappled",
+                "incapacitated",
+                "paralyzed",
+                "poisoned",
+                "prone",
+                "restrained",
+                "stunned",
+                "unconscious",
+            }
+            escape_dc = normalized_selection.get("escape_dc")
+            escape_abilities = [
+                str(item).strip().casefold()
+                for item in normalized_selection.get("escape_abilities") or []
+                if str(item).strip()
+            ]
+            source_excerpt = str(
+                normalized_selection.get("source_excerpt") or ""
+            ).strip()
+            effect = str(window.get("effect") or "").strip()
+            if condition not in supported_conditions:
+                raise CombatEngineError("on-hit ruling condition is unsupported")
+            if re.search(rf"(?i)\b{re.escape(condition)}\b", effect) is None:
+                raise CombatEngineError(
+                    "on-hit ruling condition is not stated by the reviewed attack"
+                )
+            if (
+                isinstance(escape_dc, bool)
+                or not isinstance(escape_dc, int)
+                or escape_dc < 1
+                or escape_dc > 40
+                or not escape_abilities
+                or len(escape_abilities) != len(set(escape_abilities))
+                or any(
+                    ability
+                    not in {
+                        "strength",
+                        "dexterity",
+                        "constitution",
+                        "intelligence",
+                        "wisdom",
+                        "charisma",
+                    }
+                    for ability in escape_abilities
+                )
+                or not source_excerpt
+                or source_excerpt.casefold() not in effect.casefold()
+            ):
+                raise CombatEngineError(
+                    "on-hit condition requires exact reviewed escape terms and excerpt"
+                )
+            if re.search(rf"(?i)\bDC\s*{escape_dc}\b", effect) is None or any(
+                re.search(rf"(?i)\b{re.escape(ability)}\b", effect) is None
+                for ability in escape_abilities
+            ):
+                raise CombatEngineError(
+                    "escape DC or ability is not stated by the reviewed attack"
+                )
+            conditions = {
+                str(item).strip().casefold()
+                for item in updated_sheet.get("conditions", [])
+            }
+            if condition not in conditions:
+                updated_sheet.setdefault("conditions", []).append(condition)
+            sync_combatant_conditions(next_encounter, target_id, updated_sheet)
+            ongoing_effect = {
+                "id": str(choice_id),
+                "kind": "on_hit_condition",
+                "source_actor_id": str(window.get("attacker_id") or ""),
+                "target_id": target_id,
+                "weapon_id": str(window.get("weapon_id") or ""),
+                "condition": condition,
+                "escape_dc": escape_dc,
+                "escape_abilities": escape_abilities,
+                "source_excerpt": source_excerpt,
+                "effect": effect,
+                "active": True,
+            }
+            next_encounter["ongoing_effects"] = [
+                *list(next_encounter.get("ongoing_effects") or []),
+                ongoing_effect,
+            ]
+        next_encounter["log"] = [
+            *list(next_encounter.get("log") or []),
+            {
+                "type": "attack_on_hit_ruling",
+                "target_id": target_id,
+                "choice_id": choice_id,
+                "selection": normalized_selection,
+                "ongoing_effect": ongoing_effect,
+            },
+        ][-100:]
+        next_state = {**dict(campaign.state or {}), "combat": next_encounter}
+        updates = []
+        if updated_sheet != target_record.sheet:
+            updates.append(
+                CharacterStateUpdate(
+                    character_id=target_id,
+                    sheet=validate_character_sheet(updated_sheet),
+                    notes=validate_character_notes(target_record.notes),
+                    expected_revision=target_record.revision,
+                )
+            )
+        revisions_result = StateMutationService(storage.database).replace(
+            campaign_id,
+            campaign_state=validate_party_state(next_state),
+            character_updates=updates,
+            expected_campaign_revision=campaign.revision,
+            operation="combat.attack.on_hit.ruling",
+            actor=principal_id,
+            branch_id=resolved_branch_id,
+            idempotency_key=idempotency_key,
+        )
+        response = {
+            "status": "committed",
+            "selection": normalized_selection,
+            "ongoing_effect": ongoing_effect,
+            "combat": next_encounter,
+            "campaign_revision": mutation_revision(campaign_id),
+            "revisions": [asdict(item) for item in revisions_result or []],
+        }
+        return combat_response(
+            campaign_id,
+            principal_id,
+            remember_idempotent(
+                scope,
+                idempotency_key,
+                payload,
+                response,
+                campaign_id=campaign_id,
+            ),
         )
 
     @mcp.tool()
@@ -8130,6 +8376,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         if normalized_check_action not in {
             None,
+            "escape",
             "hide",
             "improvise",
             "influence",
@@ -8385,6 +8632,44 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     raise CombatEngineError(
                         "an action-bound check can be made only on this actor's turn"
                     )
+                escape_effect: dict[str, Any] | None = None
+                if normalized_check_action == "escape":
+                    requested_effect_id = str(
+                        settlement_facts.get("ongoing_effect_id") or ""
+                    ).strip()
+                    matching_effects = [
+                        item
+                        for item in encounter.get("ongoing_effects", [])
+                        if isinstance(item, dict)
+                        and item.get("active", True)
+                        and str(item.get("target_id") or "") == actor_id
+                        and (
+                            not requested_effect_id
+                            or str(item.get("id") or "") == requested_effect_id
+                        )
+                    ]
+                    if len(matching_effects) != 1:
+                        raise CombatEngineError(
+                            "escape check requires exactly one matching ongoing effect"
+                        )
+                    escape_effect = matching_effects[0]
+                    condition = str(
+                        escape_effect.get("condition") or ""
+                    ).strip().casefold()
+                    acting_conditions = {
+                        str(item).strip().casefold()
+                        for item in acting.get("conditions", [])
+                    }
+                    if (
+                        condition not in acting_conditions
+                        or normalized_ability
+                        not in set(escape_effect.get("escape_abilities") or [])
+                        or dc != int(escape_effect.get("escape_dc", 0) or 0)
+                    ):
+                        raise CombatEngineError(
+                            "escape check does not match the active effect's condition, "
+                            "ability, and DC"
+                        )
                 encounter = resolve_common_action(
                     encounter,
                     actor_id_value=actor_id,
@@ -8396,6 +8681,37 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     },
                 )
                 result = {**result, "action": normalized_check_action}
+                if escape_effect is not None:
+                    condition = str(escape_effect["condition"]).casefold()
+                    result["ongoing_effect_id"] = str(escape_effect.get("id") or "")
+                    result["condition"] = condition
+                    result["escaped"] = bool(result["success"])
+                    if result["success"]:
+                        escaped_sheet = deepcopy(actor["sheet"])
+                        escaped_sheet["conditions"] = [
+                            item
+                            for item in escaped_sheet.get("conditions", [])
+                            if str(item).casefold() != condition
+                        ]
+                        current_actor = characters.get(actor_id)
+                        updates.append(
+                            CharacterStateUpdate(
+                                character_id=actor_id,
+                                sheet=validate_character_sheet(escaped_sheet),
+                                notes=validate_character_notes(current_actor.notes),
+                                expected_revision=current_actor.revision,
+                            )
+                        )
+                        for ongoing in encounter.get("ongoing_effects", []):
+                            if str(ongoing.get("id") or "") == str(
+                                escape_effect.get("id") or ""
+                            ):
+                                ongoing["active"] = False
+                                ongoing["resolution"] = {
+                                    "kind": "escape_check",
+                                    "actor_id": actor_id,
+                                    "success": True,
+                                }
         if encounter:
             for update in updates:
                 sync_combatant_conditions(encounter, update.character_id, update.sheet)

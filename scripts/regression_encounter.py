@@ -88,6 +88,15 @@ def _arguments() -> argparse.Namespace:
         help="Keep source-positioned hostiles hidden independently of Surprise",
     )
     parser.add_argument(
+        "--source-hidden-actor-id",
+        action="append",
+        default=[],
+        help=(
+            "Limit source-positioned hidden status and Stealth rolls to these initial "
+            "hostiles; repeat for a mixed visible/hidden encounter"
+        ),
+    )
+    parser.add_argument(
         "--shared-hostile-stealth",
         action="store_true",
         help=(
@@ -112,6 +121,46 @@ def _arguments() -> argparse.Namespace:
         help=(
             "Source-cited opening cast with actor_id, spell_id, source_item_id, "
             "and source_excerpt; repeat to preserve an authored sequence"
+        ),
+    )
+    parser.add_argument(
+        "--source-precombat-cast-json",
+        action="append",
+        type=json.loads,
+        default=[],
+        help=(
+            "Source-cited out-of-combat cast with actor_id, spell_id, cast_level, "
+            "source_excerpt, and optional component_ruling"
+        ),
+    )
+    parser.add_argument(
+        "--source-opening-weapon-json",
+        action="append",
+        type=json.loads,
+        default=[],
+        help=(
+            "Source-cited first attack choice with actor_id, weapon_id, and "
+            "source_excerpt; repeat for independently authored openings"
+        ),
+    )
+    parser.add_argument(
+        "--source-on-hit-ruling-json",
+        action="append",
+        type=json.loads,
+        default=[],
+        help=(
+            "Reviewed descriptive attack settlement with actor_id, weapon_id, "
+            "condition, escape_dc, escape_abilities, and exact source_excerpt"
+        ),
+    )
+    parser.add_argument(
+        "--source-delayed-action-json",
+        action="append",
+        type=json.loads,
+        default=[],
+        help=(
+            "Source-cited delayed participation with actor_id, until_round, and "
+            "source_excerpt; the actor remains present but takes no earlier turn"
         ),
     )
     parser.add_argument("--surrender-actor-id", default="")
@@ -262,6 +311,7 @@ def _participant_config(
     *,
     surprise_by_actor: dict[str, bool],
     hostiles_hidden: bool = True,
+    hidden_actor_ids: list[str] | None = None,
     visible_to_actor_ids_by_hostile: dict[str, list[str]] | None = None,
     source_conditions_by_actor: dict[str, list[dict[str, Any]]] | None = None,
 ) -> list[dict[str, Any]]:
@@ -289,15 +339,22 @@ def _participant_config(
         (6, 6),
         (8, 6),
     )
+    selected_hidden_ids = set(hidden_actor_ids or [])
     configs.extend(
         {
             "actor_id": actor_id,
             "position": {"x": hostile_positions[index][0], "y": hostile_positions[index][1]},
             "disposition": "hostile",
-            "hidden": hostiles_hidden and not bool(surprise_by_actor.get(actor_id, False)),
+            "hidden": (
+                (hostiles_hidden or actor_id in selected_hidden_ids)
+                and not bool(surprise_by_actor.get(actor_id, False))
+            ),
             "visible_to_actor_ids": (
                 list(dict(visible_to_actor_ids_by_hostile or {}).get(actor_id) or [])
-                if hostiles_hidden and not bool(surprise_by_actor.get(actor_id, False))
+                if (
+                    (hostiles_hidden or actor_id in selected_hidden_ids)
+                    and not bool(surprise_by_actor.get(actor_id, False))
+                )
                 else None
             ),
             "surprised": bool(surprise_by_actor.get(actor_id, False)),
@@ -542,6 +599,199 @@ def _source_opening_casts(
         cast["declaration"] = dict(raw.get("declaration") or {})
         cast["sequence"] = index + 1
         normalized.append(cast)
+    return normalized
+
+
+def _source_precombat_casts(
+    values: list[dict[str, Any]],
+    *,
+    participant_ids: list[str],
+) -> list[dict[str, Any]]:
+    allowed = {
+        "actor_id",
+        "spell_id",
+        "cast_level",
+        "source_excerpt",
+        "component_ruling",
+    }
+    normalized: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for index, raw in enumerate(values):
+        if not isinstance(raw, dict):
+            raise ValueError(f"source precombat cast {index} must be an object")
+        unknown = set(raw) - allowed
+        if unknown:
+            raise ValueError(
+                f"source precombat cast {index} has unsupported fields: "
+                f"{', '.join(sorted(unknown))}"
+            )
+        actor_id = str(raw.get("actor_id") or "").strip()
+        spell_id = str(raw.get("spell_id") or "").strip()
+        source_excerpt = str(raw.get("source_excerpt") or "").strip()
+        cast_level = raw.get("cast_level")
+        component_ruling = raw.get("component_ruling")
+        identity = (actor_id, spell_id)
+        if (
+            actor_id not in participant_ids
+            or not spell_id
+            or not source_excerpt
+            or isinstance(cast_level, bool)
+            or not isinstance(cast_level, int)
+            or cast_level < 0
+            or cast_level > 9
+            or (
+                component_ruling is not None
+                and not isinstance(component_ruling, dict)
+            )
+            or identity in seen
+        ):
+            raise ValueError(
+                f"source precombat cast {index} requires a unique participant spell, "
+                "legal cast level, exact excerpt, and optional component ruling"
+            )
+        seen.add(identity)
+        normalized.append(
+            {
+                "sequence": index + 1,
+                "actor_id": actor_id,
+                "spell_id": spell_id,
+                "cast_level": cast_level,
+                "source_excerpt": source_excerpt,
+                "component_ruling": dict(component_ruling or {}),
+            }
+        )
+    return normalized
+
+
+def _source_opening_weapons(
+    values: list[dict[str, Any]],
+    *,
+    participant_ids: list[str],
+) -> dict[str, dict[str, str]]:
+    normalized: dict[str, dict[str, str]] = {}
+    for index, raw in enumerate(values):
+        if not isinstance(raw, dict):
+            raise ValueError(f"source opening weapon {index} must be an object")
+        unknown = set(raw) - {"actor_id", "weapon_id", "source_excerpt"}
+        if unknown:
+            raise ValueError(
+                f"source opening weapon {index} has unsupported fields: "
+                f"{', '.join(sorted(unknown))}"
+            )
+        value = {
+            key: str(raw.get(key) or "").strip()
+            for key in ("actor_id", "weapon_id", "source_excerpt")
+        }
+        if (
+            not all(value.values())
+            or value["actor_id"] not in participant_ids
+            or value["actor_id"] in normalized
+        ):
+            raise ValueError(
+                f"source opening weapon {index} requires one participant actor, "
+                "weapon id, and exact excerpt"
+            )
+        normalized[value["actor_id"]] = value
+    return normalized
+
+
+def _source_on_hit_rulings(
+    values: list[dict[str, Any]],
+    *,
+    participant_ids: list[str],
+) -> dict[tuple[str, str], dict[str, Any]]:
+    allowed = {
+        "actor_id",
+        "weapon_id",
+        "condition",
+        "escape_dc",
+        "escape_abilities",
+        "source_excerpt",
+    }
+    normalized: dict[tuple[str, str], dict[str, Any]] = {}
+    for index, raw in enumerate(values):
+        if not isinstance(raw, dict):
+            raise ValueError(f"source on-hit ruling {index} must be an object")
+        unknown = set(raw) - allowed
+        if unknown:
+            raise ValueError(
+                f"source on-hit ruling {index} has unsupported fields: "
+                f"{', '.join(sorted(unknown))}"
+            )
+        actor_id = str(raw.get("actor_id") or "").strip()
+        weapon_id = str(raw.get("weapon_id") or "").strip()
+        condition = str(raw.get("condition") or "").strip().casefold()
+        source_excerpt = str(raw.get("source_excerpt") or "").strip()
+        escape_dc = raw.get("escape_dc")
+        escape_abilities = [
+            str(item).strip().casefold()
+            for item in raw.get("escape_abilities") or []
+            if str(item).strip()
+        ]
+        identity = (actor_id, weapon_id)
+        if (
+            actor_id not in participant_ids
+            or not weapon_id
+            or not condition
+            or isinstance(escape_dc, bool)
+            or not isinstance(escape_dc, int)
+            or not 1 <= escape_dc <= 40
+            or not escape_abilities
+            or len(escape_abilities) != len(set(escape_abilities))
+            or not source_excerpt
+            or identity in normalized
+        ):
+            raise ValueError(
+                f"source on-hit ruling {index} requires one participant weapon, "
+                "condition, escape terms, and exact excerpt"
+            )
+        normalized[identity] = {
+            "actor_id": actor_id,
+            "weapon_id": weapon_id,
+            "id": "apply_condition",
+            "condition": condition,
+            "escape_dc": escape_dc,
+            "escape_abilities": escape_abilities,
+            "source_excerpt": source_excerpt,
+        }
+    return normalized
+
+
+def _source_delayed_actions(
+    values: list[dict[str, Any]],
+    *,
+    participant_ids: list[str],
+) -> dict[str, dict[str, Any]]:
+    normalized: dict[str, dict[str, Any]] = {}
+    for index, raw in enumerate(values):
+        if not isinstance(raw, dict):
+            raise ValueError(f"source delayed action {index} must be an object")
+        unknown = set(raw) - {"actor_id", "until_round", "source_excerpt"}
+        if unknown:
+            raise ValueError(
+                f"source delayed action {index} has unsupported fields: "
+                f"{', '.join(sorted(unknown))}"
+            )
+        actor_id = str(raw.get("actor_id") or "").strip()
+        until_round = raw.get("until_round")
+        source_excerpt = str(raw.get("source_excerpt") or "").strip()
+        if (
+            actor_id not in participant_ids
+            or actor_id in normalized
+            or isinstance(until_round, bool)
+            or not isinstance(until_round, int)
+            or until_round < 2
+            or not source_excerpt
+        ):
+            raise ValueError(
+                f"source delayed action {index} requires one participant, round 2 "
+                "or later, and an exact excerpt"
+            )
+        normalized[actor_id] = {
+            "actor_id": actor_id,
+            "until_round": until_round,
+            "source_excerpt": source_excerpt,
+        }
     return normalized
 
 
@@ -853,6 +1103,18 @@ async def _start(
         args.campaign_id,
         [*party_ids, *all_hostile_ids],
     )
+    opening_weapons = _source_opening_weapons(
+        args.source_opening_weapon_json,
+        participant_ids=all_hostile_ids,
+    )
+    on_hit_rulings = _source_on_hit_rulings(
+        args.source_on_hit_ruling_json,
+        participant_ids=all_hostile_ids,
+    )
+    delayed_actions = _source_delayed_actions(
+        args.source_delayed_action_json,
+        participant_ids=initial_hostile_ids,
+    )
     for actor_id in all_hostile_ids:
         attacks = list(
             dict(dict(actors[actor_id].get("derived") or {}).get("inventory") or {}).get(
@@ -864,6 +1126,80 @@ async def _start(
             attacks,
             required_weapon_ids=args.required_hostile_weapon_id,
         )
+        attack_ids = {str(item.get("item_id") or "") for item in attacks}
+        opening = opening_weapons.get(actor_id)
+        if opening and opening["weapon_id"] not in attack_ids:
+            raise RuntimeError(
+                f"source opening weapon {opening['weapon_id']} is absent from {actor_id}"
+            )
+        for ruling_actor_id, ruling_weapon_id in on_hit_rulings:
+            if (
+                ruling_actor_id == actor_id
+                and ruling_weapon_id not in attack_ids
+            ):
+                raise RuntimeError(
+                    f"source on-hit weapon {ruling_weapon_id} is absent from {actor_id}"
+                )
+    selected_hidden_ids = [str(item).strip() for item in args.source_hidden_actor_id]
+    if (
+        any(not item for item in selected_hidden_ids)
+        or len(selected_hidden_ids) != len(set(selected_hidden_ids))
+        or not set(selected_hidden_ids) <= set(initial_hostile_ids)
+        or (selected_hidden_ids and args.hostiles_hidden)
+    ):
+        raise ValueError(
+            "source hidden actor ids must be unique initial hostiles and cannot be "
+            "combined with the all-hostiles --hostiles-hidden flag"
+        )
+    precombat_casts = _source_precombat_casts(
+        args.source_precombat_cast_json,
+        participant_ids=[*party_ids, *initial_hostile_ids],
+    )
+    precombat_cast_results: list[dict[str, Any]] = []
+    for cast in precombat_casts:
+        actor = actors[cast["actor_id"]]
+        cast_payload: dict[str, Any] = {
+            "spell_id": cast["spell_id"],
+            "cast_level": cast["cast_level"],
+        }
+        if cast["component_ruling"]:
+            cast_payload["component_ruling"] = cast["component_ruling"]
+        settled = await client.domain(
+            "character_action",
+            {
+                "character_id": cast["actor_id"],
+                "action": "cast_spell",
+                "payload": cast_payload,
+                "expected_revision": actor["revision"],
+                "idempotency_key": (
+                    "encounter-source-precombat-cast-"
+                    + _token(
+                        f"{args.run_id}:{cast['sequence']}:{cast['actor_id']}:"
+                        f"{cast['spell_id']}",
+                        length=24,
+                    )
+                ),
+            },
+        )
+        if settled.get("status") not in {"committed", "pending_ruling"}:
+            raise RuntimeError(
+                "source precombat spell did not pay canonical resources and "
+                "start its structured duration"
+            )
+        precombat_cast_results.append(
+            {
+                **cast,
+                "result": settled,
+            }
+        )
+        actors.update(
+            await _characters(
+                client,
+                args.campaign_id,
+                [cast["actor_id"]],
+            )
+        )
+    campaign = await _campaign(client, args.campaign_id)
     passive_perception: dict[str, int] = {}
     visible_to_actor_ids_by_hostile: dict[str, list[str]] = {}
     surprise_modes = sum(
@@ -885,6 +1221,30 @@ async def _start(
             "source_excerpt": str(args.source_excerpt or ""),
         }
         expected_revision = campaign["revision"]
+        if selected_hidden_ids:
+            (
+                _ignored_surprise,
+                passive_perception,
+                hidden_basis,
+                expected_revision,
+            ) = await _roll_hostile_stealth(
+                client,
+                args,
+                branch_id=str(branch["id"]),
+                actors=actors,
+                party_ids=party_ids,
+                hostile_ids=selected_hidden_ids,
+            )
+            visible_to_actor_ids_by_hostile = {
+                hostile_id: [
+                    actor_id
+                    for actor_id in party_ids
+                    if passive_perception[actor_id]
+                    >= int(dict(hidden_basis["stealth_totals"])[hostile_id])
+                ]
+                for hostile_id in selected_hidden_ids
+            }
+            surprise_basis["hidden_positioning"] = hidden_basis
     elif args.surprise_check_report is not None:
         surprise, surprise_basis = _surprise_from_check_report(
             args.surprise_check_report,
@@ -909,13 +1269,20 @@ async def _start(
             passive_perception,
             surprise_basis,
             expected_revision,
-        ) = await _roll_hostile_stealth(
+            ) = await _roll_hostile_stealth(
             client,
             args,
             branch_id=str(branch["id"]),
             actors=actors,
             party_ids=party_ids,
-            hostile_ids=initial_hostile_ids,
+            hostile_ids=selected_hidden_ids or initial_hostile_ids,
+        )
+        surprise.update(
+            {
+                actor_id: False
+                for actor_id in initial_hostile_ids
+                if actor_id not in surprise
+            }
         )
         visible_to_actor_ids_by_hostile = {
             hostile_id: [
@@ -924,7 +1291,7 @@ async def _start(
                 if passive_perception[actor_id]
                 >= int(dict(surprise_basis["stealth_totals"])[hostile_id])
             ]
-            for hostile_id in initial_hostile_ids
+            for hostile_id in (selected_hidden_ids or initial_hostile_ids)
         }
     started = await client.domain(
         "combat_start",
@@ -935,7 +1302,11 @@ async def _start(
                 party_ids,
                 initial_hostile_ids,
                 surprise_by_actor=surprise,
-                hostiles_hidden=args.hostiles_hidden or not args.no_surprise,
+                hostiles_hidden=(
+                    args.hostiles_hidden
+                    or (not args.no_surprise and not selected_hidden_ids)
+                ),
+                hidden_actor_ids=selected_hidden_ids,
                 visible_to_actor_ids_by_hostile=visible_to_actor_ids_by_hostile,
                 source_conditions_by_actor=source_conditions_by_actor,
             ),
@@ -1004,6 +1375,10 @@ async def _start(
         "visible_to_actor_ids_by_hostile": visible_to_actor_ids_by_hostile,
         "surprise": surprise,
         "source_conditions_by_actor": source_conditions_by_actor,
+        "source_precombat_casts": precombat_cast_results,
+        "source_opening_weapons": list(opening_weapons.values()),
+        "source_on_hit_rulings": list(on_hit_rulings.values()),
+        "source_delayed_actions": list(delayed_actions.values()),
         "source_opening_casts": _source_opening_casts(
             args.source_opening_cast_json,
             participant_ids=[*party_ids, *all_hostile_ids],
@@ -1525,6 +1900,18 @@ async def _auto_run(
         args.source_opening_cast_json,
         participant_ids=[*party_ids, *hostile_ids],
     )
+    opening_weapons = _source_opening_weapons(
+        args.source_opening_weapon_json,
+        participant_ids=hostile_ids,
+    )
+    on_hit_rulings = _source_on_hit_rulings(
+        args.source_on_hit_ruling_json,
+        participant_ids=hostile_ids,
+    )
+    delayed_actions = _source_delayed_actions(
+        args.source_delayed_action_json,
+        participant_ids=hostile_ids,
+    )
     surrender_configured = bool(
         args.surrender_actor_id
         or args.surrender_at_hp
@@ -1582,6 +1969,7 @@ async def _auto_run(
         )
     turns: list[dict[str, Any]] = []
     completed_opening_casts: set[int] = set()
+    completed_opening_weapon_actor_ids: set[str] = set()
     fled_hostile_ids: set[str] = set()
     if args.flee_on_start_actor_id:
         campaign = await _campaign(client, args.campaign_id)
@@ -1755,6 +2143,32 @@ async def _auto_run(
                 }
             )
             continue
+        delayed = delayed_actions.get(actor_id)
+        round_number = int(combat.get("round", 1) or 1)
+        if (
+            delayed is not None
+            and round_number < int(delayed["until_round"])
+            and _hit_points(actor) > 0
+        ):
+            ended_turn = await _end_turn(
+                client,
+                args,
+                str(branch["id"]),
+                actor_id,
+                sequence,
+            )
+            turns.append(
+                {
+                    "sequence": sequence,
+                    "kind": "source_delayed_action",
+                    "actor_id": actor_id,
+                    "round": round_number,
+                    "until_round": delayed["until_round"],
+                    "source_excerpt": delayed["source_excerpt"],
+                    "result": ended_turn,
+                }
+            )
+            continue
         if _hit_points(actor) == 0 and actor_id in party_ids and not actor_conditions & {
             "dead",
             "stable",
@@ -1812,6 +2226,66 @@ async def _auto_run(
                     "actor_id": actor_id,
                     "result": stood,
                 }
+            )
+            continue
+        escape_effect = next(
+            (
+                item
+                for item in combat.get("ongoing_effects", [])
+                if isinstance(item, dict)
+                and item.get("active", True)
+                and str(item.get("target_id") or "") == actor_id
+                and str(item.get("condition") or "").casefold()
+                in actor_conditions
+            ),
+            None,
+        )
+        if escape_effect is not None and "escape" in available_actions:
+            ability = str(list(escape_effect["escape_abilities"])[0])
+            dc = int(escape_effect["escape_dc"])
+            campaign = await _campaign(client, args.campaign_id)
+            escaped = await client.domain(
+                "combat_check",
+                {
+                    "campaign_id": args.campaign_id,
+                    "actor_id": actor_id,
+                    "kind": "ability",
+                    "ability": ability,
+                    "dc": dc,
+                    "action": "escape",
+                    "rule_facts": {
+                        "ongoing_effect_id": str(escape_effect["id"]),
+                    },
+                    "branch_id": branch["id"],
+                    "expected_revision": campaign["revision"],
+                    "idempotency_key": (
+                        "encounter-effect-escape-"
+                        + _token(
+                            f"{args.run_id}:{sequence}:{actor_id}:"
+                            f"{escape_effect['id']}",
+                            length=24,
+                        )
+                    ),
+                },
+            )
+            turns.append(
+                {
+                    "sequence": sequence,
+                    "kind": "effect_escape",
+                    "actor_id": actor_id,
+                    "ongoing_effect_id": escape_effect["id"],
+                    "condition": escape_effect["condition"],
+                    "ability": ability,
+                    "dc": dc,
+                    "result": escaped,
+                }
+            )
+            await _end_turn(
+                client,
+                args,
+                str(branch["id"]),
+                actor_id,
+                sequence,
             )
             continue
         opening_cast = next(
@@ -2019,14 +2493,18 @@ async def _auto_run(
             )
             await _end_turn(client, args, str(branch["id"]), actor_id, sequence)
             continue
-        preferred_weapon_id = (
-            _preferred_hostile_weapon_id(
+        source_opening_weapon = opening_weapons.get(actor_id)
+        preferred_weapon_id = ""
+        if (
+            source_opening_weapon is not None
+            and actor_id not in completed_opening_weapon_actor_ids
+        ):
+            preferred_weapon_id = source_opening_weapon["weapon_id"]
+        elif actor_id in hostile_ids:
+            preferred_weapon_id = _preferred_hostile_weapon_id(
                 actor,
                 hostile_index=hostile_ids.index(actor_id),
             )
-            if actor_id in hostile_ids
-            else ""
-        )
         active_multiattack = bool(
             dict(combatants[actor_id].get("turn_flags") or {}).get("multiattack")
         )
@@ -2106,6 +2584,49 @@ async def _auto_run(
                     ),
                 },
             )
+            selected_weapon_id = str(action.get("weapon_id") or "")
+            if (
+                source_opening_weapon is not None
+                and selected_weapon_id == source_opening_weapon["weapon_id"]
+            ):
+                completed_opening_weapon_actor_ids.add(actor_id)
+            on_hit_settlement = None
+            if resolved.get("status") == "pending_ruling":
+                choice_id = str(
+                    dict(resolved.get("result") or {}).get(
+                        "pending_on_hit_ruling_id"
+                    )
+                    or ""
+                )
+                ruling = on_hit_rulings.get((actor_id, selected_weapon_id))
+                if not choice_id or ruling is None:
+                    raise RuntimeError(
+                        "reviewed attack opened an on-hit ruling without a matching "
+                        "source settlement declaration"
+                    )
+                campaign = await _campaign(client, args.campaign_id)
+                on_hit_settlement = await client.domain(
+                    "combat_on_hit_ruling",
+                    {
+                        "campaign_id": args.campaign_id,
+                        "target_id": target_id,
+                        "choice_id": choice_id,
+                        "selection": {
+                            key: value
+                            for key, value in ruling.items()
+                            if key not in {"actor_id", "weapon_id"}
+                        },
+                        "branch_id": branch["id"],
+                        "expected_revision": campaign["revision"],
+                        "idempotency_key": (
+                            "encounter-on-hit-ruling-"
+                            + _token(
+                                f"{args.run_id}:{sequence}:{choice_id}",
+                                length=24,
+                            )
+                        ),
+                    },
+                )
             turns.append(
                 {
                     "sequence": sequence,
@@ -2114,9 +2635,21 @@ async def _auto_run(
                     "target_id": target_id,
                     "preflight": preflight,
                     "result": resolved,
+                    "source_opening_weapon": (
+                        source_opening_weapon
+                        if source_opening_weapon is not None
+                        and selected_weapon_id == source_opening_weapon["weapon_id"]
+                        else None
+                    ),
+                    "on_hit_settlement": on_hit_settlement,
                 }
             )
-            if _has_blocking_pending(dict(resolved.get("combat") or {})):
+            settlement_combat = (
+                dict(on_hit_settlement.get("combat") or {})
+                if on_hit_settlement is not None
+                else dict(resolved.get("combat") or {})
+            )
+            if _has_blocking_pending(settlement_combat):
                 continue
             if actor_id in hostile_ids and _has_multiattack_followup(
                 dict(resolved.get("combat") or {}),
@@ -2168,6 +2701,12 @@ async def _auto_run(
         ),
         "source_opening_casts": opening_casts,
         "completed_opening_cast_sequences": sorted(completed_opening_casts),
+        "source_opening_weapons": list(opening_weapons.values()),
+        "completed_opening_weapon_actor_ids": sorted(
+            completed_opening_weapon_actor_ids
+        ),
+        "source_on_hit_rulings": list(on_hit_rulings.values()),
+        "source_delayed_actions": list(delayed_actions.values()),
         "surrender": (
             {
                 "actor_id": args.surrender_actor_id,
