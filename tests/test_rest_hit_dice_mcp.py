@@ -120,6 +120,90 @@ def _wizard_resting_sheet() -> dict:
     return sheet
 
 
+def _bard_resting_sheet() -> dict:
+    sheet = default_character_sheet()
+    sheet["edition"] = "2014"
+    sheet["progression"] = {
+        "level": 3,
+        "classes": [{"name": "Bard", "level": 3, "hit_die": 8}],
+    }
+    sheet["combat"]["hp"] = {"value": 18, "max": 18, "temp": 0}
+    sheet["content"]["features"] = [
+        {
+            "id": "dnd5e.content.srd2014.feature.bard-song-of-rest",
+            "name": "Song of Rest",
+            "source_key": "Bard",
+            "rule_refs": ["bundled:srd2014/02_Classes/Bard.md"],
+        }
+    ]
+    return sheet
+
+
+def _land_druid_resting_sheet() -> dict:
+    sheet = default_character_sheet()
+    sheet["edition"] = "2014"
+    sheet["progression"] = {
+        "level": 4,
+        "classes": [
+            {
+                "name": "Druid",
+                "level": 4,
+                "subclass": "Circle of the Land",
+                "hit_die": 8,
+            }
+        ],
+    }
+    sheet["combat"]["hp"] = {"value": 20, "max": 24, "temp": 0}
+    sheet["spellcasting"]["spell_slots"] = {
+        "2": {
+            "label": "Level 2 spell slots",
+            "value": 0,
+            "max": 3,
+            "recovers_on": "long_rest",
+            "source_key": "Druid",
+            "slot_level": 2,
+        }
+    }
+    sheet["content"]["features"] = [
+        {
+            "id": (
+                "dnd5e.content.srd2014.feature."
+                "circle-of-the-land-natural-recovery"
+            ),
+            "name": "Natural Recovery",
+            "source_key": "Circle of the Land",
+            "rule_refs": ["bundled:srd2014/02_Classes/Druid.md"],
+        }
+    ]
+    return sheet
+
+
+def _sorcerer_resting_sheet() -> dict:
+    sheet = default_character_sheet()
+    sheet["edition"] = "2014"
+    sheet["progression"] = {
+        "level": 20,
+        "classes": [{"name": "Sorcerer", "level": 20, "hit_die": 6}],
+    }
+    sheet["combat"]["hp"] = {"value": 100, "max": 100, "temp": 0}
+    sheet["resources"]["sorcery_points"] = {
+        "label": "Sorcery Points",
+        "value": 3,
+        "max": 20,
+        "recovers_on": "long_rest",
+        "source_key": "Sorcerer",
+    }
+    sheet["content"]["features"] = [
+        {
+            "id": "dnd5e.content.srd2014.feature.sorcerer-sorcerous-restoration",
+            "name": "Sorcerous Restoration",
+            "source_key": "Sorcerer",
+            "rule_refs": ["bundled:srd2014/02_Classes/Sorcerer.md"],
+        }
+    ]
+    return sheet
+
+
 def _monk_resting_sheet() -> dict:
     sheet = default_character_sheet()
     sheet["combat"]["hp"] = {"value": 8, "max": 8, "temp": 0}
@@ -325,6 +409,239 @@ def test_short_rest_rolls_requested_hit_dice_inside_the_mcp(tmp_path: Path) -> N
         assert rested["result"]["hit_die_healing"] == rolled
         assert rested["character"]["sheet"]["combat"]["hp"]["value"] == 1 + rolled
         assert rested["character"]["sheet"]["combat"]["hit_dice"]["fighter:d10"]["value"] == 1
+
+    asyncio.run(exercise())
+
+
+def test_short_rest_applies_source_bound_song_of_rest_inside_the_mcp(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        server = create_server(_config(tmp_path))
+        campaign = await _call(
+            server,
+            "campaign_create",
+            {"name": "Song rest", "edition": "2014", "idempotency_key": "campaign"},
+        )
+        target_sheet = _resting_sheet()
+        target_sheet["combat"]["hp"]["max"] = 30
+        target = await _call(
+            server,
+            "character_create_from",
+            {
+                "mode": "direct",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "name": "Wounded Fighter",
+                    "sheet": target_sheet,
+                },
+                "idempotency_key": "target",
+            },
+        )
+        bard = await _call(
+            server,
+            "character_create_from",
+            {
+                "mode": "direct",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "name": "Resting Bard",
+                    "sheet": _bard_resting_sheet(),
+                },
+                "idempotency_key": "bard",
+            },
+        )
+        ready = await _call(
+            server,
+            "character_query",
+            {
+                "view": "rest",
+                "payload": {
+                    "character_id": target["id"],
+                    "rest_type": "short_rest",
+                    "duration_minutes": 60,
+                    "rest_schedule": _short_rest_schedule(),
+                    "hit_dice_spends": [{"key": "fighter:d10", "count": 1}],
+                    "song_of_rest_source_actor_id": bard["id"],
+                },
+            },
+        )
+        assert ready["ready"] is True
+        assert ready["song_of_rest_source_actor_id"] == bard["id"]
+        assert ready["song_of_rest_die"] == "1d6"
+
+        started = await _advance_short_rest_clock(server, campaign["id"], "song")
+        with pytest.raises(Exception, match="completed the same short rest"):
+            await _call(
+                server,
+                "character_state_change",
+                {
+                    "character_id": target["id"],
+                    "action": "rest",
+                    "payload": {
+                        "rest_type": "short_rest",
+                        "started_elapsed_minutes": started,
+                        "rest_schedule": _short_rest_schedule(),
+                        "hit_dice_spends": [{"key": "fighter:d10", "count": 1}],
+                        "song_of_rest_source_actor_id": bard["id"],
+                    },
+                    "expected_revision": target["revision"],
+                    "idempotency_key": "premature-rest",
+                },
+            )
+        bard_rested = await _call(
+            server,
+            "character_state_change",
+            {
+                "character_id": bard["id"],
+                "action": "rest",
+                "payload": {
+                    "rest_type": "short_rest",
+                    "started_elapsed_minutes": started,
+                    "rest_schedule": _short_rest_schedule(),
+                },
+                "expected_revision": bard["revision"],
+                "idempotency_key": "bard-rest",
+            },
+        )
+        assert bard_rested["status"] == "committed"
+        rested = await _call(
+            server,
+            "character_state_change",
+            {
+                "character_id": target["id"],
+                "action": "rest",
+                "payload": {
+                    "rest_type": "short_rest",
+                    "started_elapsed_minutes": started,
+                    "rest_schedule": _short_rest_schedule(),
+                    "hit_dice_spends": [{"key": "fighter:d10", "count": 1}],
+                    "song_of_rest_source_actor_id": bard["id"],
+                },
+                "expected_revision": target["revision"],
+                "idempotency_key": "rest",
+            },
+        )
+        song = rested["result"]["song_of_rest"]
+        assert song["die"] == "1d6"
+        assert 1 <= song["roll"]["total"] <= 6
+        assert song["applied_healing"] == song["rolled_healing"]
+        assert rested["song_of_rest_source"] == {
+            "actor_id": bard["id"],
+            "die": "1d6",
+        }
+        hit_die_total = rested["hit_dice_rolls"][0]["total"]
+        assert (
+            rested["character"]["sheet"]["combat"]["hp"]["value"]
+            == 1 + hit_die_total + song["rolled_healing"]
+        )
+        mechanic_ids = {
+            receipt["mechanic_id"]
+            for receipt in rested["result"]["rule_receipts"]
+        }
+        assert "dnd5e.core.rest.song_of_rest" in mechanic_ids
+
+    asyncio.run(exercise())
+
+
+def test_short_rest_applies_natural_and_sorcerous_recovery_inside_the_mcp(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        server = create_server(_config(tmp_path))
+        campaign = await _call(
+            server,
+            "campaign_create",
+            {"name": "Class recovery", "edition": "2014", "idempotency_key": "campaign"},
+        )
+        druid = await _call(
+            server,
+            "character_create_from",
+            {
+                "mode": "direct",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "name": "Land Druid",
+                    "sheet": _land_druid_resting_sheet(),
+                },
+                "idempotency_key": "druid",
+            },
+        )
+        sorcerer = await _call(
+            server,
+            "character_create_from",
+            {
+                "mode": "direct",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "name": "Archsorcerer",
+                    "sheet": _sorcerer_resting_sheet(),
+                },
+                "idempotency_key": "sorcerer",
+            },
+        )
+        ready = await _call(
+            server,
+            "character_query",
+            {
+                "view": "rest",
+                "payload": {
+                    "character_id": druid["id"],
+                    "rest_type": "short_rest",
+                    "duration_minutes": 60,
+                    "rest_schedule": _short_rest_schedule(),
+                    "natural_recovery": {"2": 1},
+                    "rest_activity_minutes": {"meditation": 60},
+                },
+            },
+        )
+        assert ready["natural_recovery"]["recovered"] == {"2": 1}
+
+        started = await _advance_short_rest_clock(server, campaign["id"], "class")
+        druid_rested = await _call(
+            server,
+            "character_state_change",
+            {
+                "character_id": druid["id"],
+                "action": "rest",
+                "payload": {
+                    "rest_type": "short_rest",
+                    "started_elapsed_minutes": started,
+                    "rest_schedule": _short_rest_schedule(),
+                    "natural_recovery": {"2": 1},
+                    "rest_activity_minutes": {"meditation": 60},
+                },
+                "expected_revision": druid["revision"],
+                "idempotency_key": "druid-rest",
+            },
+        )
+        assert druid_rested["character"]["sheet"]["spellcasting"]["spell_slots"]["2"][
+            "value"
+        ] == 1
+        assert druid_rested["result"]["natural_recovery"]["used_levels"] == 2
+
+        sorcerer_rested = await _call(
+            server,
+            "character_state_change",
+            {
+                "character_id": sorcerer["id"],
+                "action": "rest",
+                "payload": {
+                    "rest_type": "short_rest",
+                    "started_elapsed_minutes": started,
+                    "rest_schedule": _short_rest_schedule(),
+                },
+                "expected_revision": sorcerer["revision"],
+                "idempotency_key": "sorcerer-rest",
+            },
+        )
+        assert sorcerer_rested["result"]["sorcerous_restoration"]["recovered"] == 4
+        assert (
+            sorcerer_rested["character"]["sheet"]["resources"]["sorcery_points"][
+                "value"
+            ]
+            == 7
+        )
 
     asyncio.run(exercise())
 

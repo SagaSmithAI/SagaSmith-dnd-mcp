@@ -3164,6 +3164,8 @@ async def _short_rest(
     allowed_fields = {
         "actor_id",
         "arcane_recovery",
+        "natural_recovery",
+        "song_of_rest_source_actor_id",
         "attune_item_id",
         "attunement_prerequisite_confirmed",
         "hit_dice_spends",
@@ -3177,6 +3179,10 @@ async def _short_rest(
         unexpected = set(member) - allowed_fields
         actor_id = str(member.get("actor_id") or "")
         arcane_recovery = member.get("arcane_recovery")
+        natural_recovery = member.get("natural_recovery")
+        song_of_rest_source_actor_id = (
+            str(member.get("song_of_rest_source_actor_id") or "").strip() or None
+        )
         attune_item_id = str(member.get("attune_item_id") or "").strip() or None
         attunement_prerequisite_confirmed = member.get("attunement_prerequisite_confirmed")
         hit_dice_spends = member.get("hit_dice_spends")
@@ -3186,6 +3192,7 @@ async def _short_rest(
             unexpected
             or not actor_id
             or (arcane_recovery is not None and not isinstance(arcane_recovery, dict))
+            or (natural_recovery is not None and not isinstance(natural_recovery, dict))
             or (
                 attunement_prerequisite_confirmed is not None
                 and not isinstance(attunement_prerequisite_confirmed, bool)
@@ -3196,6 +3203,8 @@ async def _short_rest(
         ):
             raise ValueError(
                 "short-rest members accept actor_id, optional arcane_recovery, "
+                "optional natural_recovery, "
+                "optional song_of_rest_source_actor_id, "
                 "optional attune_item_id with attunement_prerequisite_confirmed, "
                 "optional hit_dice_spends, optional rest_activity_minutes, and "
                 "optional rest_schedule only"
@@ -3225,6 +3234,8 @@ async def _short_rest(
             {
                 "actor_id": actor_id,
                 "arcane_recovery": deepcopy(arcane_recovery or {}),
+                "natural_recovery": deepcopy(natural_recovery or {}),
+                "song_of_rest_source_actor_id": song_of_rest_source_actor_id,
                 "hit_dice_spends": normalized_spends,
                 "rest_activity_minutes": deepcopy(rest_activity_minutes or {}),
                 "rest_schedule": deepcopy(
@@ -3247,6 +3258,19 @@ async def _short_rest(
     actor_ids = [item["actor_id"] for item in normalized]
     if len(actor_ids) != len(set(actor_ids)):
         raise ValueError("short-rest member actor ids must be unique")
+    song_source_ids = {
+        str(item["song_of_rest_source_actor_id"])
+        for item in normalized
+        if item["song_of_rest_source_actor_id"] is not None
+    }
+    if song_source_ids - set(actor_ids):
+        raise ValueError("every Song of Rest source must participate in the same short rest")
+    if any(
+        item["song_of_rest_source_actor_id"] is not None
+        and not item["hit_dice_spends"]
+        for item in normalized
+    ):
+        raise ValueError("Song of Rest applies only to members who spend one or more Hit Dice")
     rest_identity = _short_rest_identity(
         normalized,
         duration_minutes=duration_minutes,
@@ -3273,6 +3297,10 @@ async def _short_rest(
                     "rest_type": "short_rest",
                     "hit_dice_spends": member["hit_dice_spends"],
                     "arcane_recovery": member["arcane_recovery"],
+                    "natural_recovery": member["natural_recovery"],
+                    "song_of_rest_source_actor_id": member[
+                        "song_of_rest_source_actor_id"
+                    ],
                     "attune_item_id": member.get("attune_item_id"),
                     "attunement_prerequisite_confirmed": member.get(
                         "attunement_prerequisite_confirmed"
@@ -3338,7 +3366,11 @@ async def _short_rest(
     )
     rested = []
     actor_by_id = {str(actor["id"]): actor for actor in actors}
-    for member in normalized:
+    ordered_members = [
+        *[item for item in normalized if item["actor_id"] in song_source_ids],
+        *[item for item in normalized if item["actor_id"] not in song_source_ids],
+    ]
+    for member in ordered_members:
         actor_id = member["actor_id"]
         payload: dict[str, Any] = {
             "rest_type": "short_rest",
@@ -3347,6 +3379,12 @@ async def _short_rest(
         }
         if member["arcane_recovery"]:
             payload["arcane_recovery"] = member["arcane_recovery"]
+        if member["natural_recovery"]:
+            payload["natural_recovery"] = member["natural_recovery"]
+        if member["song_of_rest_source_actor_id"] is not None:
+            payload["song_of_rest_source_actor_id"] = member[
+                "song_of_rest_source_actor_id"
+            ]
         if member.get("attune_item_id"):
             payload["attune_item_id"] = member["attune_item_id"]
             payload["attunement_prerequisite_confirmed"] = True

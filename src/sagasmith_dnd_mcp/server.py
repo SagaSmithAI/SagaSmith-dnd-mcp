@@ -139,9 +139,11 @@ from sagasmith_dnd.lifecycle import (
     recover_stable_creature,
     stand_outside_combat,
     validate_arcane_recovery_choice,
+    validate_natural_recovery_choice,
     validate_rest_activity_minutes,
     validate_rest_hit_dice_requests,
     validate_rest_schedule,
+    validate_song_of_rest_source,
 )
 from sagasmith_dnd.module_profile import DndModuleProfile
 from sagasmith_dnd.playthrough import validate_playthrough_manifest
@@ -9888,6 +9890,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         hit_dice_spends: list[dict[str, Any]] | None = None,
         hit_dice_recovery: dict[str, int] | None = None,
         arcane_recovery: dict[str, int] | None = None,
+        natural_recovery: dict[str, int] | None = None,
+        song_of_rest_source_actor_id: str | None = None,
         attune_item_id: str | None = None,
         attunement_prerequisite_confirmed: bool | None = None,
         rest_activity_minutes: dict[str, int] | None = None,
@@ -9920,6 +9924,16 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             )
         if prepared_spell_ids is not None and normalized_rest_type != "long_rest":
             raise CombatEngineError("prepared spells can be changed only as part of a long rest")
+        song_source_actor_id = str(song_of_rest_source_actor_id or "").strip() or None
+        song_source = None
+        song_die_sides = None
+        if song_source_actor_id is not None:
+            song_source = characters.get(song_source_actor_id)
+            if song_source.campaign_id != current.campaign_id:
+                raise CombatEngineError(
+                    "Song of Rest source must belong to the resting character's campaign"
+                )
+            song_die_sides = validate_song_of_rest_source(song_source.sheet)
         if attune_item_id:
             if attunement_prerequisite_confirmed is not True:
                 raise CombatEngineError(
@@ -9938,6 +9952,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "hit_dice_spends": hit_dice_spends or [],
             "hit_dice_recovery": hit_dice_recovery or {},
             "arcane_recovery": arcane_recovery or {},
+            "natural_recovery": natural_recovery or {},
+            "song_of_rest_source_actor_id": song_source_actor_id,
             "attune_item_id": attune_item_id,
             "attunement_prerequisite_confirmed": attunement_prerequisite_confirmed,
             "rest_activity_minutes": rest_activity_minutes or {},
@@ -9966,6 +9982,20 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             completed_elapsed_minutes, int
         ):
             raise CombatEngineError("short rest requires a current campaign clock")
+        if song_source is not None and song_source.id != current.id:
+            source_history = dict(
+                dict(song_source.sheet.get("combat") or {}).get("rest_history") or {}
+            )
+            if (
+                source_history.get("last_rest_type") != "short_rest"
+                or source_history.get("last_rest_started_elapsed_minutes")
+                != started_elapsed_minutes
+                or source_history.get("last_rest_completed_elapsed_minutes")
+                != completed_elapsed_minutes
+            ):
+                raise CombatEngineError(
+                    "Song of Rest source must have completed the same short rest"
+                )
         timed_sheet = record_rest_completion(
             current.sheet,
             rest_type=normalized_rest_type,
@@ -9987,8 +10017,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             hit_dice_spends=hit_dice_spends,
             hit_dice_recovery=hit_dice_recovery,
             arcane_recovery=arcane_recovery,
+            natural_recovery=natural_recovery,
             rest_activity_minutes=rest_activity_minutes,
             food_and_drink=food_and_drink,
+            song_of_rest_source_sheet=(
+                song_source.sheet if song_source is not None else None
+            ),
             rules=rest_rules,
             world_day=int(
                 dict(dict(campaign.state or {}).get("world_time") or {}).get("day", 0) or 0
@@ -10062,6 +10096,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "preparation": (
                 {key: value for key, value in preparation_result.items() if key != "sheet"}
                 if preparation_result is not None
+                else None
+            ),
+            "song_of_rest_source": (
+                {
+                    "actor_id": song_source_actor_id,
+                    "die": f"1d{song_die_sides}",
+                }
+                if song_source_actor_id is not None and song_die_sides is not None
                 else None
             ),
             "character": character_view(characters.get(character_id)),
@@ -18079,6 +18121,23 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 data.get("arcane_recovery"),
                 world_day=world_day,
             )
+            natural_recovery = validate_natural_recovery_choice(
+                current.sheet,
+                data.get("natural_recovery"),
+                rest_activity_minutes=data.get("rest_activity_minutes"),
+            )
+            song_source_actor_id = (
+                str(data.get("song_of_rest_source_actor_id") or "").strip() or None
+            )
+            song_die_sides = None
+            if song_source_actor_id is not None:
+                song_source = characters.get(song_source_actor_id)
+                if song_source.campaign_id != current.campaign_id:
+                    raise CombatEngineError(
+                        "Song of Rest source must belong to the resting "
+                        "character's campaign"
+                    )
+                song_die_sides = validate_song_of_rest_source(song_source.sheet)
             rest_activity_minutes = validate_rest_activity_minutes(
                 data.get("rest_activity_minutes")
             )
@@ -18116,6 +18175,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "world_day": world_day,
                 "hit_dice_spends": [{"key": key, "count": count} for key, count in hit_dice],
                 "arcane_recovery": arcane_recovery,
+                "natural_recovery": natural_recovery,
+                "song_of_rest_source_actor_id": song_source_actor_id,
+                "song_of_rest_die": (
+                    f"1d{song_die_sides}" if song_die_sides is not None else None
+                ),
                 "attune_item_id": attune_item_id,
                 "attunement_prerequisite_confirmed": (True if attune_item_id is not None else None),
                 "rest_activity_minutes": rest_activity_minutes,
@@ -18898,6 +18962,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 hit_dice_spends=data.get("hit_dice_spends"),
                 hit_dice_recovery=data.get("hit_dice_recovery"),
                 arcane_recovery=data.get("arcane_recovery"),
+                natural_recovery=data.get("natural_recovery"),
+                song_of_rest_source_actor_id=data.get("song_of_rest_source_actor_id"),
                 attune_item_id=data.get("attune_item_id"),
                 attunement_prerequisite_confirmed=data.get("attunement_prerequisite_confirmed"),
                 rest_activity_minutes=data.get("rest_activity_minutes"),

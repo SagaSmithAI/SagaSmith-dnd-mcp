@@ -3017,7 +3017,13 @@ def test_short_rest_advances_clock_and_applies_only_explicit_resource_choices() 
                         assert arguments["payload"]["hit_dice_spends"] == [
                             {"key": "fighter:d10", "count": 1}
                         ]
-                        assert arguments["payload"]["rest_activity_minutes"] == {"meditation": 30}
+                        assert (
+                            arguments["payload"]["song_of_rest_source_actor_id"]
+                            == "wizard"
+                        )
+                        assert arguments["payload"]["rest_activity_minutes"] == {
+                            "meditation": 30
+                        }
                     if actor_id == "wizard":
                         assert arguments["payload"]["arcane_recovery"] == {"1": 1}
                     return {"ready": True, "character_id": actor_id}
@@ -3063,7 +3069,13 @@ def test_short_rest_advances_clock_and_applies_only_explicit_resource_choices() 
                     assert arguments["payload"]["hit_dice_spends"] == [
                         {"key": "fighter:d10", "count": 1}
                     ]
-                    assert arguments["payload"]["rest_activity_minutes"] == {"meditation": 30}
+                    assert (
+                        arguments["payload"]["song_of_rest_source_actor_id"]
+                        == "wizard"
+                    )
+                    assert arguments["payload"]["rest_activity_minutes"] == {
+                        "meditation": 30
+                    }
                 else:
                     assert "hit_dice_spends" not in arguments["payload"]
                     assert "rest_activity_minutes" not in arguments["payload"]
@@ -3099,6 +3111,7 @@ def test_short_rest_advances_clock_and_applies_only_explicit_resource_choices() 
                 {
                     "actor_id": "fighter",
                     "hit_dice_spends": [{"key": "fighter:d10", "count": 1}],
+                    "song_of_rest_source_actor_id": "wizard",
                     "rest_activity_minutes": {"meditation": 30},
                 },
                 {"actor_id": "wizard", "arcane_recovery": {"1": 1}},
@@ -3116,6 +3129,8 @@ def test_short_rest_advances_clock_and_applies_only_explicit_resource_choices() 
         {
             "actor_id": "fighter",
             "arcane_recovery": {},
+            "natural_recovery": {},
+            "song_of_rest_source_actor_id": "wizard",
             "hit_dice_spends": [{"key": "fighter:d10", "count": 1}],
             "rest_activity_minutes": {"meditation": 30},
             "rest_schedule": {
@@ -3127,6 +3142,8 @@ def test_short_rest_advances_clock_and_applies_only_explicit_resource_choices() 
         {
             "actor_id": "wizard",
             "arcane_recovery": {"1": 1},
+            "natural_recovery": {},
+            "song_of_rest_source_actor_id": None,
             "hit_dice_spends": [],
             "rest_activity_minutes": {},
             "rest_schedule": {
@@ -3146,8 +3163,8 @@ def test_short_rest_advances_clock_and_applies_only_explicit_resource_choices() 
         _mutation_key("run-1", "short-rest-clock-advance", identity)
     ]
     assert client.keys["actor"] == [
-        _mutation_key("run-1", "short-rest-actor", f"{identity}:fighter"),
         _mutation_key("run-1", "short-rest-actor", f"{identity}:wizard"),
+        _mutation_key("run-1", "short-rest-actor", f"{identity}:fighter"),
     ]
     assert client.keys["continuity"] == [_mutation_key("run-1", "short-rest-continuity", identity)]
     assert client.keys["sync"] == [_mutation_key("run-1", "sync", f"short-rest-sync:{identity}")]
