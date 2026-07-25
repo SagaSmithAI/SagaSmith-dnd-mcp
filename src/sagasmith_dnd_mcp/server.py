@@ -15664,6 +15664,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             source_title=str(module.get("title") or ""),
         )
         for candidate in candidates:
+            local_candidate_id = str(candidate["id"])
+            candidate["id"] = "candidate:" + hashlib.sha256(
+                f"{module_id}\x1f{local_candidate_id}".encode("utf-8")
+            ).hexdigest()[:20]
             candidate["review_tool"] = "module_content_review"
             candidate["module_id"] = module_id
             if len(candidate.get("source_scene_ids") or []) != 1:

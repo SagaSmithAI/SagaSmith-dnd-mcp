@@ -335,3 +335,92 @@ def test_text_module_spellcaster_ocr_hydrates_source_bound_spells(
         assert created["statblock"]["warnings"] == []
 
     asyncio.run(exercise())
+
+
+def test_reimported_module_statblock_candidates_have_globally_unique_ids(
+    tmp_path: Path,
+) -> None:
+    config = McpConfig(
+        home=tmp_path / "home",
+        database_url=None,
+        chroma_url=None,
+        chroma_path_override=None,
+        dnd_skills_dir=tmp_path / "dnd",
+        modulegen_skills_dir=tmp_path / "modulegen",
+        auto_seed_rules=True,
+    )
+
+    async def exercise() -> None:
+        server = create_server(config)
+        campaign = await _call(
+            server,
+            "campaign_create",
+            {
+                "name": "Candidate identity",
+                "edition": "2014",
+                "idempotency_key": "campaign",
+            },
+        )
+        module_ids: list[str] = []
+        for version in ("one", "two"):
+            staged = await _call(
+                server,
+                "module_import",
+                {
+                    "campaign_id": campaign["id"],
+                    "action": "stage",
+                    "payload": {
+                        "name": f"goblins-{version}.md",
+                        "content": GOBLIN_MODULE,
+                        "source_key": f"goblins-{version}",
+                        "title": "Goblins",
+                    },
+                    "idempotency_key": f"stage-{version}",
+                },
+            )
+            job_id = staged["job"]["id"]
+            for action in ("inspect", "validate", "ingest"):
+                result = await _call(
+                    server,
+                    "module_import",
+                    {
+                        "campaign_id": campaign["id"],
+                        "action": action,
+                        "payload": {"job_id": job_id},
+                        "idempotency_key": f"{action}-{version}",
+                    },
+                )
+            current = await _call(
+                server,
+                "campaign_query",
+                {"view": "get", "payload": {"campaign_id": campaign["id"]}},
+            )
+            await _call(
+                server,
+                "module_import",
+                {
+                    "campaign_id": campaign["id"],
+                    "action": "activate",
+                    "payload": {"job_id": job_id},
+                    "expected_revision": current["revision"],
+                    "idempotency_key": f"activate-{version}",
+                },
+            )
+            module_ids.append(result["module_id"])
+
+        candidate_ids = []
+        for module_id in module_ids:
+            candidates = await _call(
+                server,
+                "module_query",
+                {
+                    "campaign_id": campaign["id"],
+                    "view": "candidates",
+                    "payload": {"module_id": module_id},
+                },
+            )
+            candidate_ids.append(candidates[0]["id"])
+
+        assert len(set(candidate_ids)) == 2
+
+    asyncio.run(exercise())
