@@ -3317,7 +3317,10 @@ def test_source_bound_time_advance_commits_clock_knowledge_and_snapshot(
         assert result["continuity"]["snapshot"]["slot"] == 5
 
 
-def test_play_activity_records_structured_effect_and_random_receipt() -> None:
+@pytest.mark.parametrize("defer_checkpoint", [False, True])
+def test_play_activity_records_structured_effect_and_random_receipt(
+    defer_checkpoint: bool,
+) -> None:
     receipt = {
         "operation": "character_action",
         "position_before": 10,
@@ -3371,8 +3374,12 @@ def test_play_activity_records_structured_effect_and_random_receipt() -> None:
                 payload = arguments["payload"]["event"]["payload"]
                 assert payload["core_effect"]["kind"] == "second_wind"
                 assert payload["random_stream_receipt"] == receipt
+                assert ("snapshot" in arguments["payload"]) is not defer_checkpoint
                 self.revision += 1
-                return {"event": {"id": "event-1"}, "snapshot": {"slot": 6}}
+                return {
+                    "event": {"id": "event-1"},
+                    **({} if defer_checkpoint else {"snapshot": {"slot": 6}}),
+                }
             if tool_id == "playthrough_manifest":
                 return {
                     "manifest": {"status": "in_progress"},
@@ -3392,11 +3399,13 @@ def test_play_activity_records_structured_effect_and_random_receipt() -> None:
             declaration=None,
             reason="The fighter used Second Wind before pursuing the hostage bargain.",
             knowledge_actor_ids=["cleric"],
+            defer_checkpoint=defer_checkpoint,
         )
     )
 
     assert result["action"]["result"]["core_effect"]["after_hp"] == 10
     assert result["knowledge_actor_ids"] == ["fighter", "cleric"]
+    assert ("snapshot" in result["continuity"]) is not defer_checkpoint
 
 
 def test_dm_event_keeps_enemy_knowledge_out_of_party_event_stream() -> None:

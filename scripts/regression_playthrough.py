@@ -3472,6 +3472,7 @@ async def _use_activity(
     declaration: dict[str, Any] | None,
     reason: str,
     knowledge_actor_ids: list[str],
+    defer_checkpoint: bool = False,
 ) -> dict[str, Any]:
     if not all((scene_id, location_key, actor_id, activity_id, reason.strip())):
         raise ValueError("use-activity requires scene, location, actor, activity id, and reason")
@@ -3520,45 +3521,47 @@ async def _use_activity(
     recipients = list(dict.fromkeys([actor_id, *knowledge_actor_ids]))
     campaign = await _campaign(client, campaign_id)
     core_effect = dict(dict(acted.get("result") or {}).get("core_effect") or {})
+    continuity_payload = {
+        "event": {
+            "summary": reason.strip(),
+            "event_type": "character_activity",
+            "audience_scope": "party",
+            "payload": {
+                "scene_id": scene_id,
+                "location_key": location_key,
+                "actor_id": actor_id,
+                "activity_id": activity_id,
+                "declaration": deepcopy(declaration or {}),
+                "core_effect": core_effect,
+                "random_stream_receipt": deepcopy(acted.get("random_stream_receipt")),
+            },
+        },
+        "actor_knowledge": [
+            {
+                "actor_id": recipient,
+                "knowledge_key": (
+                    f"playthrough.{_token(run_id)}.{_token(scene_id)}."
+                    f"{_token(actor_id)}.{_token(activity_id)}"
+                ),
+                "proposition": reason.strip(),
+                "disclosure_scope": "owner",
+            }
+            for recipient in recipients
+        ],
+        "branch_id": str(branch["id"]),
+    }
+    if not defer_checkpoint:
+        continuity_payload["snapshot"] = {
+            "label": (
+                f"Full playthrough activity: {actor['name']} used "
+                f"{activity_id} at {location_key}"
+            )
+        }
     committed = await client.domain(
         "continuity_commit",
         {
             "campaign_id": campaign_id,
-            "payload": {
-                "event": {
-                    "summary": reason.strip(),
-                    "event_type": "character_activity",
-                    "audience_scope": "party",
-                    "payload": {
-                        "scene_id": scene_id,
-                        "location_key": location_key,
-                        "actor_id": actor_id,
-                        "activity_id": activity_id,
-                        "declaration": deepcopy(declaration or {}),
-                        "core_effect": core_effect,
-                        "random_stream_receipt": deepcopy(acted.get("random_stream_receipt")),
-                    },
-                },
-                "actor_knowledge": [
-                    {
-                        "actor_id": recipient,
-                        "knowledge_key": (
-                            f"playthrough.{_token(run_id)}.{_token(scene_id)}."
-                            f"{_token(actor_id)}.{_token(activity_id)}"
-                        ),
-                        "proposition": reason.strip(),
-                        "disclosure_scope": "owner",
-                    }
-                    for recipient in recipients
-                ],
-                "snapshot": {
-                    "label": (
-                        f"Full playthrough activity: {actor['name']} used "
-                        f"{activity_id} at {location_key}"
-                    )
-                },
-                "branch_id": str(branch["id"]),
-            },
+            "payload": continuity_payload,
             "expected_revision": campaign["revision"],
             "idempotency_key": _mutation_key(
                 run_id,
@@ -6954,6 +6957,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     declaration=args.activity_declaration_json,
                     reason=args.activity_reason,
                     knowledge_actor_ids=args.knowledge_actor_id,
+                    defer_checkpoint=args.defer_checkpoint,
                 )
             elif args.action == "long-rest":
                 if phase != "play":
