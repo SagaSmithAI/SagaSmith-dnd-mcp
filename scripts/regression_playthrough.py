@@ -86,6 +86,7 @@ def _arguments() -> argparse.Namespace:
             "relock-core",
             "refresh-module",
             "query-source",
+            "index-source",
             "read-scene",
             "roll-source",
             "register-party",
@@ -104,6 +105,7 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--module-source-path", type=Path)
     parser.add_argument("--module-source-key", default="")
     parser.add_argument("--module-title", default="")
+    parser.add_argument("--module-id", default="")
     parser.add_argument(
         "--refresh-return-phase",
         choices=("lobby", "play"),
@@ -422,6 +424,34 @@ async def _read_scene(
     if returned_scene_id != normalized_scene_id:
         raise RuntimeError("module_query returned a different scene")
     return result
+
+
+async def _index_source(
+    client: ExposureClient,
+    *,
+    campaign_id: str,
+    module_id: str,
+) -> dict[str, Any]:
+    normalized_module_id = module_id.strip()
+    if not normalized_module_id:
+        raise ValueError("index-source requires --module-id")
+    result = await client.domain(
+        "module_query",
+        {
+            "campaign_id": campaign_id,
+            "view": "index",
+            "payload": {"module_id": normalized_module_id},
+        },
+    )
+    if not isinstance(result, list) or any(not isinstance(item, dict) for item in result):
+        raise RuntimeError("module_query returned an invalid module index")
+    returned_module_ids = {
+        str(item.get("module_id") or "")
+        for item in result
+    }
+    if returned_module_ids - {normalized_module_id}:
+        raise RuntimeError("module_query returned a different module index")
+    return {"module_id": normalized_module_id, "scenes": result}
 
 
 def _server_parameters(args: argparse.Namespace) -> StdioServerParameters:
@@ -6882,6 +6912,13 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     query=args.source_query,
                     top_k=args.source_top_k,
                     expand=args.source_expand,
+                )
+            elif args.action == "index-source":
+                await client.load(*_source_groups(phase))
+                report["result"] = await _index_source(
+                    client,
+                    campaign_id=args.campaign_id,
+                    module_id=args.module_id,
                 )
             elif args.action == "read-scene":
                 await client.load(*_source_groups(phase))

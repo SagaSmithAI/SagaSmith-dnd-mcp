@@ -31,6 +31,7 @@ from scripts.regression_playthrough import (
     _configure_advancement,
     _configure_ending_conditions,
     _extend_manifest_for_module_revision,
+    _index_source,
     _initialize_clock,
     _initialize_source_state,
     _level_spell_choice_counts,
@@ -1263,6 +1264,35 @@ def test_query_source_searches_and_expands_only_public_mcp_results() -> None:
         ),
         ("module_expand", {"chunk_id": "chunk-1"}),
     ]
+
+
+def test_index_source_uses_exact_public_mcp_module_query() -> None:
+    class Client:
+        async def domain(self, tool_id: str, arguments: dict):
+            assert tool_id == "module_query"
+            assert arguments == {
+                "campaign_id": "campaign-1",
+                "view": "index",
+                "payload": {"module_id": "module-1"},
+            }
+            return [
+                {
+                    "module_id": "module-1",
+                    "chapter_id": "chapter-1",
+                    "scene_id": "scene-1",
+                }
+            ]
+
+    result = asyncio.run(
+        _index_source(
+            Client(),
+            campaign_id="campaign-1",
+            module_id="module-1",
+        )
+    )
+
+    assert result["module_id"] == "module-1"
+    assert result["scenes"][0]["scene_id"] == "scene-1"
 
 
 def test_read_scene_uses_exact_public_mcp_scene_query() -> None:
