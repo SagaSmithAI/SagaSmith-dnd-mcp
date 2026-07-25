@@ -23,6 +23,7 @@ from scripts.regression_campaign import (
     _prepare_rule_statblock_with_recovery,
     _prepare_statblock,
     _restore_statblock_preparation_context,
+    _review_override_page,
     _statblock_creation_key,
     _validate_noncombat_scene,
 )
@@ -42,6 +43,18 @@ def test_blocked_candidate_override_requires_nonempty_visual_evidence(tmp_path: 
     assert resolved == path.resolve()
     with pytest.raises(ValueError, match="visual evidence"):
         _load_review_override(path, "")
+
+
+def test_multi_page_candidate_override_requires_an_in_range_visual_page() -> None:
+    candidate = {"page_start": 195, "page_end": 196}
+
+    assert _review_override_page(candidate, 195) == 195
+    with pytest.raises(ValueError, match="requires explicit --source-page"):
+        _review_override_page(candidate, None)
+    with pytest.raises(ValueError, match="outside"):
+        _review_override_page(candidate, 197)
+    with pytest.raises(ValueError, match="does not match"):
+        _review_override_page({"page_start": 195, "page_end": 195}, 196)
 
 
 def test_statblock_variant_file_requires_a_json_object(tmp_path: Path) -> None:

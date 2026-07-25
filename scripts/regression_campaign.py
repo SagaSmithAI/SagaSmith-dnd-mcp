@@ -34,6 +34,36 @@ def _load_review_override(path: Path, observation: str) -> tuple[str, str, Path]
     return content, evidence, resolved
 
 
+def _review_override_page(
+    candidate: dict[str, Any],
+    requested_page: int | None,
+) -> int:
+    page_start = candidate.get("page_start")
+    page_end = candidate.get("page_end")
+    if page_start is None or page_end is None:
+        raise ValueError("review override candidate has no source page range")
+    first = int(page_start)
+    last = int(page_end)
+    if first > last:
+        raise ValueError("review override candidate has an invalid source page range")
+    if first == last:
+        if requested_page is not None and int(requested_page) != first:
+            raise ValueError(
+                "review override --source-page does not match the candidate source page"
+            )
+        return first
+    if requested_page is None:
+        raise ValueError(
+            "review override for a multi-page candidate requires explicit --source-page"
+        )
+    selected = int(requested_page)
+    if not first <= selected <= last:
+        raise ValueError(
+            "review override --source-page is outside the candidate source page range"
+        )
+    return selected
+
+
 def _load_json_object(path: Path, label: str) -> tuple[dict[str, Any], Path]:
     resolved = path.expanduser().resolve()
     value = json.loads(resolved.read_text(encoding="utf-8"))
@@ -137,7 +167,10 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument(
         "--source-page",
         type=int,
-        help="One-based PDF page filter for prepare-rule-statblock chunk discovery",
+        help=(
+            "One-based PDF page for prepare-rule-statblock discovery or an explicit "
+            "visual-review page when a module candidate spans multiple pages"
+        ),
     )
     parser.add_argument(
         "--ability-method",
@@ -1948,10 +1981,10 @@ async def _prepare_statblock(args: argparse.Namespace) -> dict[str, Any]:
                         args.review_override,
                         args.review_observation,
                     )
-                    if candidate.get("page_start") != candidate.get("page_end"):
-                        raise ValueError(
-                            "review override requires a candidate from one source page"
-                        )
+                    page_number = _review_override_page(
+                        candidate,
+                        args.source_page,
+                    )
                     assets = _facade_value(
                         await client.domain(
                             "module_query",
@@ -1972,7 +2005,6 @@ async def _prepare_statblock(args: argparse.Namespace) -> dict[str, Any]:
                             "review override requires exactly one source PDF asset"
                         )
                     source_asset_id = str(pdf_assets[0]["id"])
-                    page_number = int(candidate["page_start"])
                     source_chunk_ids = None
                     review_metadata = {
                         "review_method": "rendered_source_page",
