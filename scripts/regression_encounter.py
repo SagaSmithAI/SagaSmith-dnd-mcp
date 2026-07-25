@@ -38,6 +38,16 @@ def _arguments() -> argparse.Namespace:
         help="Already-arrived source combatants tracked as a separate manifest group",
     )
     parser.add_argument(
+        "--reinforcement-hostile-report",
+        type=Path,
+        action="append",
+        default=[],
+        help=(
+            "Source-cited reinforcements queued through public combat_join after "
+            "the encounter starts; they enter at the next round boundary"
+        ),
+    )
+    parser.add_argument(
         "--required-hostile-weapon-id",
         action="append",
         default=[],
@@ -53,6 +63,8 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--hostile-label", default="Source-defined hostiles")
     parser.add_argument("--additional-hostile-label", default="Additional source hostiles")
     parser.add_argument("--additional-hostile-source-excerpt", default="")
+    parser.add_argument("--reinforcement-hostile-label", default="Source reinforcements")
+    parser.add_argument("--reinforcement-hostile-source-excerpt", default="")
     parser.add_argument("--surprise-check-report", type=Path)
     parser.add_argument("--source-surprised-actor-id", action="append", default=[])
     parser.add_argument(
@@ -175,12 +187,18 @@ def _participant_manifest(
     additional_hostile_ids: list[str] | None = None,
     additional_label: str = "",
     additional_source_excerpt: str = "",
+    reinforcement_hostile_ids: list[str] | None = None,
+    reinforcement_label: str = "",
+    reinforcement_source_excerpt: str = "",
 ) -> dict[str, Any]:
     if not source_excerpt.strip():
         raise ValueError("encounter start requires an exact source excerpt")
     additional_ids = list(additional_hostile_ids or [])
     if additional_ids and not additional_source_excerpt.strip():
         raise ValueError("additional source hostiles require an exact source excerpt")
+    reinforcement_ids = list(reinforcement_hostile_ids or [])
+    if reinforcement_ids and not reinforcement_source_excerpt.strip():
+        raise ValueError("source reinforcements require an exact source excerpt")
     groups = [
         {
             "key": "source-hostiles",
@@ -200,6 +218,17 @@ def _participant_manifest(
                 "required_count": len(additional_ids),
                 "actor_ids": additional_ids,
                 "source_excerpt": additional_source_excerpt,
+            }
+        )
+    if reinforcement_ids:
+        groups.append(
+            {
+                "key": "source-reinforcements",
+                "label": reinforcement_label,
+                "role": "reinforcement",
+                "required_count": len(reinforcement_ids),
+                "actor_ids": reinforcement_ids,
+                "source_excerpt": reinforcement_source_excerpt,
             }
         )
     return {
@@ -286,6 +315,34 @@ def _participant_config(
         for index, actor_id in enumerate(hostile_ids)
     )
     return configs
+
+
+def _reinforcement_config(actor_id: str, index: int) -> dict[str, Any]:
+    """Place a queued source reinforcement without granting an immediate turn."""
+
+    if not actor_id.strip():
+        raise ValueError("source reinforcement actor_id must be non-empty")
+    positions = (
+        (7, 2),
+        (7, 4),
+        (9, 2),
+        (9, 4),
+        (6, 6),
+        (8, 6),
+        (10, 2),
+        (10, 4),
+        (6, 7),
+        (8, 7),
+    )
+    if index < 0 or index >= len(positions):
+        raise ValueError("default encounter layout supports at most 10 reinforcements")
+    return {
+        "position": {"x": positions[index][0], "y": positions[index][1]},
+        "disposition": "hostile",
+        "hidden": False,
+        "surprised": False,
+        "death_saves": False,
+    }
 
 
 def _facade_value(value: Any) -> Any:
@@ -769,6 +826,7 @@ async def _start(
     party_ids: list[str],
     hostile_ids: list[str],
     additional_hostile_ids: list[str],
+    reinforcement_hostile_ids: list[str],
 ) -> dict[str, Any]:
     if not args.scene_id or not args.location_key:
         raise ValueError("encounter start requires --scene-id and --location-key")
@@ -784,10 +842,11 @@ async def _start(
     if phase != "play":
         raise RuntimeError("encounter start requires the play phase")
     branch = await _current_branch(client, args.campaign_id)
-    all_hostile_ids = [*hostile_ids, *additional_hostile_ids]
+    initial_hostile_ids = [*hostile_ids, *additional_hostile_ids]
+    all_hostile_ids = [*initial_hostile_ids, *reinforcement_hostile_ids]
     source_conditions_by_actor = _source_declared_conditions(
         args.source_condition_json,
-        participant_ids=[*party_ids, *all_hostile_ids],
+        participant_ids=[*party_ids, *initial_hostile_ids],
     )
     actors = await _characters(
         client,
@@ -820,7 +879,7 @@ async def _start(
             "--source-surprised-actor-id are mutually exclusive"
         )
     if args.no_surprise:
-        surprise = {actor_id: False for actor_id in [*party_ids, *all_hostile_ids]}
+        surprise = {actor_id: False for actor_id in [*party_ids, *initial_hostile_ids]}
         surprise_basis = {
             "mode": "source_scene_no_surprise",
             "source_excerpt": str(args.source_excerpt or ""),
@@ -833,13 +892,13 @@ async def _start(
             scene_id=args.scene_id,
             location_key=args.location_key,
             party_ids=party_ids,
-            hostile_ids=all_hostile_ids,
+            hostile_ids=initial_hostile_ids,
         )
         expected_revision = campaign["revision"]
     elif args.source_surprised_actor_id:
         surprise, surprise_basis = _source_declared_surprise(
             party_ids=party_ids,
-            hostile_ids=all_hostile_ids,
+            hostile_ids=initial_hostile_ids,
             surprised_actor_ids=args.source_surprised_actor_id,
             source_excerpt=str(args.source_excerpt or ""),
         )
@@ -856,7 +915,7 @@ async def _start(
             branch_id=str(branch["id"]),
             actors=actors,
             party_ids=party_ids,
-            hostile_ids=all_hostile_ids,
+            hostile_ids=initial_hostile_ids,
         )
         visible_to_actor_ids_by_hostile = {
             hostile_id: [
@@ -865,16 +924,16 @@ async def _start(
                 if passive_perception[actor_id]
                 >= int(dict(surprise_basis["stealth_totals"])[hostile_id])
             ]
-            for hostile_id in all_hostile_ids
+            for hostile_id in initial_hostile_ids
         }
     started = await client.domain(
         "combat_start",
         {
             "campaign_id": args.campaign_id,
-            "participant_ids": [*party_ids, *all_hostile_ids],
+            "participant_ids": [*party_ids, *initial_hostile_ids],
             "participant_config": _participant_config(
                 party_ids,
-                all_hostile_ids,
+                initial_hostile_ids,
                 surprise_by_actor=surprise,
                 hostiles_hidden=args.hostiles_hidden or not args.no_surprise,
                 visible_to_actor_ids_by_hostile=visible_to_actor_ids_by_hostile,
@@ -888,6 +947,11 @@ async def _start(
                 additional_label=args.additional_hostile_label,
                 additional_source_excerpt=str(
                     args.additional_hostile_source_excerpt or ""
+                ),
+                reinforcement_hostile_ids=reinforcement_hostile_ids,
+                reinforcement_label=args.reinforcement_hostile_label,
+                reinforcement_source_excerpt=str(
+                    args.reinforcement_hostile_source_excerpt or ""
                 ),
             ),
             "name": args.encounter_name,
@@ -910,6 +974,25 @@ async def _start(
         "combat.save",
         "combat.map",
     )
+    reinforcement_queue: list[dict[str, Any]] = []
+    for index, actor_id in enumerate(reinforcement_hostile_ids):
+        campaign = await _campaign(client, args.campaign_id)
+        reinforcement_queue.append(
+            await client.domain(
+                "combat_join",
+                {
+                    "campaign_id": args.campaign_id,
+                    "actor_id": actor_id,
+                    "participant_config": _reinforcement_config(actor_id, index),
+                    "branch_id": branch["id"],
+                    "expected_revision": campaign["revision"],
+                    "idempotency_key": (
+                        "encounter-queue-reinforcement-"
+                        + _token(f"{args.run_id}:{actor_id}", length=24)
+                    ),
+                },
+            )
+        )
     status = await client.domain(
         "combat_query",
         {"campaign_id": args.campaign_id, "view": "status"},
@@ -926,6 +1009,7 @@ async def _start(
             participant_ids=[*party_ids, *all_hostile_ids],
         ),
         "start": started,
+        "reinforcement_queue": reinforcement_queue,
         "combat_exposure": opened_combat,
         "combat": status,
         "actors": [_character_summary(actors[item]) for item in actors],
@@ -2042,9 +2126,29 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
         if args.additional_hostile_report
         else []
     )
-    if set(hostile_ids) & set(additional_hostile_ids):
-        raise ValueError("base and additional hostile reports must be disjoint")
-    all_hostile_ids = [*hostile_ids, *additional_hostile_ids]
+    reinforcement_hostile_ids = (
+        _hostile_ids(args.reinforcement_hostile_report)
+        if args.reinforcement_hostile_report
+        else []
+    )
+    hostile_groups = [
+        set(hostile_ids),
+        set(additional_hostile_ids),
+        set(reinforcement_hostile_ids),
+    ]
+    if any(
+        left & right
+        for index, left in enumerate(hostile_groups)
+        for right in hostile_groups[index + 1 :]
+    ):
+        raise ValueError(
+            "base, additional, and reinforcement hostile reports must be disjoint"
+        )
+    all_hostile_ids = [
+        *hostile_ids,
+        *additional_hostile_ids,
+        *reinforcement_hostile_ids,
+    ]
     report: dict[str, Any] = {
         "action": args.action,
         "transport": "stdio",
@@ -2053,6 +2157,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
         "party_ids": party_ids,
         "hostile_ids": hostile_ids,
         "additional_hostile_ids": additional_hostile_ids,
+        "reinforcement_hostile_ids": reinforcement_hostile_ids,
     }
     async with stdio_client(_server_parameters(args)) as (read, write):
         async with ClientSession(read, write) as session:
@@ -2065,6 +2170,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     party_ids,
                     hostile_ids,
                     additional_hostile_ids,
+                    reinforcement_hostile_ids,
                 )
             elif args.action == "auto-run":
                 report["result"] = await _auto_run(

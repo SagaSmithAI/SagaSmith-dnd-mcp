@@ -15,6 +15,7 @@ from scripts.regression_encounter import (
     _participant_manifest,
     _preferred_hostile_weapon_id,
     _preferred_multiattack_option_id,
+    _reinforcement_config,
     _roll_total,
     _should_stand,
     _source_declared_conditions,
@@ -456,6 +457,46 @@ def test_encounter_manifest_tracks_arrived_source_group_separately() -> None:
             "source_excerpt": "One goblin flees to area 8 to warn Klarg.",
         },
     ]
+
+
+def test_encounter_manifest_tracks_delayed_source_reinforcements() -> None:
+    manifest = _participant_manifest(
+        ["guard", "vhalak"],
+        label="Main cavern occupants",
+        source_excerpt="One more stands guard in the western half of the cavern.",
+        reinforcement_hostile_ids=["rift-1", "rift-2"],
+        reinforcement_label="Rift workers",
+        reinforcement_source_excerpt=(
+            "If a fight breaks out in the main cavern, the two bugbears in "
+            "the rift climb up the ropes to join the fray."
+        ),
+    )
+
+    assert manifest["groups"][1] == {
+        "key": "source-reinforcements",
+        "label": "Rift workers",
+        "role": "reinforcement",
+        "required_count": 2,
+        "actor_ids": ["rift-1", "rift-2"],
+        "source_excerpt": (
+            "If a fight breaks out in the main cavern, the two bugbears in "
+            "the rift climb up the ropes to join the fray."
+        ),
+    }
+
+
+def test_source_reinforcements_enter_openly_at_next_round_positions() -> None:
+    first = _reinforcement_config("rift-1", 0)
+    second = _reinforcement_config("rift-2", 1)
+
+    assert first == {
+        "position": {"x": 7, "y": 2},
+        "disposition": "hostile",
+        "hidden": False,
+        "surprised": False,
+        "death_saves": False,
+    }
+    assert second["position"] == {"x": 7, "y": 4}
 
 
 def test_default_ambush_layout_keeps_two_goblins_thirty_feet_away() -> None:
