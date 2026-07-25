@@ -3908,7 +3908,7 @@ def test_partially_committed_check_is_recovered_without_reroll() -> None:
     )
 
 
-def test_xp_award_uses_source_ref_and_all_exact_recipients() -> None:
+def test_xp_award_uses_source_ref_and_keeps_dead_participant_share() -> None:
     source_ref = {
         "module_id": "module-1",
         "scene_id": "scene-1",
@@ -3937,6 +3937,9 @@ def test_xp_award_uses_source_ref_and_all_exact_recipients() -> None:
                     "id": actor_id,
                     "campaign_id": "campaign-1",
                     "revision": 2,
+                    "sheet": {
+                        "conditions": ["dead"] if actor_id == "actor-1" else [],
+                    },
                 }
             if tool_id == "campaign_change":
                 assert arguments["action"] == "experience_award"
