@@ -86,6 +86,7 @@ def _arguments() -> argparse.Namespace:
             "restore-regression",
             "relock-core",
             "prepare-statblock",
+            "discover-rule-chunks",
             "prepare-rule-statblock",
             "prepare-core-wizard",
             "noncombat-check",
@@ -162,7 +163,7 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument(
         "--source-query",
         default="",
-        help="Case-insensitive source text filter for prepare-rule-statblock chunk discovery",
+        help="Case-insensitive text filter for rule source chunk discovery",
     )
     parser.add_argument(
         "--source-page",
@@ -2829,6 +2830,120 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
             }
 
 
+async def _discover_rule_chunks(args: argparse.Namespace) -> dict[str, Any]:
+    """Inspect rule-source chunk boundaries without attempting actor creation."""
+
+    if not args.source_id or args.source_path:
+        raise ValueError("discover-rule-chunks requires --source-id without --source-path")
+    source_query = str(getattr(args, "source_query", "") or "").strip()
+    source_page = getattr(args, "source_page", None)
+    if not source_query and source_page is None:
+        raise ValueError("discover-rule-chunks requires --source-query or --source-page")
+    if source_page is not None and source_page < 1:
+        raise ValueError("--source-page must be positive")
+    token = _idempotency_token(args.run_id)
+    async with stdio_client(_server_parameters(args)) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            client = CampaignMcp(session, args.campaign_id)
+            phase_payload = await client.core(
+                "game_phase", {"campaign_id": args.campaign_id, "action": "get"}
+            )
+            initial_phase = str(_facade_value(phase_payload)["tool_profile"])
+            await client.open()
+            await client.load(*_phase_groups(initial_phase))
+            branches = _facade_value(
+                await client.domain(
+                    "branch_query", {"campaign_id": args.campaign_id, "view": "list"}
+                )
+            )
+            current_branch = next((item for item in branches if item.get("is_current")), None)
+            if current_branch is None:
+                raise RuntimeError("campaign has no current branch")
+            phase_changes: list[dict[str, Any]] = []
+            if initial_phase != "lobby":
+                campaign = _facade_value(
+                    await client.core(
+                        "campaign_query",
+                        {"view": "get", "payload": {"campaign_id": args.campaign_id}},
+                    )
+                )
+                phase_changes.append(
+                    _facade_value(
+                        await client.core(
+                            "game_phase",
+                            {
+                                "campaign_id": args.campaign_id,
+                                "action": "set",
+                                "tool_profile": "lobby",
+                                "expected_revision": campaign["revision"],
+                                "branch_id": current_branch["id"],
+                                "idempotency_key": _phase_transition_key(
+                                    token, "rule-chunk-discovery-enter-lobby", campaign
+                                ),
+                            },
+                        )
+                    )
+                )
+            await client.open()
+            await client.load("lobby.campaign", "lobby.rules")
+            query_payload: dict[str, Any] = {
+                "source_id": str(args.source_id),
+                "query": source_query,
+                "limit": 200,
+            }
+            if source_page is not None:
+                query_payload["page"] = source_page
+            chunks = list(
+                _facade_value(
+                    await client.domain(
+                        "rule_pack_query",
+                        {"view": "source_chunks", "payload": query_payload},
+                    )
+                )
+            )
+            if initial_phase != "lobby":
+                campaign = _facade_value(
+                    await client.core(
+                        "campaign_query",
+                        {"view": "get", "payload": {"campaign_id": args.campaign_id}},
+                    )
+                )
+                phase_changes.append(
+                    _facade_value(
+                        await client.core(
+                            "game_phase",
+                            {
+                                "campaign_id": args.campaign_id,
+                                "action": "set",
+                                "tool_profile": initial_phase,
+                                "expected_revision": campaign["revision"],
+                                "branch_id": current_branch["id"],
+                                "idempotency_key": _phase_transition_key(
+                                    token, "rule-chunk-discovery-restore-phase", campaign
+                                ),
+                            },
+                        )
+                    )
+                )
+            return {
+                "action": "discover-rule-chunks",
+                "transport": "stdio",
+                "campaign_id": args.campaign_id,
+                "source_id": str(args.source_id),
+                "initial_phase": initial_phase,
+                "query": query_payload,
+                "chunks": chunks,
+                "phase_changes": phase_changes,
+            }
+
+
+async def _discover_rule_chunks_with_recovery(
+    args: argparse.Namespace,
+) -> dict[str, Any]:
+    return await _statblock_preparation_with_recovery(args, _discover_rule_chunks)
+
+
 async def _prepare_core_wizard(args: argparse.Namespace) -> dict[str, Any]:
     """Build a complete Wizard through public lobby tools and active Core content."""
 
@@ -5002,6 +5117,7 @@ def main() -> int:
         "restore-regression": _restore_regression,
         "relock-core": _relock_core,
         "prepare-statblock": _prepare_statblock_with_recovery,
+        "discover-rule-chunks": _discover_rule_chunks_with_recovery,
         "prepare-rule-statblock": _prepare_rule_statblock_with_recovery,
         "prepare-core-wizard": _prepare_core_wizard,
         "noncombat-check": _noncombat_check,

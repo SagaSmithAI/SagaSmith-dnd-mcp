@@ -16,6 +16,7 @@ from scripts.regression_campaign import (
     _arguments,
     _character_summary,
     _configure_utf8_streams,
+    _discover_rule_chunks,
     _expanded_source_ref,
     _load_json_object,
     _load_review_override,
@@ -416,6 +417,43 @@ def test_prepare_rule_statblock_discovers_chunks_by_source_page_and_text(
     )
     assert create_call["payload"]["chunk_ids"] == ["kenku-chunk"]
     assert report["selected_source_chunks"][0]["page_start"] == 195
+
+
+def test_discover_rule_chunks_returns_boundaries_without_creating_an_actor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = _RuleStatblockClient()
+    _patch_rule_statblock_transport(monkeypatch, client)
+    args = _rule_statblock_args(tmp_path, defer_checkpoint=True)
+    args.source_query = "Kenku"
+    args.source_page = 195
+
+    report = asyncio.run(_discover_rule_chunks(args))
+
+    assert report["query"] == {
+        "source_id": "source-1",
+        "query": "Kenku",
+        "page": 195,
+        "limit": 200,
+    }
+    assert report["chunks"] == [
+        {
+            "id": "kenku-chunk",
+            "content": "KENKU\nMedium humanoid (kenku), chaotic neutral",
+            "page_start": 195,
+            "page_end": 195,
+        }
+    ]
+    assert not any(
+        scope == "domain" and tool_id == "character_create_from"
+        for scope, tool_id, _arguments in client.calls
+    )
+    phase_sets = [
+        arguments["tool_profile"]
+        for scope, tool_id, arguments in client.calls
+        if scope == "core" and tool_id == "game_phase" and arguments["action"] == "set"
+    ]
+    assert phase_sets == ["lobby", "play"]
 
 
 def test_prepare_rule_statblock_uses_checksum_bound_visual_review(
