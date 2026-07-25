@@ -796,6 +796,17 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         phase = str(state.get("game_phase") or PROFILE_LOBBY)
         return phase if phase in {PROFILE_LOBBY, PROFILE_PLAY} else PROFILE_LOBBY
 
+    def preparation_setup_closed(campaign: Any) -> bool:
+        """Return whether this campaign has ever crossed into live play."""
+        state = dict(campaign.state or {})
+        if bool(state.get("adventure_started", False)):
+            return True
+        manifest = state.get("playthrough_manifest")
+        return isinstance(manifest, dict) and str(manifest.get("status") or "") in {
+            "in_progress",
+            "completed",
+        }
+
     def validate_exposure_scope(
         exposure: Exposure, tool_id: str, arguments: dict[str, Any]
     ) -> None:
@@ -2721,6 +2732,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             raise CombatEngineError("end the active combat before leaving the combat profile")
         state = dict(campaign.state or {})
         state["game_phase"] = profile
+        if profile == PROFILE_PLAY:
+            state["adventure_started"] = True
         revisions_result = StateMutationService(storage.database).replace(
             campaign_id,
             campaign_state=validate_party_state(state),
@@ -10645,16 +10658,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "feature_artifacts": context["feature_options"],
             "subclass_options": context["subclass_options"],
             "spell_choices": applied["spell_choices"],
-            "prepared_spell_event": (
-                "level_up"
-                if applied["spellcasting"].get("mode") in {"prepared", "spellbook"}
-                else None
-            ),
+            # In 2014, gaining a level can add cantrips, known spells, or
+            # wizard spellbook entries.  A prepared list itself changes only
+            # when the character finishes a long rest.
+            "prepared_spell_event": None,
             "complete": not (
                 context["feature_options"]
                 or context["subclass_options"]
                 or any(int(value) for value in applied["spell_choices"].values())
-                or applied["spellcasting"].get("mode") in {"prepared", "spellbook"}
             ),
         }
         result = {key: value for key, value in applied.items() if key != "sheet"}
@@ -10727,11 +10738,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "feature_artifacts": context["feature_options"],
             "subclass_options": context["subclass_options"],
             "spell_choices": preview["spell_choices"],
-            "prepared_spell_event": (
-                "level_up"
-                if preview["spellcasting"].get("mode") in {"prepared", "spellbook"}
-                else None
-            ),
+            "prepared_spell_event": None,
         }
         follow_up["complete"] = not (
             follow_up["feature_artifacts"]
@@ -10994,6 +11001,24 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 completed_elapsed_minutes=completed_elapsed,
                 rest_schedule=member["rest_schedule"],
             )
+            if member["prepared_spell_ids"] is not None:
+                preparation_preview = replace_prepared_spells(
+                    current.sheet,
+                    spell_ids=member["prepared_spell_ids"],
+                    event="long_rest",
+                )
+                required_minutes = int(
+                    preparation_preview.get("preparation_minutes", 0) or 0
+                )
+                available_minutes = int(
+                    member["rest_schedule"].get("light_activity_minutes", 0) or 0
+                )
+                if available_minutes < required_minutes:
+                    raise CombatEngineError(
+                        f"prepared spell list for {current.id} requires "
+                        f"{required_minutes} minutes of light preparation activity; "
+                        f"the rest schedule records {available_minutes}"
+                    )
 
         effect_steps = {
             "minute": duration_minutes,
@@ -11531,7 +11556,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 raise CombatEngineError("prepared spells cannot be changed during combat")
             if state.get("game_phase", PROFILE_LOBBY) != PROFILE_LOBBY:
                 raise CombatEngineError(
-                    "live prepared-spell changes must be submitted atomically with character_rest"
+                    "live prepared-spell changes must be submitted atomically with party_rest"
+                )
+            if preparation_setup_closed(campaign):
+                raise CombatEngineError(
+                    "individual preparation edits are initial setup only; after play starts, "
+                    "submit the complete list with the edition's legal timing event"
                 )
         preparation_rules = (
             effective_rule_context(current.campaign_id) if current.campaign_id else None
@@ -11560,9 +11590,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         expected_revision: int | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
-        """Set the complete prepared list atomically during setup or level advancement."""
+        """Set the complete prepared list atomically under the edition timing rules."""
         current = characters.get(character_id)
         require_character_control(current, principal_id)
+        normalized_event = str(event).strip().lower().replace("-", "_")
         if current.campaign_id is not None:
             campaign = campaigns.get(current.campaign_id)
             state = dict(campaign.state or {})
@@ -11571,10 +11602,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 raise CombatEngineError("prepared spells cannot be changed during combat")
             if state.get("game_phase", PROFILE_LOBBY) != PROFILE_LOBBY:
                 raise CombatEngineError("switch to lobby for setup or level-up preparation changes")
-        normalized_event = str(event).strip().lower().replace("-", "_")
+            if normalized_event == "setup" and preparation_setup_closed(campaign):
+                raise CombatEngineError(
+                    "prepared-spell setup is closed after live play starts; use the edition's "
+                    "legal long-rest or level-up workflow"
+                )
         if normalized_event not in {"setup", "level_up"}:
             raise CombatEngineError(
-                "this tool accepts setup or level_up; long-rest changes belong in character_rest"
+                "this tool accepts setup or level_up; long-rest changes belong in party_rest"
             )
         result = replace_prepared_spells(
             current.sheet,

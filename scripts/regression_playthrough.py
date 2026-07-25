@@ -5488,12 +5488,10 @@ def _level_spell_choice_counts(
     *,
     spell_by_id: dict[str, dict[str, Any]],
     class_name: str,
-    prepared_event: str,
     preparation_mode: str,
-    prepared_spell_ids: list[str],
     maximum_spell_level: int,
 ) -> tuple[int, int, list[str]]:
-    """Count advancement choices while auditing prepared-caster card hydration."""
+    """Count advancement choices while auditing prepared-caster catalog hydration."""
     selected_cantrips = 0
     selected_leveled = 0
     prepared_additions: list[str] = []
@@ -5512,9 +5510,9 @@ def _level_spell_choice_counts(
         spell_level = int(requirements.get("level", 0) or 0)
         method = selection["method"]
         if method == "class_prepared":
-            if prepared_event != "level_up" or preparation_mode != "prepared":
+            if preparation_mode != "prepared":
                 raise ValueError(
-                    "class_prepared level spells require a prepared-caster level-up event"
+                    "class_prepared level spells require a prepared-caster configuration"
                 )
             if spell_level < 1:
                 raise ValueError("prepared-caster cantrips must use the known method")
@@ -5522,11 +5520,9 @@ def _level_spell_choice_counts(
                 raise ValueError(
                     "class_prepared level spell exceeds the actor's available spell slots"
                 )
-            if selection["artifact_id"] not in prepared_spell_ids:
-                raise ValueError(
-                    "every class_prepared level spell must appear in the complete "
-                    "prepared-spell list"
-                )
+            # This lazily materializes legal class-list access on the actor
+            # card. It does not prepare the spell; 2014 preparation waits for
+            # the next completed long rest.
             prepared_additions.append(selection["artifact_id"])
             continue
         if spell_level == 0:
@@ -5703,9 +5699,7 @@ async def _preflight_level_completion(
         spell_selections,
         spell_by_id=spell_by_id,
         class_name=class_name,
-        prepared_event=prepared_event,
         preparation_mode=str(spellcasting_plan.get("preparation_mode") or "known"),
-        prepared_spell_ids=prepared_spell_ids,
         maximum_spell_level=int(spellcasting_plan.get("maximum_spell_level", 0) or 0),
     )
     required_counts = (
@@ -6046,9 +6040,7 @@ async def _advance_level(
         spell_selections,
         spell_by_id=spell_by_id,
         class_name=normalized_class,
-        prepared_event=prepared_event,
         preparation_mode=preparation_mode,
-        prepared_spell_ids=prepared_spell_ids,
         maximum_spell_level=maximum_spell_level,
     )
     if (selected_cantrips, selected_leveled) != (

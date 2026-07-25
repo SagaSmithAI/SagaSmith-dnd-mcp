@@ -166,6 +166,52 @@ def test_2024_prepared_spell_changes_follow_phase_and_long_rest_rules(tmp_path: 
             },
         )
         campaign = await call(server, "campaign_get", {"campaign_id": campaign["id"]})
+        assert campaign["state"]["adventure_started"] is True
+        lobby = await call(
+            server,
+            "game_phase_set",
+            {
+                "campaign_id": campaign["id"],
+                "tool_profile": "lobby",
+                "expected_revision": campaign["revision"],
+                "idempotency_key": "prep-lobby-after-start",
+            },
+        )
+        with pytest.raises(ToolError, match="setup is closed"):
+            await call(
+                server,
+                "character_spell_prepare_list",
+                {
+                    "character_id": ranger["id"],
+                    "spell_ids": ["a", "b"],
+                    "event": "setup",
+                    "expected_revision": ranger["revision"],
+                    "idempotency_key": "prep-setup-after-start",
+                },
+            )
+        with pytest.raises(ToolError, match="initial setup only"):
+            await call(
+                server,
+                "character_spell_prepare",
+                {
+                    "character_id": ranger["id"],
+                    "spell_id": "c",
+                    "prepared": True,
+                    "expected_revision": ranger["revision"],
+                    "idempotency_key": "prep-toggle-after-start",
+                },
+            )
+        await call(
+            server,
+            "game_phase_set",
+            {
+                "campaign_id": campaign["id"],
+                "tool_profile": "play",
+                "expected_revision": lobby["campaign_revision"],
+                "idempotency_key": "prep-resume-play",
+            },
+        )
+        campaign = await call(server, "campaign_get", {"campaign_id": campaign["id"]})
         clock = await call(
             server,
             "campaign_change",

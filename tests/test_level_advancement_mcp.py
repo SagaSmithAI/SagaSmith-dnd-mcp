@@ -2119,6 +2119,15 @@ def test_lobby_level_advance_is_source_bound_and_reports_catalog_follow_up(
                 "idempotency_key": "actor",
             },
         )
+        plan = await _call(
+            server,
+            "character_query",
+            {
+                "view": "advancement",
+                "payload": {"character_id": actor["id"], "class_name": "Cleric"},
+            },
+        )
+        assert plan["follow_up"]["prepared_spell_event"] is None
         arguments = {
             "character_id": actor["id"],
             "action": "level_advance",
@@ -2145,6 +2154,7 @@ def test_lobby_level_advance_is_source_bound_and_reports_catalog_follow_up(
         assert sheet["spellcasting"]["spell_slots"]["1"]["value"] == 1
         assert sheet["spellcasting"]["spell_slots"]["1"]["max"] == 3
         assert advanced["advancement"]["hp_bonus_sources"][0]["amount"] == 1
+        assert advanced["advancement"]["follow_up"]["prepared_spell_event"] is None
         feature_ids = {
             item["artifact_id"]
             for item in advanced["advancement"]["follow_up"]["feature_artifacts"]

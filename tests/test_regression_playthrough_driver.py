@@ -2094,20 +2094,16 @@ def test_prepared_caster_spell_hydration_does_not_consume_known_spell_quota() ->
         selections,
         spell_by_id=catalog,
         class_name="Cleric",
-        prepared_event="level_up",
         preparation_mode="prepared",
-        prepared_spell_ids=[artifact_id],
         maximum_spell_level=2,
     ) == (0, 0, [artifact_id])
 
-    with pytest.raises(ValueError, match="complete prepared-spell list"):
+    with pytest.raises(ValueError, match="prepared-caster configuration"):
         _level_spell_choice_counts(
             selections,
             spell_by_id=catalog,
             class_name="Cleric",
-            prepared_event="level_up",
-            preparation_mode="prepared",
-            prepared_spell_ids=[],
+            preparation_mode="known",
             maximum_spell_level=2,
         )
 

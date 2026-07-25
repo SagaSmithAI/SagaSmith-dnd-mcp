@@ -351,3 +351,145 @@ def test_party_long_rest_honors_source_granted_elf_trance(tmp_path: Path) -> Non
         assert updated["sheet"]["combat"]["rest_history"]["last_long_rest_elapsed_minutes"] == 240
 
     asyncio.run(exercise())
+
+
+def test_party_long_rest_accounts_for_2014_preparation_time(tmp_path: Path) -> None:
+    async def exercise() -> None:
+        server = create_server(_config(tmp_path))
+        campaign = await _call(
+            server,
+            "campaign_create",
+            {
+                "name": "Prepared spell timing",
+                "edition": "2014",
+                "idempotency_key": "campaign",
+            },
+        )
+        sheet = default_character_sheet()
+        sheet["progression"] = {
+            "level": 3,
+            "classes": [{"name": "Cleric", "level": 3, "hit_die": 8}],
+        }
+        sheet["abilities"]["wisdom"]["score"] = 16
+        sheet["spellcasting"]["preparation"] = {
+            "mode": "prepared",
+            "max_prepared": 6,
+            "changes_on": "long_rest",
+            "selected_spell_ids": ["bless"],
+        }
+        sheet["content"]["spells"] = [
+            {
+                "id": "bless",
+                "name": "Bless",
+                "level": 1,
+                "grant": {
+                    "source_type": "class",
+                    "source_key": "cleric",
+                    "method": "class_prepared",
+                },
+                "access": {"prepared": True},
+            },
+            {
+                "id": "aid",
+                "name": "Aid",
+                "level": 2,
+                "grant": {
+                    "source_type": "class",
+                    "source_key": "cleric",
+                    "method": "class_prepared",
+                },
+                "access": {"prepared": False},
+            },
+        ]
+        cleric = await _call(
+            server,
+            "character_create_from",
+            {
+                "mode": "direct",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "name": "Cleric",
+                    "sheet": sheet,
+                },
+                "idempotency_key": "cleric",
+            },
+        )
+        current = await _call(
+            server,
+            "campaign_query",
+            {"view": "get", "payload": {"campaign_id": campaign["id"]}},
+        )
+        clock = await _call(
+            server,
+            "campaign_change",
+            {
+                "campaign_id": campaign["id"],
+                "action": "clock_set",
+                "payload": {"day": 1, "hour": 8, "minute": 0},
+                "expected_revision": current["revision"],
+                "idempotency_key": "clock",
+            },
+        )
+
+        with pytest.raises(Exception, match="requires 3 minutes"):
+            await _call(
+                server,
+                "campaign_change",
+                {
+                    "campaign_id": campaign["id"],
+                    "action": "party_rest",
+                    "payload": {
+                        "members": [
+                            {
+                                "character_id": cleric["id"],
+                                "expected_revision": cleric["revision"],
+                                "prepared_spell_ids": ["bless", "aid"],
+                                "rest_schedule": {
+                                    "sleep_minutes": 479,
+                                    "light_activity_minutes": 1,
+                                    "strenuous_activity_minutes": 0,
+                                },
+                            }
+                        ]
+                    },
+                    "expected_revision": clock["campaign_revision"],
+                    "idempotency_key": "too-little-preparation",
+                },
+            )
+
+        rested = await _call(
+            server,
+            "campaign_change",
+            {
+                "campaign_id": campaign["id"],
+                "action": "party_rest",
+                "payload": {
+                    "members": [
+                        {
+                            "character_id": cleric["id"],
+                            "expected_revision": cleric["revision"],
+                            "prepared_spell_ids": ["bless", "aid"],
+                            "rest_schedule": {
+                                "sleep_minutes": 477,
+                                "light_activity_minutes": 3,
+                                "strenuous_activity_minutes": 0,
+                            },
+                        }
+                    ]
+                },
+                "expected_revision": clock["campaign_revision"],
+                "idempotency_key": "prepared-rest",
+            },
+        )
+        assert rested["preparations"][cleric["id"]]["preparation_minutes"] == 3
+        updated = await _call(
+            server,
+            "character_query",
+            {"view": "get", "payload": {"character_id": cleric["id"]}},
+        )
+        assert updated["sheet"]["spellcasting"]["preparation"]["selected_spell_ids"] == [
+            "bless",
+            "aid",
+        ]
+
+    asyncio.run(exercise())
