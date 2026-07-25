@@ -8,6 +8,7 @@ from scripts.regression_encounter import (
     _characters,
     _choose_destination,
     _choose_party_spell,
+    _defense_selection,
     _has_blocking_pending,
     _has_multiattack_followup,
     _observable_target_ids,
@@ -211,6 +212,36 @@ def test_movement_pending_reaction_blocks_followup_attack() -> None:
     assert not _has_blocking_pending(
         {"pending": [{"id": "reaction-1", "status": "resolved"}]}
     )
+
+
+def test_reaction_tactics_spend_shield_only_when_it_changes_the_attack() -> None:
+    base = {
+        "trigger": "attack_hit_defense",
+        "candidates": [
+            {
+                "id": "shield",
+                "projected_hit": False,
+                "cast_levels": [2, 1],
+            },
+            {"id": "decline"},
+        ],
+    }
+
+    assert _defense_selection(base) == {"id": "shield", "cast_level": 1}
+    base["candidates"][0]["projected_hit"] = True
+    assert _defense_selection(base) == {"id": "decline"}
+
+
+def test_reaction_tactics_block_magic_missile_when_shield_is_available() -> None:
+    assert _defense_selection(
+        {
+            "trigger": "magic_missile_targeted",
+            "candidates": [
+                {"id": "shield", "cast_levels": [1, 2]},
+                {"id": "decline"},
+            ],
+        }
+    ) == {"id": "shield", "cast_level": 1}
 
 
 def test_all_source_hostiles_defeated_is_victory_without_flee_rule() -> None:

@@ -1203,6 +1203,41 @@ def _has_blocking_pending(combat: dict[str, Any]) -> bool:
     )
 
 
+def _defense_selection(pending: dict[str, Any]) -> dict[str, Any]:
+    """Choose a defense only when it prevents the triggering hit or missiles."""
+
+    trigger = str(pending.get("trigger") or "")
+    candidates = [
+        item
+        for item in pending.get("candidates", [])
+        if isinstance(item, dict)
+        and str(item.get("id") or "") not in {"", "decline", "skip", "pass"}
+    ]
+    selected = next(
+        (
+            item
+            for item in candidates
+            if trigger == "magic_missile_targeted"
+            or (
+                trigger == "attack_hit_defense"
+                and item.get("projected_hit") is False
+            )
+        ),
+        None,
+    )
+    if selected is None:
+        return {"id": "decline"}
+    selection: dict[str, Any] = {"id": str(selected["id"])}
+    cast_levels = sorted(
+        int(level)
+        for level in selected.get("cast_levels", [])
+        if isinstance(level, int) and not isinstance(level, bool) and level > 0
+    )
+    if cast_levels:
+        selection["cast_level"] = cast_levels[0]
+    return selection
+
+
 def _source_outcome(
     *,
     defeated_hostiles: int,
@@ -1342,7 +1377,7 @@ async def _resolve_pending(
             "action": action,
             "payload": {
                 "choice_id": pending["id"],
-                "selection": {"id": "decline"},
+                "selection": _defense_selection(pending),
             },
             "branch_id": branch_id,
             "expected_revision": campaign["revision"],
@@ -2081,6 +2116,8 @@ async def _auto_run(
                     "result": resolved,
                 }
             )
+            if _has_blocking_pending(dict(resolved.get("combat") or {})):
+                continue
             if actor_id in hostile_ids and _has_multiattack_followup(
                 dict(resolved.get("combat") or {}),
                 actor_id,
