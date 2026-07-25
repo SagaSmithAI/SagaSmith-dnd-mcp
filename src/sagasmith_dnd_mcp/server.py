@@ -4822,6 +4822,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         "name": "Apply a structured condition",
                     },
                     {
+                        "id": "saving_throw_damage",
+                        "name": "Resolve a saving throw and damage",
+                    },
+                    {
                         "id": "dismiss",
                         "name": "No structured condition applies",
                     },
@@ -4894,7 +4898,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         branch_id: str | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
-        """Settle a reviewed attack's descriptive on-hit condition and escape terms."""
+        """Settle a reviewed attack's structured condition or save-and-damage effect."""
         access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
         require_write_contract(expected_revision, idempotency_key)
         resolved_branch_id = require_current_branch(campaign_id, branch_id)
@@ -4935,9 +4939,23 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "choice_id is not this target's pending attack on-hit ruling"
             )
         selection_id = str(normalized_selection.get("id") or "").strip().casefold()
-        if selection_id not in {"apply_condition", "dismiss"}:
+        if selection_id not in {"apply_condition", "saving_throw_damage", "dismiss"}:
             raise CombatEngineError(
-                "attack on-hit ruling must apply a structured condition or dismiss it"
+                "attack on-hit ruling must apply a condition, resolve save damage, "
+                "or dismiss it"
+            )
+        effect = str(window.get("effect") or "").strip()
+        has_explicit_save_damage = (
+            re.search(r"(?i)\bsaving throw\b", effect) is not None
+            and re.search(r"(?i)\bdamage\b", effect) is not None
+        )
+        if selection_id == "dismiss" and has_explicit_save_damage:
+            raise CombatEngineError(
+                "an explicit saving-throw damage effect cannot be dismissed"
+            )
+        if selection_id == "apply_condition" and has_explicit_save_damage:
+            raise CombatEngineError(
+                "an explicit saving-throw damage effect requires save-and-damage settlement"
             )
         next_encounter = resolve_choice_window(
             encounter,
@@ -4947,6 +4965,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         updated_sheet = deepcopy(target_record.sheet)
         ongoing_effect: dict[str, Any] | None = None
+        settlement_result: dict[str, Any] | None = None
+        rule_receipts: list[dict[str, Any]] = []
         if selection_id == "apply_condition":
             allowed_fields = {
                 "id",
@@ -4987,7 +5007,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             source_excerpt = str(
                 normalized_selection.get("source_excerpt") or ""
             ).strip()
-            effect = str(window.get("effect") or "").strip()
             if condition not in supported_conditions:
                 raise CombatEngineError("on-hit ruling condition is unsupported")
             if re.search(rf"(?i)\b{re.escape(condition)}\b", effect) is None:
@@ -5050,6 +5069,280 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 *list(next_encounter.get("ongoing_effects") or []),
                 ongoing_effect,
             ]
+        elif selection_id == "saving_throw_damage":
+            allowed_fields = {
+                "id",
+                "save_ability",
+                "save_dc",
+                "damage_formula",
+                "damage_type",
+                "half_on_success",
+                "source_excerpt",
+                "zero_hp_effect",
+            }
+            unknown_fields = set(normalized_selection) - allowed_fields
+            if unknown_fields:
+                raise CombatEngineError(
+                    "unsupported on-hit save-damage fields: "
+                    + ", ".join(sorted(unknown_fields))
+                )
+            save_ability = str(
+                normalized_selection.get("save_ability") or ""
+            ).strip().casefold()
+            save_dc = normalized_selection.get("save_dc")
+            damage_formula = str(
+                normalized_selection.get("damage_formula") or ""
+            ).strip().casefold().replace(" ", "")
+            damage_type = str(
+                normalized_selection.get("damage_type") or ""
+            ).strip().casefold()
+            half_on_success = normalized_selection.get("half_on_success")
+            source_excerpt = str(
+                normalized_selection.get("source_excerpt") or ""
+            ).strip()
+            zero_hp_effect = normalized_selection.get("zero_hp_effect")
+            supported_abilities = {
+                "strength",
+                "dexterity",
+                "constitution",
+                "intelligence",
+                "wisdom",
+                "charisma",
+            }
+            if (
+                save_ability not in supported_abilities
+                or isinstance(save_dc, bool)
+                or not isinstance(save_dc, int)
+                or not 1 <= save_dc <= 40
+                or not damage_formula
+                or not damage_type
+                or not isinstance(half_on_success, bool)
+                or not source_excerpt
+                or source_excerpt.casefold() not in effect.casefold()
+            ):
+                raise CombatEngineError(
+                    "on-hit save damage requires exact reviewed save, damage, "
+                    "success, and excerpt terms"
+                )
+            if re.search(
+                rf"(?i)\bDC\s*{save_dc}\s+{re.escape(save_ability)}\s+saving throw\b",
+                effect,
+            ) is None:
+                raise CombatEngineError(
+                    "save DC or ability is not stated by the reviewed attack"
+                )
+            if re.search(
+                rf"(?i)(?<![A-Za-z0-9]){re.escape(damage_formula)}(?![A-Za-z0-9])",
+                effect.replace(" ", ""),
+            ) is None or re.search(
+                rf"(?i)\b{re.escape(damage_type)}\s+damage\b",
+                effect,
+            ) is None:
+                raise CombatEngineError(
+                    "damage formula or type is not stated by the reviewed attack"
+                )
+            states_half_damage = re.search(
+                r"(?i)\bhalf as much damage on a successful one\b",
+                effect,
+            ) is not None
+            if half_on_success != states_half_damage:
+                raise CombatEngineError(
+                    "success damage does not match the reviewed attack"
+                )
+            states_zero_hp_effect = re.search(
+                r"(?i)\b(?:the poison|it)\s+reduces the target to 0 hit points\b",
+                effect,
+            ) is not None
+            normalized_zero_hp_effect: dict[str, Any] | None = None
+            if states_zero_hp_effect:
+                if not isinstance(zero_hp_effect, dict):
+                    raise CombatEngineError(
+                        "the reviewed zero-hit-point effect requires structured settlement"
+                    )
+                unknown_zero_fields = set(zero_hp_effect) - {
+                    "stable",
+                    "conditions",
+                    "duration",
+                }
+                raw_duration = zero_hp_effect.get("duration")
+                raw_zero_conditions = zero_hp_effect.get("conditions")
+                if not isinstance(raw_duration, dict) or not isinstance(
+                    raw_zero_conditions, list
+                ):
+                    raise CombatEngineError(
+                        "zero-hit-point conditions and duration must be structured"
+                    )
+                duration = dict(raw_duration)
+                unknown_duration_fields = set(duration) - {"period", "remaining"}
+                zero_conditions = [
+                    str(item).strip().casefold()
+                    for item in raw_zero_conditions
+                    if str(item).strip()
+                ]
+                duration_remaining = duration.get("remaining")
+                if (
+                    unknown_zero_fields
+                    or unknown_duration_fields
+                    or zero_hp_effect.get("stable") is not True
+                    or set(zero_conditions) != {"poisoned", "paralyzed"}
+                    or len(zero_conditions) != 2
+                    or str(duration.get("period") or "").strip().casefold() != "hour"
+                    or isinstance(duration_remaining, bool)
+                    or duration_remaining != 1
+                    or re.search(r"(?i)\bstable but poisoned for 1 hour\b", effect)
+                    is None
+                    or re.search(
+                        r"(?i)\bparalyzed while poisoned in this way\b",
+                        effect,
+                    )
+                    is None
+                ):
+                    raise CombatEngineError(
+                        "zero-hit-point settlement does not match the reviewed attack"
+                    )
+                normalized_zero_hp_effect = {
+                    "stable": True,
+                    "conditions": zero_conditions,
+                    "duration": {"period": "hour", "remaining": 1},
+                }
+            elif zero_hp_effect is not None:
+                raise CombatEngineError(
+                    "the reviewed attack does not state a zero-hit-point effect"
+                )
+            target_actor = combat_actor_snapshot(target_id)
+            target_actor["sheet"] = deepcopy(updated_sheet)
+            target_actor["derived"] = derive_character_sheet(updated_sheet)
+            saved = resolve_actor_check(
+                target_actor,
+                kind="save",
+                ability=save_ability,
+                dc=save_dc,
+                ruleset=str(next_encounter.get("ruleset") or "2014"),
+                rules=effective_rule_context(
+                    campaign_id,
+                    facts={
+                        "actor_id": target_id,
+                        "attacker_id": str(window.get("attacker_id") or ""),
+                        "weapon_id": str(window.get("weapon_id") or ""),
+                        "kind": "attack_on_hit_save",
+                    },
+                ),
+            )
+            rule_receipts.extend(saved.get("rule_receipts") or [])
+            damage_roll = asdict(roll(damage_formula))
+            damage_amount = int(damage_roll["total"])
+            if saved["success"]:
+                damage_amount = damage_amount // 2 if half_on_success else 0
+            damaged_result: dict[str, Any] | None = None
+            applied_zero_hp_effect: dict[str, Any] | None = None
+            if damage_amount > 0:
+                combatant = require_encounter_combatant(
+                    next_encounter,
+                    target_id,
+                    role="attack on-hit target",
+                )
+                damaged = apply_damage_to_sheet(
+                    updated_sheet,
+                    amount=damage_amount,
+                    damage_type=damage_type,
+                    source=str(window.get("weapon_id") or "attack-on-hit"),
+                    ruleset=str(next_encounter.get("ruleset") or "2014"),
+                    death_saves=bool(combatant.get("death_saves", False)),
+                )
+                updated_sheet = damaged["sheet"]
+                damaged_result = {
+                    key: value for key, value in damaged.items() if key != "sheet"
+                }
+                add_concentration_window(
+                    next_encounter,
+                    target_id,
+                    damaged.get("concentration"),
+                    next_revision=campaign.revision + 1,
+                )
+                if (
+                    normalized_zero_hp_effect is not None
+                    and int(damaged.get("before_hp", 0) or 0) > 0
+                    and int(damaged.get("after_hp", 0) or 0) == 0
+                    and int(damaged.get("applied_amount", 0) or 0) > 0
+                ):
+                    zero_conditions = {
+                        str(item).strip().casefold()
+                        for item in updated_sheet.get("conditions", [])
+                    }
+                    zero_conditions.discard("dead")
+                    zero_conditions.discard("stable")
+                    zero_conditions.add("unconscious")
+                    updated_sheet["conditions"] = sorted(zero_conditions)
+                    stabilized = stabilize_sheet(updated_sheet)
+                    updated_sheet = stabilized["sheet"]
+                    before_special_conditions = {
+                        str(item).strip().casefold()
+                        for item in updated_sheet.get("conditions", [])
+                    }
+                    added_conditions = [
+                        condition
+                        for condition in normalized_zero_hp_effect["conditions"]
+                        if condition not in before_special_conditions
+                    ]
+                    updated_sheet["conditions"] = sorted(
+                        before_special_conditions
+                        | set(normalized_zero_hp_effect["conditions"])
+                    )
+                    effect_id = f"{choice_id}:zero-hp"
+                    updated_sheet, _ = add_effect(
+                        updated_sheet,
+                        {
+                            "id": effect_id,
+                            "name": "Attack poison at 0 hit points",
+                            "kind": "timed_conditions",
+                            "source": str(window.get("weapon_id") or ""),
+                            "active": True,
+                            "duration": normalized_zero_hp_effect["duration"],
+                            "changes": [
+                                {
+                                    "path": "conditions",
+                                    "mode": "add",
+                                    "value": added_conditions,
+                                }
+                            ],
+                            "description": source_excerpt,
+                        },
+                    )
+                    applied_zero_hp_effect = {
+                        **normalized_zero_hp_effect,
+                        "effect_id": effect_id,
+                        "added_conditions": added_conditions,
+                        "stabilization": {
+                            key: value
+                            for key, value in stabilized.items()
+                            if key != "sheet"
+                        },
+                    }
+                    ongoing_effect = {
+                        "id": effect_id,
+                        "kind": "timed_conditions",
+                        "source_actor_id": str(window.get("attacker_id") or ""),
+                        "target_id": target_id,
+                        "weapon_id": str(window.get("weapon_id") or ""),
+                        "conditions": list(normalized_zero_hp_effect["conditions"]),
+                        "duration": dict(normalized_zero_hp_effect["duration"]),
+                        "source_excerpt": source_excerpt,
+                        "effect": effect,
+                        "active": True,
+                    }
+                    next_encounter["ongoing_effects"] = [
+                        *list(next_encounter.get("ongoing_effects") or []),
+                        ongoing_effect,
+                    ]
+            sync_combatant_conditions(next_encounter, target_id, updated_sheet)
+            reconcile_readied_spells(next_encounter, target_id, updated_sheet)
+            settlement_result = {
+                "save": saved,
+                "damage_roll": damage_roll,
+                "damage_amount": damage_amount,
+                "damage": damaged_result,
+                "zero_hp_effect": applied_zero_hp_effect,
+            }
         next_encounter["log"] = [
             *list(next_encounter.get("log") or []),
             {
@@ -5058,6 +5351,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "choice_id": choice_id,
                 "selection": normalized_selection,
                 "ongoing_effect": ongoing_effect,
+                "result": settlement_result,
             },
         ][-100:]
         next_state = {**dict(campaign.state or {}), "combat": next_encounter}
@@ -5080,11 +5374,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             actor=principal_id,
             branch_id=resolved_branch_id,
             idempotency_key=idempotency_key,
+            rule_receipts=rule_receipts,
         )
         response = {
             "status": "committed",
             "selection": normalized_selection,
             "ongoing_effect": ongoing_effect,
+            "result": settlement_result,
             "combat": next_encounter,
             "campaign_revision": mutation_revision(campaign_id),
             "revisions": [asdict(item) for item in revisions_result or []],

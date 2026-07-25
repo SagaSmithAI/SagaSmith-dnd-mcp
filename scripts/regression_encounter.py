@@ -7,6 +7,7 @@ import asyncio
 import json
 import os
 import sys
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
@@ -703,9 +704,16 @@ def _source_on_hit_rulings(
     allowed = {
         "actor_id",
         "weapon_id",
+        "id",
         "condition",
         "escape_dc",
         "escape_abilities",
+        "save_ability",
+        "save_dc",
+        "damage_formula",
+        "damage_type",
+        "half_on_success",
+        "zero_hp_effect",
         "source_excerpt",
     }
     normalized: dict[tuple[str, str], dict[str, Any]] = {}
@@ -720,26 +728,93 @@ def _source_on_hit_rulings(
             )
         actor_id = str(raw.get("actor_id") or "").strip()
         weapon_id = str(raw.get("weapon_id") or "").strip()
-        condition = str(raw.get("condition") or "").strip().casefold()
+        selection_id = str(raw.get("id") or "").strip().casefold()
+        if not selection_id:
+            selection_id = (
+                "saving_throw_damage"
+                if raw.get("save_ability") is not None
+                else "apply_condition"
+            )
+        if selection_id not in {"apply_condition", "saving_throw_damage"}:
+            raise ValueError(
+                f"source on-hit ruling {index} has unsupported id {selection_id!r}"
+            )
         source_excerpt = str(raw.get("source_excerpt") or "").strip()
+        identity = (actor_id, weapon_id)
+        if (
+            actor_id not in participant_ids
+            or not weapon_id
+            or not source_excerpt
+            or identity in normalized
+        ):
+            raise ValueError(
+                f"source on-hit ruling {index} requires one participant weapon "
+                "and exact excerpt"
+            )
+        if selection_id == "saving_throw_damage":
+            condition_fields = {
+                "condition",
+                "escape_dc",
+                "escape_abilities",
+            }
+            if any(raw.get(field) is not None for field in condition_fields):
+                raise ValueError(
+                    f"source on-hit ruling {index} mixes condition and save-damage terms"
+                )
+            save_ability = str(raw.get("save_ability") or "").strip().casefold()
+            save_dc = raw.get("save_dc")
+            damage_formula = str(raw.get("damage_formula") or "").strip()
+            damage_type = str(raw.get("damage_type") or "").strip().casefold()
+            half_on_success = raw.get("half_on_success")
+            zero_hp_effect = raw.get("zero_hp_effect")
+            if (
+                not save_ability
+                or isinstance(save_dc, bool)
+                or not isinstance(save_dc, int)
+                or not 1 <= save_dc <= 40
+                or not damage_formula
+                or not damage_type
+                or not isinstance(half_on_success, bool)
+                or (
+                    zero_hp_effect is not None
+                    and not isinstance(zero_hp_effect, dict)
+                )
+            ):
+                raise ValueError(
+                    f"source on-hit ruling {index} requires reviewed save, "
+                    "damage, success, and optional zero-HP terms"
+                )
+            normalized[identity] = {
+                "actor_id": actor_id,
+                "weapon_id": weapon_id,
+                "id": selection_id,
+                "save_ability": save_ability,
+                "save_dc": save_dc,
+                "damage_formula": damage_formula,
+                "damage_type": damage_type,
+                "half_on_success": half_on_success,
+                "source_excerpt": source_excerpt,
+                **(
+                    {"zero_hp_effect": deepcopy(zero_hp_effect)}
+                    if zero_hp_effect is not None
+                    else {}
+                ),
+            }
+            continue
+        condition = str(raw.get("condition") or "").strip().casefold()
         escape_dc = raw.get("escape_dc")
         escape_abilities = [
             str(item).strip().casefold()
             for item in raw.get("escape_abilities") or []
             if str(item).strip()
         ]
-        identity = (actor_id, weapon_id)
         if (
-            actor_id not in participant_ids
-            or not weapon_id
-            or not condition
+            not condition
             or isinstance(escape_dc, bool)
             or not isinstance(escape_dc, int)
             or not 1 <= escape_dc <= 40
             or not escape_abilities
             or len(escape_abilities) != len(set(escape_abilities))
-            or not source_excerpt
-            or identity in normalized
         ):
             raise ValueError(
                 f"source on-hit ruling {index} requires one participant weapon, "
@@ -748,7 +823,7 @@ def _source_on_hit_rulings(
         normalized[identity] = {
             "actor_id": actor_id,
             "weapon_id": weapon_id,
-            "id": "apply_condition",
+            "id": selection_id,
             "condition": condition,
             "escape_dc": escape_dc,
             "escape_abilities": escape_abilities,

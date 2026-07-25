@@ -496,7 +496,29 @@ def test_source_authored_precombat_and_attack_tactics_are_structured() -> None:
                     "target can make a DC 12 Strength check, bursting the webbing on "
                     "a success."
                 ),
-            }
+            },
+            {
+                "actor_id": "spider-1",
+                "weapon_id": "bite",
+                "id": "saving_throw_damage",
+                "save_ability": "constitution",
+                "save_dc": 11,
+                "damage_formula": "2d8",
+                "damage_type": "poison",
+                "half_on_success": True,
+                "zero_hp_effect": {
+                    "stable": True,
+                    "conditions": ["poisoned", "paralyzed"],
+                    "duration": {"period": "hour", "remaining": 1},
+                },
+                "source_excerpt": (
+                    "The target must make a DC 11 Constitution saving throw, "
+                    "taking 9 (2d8) poison damage on a failed save, or half as "
+                    "much damage on a successful one. If the poison reduces the "
+                    "target to 0 hit points, the target is stable but poisoned "
+                    "for 1 hour, and paralyzed while poisoned in this way."
+                ),
+            },
         ],
         participant_ids=["nezznar", "spider-1"],
     )
@@ -516,6 +538,8 @@ def test_source_authored_precombat_and_attack_tactics_are_structured() -> None:
     assert precombat[0]["cast_level"] == 2
     assert openings["spider-1"]["weapon_id"] == "web"
     assert rulings[("spider-1", "web")]["escape_dc"] == 12
+    assert rulings[("spider-1", "bite")]["id"] == "saving_throw_damage"
+    assert rulings[("spider-1", "bite")]["zero_hp_effect"]["stable"] is True
     assert delayed["nezznar"]["until_round"] == 2
 
 

@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
+import pytest
 from sagasmith_dnd.character_schema import default_character_sheet
+from sagasmith_dnd.engine import DiceResult
 
 from sagasmith_dnd_mcp import server as server_module
 from sagasmith_dnd_mcp.config import McpConfig
@@ -223,5 +225,230 @@ def test_public_on_hit_ruling_applies_and_escapes_web_condition(
         )
         assert target_combatant["turn_budget"]["main_action"] == 0
         assert escaped["combat"]["ongoing_effects"][0]["active"] is False
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize(
+    ("save_success", "starting_hp"),
+    [(True, 20), (False, 4)],
+)
+def test_public_on_hit_ruling_resolves_spider_bite_poison(
+    tmp_path: Path,
+    monkeypatch,
+    save_success: bool,
+    starting_hp: int,
+) -> None:
+    original_attack_roll = server_module.roll_attack_action
+    original_actor_check = server_module.resolve_actor_check
+    original_roll = server_module.roll
+
+    def forced_hit(*, plan, rng=None):
+        result = original_attack_roll(plan=plan, rng=rng)
+        result.update(
+            natural=10,
+            total=max(int(plan["target_ac"]), int(result.get("total", 0) or 0)),
+            armor_class=int(plan["target_ac"]),
+            hit=True,
+            critical=False,
+            fumble=False,
+        )
+        return result
+
+    def forced_save(*args, **kwargs):
+        result = original_actor_check(*args, **kwargs)
+        result.update(
+            natural=15 if save_success else 5,
+            total=int(kwargs["dc"]) if save_success else int(kwargs["dc"]) - 1,
+            success=save_success,
+        )
+        return result
+
+    def forced_damage(expression: str, **kwargs):
+        if expression.replace(" ", "").casefold() == "2d8":
+            return DiceResult(
+                total=8,
+                rolls=(4, 4),
+                expression=expression,
+                detail="2d8[4, 4]",
+            )
+        return original_roll(expression, **kwargs)
+
+    monkeypatch.setattr(server_module, "roll_attack_action", forced_hit)
+    monkeypatch.setattr(server_module, "resolve_actor_check", forced_save)
+    monkeypatch.setattr(server_module, "roll", forced_damage)
+
+    async def exercise() -> None:
+        server = create_server(_config(tmp_path))
+
+        async def raw(name: str, arguments: dict):
+            _, result = await server.call_tool(name, arguments)
+            return result
+
+        async def call(name: str, arguments: dict):
+            result = await raw(name, arguments)
+            return result.get("result", result)
+
+        campaign = await call(
+            "campaign_create",
+            {
+                "name": "Spider bite on-hit ruling",
+                "edition": "2014",
+                "idempotency_key": "campaign",
+            },
+        )
+        spider = await call(
+            "character_create",
+            {
+                "campaign_id": campaign["id"],
+                "name": "Giant Spider",
+                "character_type": "monster",
+                "idempotency_key": "spider",
+            },
+        )
+        target = await call(
+            "character_create",
+            {
+                "campaign_id": campaign["id"],
+                "name": "Target",
+                "character_type": "pc",
+                "idempotency_key": "target",
+            },
+        )
+        bite_effect = (
+            "and the target must make a DC 11 Constitution saving throw, taking "
+            "9 (2d8) poison damage on a failed save, or half as much damage on "
+            "a successful one. If the poison reduces the target to 0 hit points, "
+            "the target is stable but poisoned for 1 hour, and paralyzed while "
+            "poisoned in this way."
+        )
+        spider_sheet = default_character_sheet()
+        spider_sheet["combat"]["hp"] = {"value": 26, "max": 26, "temp": 0}
+        spider_sheet["inventory"]["items"] = [
+            {
+                "id": "bite",
+                "name": "Bite",
+                "kind": "weapon",
+                "equipped": True,
+                "equipped_slot": "main_hand",
+                "mechanics": {
+                    "attack_type": "melee",
+                    "attack_ability": "strength",
+                    "damage_formula": "1",
+                    "damage_type": "piercing",
+                    "on_hit_effect": bite_effect,
+                    "reach_ft": 5,
+                    "attack_bonus_override": 5,
+                    "always_available": True,
+                },
+            }
+        ]
+        spider_sheet["inventory"]["equipment_slots"]["main_hand"] = "bite"
+        target_sheet = default_character_sheet()
+        target_sheet["combat"]["hp"] = {
+            "value": starting_hp,
+            "max": starting_hp,
+            "temp": 0,
+        }
+        for actor, sheet, key in (
+            (spider, spider_sheet, "spider-sheet"),
+            (target, target_sheet, "target-sheet"),
+        ):
+            await call(
+                "character_sheet_replace",
+                {
+                    "character_id": actor["id"],
+                    "sheet": sheet,
+                    "expected_revision": actor["revision"],
+                    "idempotency_key": key,
+                },
+            )
+        campaign = await call("campaign_get", {"campaign_id": campaign["id"]})
+        started = await raw(
+            "combat_start",
+            {
+                "campaign_id": campaign["id"],
+                "participant_ids": [spider["id"], target["id"]],
+                "participant_config": [
+                    {
+                        "actor_id": spider["id"],
+                        "initiative": 20,
+                        "position": {"x": 0, "y": 0},
+                    },
+                    {
+                        "actor_id": target["id"],
+                        "initiative": 10,
+                        "position": {"x": 1, "y": 0},
+                        "death_saves": True,
+                    },
+                ],
+                "expected_revision": campaign["revision"],
+                "idempotency_key": "start",
+            },
+        )
+        attacked = await raw(
+            "combat_resolve_attack",
+            {
+                "campaign_id": campaign["id"],
+                "actor_id": spider["id"],
+                "target_id": target["id"],
+                "action": {"weapon_id": "bite", "attack_mode": "melee"},
+                "expected_revision": started["campaign_revision"],
+                "idempotency_key": "bite",
+            },
+        )
+        assert attacked["status"] == "pending_ruling"
+        ruled = await raw(
+            "combat_on_hit_ruling",
+            {
+                "campaign_id": campaign["id"],
+                "target_id": target["id"],
+                "choice_id": attacked["result"]["pending_on_hit_ruling_id"],
+                "selection": {
+                    "id": "saving_throw_damage",
+                    "save_ability": "constitution",
+                    "save_dc": 11,
+                    "damage_formula": "2d8",
+                    "damage_type": "poison",
+                    "half_on_success": True,
+                    "zero_hp_effect": {
+                        "stable": True,
+                        "conditions": ["poisoned", "paralyzed"],
+                        "duration": {"period": "hour", "remaining": 1},
+                    },
+                    "source_excerpt": bite_effect,
+                },
+                "expected_revision": attacked["campaign_revision"],
+                "idempotency_key": "rule-bite",
+            },
+        )
+        target_after = await call(
+            "character_get",
+            {"character_id": target["id"]},
+        )
+        assert ruled["result"]["save"]["success"] is save_success
+        assert ruled["result"]["damage_roll"]["total"] == 8
+        if save_success:
+            assert ruled["result"]["damage_amount"] == 4
+            assert target_after["sheet"]["combat"]["hp"]["value"] == 15
+            assert ruled["result"]["zero_hp_effect"] is None
+        else:
+            assert ruled["result"]["damage_amount"] == 8
+            assert target_after["sheet"]["combat"]["hp"]["value"] == 0
+            assert set(target_after["sheet"]["conditions"]) == {
+                "paralyzed",
+                "poisoned",
+                "prone",
+                "stable",
+                "unconscious",
+            }
+            assert "dead" not in target_after["sheet"]["conditions"]
+            poison_effect = next(
+                item
+                for item in target_after["sheet"]["effects"]
+                if item["kind"] == "timed_conditions"
+            )
+            assert poison_effect["duration"] == {"period": "hour", "remaining": 1}
+            assert ruled["result"]["zero_hp_effect"]["effect_id"] == poison_effect["id"]
 
     asyncio.run(exercise())
