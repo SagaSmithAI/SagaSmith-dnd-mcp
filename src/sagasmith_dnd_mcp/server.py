@@ -311,6 +311,26 @@ def _normalize_source_evidence_text(value: Any) -> str:
     return " ".join(text.translate(_SOURCE_EVIDENCE_TRANSLATION).split()).casefold()
 
 
+def _source_contains_narrative_name(*, name: str, content: str) -> bool:
+    """Match an exact name or a two-part name split by a short source appositive."""
+
+    normalized_name = _normalize_source_evidence_text(name)
+    normalized_content = _normalize_source_evidence_text(content)
+    if normalized_name in normalized_content:
+        return True
+
+    name_parts = re.findall(r"\w+", normalized_name, flags=re.UNICODE)
+    if len(name_parts) != 2:
+        return False
+    split_name = re.compile(
+        rf"(?<!\w){re.escape(name_parts[0])}(?!\w)"
+        rf"(.{{1,80}}?)"
+        rf"(?<!\w){re.escape(name_parts[1])}(?!\w)",
+        flags=re.DOTALL,
+    )
+    return split_name.search(normalized_content) is not None
+
+
 def _validated_distinct_choices(value: Any, *, count: int, label: str) -> list[str]:
     if value is None:
         values: list[Any] = []
@@ -20421,7 +20441,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             normalized_content = _normalize_source_evidence_text(chunk_content)
             if _normalize_source_evidence_text(source_excerpt) not in normalized_content:
                 raise ValueError("narrative NPC source_excerpt is not present in its chunk")
-            if _normalize_source_evidence_text(name) not in normalized_content:
+            if not _source_contains_narrative_name(name=name, content=chunk_content):
                 raise ValueError("narrative NPC name is not present in its source chunk")
 
             normalized_source_ref = {

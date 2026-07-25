@@ -17,6 +17,7 @@ NARRATIVE_MODULE = """# Part 2: Phandalin
 Qelline Alderleaf is a pragmatic halfling farmer and a kind host.
 Her son Carp found a secret tunnel in the woods near Tresendar Manor.
 Carp can take the characters to the tunnel or provide directions.
+Renaer—the son of Lord Dagult Neverember—waits in hiding.
 """
 
 
@@ -251,5 +252,37 @@ def test_narrative_npc_rejects_unverifiable_identity_and_source(
                     "idempotency_key": "bad-hash",
                 },
             )
+
+    asyncio.run(exercise())
+
+
+def test_narrative_npc_accepts_two_part_name_split_by_source_appositive(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        server, campaign_id, source_ref = await _campaign_with_narrative_module(
+            tmp_path
+        )
+        created = await _call(
+            server,
+            "character_create_from",
+            {
+                "mode": "narrative_npc",
+                "payload": {
+                    "campaign_id": campaign_id,
+                    "name": "Renaer Neverember",
+                    "role": "Hidden noble and witness.",
+                    "summary": "Renaer waits in hiding after an attack.",
+                    "source_ref": source_ref,
+                    "source_excerpt": (
+                        "Renaer—the son of Lord Dagult Neverember—waits in hiding."
+                    ),
+                },
+                "idempotency_key": "narrative-renaer",
+            },
+        )
+
+        assert created["character"]["name"] == "Renaer Neverember"
+        assert created["narrative_npc"]["combat_eligible"] is False
 
     asyncio.run(exercise())
