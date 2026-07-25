@@ -229,7 +229,17 @@ def test_imported_rule_source_creates_a_source_bound_combat_actor(tmp_path: Path
                         "creature_type": "undead",
                         "current_hit_points": 1,
                         "armor_class": 12,
+                        "alignment": "chaotic evil",
+                        "darkvision_ft": 60,
                         "languages": ["Common", "Elvish"],
+                        "relentless_endurance": {
+                            "feature_id": "relentless-endurance",
+                            "source_excerpt": (
+                                "When reduced to 0 hit points, he drops to 1 hit point "
+                                "instead (but can't do this again until he finishes a "
+                                "long rest)."
+                            ),
+                        },
                         "action_overrides": {
                             "club": {
                                 "id": "gauntlet-slam",
@@ -246,7 +256,23 @@ def test_imported_rule_source_creates_a_source_bound_combat_actor(tmp_path: Path
         assert variant_actor["sheet"]["progression"]["species"] == "undead"
         assert variant_actor["sheet"]["combat"]["hp"] == {"value": 1, "max": 4, "temp": 0}
         assert variant_actor["derived"]["armor_class"] == 12
+        assert variant_actor["sheet"]["traits"]["alignment"] == "chaotic evil"
+        assert variant_actor["sheet"]["traits"]["senses"]["darkvision"] == 60
         assert variant_actor["sheet"]["traits"]["languages"] == ["Common", "Elvish"]
+        feature = next(
+            item
+            for item in variant_actor["sheet"]["content"]["features"]
+            if item["id"] == "relentless-endurance"
+        )
+        assert {
+            key: feature["uses"][key]
+            for key in ("label", "value", "max", "recovers_on")
+        } == {
+            "label": "uses",
+            "value": 1,
+            "max": 1,
+            "recovers_on": "long_rest",
+        }
         assert variant_actor["derived"]["inventory"]["weapon_attacks"][0]["item_id"] == (
             "gauntlet-slam"
         )
@@ -258,6 +284,55 @@ def test_imported_rule_source_creates_a_source_bound_combat_actor(tmp_path: Path
         assert {
             item["source_id"] for item in variant["variant_evidence"]["sources"]
         } == {ingested["source_id"]}
+        current_campaign = await _call(
+            server,
+            "campaign_get",
+            {"campaign_id": campaign["id"]},
+        )
+        endured = await _call(
+            server,
+            "combat_apply_damage",
+            {
+                "campaign_id": campaign["id"],
+                "target_id": variant_actor["id"],
+                "parts": [{"amount": 1, "damage_type": "cold"}],
+                "expected_revision": current_campaign["revision"],
+                "idempotency_key": "variant-relentless-endurance",
+            },
+        )
+        after_endurance = await _call(
+            server,
+            "character_get",
+            {"character_id": variant_actor["id"]},
+        )
+        assert endured["after_hp"] == 1
+        assert endured["relentless_endurance_triggered"] is True
+        assert endured["relentless_endurance_use"]["after_uses"] == 0
+        persisted_feature = next(
+            item
+            for item in after_endurance["sheet"]["content"]["features"]
+            if item["id"] == "relentless-endurance"
+        )
+        assert persisted_feature["uses"]["value"] == 0
+
+        current_campaign = await _call(
+            server,
+            "campaign_get",
+            {"campaign_id": campaign["id"]},
+        )
+        spent = await _call(
+            server,
+            "combat_apply_damage",
+            {
+                "campaign_id": campaign["id"],
+                "target_id": variant_actor["id"],
+                "parts": [{"amount": 1, "damage_type": "cold"}],
+                "expected_revision": current_campaign["revision"],
+                "idempotency_key": "variant-relentless-spent",
+            },
+        )
+        assert spent["after_hp"] == 0
+        assert spent["relentless_endurance_triggered"] is False
 
         downed = await _call(
             server,
