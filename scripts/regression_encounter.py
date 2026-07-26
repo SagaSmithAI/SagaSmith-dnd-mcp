@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import heapq
 import json
 import os
 import re
@@ -236,6 +237,16 @@ def _arguments() -> argparse.Namespace:
             "DM-reviewed attack environment with actor_id, direct_sunlight, "
             "and the exact source_excerpt for a structured Sunlight Sensitivity "
             "trait; repeat for each affected participant"
+        ),
+    )
+    parser.add_argument(
+        "--source-avoidance-report",
+        action="append",
+        type=Path,
+        default=[],
+        help=(
+            "Public record-event report proving actor knowledge of marked "
+            "hazard cells that voluntary movement must route around"
         ),
     )
     parser.add_argument(
@@ -1354,6 +1365,80 @@ def _source_attack_environments(
     return normalized
 
 
+def _source_avoidances(
+    paths: list[Path],
+    *,
+    campaign_id: str,
+    scene_id: str,
+    participant_ids: list[str],
+) -> tuple[dict[str, set[str]], list[dict[str, Any]]]:
+    participant_set = set(participant_ids)
+    avoided_by_actor: dict[str, set[str]] = {}
+    evidence: list[dict[str, Any]] = []
+    cell_pattern = re.compile(r"(?<!\d)(\d+),(\d+)(?!\d)")
+    for index, path in enumerate(paths):
+        report = _read_report(path)
+        continuity = dict(
+            dict(report.get("result") or {}).get("continuity") or {}
+        )
+        event = dict(continuity.get("event") or {})
+        payload = dict(event.get("payload") or {})
+        knowledge = list(continuity.get("actor_knowledge") or [])
+        summary = str(event.get("summary") or "")
+        source_excerpt = str(payload.get("source_excerpt") or "").strip()
+        cells = {
+            f"{int(x)},{int(y)}"
+            for x, y in cell_pattern.findall(summary)
+        }
+        if (
+            report.get("campaign_id") != campaign_id
+            or report.get("passed") is not True
+            or event.get("event_type") != "trap_detected"
+            or str(payload.get("scene_id") or "") != scene_id
+            or not str(event.get("id") or "")
+            or not source_excerpt
+            or not cells
+        ):
+            raise ValueError(
+                f"source avoidance report {index} must be a passed public "
+                "trap_detected event for this campaign and scene with marked cells"
+            )
+        actor_ids: list[str] = []
+        for item in knowledge:
+            actor_id = str(dict(item).get("actor_id") or "")
+            proposition = str(dict(item).get("proposition") or "")
+            proposition_cells = {
+                f"{int(x)},{int(y)}"
+                for x, y in cell_pattern.findall(proposition)
+            }
+            if (
+                actor_id not in participant_set
+                or not cells <= proposition_cells
+                or "avoid" not in proposition.casefold()
+            ):
+                raise ValueError(
+                    f"source avoidance report {index} contains knowledge that "
+                    "does not prove a participant knows and avoids every marked cell"
+                )
+            avoided_by_actor.setdefault(actor_id, set()).update(cells)
+            actor_ids.append(actor_id)
+        if not actor_ids or len(actor_ids) != len(set(actor_ids)):
+            raise ValueError(
+                f"source avoidance report {index} must contain unique actor knowledge"
+            )
+        evidence.append(
+            {
+                "report_path": str(path.expanduser().resolve()),
+                "event_id": str(event["id"]),
+                "actor_ids": actor_ids,
+                "avoided_cells": sorted(cells),
+                "source_excerpt": source_excerpt,
+                "source_ref": deepcopy(payload.get("source_ref")),
+            }
+        )
+    return avoided_by_actor, evidence
+
+
 def _source_on_hit_rulings(
     values: list[dict[str, Any]],
     *,
@@ -2187,6 +2272,12 @@ async def _start(
         participant_ids=[*party_ids, *all_hostile_ids],
         actors=actors,
     )
+    _, source_avoidance_evidence = _source_avoidances(
+        args.source_avoidance_report,
+        campaign_id=args.campaign_id,
+        scene_id=args.scene_id,
+        participant_ids=[*party_ids, *all_hostile_ids],
+    )
     for actor_id in set(all_hostile_ids) | {
         ruling_actor_id for ruling_actor_id, _ in on_hit_rulings
     }:
@@ -2475,6 +2566,7 @@ async def _start(
         "source_random_activities": list(random_activities.values()),
         "source_save_activities": list(save_activities.values()),
         "source_attack_environments": list(attack_environments.values()),
+        "source_avoidances": source_avoidance_evidence,
         "source_opening_casts": _source_opening_casts(
             args.source_opening_cast_json,
             participant_ids=[*party_ids, *all_hostile_ids],
@@ -2621,7 +2713,9 @@ def _choose_destination(
     combat: dict[str, Any],
     actor_id: str,
     target_id: str,
-) -> tuple[dict[str, int], int] | None:
+    *,
+    avoided_cells: set[str] | None = None,
+) -> tuple[dict[str, int], int, list[dict[str, int]]] | None:
     combatants = list(combat.get("combatants") or [])
     acting = next(item for item in combatants if item.get("actor_id") == actor_id)
     target = next(item for item in combatants if item.get("actor_id") == target_id)
@@ -2711,40 +2805,110 @@ def _choose_destination(
     }
     battle_map = dict(combat.get("battle_map") or {})
     bounds = dict(battle_map.get("bounds") or {})
-    blocked_cells = set(battle_map.get("blocked_cells") or [])
+    width = int(bounds.get("width_cells", 0) or 0)
+    height = int(bounds.get("height_cells", 0) or 0)
+    if width <= 0 or height <= 0:
+        return None
+    blocked_cells = {
+        *set(battle_map.get("blocked_cells") or []),
+        *set(avoided_cells or set()),
+    }
     difficult_cells = set(battle_map.get("difficult_cells") or [])
-    candidates: list[tuple[int, int, int]] = []
-    for x in range(int(goal["x"]) - 1, int(goal["x"]) + 2):
-        for y in range(int(goal["y"]) - 1, int(goal["y"]) + 2):
-            destination = {"x": x, "y": y}
-            if (
-                (x, y) in occupied
-                or (x == int(goal["x"]) and y == int(goal["y"]))
-                or f"{x},{y}" in blocked_cells
-                or not 0 <= x < int(bounds.get("width_cells", 0) or 0)
-                or not 0 <= y < int(bounds.get("height_cells", 0) or 0)
-            ):
-                continue
-            steps = _distance(origin, destination)
-            if not 0 < steps <= budget_cells:
-                continue
-            if difficult_cells and steps > 1:
-                continue
-            if any(
-                _distance(destination, source_position)
-                < _distance(origin, source_position)
-                for source_position in fear_source_positions
-            ):
-                continue
-            if turn_source_position is not None and _distance(
-                destination, turn_source_position
-            ) <= _distance(origin, turn_source_position):
-                continue
-            candidates.append((steps, x, y))
+    origin_cell = (int(origin["x"]), int(origin["y"]))
+    goal_cell = (int(goal["x"]), int(goal["y"]))
+    budget_ft = budget_cells * 5
+    costs: dict[tuple[int, int], int] = {origin_cell: 0}
+    steps_by_cell: dict[tuple[int, int], int] = {origin_cell: 0}
+    previous: dict[tuple[int, int], tuple[int, int]] = {}
+    queue: list[tuple[int, int, int, int]] = [
+        (0, 0, origin_cell[0], origin_cell[1])
+    ]
+    while queue:
+        cost, steps, x, y = heapq.heappop(queue)
+        current_cell = (x, y)
+        if cost != costs.get(current_cell) or steps != steps_by_cell.get(
+            current_cell
+        ):
+            continue
+        for delta_x in (-1, 0, 1):
+            for delta_y in (-1, 0, 1):
+                if delta_x == 0 and delta_y == 0:
+                    continue
+                neighbor = (x + delta_x, y + delta_y)
+                if (
+                    not 0 <= neighbor[0] < width
+                    or not 0 <= neighbor[1] < height
+                    or neighbor in occupied
+                    or neighbor == goal_cell
+                    or f"{neighbor[0]},{neighbor[1]}" in blocked_cells
+                ):
+                    continue
+                current_position = {"x": x, "y": y}
+                neighbor_position = {
+                    "x": neighbor[0],
+                    "y": neighbor[1],
+                }
+                if any(
+                    _distance(neighbor_position, source_position)
+                    < _distance(current_position, source_position)
+                    for source_position in fear_source_positions
+                ):
+                    continue
+                next_steps = steps + 1
+                next_cost = cost + (
+                    10
+                    if f"{neighbor[0]},{neighbor[1]}" in difficult_cells
+                    else 5
+                )
+                if next_cost > budget_ft:
+                    continue
+                previous_best = (
+                    costs.get(neighbor, budget_ft + 1),
+                    steps_by_cell.get(neighbor, budget_cells + 1),
+                )
+                if (next_cost, next_steps) >= previous_best:
+                    continue
+                costs[neighbor] = next_cost
+                steps_by_cell[neighbor] = next_steps
+                previous[neighbor] = current_cell
+                heapq.heappush(
+                    queue,
+                    (next_cost, next_steps, neighbor[0], neighbor[1]),
+                )
+    origin_target_distance = _distance(origin, goal)
+    candidates: list[tuple[int, int, int, int, int]] = []
+    for (x, y), cost in costs.items():
+        if (x, y) == origin_cell:
+            continue
+        destination = {"x": x, "y": y}
+        target_distance = _distance(destination, goal)
+        if target_distance >= origin_target_distance:
+            continue
+        if turn_source_position is not None and _distance(
+            destination, turn_source_position
+        ) <= _distance(origin, turn_source_position):
+            continue
+        candidates.append(
+            (
+                target_distance,
+                cost,
+                steps_by_cell[(x, y)],
+                x,
+                y,
+            )
+        )
     if not candidates:
         return None
-    steps, x, y = min(candidates)
-    return {"x": x, "y": y}, steps * 5
+    _, _, steps, x, y = min(candidates)
+    selected = (x, y)
+    reverse_path = [selected]
+    while reverse_path[-1] != origin_cell:
+        reverse_path.append(previous[reverse_path[-1]])
+    route = [
+        {"x": point[0], "y": point[1]}
+        for point in reversed(reverse_path[:-1])
+    ]
+    return {"x": x, "y": y}, steps * 5, route
 
 
 def _current_actor_id(combat: dict[str, Any]) -> str:
@@ -3336,6 +3500,12 @@ async def _auto_run(
         args.source_attack_environment_json,
         participant_ids=[*party_ids, *hostile_ids],
         actors=initial_actors,
+    )
+    avoided_cells_by_actor, source_avoidance_evidence = _source_avoidances(
+        args.source_avoidance_report,
+        campaign_id=args.campaign_id,
+        scene_id=args.scene_id,
+        participant_ids=[*party_ids, *hostile_ids],
     )
     revealed_surprised = [
         str(item["actor_id"])
@@ -4024,6 +4194,9 @@ async def _auto_run(
                     combat,
                     actor_id,
                     stabilization_target_id,
+                    avoided_cells=avoided_cells_by_actor.get(
+                        actor_id, set()
+                    ),
                 )
                 if destination is None:
                     await _end_turn(
@@ -4044,6 +4217,7 @@ async def _auto_run(
                         "payload": {
                             "distance": destination[1],
                             "destination": destination[0],
+                            "path": destination[2],
                         },
                         "branch_id": branch["id"],
                         "expected_revision": campaign["revision"],
@@ -4063,6 +4237,10 @@ async def _auto_run(
                             "kind": "stabilize_move",
                             "actor_id": actor_id,
                             "target_id": stabilization_target_id,
+                            "planned_path": destination[2],
+                            "avoided_cells": sorted(
+                                avoided_cells_by_actor.get(actor_id, set())
+                            ),
                             "result": moved,
                         }
                     )
@@ -4571,7 +4749,12 @@ async def _auto_run(
             action_context=attack_context,
         )
         if plan is None and living_targets:
-            destination = _choose_destination(combat, actor_id, living_targets[0])
+            destination = _choose_destination(
+                combat,
+                actor_id,
+                living_targets[0],
+                avoided_cells=avoided_cells_by_actor.get(actor_id, set()),
+            )
             if destination is not None:
                 campaign = await _campaign(client, args.campaign_id)
                 moved = await client.domain(
@@ -4583,6 +4766,7 @@ async def _auto_run(
                         "payload": {
                             "distance": destination[1],
                             "destination": destination[0],
+                            "path": destination[2],
                         },
                         "branch_id": branch["id"],
                         "expected_revision": campaign["revision"],
@@ -4596,6 +4780,10 @@ async def _auto_run(
                         "sequence": sequence,
                         "kind": "move",
                         "actor_id": actor_id,
+                        "planned_path": destination[2],
+                        "avoided_cells": sorted(
+                            avoided_cells_by_actor.get(actor_id, set())
+                        ),
                         "result": moved,
                     }
                 )
@@ -4759,6 +4947,7 @@ async def _auto_run(
         "source_random_activities": list(random_activities.values()),
         "source_save_activities": list(save_activities.values()),
         "source_attack_environments": list(attack_environments.values()),
+        "source_avoidances": source_avoidance_evidence,
         "source_zero_hp_finisher": source_zero_hp_finisher,
         "source_zero_hp_stabilization": source_zero_hp_stabilization,
         "source_target_priorities": list(

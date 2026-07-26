@@ -33,6 +33,7 @@ from scripts.regression_encounter import (
     _selected_prepared_actor_ids,
     _should_stand,
     _source_attack_environments,
+    _source_avoidances,
     _source_declared_conditions,
     _source_declared_surprise,
     _source_delayed_actions,
@@ -1129,6 +1130,60 @@ def test_source_attack_environment_requires_the_structured_actor_trait() -> None
         )
 
 
+def test_source_avoidance_requires_public_actor_knowledge(
+    tmp_path,
+) -> None:
+    report_path = tmp_path / "trap-event.json"
+    report_path.write_text(
+        json.dumps(
+            {
+                "passed": True,
+                "campaign_id": "campaign-1",
+                "result": {
+                    "continuity": {
+                        "event": {
+                            "id": "event-1",
+                            "event_type": "trap_detected",
+                            "summary": (
+                                "The marked traps are at cells 3,3; 5,3; "
+                                "6,3; 8,3; and 10,3."
+                            ),
+                            "payload": {
+                                "scene_id": "scene-1",
+                                "source_excerpt": "Five hidden bear traps.",
+                                "source_ref": {"chunk_id": "chunk-1"},
+                            },
+                        },
+                        "actor_knowledge": [
+                            {
+                                "actor_id": "pc-1",
+                                "proposition": (
+                                    "The actor knows and avoids cells 3,3; 5,3; "
+                                    "6,3; 8,3; and 10,3."
+                                ),
+                            }
+                        ],
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    avoided, evidence = _source_avoidances(
+        [report_path],
+        campaign_id="campaign-1",
+        scene_id="scene-1",
+        participant_ids=["pc-1"],
+    )
+
+    assert avoided == {
+        "pc-1": {"3,3", "5,3", "6,3", "8,3", "10,3"}
+    }
+    assert evidence[0]["event_id"] == "event-1"
+    assert evidence[0]["source_ref"] == {"chunk_id": "chunk-1"}
+
+
 def test_source_authored_precombat_and_attack_tactics_are_structured() -> None:
     precombat = _source_precombat_casts(
         [
@@ -1884,7 +1939,48 @@ def test_movement_destination_excludes_blocked_cells_but_not_dead_occupants() ->
 
     destination = _choose_destination(combat, "pc", "goblin")
 
-    assert destination == ({"x": 6, "y": 1}, 25)
+    assert destination is not None
+    assert destination[0] == {"x": 6, "y": 1}
+    assert destination[1] == 25
+    assert destination[2][-1] == destination[0]
+
+
+def test_movement_path_routes_around_source_known_hazard_cells() -> None:
+    combat = {
+        "battle_map": {
+            "bounds": {"width_cells": 12, "height_cells": 12},
+            "blocked_cells": [],
+            "difficult_cells": [],
+        },
+        "combatants": [
+            {
+                "actor_id": "devourer",
+                "position": {"x": 8, "y": 6},
+                "conditions": [],
+                "turn_budget": {"movement": 30},
+            },
+            {
+                "actor_id": "pc",
+                "position": {"x": 1, "y": 0},
+                "conditions": [],
+                "turn_budget": {"movement": 30},
+            },
+        ],
+    }
+
+    destination = _choose_destination(
+        combat,
+        "devourer",
+        "pc",
+        avoided_cells={"5,3"},
+    )
+
+    assert destination is not None
+    assert destination[1] <= 30
+    assert "5,3" not in {
+        f"{cell['x']},{cell['y']}" for cell in destination[2]
+    }
+    assert destination[2][-1] == destination[0]
 
 
 def test_roll_total_accepts_public_facade_and_raw_shapes() -> None:
