@@ -17,6 +17,7 @@ NARRATIVE_MODULE = """# Part 2: Phandalin
 Qelline Alderleaf is a pragmatic halfling farmer and a kind host.
 Her son Carp found a secret tunnel in the woods near Tresendar Manor.
 Carp can take the characters to the tunnel or provide directions.
+Two townsfolk wait by the gate.
 Renaer—the son of Lord Dagult Neverember—waits in hiding.
 """
 
@@ -250,6 +251,72 @@ def test_narrative_npc_rejects_unverifiable_identity_and_source(
                     "mode": "narrative_npc",
                     "payload": payload,
                     "idempotency_key": "bad-hash",
+                },
+            )
+
+    asyncio.run(exercise())
+
+
+def test_narrative_npc_supports_distinct_anonymous_source_instances(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        server, campaign_id, source_ref = await _campaign_with_narrative_module(
+            tmp_path
+        )
+        created = []
+        for index in (1, 2):
+            instance_key = f"retreat-{index}"
+            created.append(
+                await _call(
+                    server,
+                    "character_create_from",
+                    {
+                        "mode": "narrative_npc",
+                        "payload": {
+                            "campaign_id": campaign_id,
+                            "name": f"Townsfolk [{instance_key}]",
+                            "source_identity": "Townsfolk",
+                            "instance_key": instance_key,
+                            "role": "Anonymous source-counted townsperson.",
+                            "summary": "A separately tracked anonymous townsperson.",
+                            "source_ref": source_ref,
+                            "source_excerpt": "Two townsfolk wait by the gate.",
+                        },
+                        "idempotency_key": f"townsfolk-{index}",
+                    },
+                )
+            )
+
+        assert created[0]["character"]["id"] != created[1]["character"]["id"]
+        assert [item["character"]["name"] for item in created] == [
+            "Townsfolk [retreat-1]",
+            "Townsfolk [retreat-2]",
+        ]
+        for index, item in enumerate(created, start=1):
+            assert item["narrative_npc"]["source_identity"] == "Townsfolk"
+            assert item["narrative_npc"]["instance_key"] == f"retreat-{index}"
+            assert "anonymous_source_instance" in item["character"]["sheet"][
+                "adventure_state"
+            ]["status_tags"]
+
+        with pytest.raises(Exception, match="anonymous narrative NPC name"):
+            await _call(
+                server,
+                "character_create_from",
+                {
+                    "mode": "narrative_npc",
+                    "payload": {
+                        "campaign_id": campaign_id,
+                        "name": "Invented Mayor",
+                        "source_identity": "Townsfolk",
+                        "instance_key": "retreat-3",
+                        "role": "Unsupported proper name.",
+                        "summary": "Must not relabel an anonymous source identity.",
+                        "source_ref": source_ref,
+                        "source_excerpt": "Two townsfolk wait by the gate.",
+                    },
+                    "idempotency_key": "invented-anonymous-name",
                 },
             )
 

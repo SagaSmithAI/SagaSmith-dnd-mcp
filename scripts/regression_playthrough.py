@@ -324,6 +324,8 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--narrative-npc-summary", default="")
     parser.add_argument("--narrative-npc-faction", default="")
     parser.add_argument("--narrative-npc-relationship", default="")
+    parser.add_argument("--narrative-npc-source-identity", default="")
+    parser.add_argument("--narrative-npc-instance-key", default="")
     parser.add_argument("--outcome-id", default="")
     parser.add_argument("--fact-json", action="append", type=json.loads, default=[])
     parser.add_argument("--npc-state-json", action="append", type=json.loads, default=[])
@@ -2726,12 +2728,16 @@ async def _prepare_narrative_npc(
     summary: str,
     faction: str,
     relationship: str,
+    source_identity: str = "",
+    instance_key: str = "",
     defer_checkpoint: bool = False,
 ) -> dict[str, Any]:
     npc_identity = _occurrence_identity(occurrence_id, "prepare-narrative-npc")
     normalized_name = name.strip()
     normalized_role = role.strip()
     normalized_summary = summary.strip()
+    normalized_source_identity = source_identity.strip() or normalized_name
+    normalized_instance_key = instance_key.strip()
     if initial_phase != "play":
         raise RuntimeError("prepare-narrative-npc requires the play phase")
     if not all(
@@ -2746,6 +2752,17 @@ async def _prepare_narrative_npc(
     ):
         raise ValueError(
             "prepare-narrative-npc requires scene, location, excerpt, name, role, and summary"
+        )
+    if normalized_instance_key and normalized_name != (
+        f"{normalized_source_identity} [{normalized_instance_key}]"
+    ):
+        raise ValueError(
+            "anonymous narrative NPC name must equal "
+            "'<source identity> [<instance key>]'"
+        )
+    if not normalized_instance_key and normalized_source_identity != normalized_name:
+        raise ValueError(
+            "narrative NPC source identity may differ from name only with an instance key"
         )
 
     await client.load("play.scene", "play.scene_control", "play.characters")
@@ -2801,6 +2818,14 @@ async def _prepare_narrative_npc(
                     "summary": normalized_summary,
                     "source_ref": exact_ref,
                     "source_excerpt": source_excerpt,
+                    **(
+                        {
+                            "source_identity": normalized_source_identity,
+                            "instance_key": normalized_instance_key,
+                        }
+                        if normalized_instance_key
+                        else {}
+                    ),
                 },
                 "idempotency_key": _mutation_key(
                     run_id,
@@ -9162,6 +9187,8 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                         summary=args.narrative_npc_summary,
                         faction=args.narrative_npc_faction,
                         relationship=args.narrative_npc_relationship,
+                        source_identity=args.narrative_npc_source_identity,
+                        instance_key=args.narrative_npc_instance_key,
                         defer_checkpoint=args.defer_checkpoint,
                     )
                 except Exception:

@@ -22226,10 +22226,32 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             name = str(required(data, "name")).strip()
             role = str(required(data, "role")).strip()
             summary = str(required(data, "summary")).strip()
+            source_identity = str(data.get("source_identity") or name).strip()
+            instance_key = str(data.get("instance_key") or "").strip()
             source_ref = data.get("source_ref")
             source_excerpt = " ".join(str(required(data, "source_excerpt")).split()).strip()
             if not name or len(name) > 200:
                 raise ValueError("narrative NPC name must contain 1 to 200 characters")
+            if not source_identity or len(source_identity) > 200:
+                raise ValueError(
+                    "narrative NPC source_identity must contain 1 to 200 characters"
+                )
+            if len(instance_key) > 100:
+                raise ValueError(
+                    "narrative NPC instance_key must not exceed 100 characters"
+                )
+            if instance_key:
+                expected_instance_name = f"{source_identity} [{instance_key}]"
+                if name != expected_instance_name:
+                    raise ValueError(
+                        "anonymous narrative NPC name must equal "
+                        "'<source_identity> [<instance_key>]'"
+                    )
+            elif source_identity != name:
+                raise ValueError(
+                    "narrative NPC source_identity may differ from name only "
+                    "when instance_key is provided"
+                )
             if not role or len(role) > 500:
                 raise ValueError("narrative NPC role must contain 1 to 500 characters")
             if not summary or len(summary) > 2000:
@@ -22319,7 +22341,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             normalized_content = _normalize_source_evidence_text(chunk_content)
             if _normalize_source_evidence_text(source_excerpt) not in normalized_content:
                 raise ValueError("narrative NPC source_excerpt is not present in its chunk")
-            if not _source_contains_narrative_name(name=name, content=chunk_content):
+            if not _source_contains_narrative_name(
+                name=source_identity,
+                content=chunk_content,
+            ):
                 raise ValueError("narrative NPC name is not present in its source chunk")
 
             normalized_source_ref = {
@@ -22337,11 +22362,20 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "combat_statblock": "not_imported",
                 "source_ref": normalized_source_ref,
                 "source_excerpt": source_excerpt,
+                **(
+                    {
+                        "source_identity": source_identity,
+                        "instance_key": instance_key,
+                    }
+                    if instance_key
+                    else {}
+                ),
             }
             sheet = default_character_sheet()
             sheet["adventure_state"]["status_tags"] = [
                 "narrative_only",
                 "source_bound",
+                *(["anonymous_source_instance"] if instance_key else []),
             ]
             notes = default_character_notes()
             notes["profile"]["summary"] = role

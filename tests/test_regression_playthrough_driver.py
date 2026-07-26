@@ -729,6 +729,30 @@ def test_narrative_npc_driver_round_trips_lobby_and_registers_manifest(
         assert result["checkpoint"]["verification"]["valid"] is True
 
 
+def test_narrative_npc_driver_requires_canonical_anonymous_instance_name() -> None:
+    with pytest.raises(ValueError, match="anonymous narrative NPC name"):
+        asyncio.run(
+            _prepare_narrative_npc(
+                object(),
+                campaign_id="campaign-1",
+                run_id="run-1",
+                occurrence_id="anonymous-1",
+                initial_phase="play",
+                scene_id="scene-1",
+                location_key="gate",
+                source_excerpt="Two townsfolk wait by the gate.",
+                source_ref={},
+                name="Invented Mayor",
+                role="Anonymous source-counted townsperson.",
+                summary="A separately tracked anonymous townsperson.",
+                faction="Greenest",
+                relationship="rescued civilian",
+                source_identity="Townsfolk",
+                instance_key="retreat-1",
+            )
+        )
+
+
 @pytest.mark.parametrize("defer_checkpoint", [False, True])
 def test_shared_consumable_driver_keeps_roll_item_and_healing_in_one_transition(
     defer_checkpoint: bool,
