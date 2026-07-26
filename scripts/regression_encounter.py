@@ -234,6 +234,15 @@ def _arguments() -> argparse.Namespace:
     )
     parser.add_argument("--surrender-actor-id", default="")
     parser.add_argument("--surrender-at-hp", type=int, default=0)
+    parser.add_argument(
+        "--surrender-after-defeated",
+        type=int,
+        default=0,
+        help=(
+            "Trigger the source-designated survivor's surrender after this many "
+            "source hostiles are defeated; mutually exclusive with --surrender-at-hp"
+        ),
+    )
     parser.add_argument("--surrender-source-excerpt", default="")
     parser.add_argument(
         "--surrender-no-escape",
@@ -2374,17 +2383,32 @@ def _source_surrender_outcome(
     *,
     actor_hit_points: int,
     surrender_at_hp: int,
+    defeated_hostiles: int = 0,
+    surrender_after_defeated: int = 0,
     actor_alive: bool,
     no_escape: bool,
     unresolved_party: bool,
 ) -> tuple[str, str] | None:
-    if (
+    threshold_met = (
         surrender_at_hp > 0
         and 0 < actor_hit_points <= surrender_at_hp
+    )
+    casualties_met = (
+        surrender_after_defeated > 0
+        and defeated_hostiles >= surrender_after_defeated
+    )
+    if (
+        (threshold_met or casualties_met)
         and actor_alive
         and no_escape
         and not unresolved_party
     ):
+        if casualties_met:
+            return (
+                "surrender",
+                f"After {defeated_hostiles} source-defined hostiles were defeated, "
+                "the source-designated survivor surrendered with no avenue of escape.",
+            )
         return (
             "surrender",
             f"The source-designated hostile surrendered at {actor_hit_points} hit points "
@@ -2743,18 +2767,22 @@ async def _auto_run(
     surrender_configured = bool(
         args.surrender_actor_id
         or args.surrender_at_hp
+        or args.surrender_after_defeated
         or args.surrender_source_excerpt
         or args.surrender_no_escape
     )
+    if args.surrender_at_hp < 0 or args.surrender_after_defeated < 0:
+        raise ValueError("source surrender thresholds must not be negative")
     if surrender_configured and (
         args.surrender_actor_id not in hostile_ids
-        or args.surrender_at_hp <= 0
+        or bool(args.surrender_at_hp) == bool(args.surrender_after_defeated)
         or not str(args.surrender_source_excerpt or "").strip()
         or not args.surrender_no_escape
     ):
         raise ValueError(
-            "source surrender requires a hostile actor, positive HP threshold, "
-            "exact source excerpt, and --surrender-no-escape"
+            "source surrender requires a hostile actor, exactly one positive HP or "
+            "defeated-hostile threshold, an exact source excerpt, and "
+            "--surrender-no-escape"
         )
     initial_combat = await client.domain(
         "combat_query",
@@ -2873,6 +2901,8 @@ async def _auto_run(
             _source_surrender_outcome(
                 actor_hit_points=_hit_points(actors[args.surrender_actor_id]),
                 surrender_at_hp=args.surrender_at_hp,
+                defeated_hostiles=len(defeated_hostiles),
+                surrender_after_defeated=args.surrender_after_defeated,
                 actor_alive=(
                     "dead" not in _conditions(actors[args.surrender_actor_id])
                 ),
@@ -3880,6 +3910,7 @@ async def _auto_run(
             {
                 "actor_id": args.surrender_actor_id,
                 "at_or_below_hit_points": args.surrender_at_hp,
+                "after_defeated": args.surrender_after_defeated,
                 "no_escape": args.surrender_no_escape,
                 "source_excerpt": str(args.surrender_source_excerpt or "").strip(),
             }

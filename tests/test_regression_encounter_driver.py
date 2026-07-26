@@ -1654,6 +1654,34 @@ def test_conscious_party_member_stabilizes_after_all_hostiles_are_resolved() -> 
     )
 
 
+def test_source_surrender_can_follow_a_source_hostile_defeat() -> None:
+    assert _source_surrender_outcome(
+        actor_hit_points=4,
+        surrender_at_hp=0,
+        defeated_hostiles=1,
+        surrender_after_defeated=1,
+        actor_alive=True,
+        no_escape=True,
+        unresolved_party=False,
+    ) == (
+        "surrender",
+        "After 1 source-defined hostiles were defeated, the source-designated "
+        "survivor surrendered with no avenue of escape.",
+    )
+    assert (
+        _source_surrender_outcome(
+            actor_hit_points=4,
+            surrender_at_hp=0,
+            defeated_hostiles=0,
+            surrender_after_defeated=1,
+            actor_alive=True,
+            no_escape=True,
+            unresolved_party=False,
+        )
+        is None
+    )
+
+
 def test_structured_multiattack_followup_prevents_early_end_turn() -> None:
     active = {
         "combatants": [
