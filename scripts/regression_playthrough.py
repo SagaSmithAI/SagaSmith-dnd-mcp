@@ -6235,7 +6235,7 @@ async def _pool_character_currency(
         planned_pool = {
             **pool_details,
             "status": "planned",
-            "expected_campaign_revision": int(campaign["revision"]) + 1,
+            "expected_campaign_revision": int(campaign["revision"]),
             "expected_character_revision": int(actor["revision"]),
         }
         planned_state = deepcopy(state_before)
@@ -6260,6 +6260,42 @@ async def _pool_character_currency(
     else:
         planned_pool = deepcopy(existing_pool)
         progress_planned = progress_before
+        if (
+            int(planned_pool["expected_campaign_revision"])
+            == int(campaign["revision"]) + 1
+            and int(planned_pool["expected_character_revision"])
+            == int(actor["revision"])
+        ):
+            # Scene progress has its own state_version and does not mutate the
+            # campaign revision. Recover plans written by the former +1
+            # assumption before retrying the public atomic wallet transfer.
+            planned_pool["expected_campaign_revision"] = int(campaign["revision"])
+            planned_state = deepcopy(state_before)
+            planned_pools = deepcopy(pools_before)
+            planned_pools[identity_token] = planned_pool
+            planned_state[state_key] = planned_pools
+            progress_planned = await client.domain(
+                "module_set_progress",
+                {
+                    "campaign_id": campaign_id,
+                    "scene_id": scene_id,
+                    "status": str((progress_before or {}).get("status") or "active"),
+                    "progress": _scene_progress_percent(progress_before),
+                    "state": planned_state,
+                    "current_location_key": location_key,
+                    "expected_state_version": int(
+                        (progress_before or {}).get("state_version", 0) or 0
+                    ),
+                    "idempotency_key": _mutation_key(
+                        run_id,
+                        f"{identity_label}-progress-rebase",
+                        (
+                            f"{pool_identity}:"
+                            f"c{campaign['revision']}:a{actor['revision']}"
+                        ),
+                    ),
+                },
+            )
 
     transferred = dict(
         _facade_value(

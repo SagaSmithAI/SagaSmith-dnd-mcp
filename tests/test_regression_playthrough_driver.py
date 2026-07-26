@@ -2276,11 +2276,13 @@ def test_currency_pool_driver_uses_public_atomic_party_transfer() -> None:
     }
 
     class Client:
-        def __init__(self) -> None:
+        def __init__(self, existing_progress: dict | None = None) -> None:
             self.campaign_revision = 9
             self.character_revision = 4
             self.wallet_calls: list[dict] = []
             self.progress_arguments: dict = {}
+            self.progress_calls: list[dict] = []
+            self.existing_progress = deepcopy(existing_progress)
             self.continuity_payload: dict = {}
 
         async def load(self, *groups: str) -> None:
@@ -2299,7 +2301,11 @@ def test_currency_pool_driver_uses_public_atomic_party_transfer() -> None:
         async def domain(self, tool_id: str, arguments: dict):
             if tool_id == "module_query":
                 if arguments["view"] == "progress":
-                    return []
+                    return (
+                        [deepcopy(self.existing_progress)]
+                        if self.existing_progress is not None
+                        else []
+                    )
                 scene_id = arguments["payload"]["scene_id"]
                 if scene_id == "source-scene-1":
                     return {
@@ -2324,7 +2330,7 @@ def test_currency_pool_driver_uses_public_atomic_party_transfer() -> None:
                 expected = arguments["payload"]
                 assert expected == {
                     "character_id": "actor-1",
-                    "expected_campaign_revision": 10,
+                    "expected_campaign_revision": 9,
                     "expected_character_revision": 4,
                 }
                 self.campaign_revision += 1
@@ -2340,8 +2346,8 @@ def test_currency_pool_driver_uses_public_atomic_party_transfer() -> None:
                 }
             if tool_id == "module_set_progress":
                 self.progress_arguments = deepcopy(arguments)
-                self.campaign_revision += 1
-                return {
+                self.progress_calls.append(deepcopy(arguments))
+                self.existing_progress = {
                     "scene_id": "scene-1",
                     "scope_id": "party",
                     "status": "active",
@@ -2349,6 +2355,7 @@ def test_currency_pool_driver_uses_public_atomic_party_transfer() -> None:
                     "state_version": (int(arguments.get("expected_state_version", 0)) + 1),
                     "state": deepcopy(arguments["state"]),
                 }
+                return deepcopy(self.existing_progress)
             if tool_id == "branch_query":
                 return [{"id": "branch-1", "is_current": True}]
             if tool_id == "memory_change":
@@ -2420,6 +2427,61 @@ def test_currency_pool_driver_uses_public_atomic_party_transfer() -> None:
     ]
     assert next(iter(distribution_state.values()))["amount"] == 10
     assert distributed["direction"] == "to_character"
+
+    stale_identity = _occurrence_identity("stale-distribution-1", "distribute-coins")
+    stale_token = regression_playthrough._token(stale_identity)
+    stale_reason = "The party pays the actor 10 gp from a source-defined reward."
+    stale_client = Client(
+        {
+            "scene_id": "scene-1",
+            "scope_id": "party",
+            "status": "active",
+            "progress": 0,
+            "state_version": 3,
+            "state": {
+                "full_playthrough_currency_distributions": {
+                    stale_token: {
+                        "occurrence_id": stale_identity,
+                        "actor_id": "actor-1",
+                        "denomination": "gp",
+                        "amount": 10,
+                        "reason": stale_reason,
+                        "source_ref": source_ref,
+                        "status": "planned",
+                        "expected_campaign_revision": 10,
+                        "expected_character_revision": 4,
+                    }
+                }
+            },
+        }
+    )
+    recovered = asyncio.run(
+        _pool_character_currency(
+            stale_client,
+            campaign_id="campaign-1",
+            run_id="run-1",
+            occurrence_id="stale-distribution-1",
+            scene_id="scene-1",
+            source_scene_id="source-scene-1",
+            location_key="market",
+            source_excerpt="Twenty steel mirrors cost 5 gp each.",
+            source_ref=source_ref,
+            actor_id="actor-1",
+            denomination="gp",
+            amount=10,
+            reason=stale_reason,
+            defer_checkpoint=True,
+            direction="to_character",
+        )
+    )
+
+    assert len(stale_client.progress_calls) == 2
+    rebound_plan = stale_client.progress_calls[0]["state"][
+        "full_playthrough_currency_distributions"
+    ][stale_token]
+    assert rebound_plan["expected_campaign_revision"] == 9
+    assert stale_client.wallet_calls[-1]["payload"]["expected_campaign_revision"] == 9
+    assert recovered["direction"] == "to_character"
 
 
 def test_currency_pool_driver_recovers_completed_progress_without_double_transfer() -> None:
