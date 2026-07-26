@@ -88,7 +88,11 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--run-id", default="full-playthrough-v1")
     parser.add_argument(
         "--party",
-        choices=("lost-mine-of-phandelver", "waterdeep-dragon-heist"),
+        choices=(
+            "lost-mine-of-phandelver",
+            "waterdeep-dragon-heist",
+            "tyranny-of-dragons",
+        ),
         default="lost-mine-of-phandelver",
     )
     parser.add_argument(
@@ -986,6 +990,19 @@ def waterdeep_party_profiles() -> list[dict[str, Any]]:
     ]
 
 
+def tyranny_party_profiles() -> list[dict[str, Any]]:
+    """Return four legal level-one PCs for the continuous Tyranny campaign.
+
+    Hoard of the Dragon Queen explicitly starts four characters at 1st level,
+    and The Rise of Tiamat continues with the same party. The corpus supplies no
+    complete pregenerated character sheets, so these source-audited Core plans
+    fill all four seats while retaining the required ability-generation and
+    spell-resource diversity.
+    """
+
+    return waterdeep_party_profiles()
+
+
 def audit_profiles(
     profiles: list[dict[str, Any]],
     *,
@@ -1021,6 +1038,25 @@ def audit_profiles(
             "official_sheets_present_in_corpus": False,
             "associated_templates_present": 0,
             "disposition": "legally generate all four DM-reviewed seats",
+        }
+    elif campaign_line_id == "tyranny-of-dragons":
+        expected_size = 4
+        size_basis = {
+            "kind": "module_source_maximum",
+            "source_minimum": 4,
+            "source_maximum": 4,
+            "selected": 4,
+            "starting_level": 1,
+            "continuation": "preserve the same party into The Rise of Tiamat",
+        }
+        pregen_review = {
+            "module_mentions_included_characters": False,
+            "official_sheets_present_in_corpus": False,
+            "associated_templates_present": 0,
+            "disposition": (
+                "legally generate all four source-confirmed seats once and "
+                "preserve them across both volumes"
+            ),
         }
     else:
         raise ValueError(f"unsupported campaign party profile: {campaign_line_id}")
@@ -1904,6 +1940,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
     profile_factories = {
         "lost-mine-of-phandelver": lost_mine_party_profiles,
         "waterdeep-dragon-heist": waterdeep_party_profiles,
+        "tyranny-of-dragons": tyranny_party_profiles,
     }
     profiles, profile_audit = select_profiles(
         profile_factories[args.party](),

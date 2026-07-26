@@ -21,6 +21,7 @@ from scripts.regression_party import (
     audit_profiles,
     lost_mine_party_profiles,
     select_profiles,
+    tyranny_party_profiles,
     waterdeep_party_profiles,
 )
 
@@ -286,6 +287,34 @@ def test_waterdeep_party_uses_explicit_dm_review_not_a_fake_module_range() -> No
         "unconfirmed_extensions_used": False,
     }
     assert audit["pregenerated_first"]["official_sheets_present_in_corpus"] is False
+
+
+def test_tyranny_party_uses_source_four_and_preserves_continuous_party() -> None:
+    profiles = tyranny_party_profiles()
+    audit = audit_profiles(profiles, campaign_line_id="tyranny-of-dragons")
+
+    assert audit["selected_size"] == audit["source_maximum"] == 4
+    assert audit["party_size_basis"] == {
+        "kind": "module_source_maximum",
+        "source_minimum": 4,
+        "source_maximum": 4,
+        "selected": 4,
+        "starting_level": 1,
+        "continuation": "preserve the same party into The Rise of Tiamat",
+    }
+    assert audit["classes_unique"] is True
+    assert audit["species_unique"] is True
+    assert audit["ability_methods"] == ["manual", "point_buy", "standard_array"]
+    assert audit["spell_resource_models"] == ["known", "prepared", "spellbook"]
+    assert audit["pregenerated_first"] == {
+        "module_mentions_included_characters": False,
+        "official_sheets_present_in_corpus": False,
+        "associated_templates_present": 0,
+        "disposition": (
+            "legally generate all four source-confirmed seats once and "
+            "preserve them across both volumes"
+        ),
+    }
 
 
 def test_catalog_source_normalizes_srd_table_markers_but_never_invents_items() -> None:
