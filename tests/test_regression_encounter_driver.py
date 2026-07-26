@@ -33,6 +33,7 @@ from scripts.regression_encounter import (
     _preflight_attack,
     _prepared_actor_ids,
     _prioritize_targets,
+    _record_source_flee_damage,
     _reinforcement_config,
     _require_live_active_party,
     _resolve_pending,
@@ -46,6 +47,7 @@ from scripts.regression_encounter import (
     _source_declared_surprise,
     _source_delayed_actions,
     _source_departure_patch,
+    _source_flee_damage_history,
     _source_flee_ready,
     _source_on_hit_rulings,
     _source_opening_casts,
@@ -67,6 +69,7 @@ from scripts.regression_encounter import (
     _surprise_from_check_report,
     _surprise_from_hostile_stealth_totals,
     _validate_hostile_attacks,
+    _validate_source_flee_configuration,
     _wound_priority,
 )
 
@@ -1086,6 +1089,214 @@ def test_source_flee_count_threshold_targets_every_designated_survivor() -> None
         flee_after_defeated=2,
         trigger_defeated_actor_id="",
     )
+
+
+def test_source_flee_supports_damage_or_critical_hit_thresholds() -> None:
+    assert _source_flee_ready(
+        acting_actor_id="lennithon",
+        flee_actor_ids={"lennithon"},
+        defeated_hostile_ids=[],
+        flee_after_defeated=0,
+        trigger_defeated_actor_id="",
+        damage_taken_by_actor={"lennithon": 24},
+        flee_after_damage=24,
+        critical_hit_actor_ids=set(),
+        flee_on_critical=True,
+    )
+    assert _source_flee_ready(
+        acting_actor_id="lennithon",
+        flee_actor_ids={"lennithon"},
+        defeated_hostile_ids=[],
+        flee_after_defeated=0,
+        trigger_defeated_actor_id="",
+        damage_taken_by_actor={"lennithon": 3},
+        flee_after_damage=24,
+        critical_hit_actor_ids={"lennithon"},
+        flee_on_critical=True,
+    )
+    assert not _source_flee_ready(
+        acting_actor_id="lennithon",
+        flee_actor_ids={"lennithon"},
+        defeated_hostile_ids=[],
+        flee_after_defeated=0,
+        trigger_defeated_actor_id="",
+        damage_taken_by_actor={"lennithon": 23},
+        flee_after_damage=24,
+        critical_hit_actor_ids=set(),
+        flee_on_critical=True,
+    )
+
+
+def test_source_flee_configuration_allows_authored_damage_or_critical_alternatives() -> None:
+    assert _validate_source_flee_configuration(
+        SimpleNamespace(
+            flee_actor_id=["lennithon"],
+            flee_trigger_defeated_actor_id="",
+            flee_on_start_actor_id="",
+            flee_after_defeated=0,
+            flee_after_damage=24,
+            flee_on_critical=True,
+            flee_source_excerpt="After it has taken 24 damage or one critical hit, it leaves.",
+            source_excerpt=(
+                "The dragon attacks the defenders. After it has taken 24 damage "
+                "or one critical hit, it leaves."
+            ),
+        ),
+        hostile_ids=["lennithon"],
+    ) == {"lennithon"}
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"flee_actor_id": []}, "--flee-actor-id"),
+        ({"flee_after_damage": 0, "flee_on_critical": False}, "at least one"),
+        ({"flee_after_damage": -1}, "must not be negative"),
+        ({"flee_source_excerpt": ""}, "require --flee-source-excerpt"),
+    ],
+)
+def test_source_flee_configuration_fails_closed(
+    overrides: dict[str, object],
+    message: str,
+) -> None:
+    values = {
+        "flee_actor_id": ["lennithon"],
+        "flee_trigger_defeated_actor_id": "",
+        "flee_on_start_actor_id": "",
+        "flee_after_defeated": 0,
+        "flee_after_damage": 24,
+        "flee_on_critical": True,
+        "flee_source_excerpt": "After it has taken 24 damage or one critical hit, it leaves.",
+        "source_excerpt": (
+            "The dragon attacks the defenders. After it has taken 24 damage "
+            "or one critical hit, it leaves."
+        ),
+    }
+    values.update(overrides)
+    with pytest.raises(ValueError, match=message):
+        _validate_source_flee_configuration(
+            SimpleNamespace(**values),
+            hostile_ids=["lennithon"],
+        )
+
+
+def test_source_flee_configuration_rejects_uncited_trigger_excerpt() -> None:
+    with pytest.raises(ValueError, match="must be contained"):
+        _validate_source_flee_configuration(
+            SimpleNamespace(
+                flee_actor_id=["lennithon"],
+                flee_trigger_defeated_actor_id="",
+                flee_on_start_actor_id="",
+                flee_after_defeated=0,
+                flee_after_damage=24,
+                flee_on_critical=True,
+                flee_source_excerpt="After 24 damage, the dragon leaves.",
+                source_excerpt="The dragon attacks the defenders.",
+            ),
+            hostile_ids=["lennithon"],
+        )
+
+
+def test_source_flee_damage_tracking_uses_server_applied_damage_and_critical() -> None:
+    damage = {"lennithon": 0}
+    critical: set[str] = set()
+    observations = _record_source_flee_damage(
+        {
+            "result": {
+                "target_id": "lennithon",
+                "hit": True,
+                "critical": True,
+                "damage": {
+                    "input_amount": 18,
+                    "applied_amount": 9,
+                    "hp_damage": 9,
+                },
+            }
+        },
+        flee_actor_ids={"lennithon"},
+        damage_taken_by_actor=damage,
+        critical_hit_actor_ids=critical,
+    )
+
+    assert observations == [
+        {
+            "target_id": "lennithon",
+            "applied_damage": 9,
+            "cumulative_applied_damage": 9,
+            "critical_hit": True,
+        }
+    ]
+    assert damage == {"lennithon": 9}
+    assert critical == {"lennithon"}
+
+
+def test_source_flee_damage_tracking_counts_each_magic_missile_dart() -> None:
+    damage = {"lennithon": 0}
+    critical: set[str] = set()
+    observations = _record_source_flee_damage(
+        {
+            "result": {
+                "kind": "magic_missile",
+                "targets": [
+                    {
+                        "target_id": "lennithon",
+                        "dart_results": [
+                            {"input_amount": 4, "applied_amount": 4},
+                            {"input_amount": 5, "applied_amount": 5},
+                            {"input_amount": 3, "applied_amount": 3},
+                        ],
+                    }
+                ],
+            }
+        },
+        flee_actor_ids={"lennithon"},
+        damage_taken_by_actor=damage,
+        critical_hit_actor_ids=critical,
+    )
+
+    assert observations[0]["applied_damage"] == 12
+    assert damage == {"lennithon": 12}
+    assert critical == set()
+
+
+def test_source_flee_damage_history_restores_interrupted_combat_counter() -> None:
+    damage, critical = _source_flee_damage_history(
+        {
+            "log": [
+                {
+                    "type": "attack",
+                    "result": {
+                        "target_id": "lennithon",
+                        "hit": True,
+                        "critical": False,
+                        "damage": {"applied_amount": 11},
+                    },
+                },
+                {
+                    "type": "attack_defense_resolved",
+                    "result": {
+                        "target_id": "lennithon",
+                        "hit": True,
+                        "critical": True,
+                        "damage": {"applied_amount": 7},
+                    },
+                },
+                {
+                    "type": "attack",
+                    "result": {
+                        "target_id": "other",
+                        "hit": True,
+                        "critical": True,
+                        "damage": {"applied_amount": 99},
+                    },
+                },
+            ]
+        },
+        flee_actor_ids={"lennithon"},
+    )
+
+    assert damage == {"lennithon": 18}
+    assert critical == {"lennithon"}
 
 
 def test_source_flee_does_not_end_while_other_hostiles_remain() -> None:

@@ -248,6 +248,23 @@ def _arguments() -> argparse.Namespace:
     )
     parser.add_argument("--flee-after-defeated", type=int, default=0)
     parser.add_argument(
+        "--flee-after-damage",
+        type=int,
+        default=0,
+        help=(
+            "Source-defined cumulative damage actually applied to a designated actor "
+            "before it attempts to flee"
+        ),
+    )
+    parser.add_argument(
+        "--flee-on-critical",
+        action="store_true",
+        help=(
+            "Make the source-designated actor attempt to flee after the server "
+            "settles a critical hit against it"
+        ),
+    )
+    parser.add_argument(
         "--flee-actor-id",
         action="append",
         default=[],
@@ -3144,14 +3161,161 @@ def _source_flee_ready(
     defeated_hostile_ids: list[str],
     flee_after_defeated: int,
     trigger_defeated_actor_id: str,
+    damage_taken_by_actor: dict[str, int] | None = None,
+    flee_after_damage: int = 0,
+    critical_hit_actor_ids: set[str] | None = None,
+    flee_on_critical: bool = False,
 ) -> bool:
     """Return whether the source-designated actor must now attempt to leave."""
 
     if acting_actor_id not in flee_actor_ids:
         return False
     if trigger_defeated_actor_id:
-        return trigger_defeated_actor_id in defeated_hostile_ids
-    return flee_after_defeated > 0 and len(defeated_hostile_ids) >= flee_after_defeated
+        if trigger_defeated_actor_id in defeated_hostile_ids:
+            return True
+    if flee_after_defeated > 0 and len(defeated_hostile_ids) >= flee_after_defeated:
+        return True
+    if flee_after_damage > 0 and int(
+        dict(damage_taken_by_actor or {}).get(acting_actor_id, 0) or 0
+    ) >= flee_after_damage:
+        return True
+    return flee_on_critical and acting_actor_id in set(critical_hit_actor_ids or set())
+
+
+def _validate_source_flee_configuration(
+    args: argparse.Namespace,
+    *,
+    hostile_ids: list[str],
+) -> set[str]:
+    """Validate source retreat triggers without widening encounter authority."""
+
+    source_flee_ids = {
+        *(str(actor_id) for actor_id in args.flee_actor_id),
+        str(args.flee_trigger_defeated_actor_id or ""),
+        str(args.flee_on_start_actor_id or ""),
+    } - {""}
+    triggered_flee_configured = bool(
+        args.flee_actor_id
+        or args.flee_trigger_defeated_actor_id
+        or args.flee_after_defeated
+        or args.flee_after_damage
+        or args.flee_on_critical
+    )
+    defeated_flee_triggers = int(bool(args.flee_trigger_defeated_actor_id)) + int(
+        bool(args.flee_after_defeated)
+    )
+    has_triggered_flee_condition = bool(
+        defeated_flee_triggers
+        or args.flee_after_damage
+        or args.flee_on_critical
+    )
+    if triggered_flee_configured and (
+        not args.flee_actor_id
+        or not has_triggered_flee_condition
+        or defeated_flee_triggers > 1
+    ):
+        raise ValueError(
+            "source-specific triggered flee requires --flee-actor-id, at least one "
+            "damage, critical-hit, or defeat trigger, and no more than one defeat trigger"
+        )
+    if args.flee_after_defeated < 0 or args.flee_after_damage < 0:
+        raise ValueError("source flee thresholds must not be negative")
+    if source_flee_ids and (
+        not source_flee_ids <= set(hostile_ids) or not str(args.flee_source_excerpt or "").strip()
+    ):
+        raise ValueError(
+            "source-specific flee actors must be encounter hostiles and require "
+            "--flee-source-excerpt"
+        )
+    if source_flee_ids and _normalized_source_text(args.flee_source_excerpt) not in (
+        _normalized_source_text(args.source_excerpt)
+    ):
+        raise ValueError("source-specific flee excerpt must be contained in --source-excerpt")
+    if args.flee_actor_id and (
+        args.flee_trigger_defeated_actor_id in args.flee_actor_id or args.flee_on_start_actor_id
+    ):
+        raise ValueError(
+            "triggered and on-start source departures are mutually exclusive, and "
+            "triggered actors must be distinct"
+        )
+    return source_flee_ids
+
+
+def _record_source_flee_damage(
+    response: dict[str, Any] | None,
+    *,
+    flee_actor_ids: set[str],
+    damage_taken_by_actor: dict[str, int],
+    critical_hit_actor_ids: set[str],
+) -> list[dict[str, Any]]:
+    """Record server-settled damage and critical-hit facts used by retreat rules."""
+
+    result = dict(dict(response or {}).get("result") or {})
+    observations: list[dict[str, Any]] = []
+
+    def record(target_id: str, applied_amount: int, *, critical_hit: bool) -> None:
+        if target_id not in flee_actor_ids:
+            return
+        if applied_amount < 0:
+            raise RuntimeError("server settlement returned negative applied damage")
+        damage_taken_by_actor[target_id] = (
+            int(damage_taken_by_actor.get(target_id, 0) or 0) + applied_amount
+        )
+        if critical_hit:
+            critical_hit_actor_ids.add(target_id)
+        if applied_amount > 0 or critical_hit:
+            observations.append(
+                {
+                    "target_id": target_id,
+                    "applied_damage": applied_amount,
+                    "cumulative_applied_damage": damage_taken_by_actor[target_id],
+                    "critical_hit": critical_hit,
+                }
+            )
+
+    direct_target_id = str(result.get("target_id") or "")
+    if direct_target_id:
+        damage = dict(result.get("damage") or {})
+        record(
+            direct_target_id,
+            int(damage.get("applied_amount", 0) or 0),
+            critical_hit=bool(result.get("hit")) and bool(result.get("critical")),
+        )
+    if str(result.get("kind") or "") == "magic_missile":
+        for target in result.get("targets", []):
+            if not isinstance(target, dict):
+                continue
+            record(
+                str(target.get("target_id") or ""),
+                sum(
+                    int(dict(dart).get("applied_amount", 0) or 0)
+                    for dart in target.get("dart_results", [])
+                    if isinstance(dart, dict)
+                ),
+                critical_hit=False,
+            )
+    return observations
+
+
+def _source_flee_damage_history(
+    combat: dict[str, Any],
+    *,
+    flee_actor_ids: set[str],
+) -> tuple[dict[str, int], set[str]]:
+    """Recover retreat damage and critical facts from the bounded combat log."""
+
+    damage_taken_by_actor = {actor_id: 0 for actor_id in flee_actor_ids}
+    critical_hit_actor_ids: set[str] = set()
+    for event in combat.get("log", []):
+        if not isinstance(event, dict):
+            continue
+        _record_source_flee_damage(
+            {"result": event.get("result")},
+            flee_actor_ids=flee_actor_ids,
+            damage_taken_by_actor=damage_taken_by_actor,
+            critical_hit_actor_ids=critical_hit_actor_ids,
+        )
+    return damage_taken_by_actor, critical_hit_actor_ids
 
 
 def _source_truce_outcome(
@@ -3459,38 +3623,10 @@ async def _auto_run(
     if str(dict(campaign.get("state") or {}).get("game_phase") or "") != "combat":
         raise RuntimeError("auto-run requires an active combat")
     branch = await _current_branch(client, args.campaign_id)
-    source_flee_ids = {
-        *(str(actor_id) for actor_id in args.flee_actor_id),
-        str(args.flee_trigger_defeated_actor_id or ""),
-        str(args.flee_on_start_actor_id or ""),
-    } - {""}
-    triggered_flee_configured = bool(
-        args.flee_actor_id or args.flee_trigger_defeated_actor_id or args.flee_after_defeated
+    _validate_source_flee_configuration(
+        args,
+        hostile_ids=hostile_ids,
     )
-    if triggered_flee_configured and (
-        not args.flee_actor_id
-        or bool(args.flee_trigger_defeated_actor_id) == bool(args.flee_after_defeated)
-    ):
-        raise ValueError(
-            "source-specific triggered flee requires --flee-actor-id and exactly one "
-            "of --flee-trigger-defeated-actor-id or positive --flee-after-defeated"
-        )
-    if args.flee_after_defeated < 0:
-        raise ValueError("--flee-after-defeated must not be negative")
-    if source_flee_ids and (
-        not source_flee_ids <= set(hostile_ids) or not str(args.flee_source_excerpt or "").strip()
-    ):
-        raise ValueError(
-            "source-specific flee actors must be encounter hostiles and require "
-            "--flee-source-excerpt"
-        )
-    if args.flee_actor_id and (
-        args.flee_trigger_defeated_actor_id in args.flee_actor_id or args.flee_on_start_actor_id
-    ):
-        raise ValueError(
-            "triggered and on-start source departures are mutually exclusive, and "
-            "triggered actors must be distinct"
-        )
     if bool(args.truce_after_defeated) != bool(args.truce_actor_id):
         raise ValueError("source truce requires both --truce-after-defeated and --truce-actor-id")
     if args.truce_after_defeated < 0:
@@ -3652,6 +3788,10 @@ async def _auto_run(
     completed_opening_casts: set[int] = set()
     completed_opening_weapon_actor_ids: set[str] = set()
     fled_hostile_ids: set[str] = set()
+    damage_taken_by_flee_actor, critical_hit_flee_actor_ids = _source_flee_damage_history(
+        initial_combat,
+        flee_actor_ids=set(args.flee_actor_id),
+    )
     if args.flee_on_start_actor_id:
         campaign = await _campaign(client, args.campaign_id)
         escaped = await client.domain(
@@ -3770,11 +3910,18 @@ async def _auto_run(
             combat,
         )
         if pending_result is not None:
+            source_flee_observations = _record_source_flee_damage(
+                pending_result,
+                flee_actor_ids=set(args.flee_actor_id),
+                damage_taken_by_actor=damage_taken_by_flee_actor,
+                critical_hit_actor_ids=critical_hit_flee_actor_ids,
+            )
             turns.append(
                 {
                     "sequence": sequence,
                     "kind": "pending_resolution",
                     "result": pending_result,
+                    "source_flee_observations": source_flee_observations,
                 }
             )
             continue
@@ -3828,6 +3975,10 @@ async def _auto_run(
                 defeated_hostile_ids=defeated_hostiles,
                 flee_after_defeated=args.flee_after_defeated,
                 trigger_defeated_actor_id=str(args.flee_trigger_defeated_actor_id or ""),
+                damage_taken_by_actor=damage_taken_by_flee_actor,
+                flee_after_damage=args.flee_after_damage,
+                critical_hit_actor_ids=critical_hit_flee_actor_ids,
+                flee_on_critical=args.flee_on_critical,
             )
             and _hit_points(actor) > 0
             and actor_id not in fled_hostile_ids
@@ -3868,6 +4019,17 @@ async def _auto_run(
                     "actor_id": actor_id,
                     "trigger_actor_id": (args.flee_trigger_defeated_actor_id or None),
                     "trigger_defeated_count": (args.flee_after_defeated or None),
+                    "trigger_damage_taken": (
+                        damage_taken_by_flee_actor.get(actor_id)
+                        if args.flee_after_damage
+                        else None
+                    ),
+                    "trigger_damage_threshold": (args.flee_after_damage or None),
+                    "trigger_critical_hit": (
+                        actor_id in critical_hit_flee_actor_ids
+                        if args.flee_on_critical
+                        else None
+                    ),
                     "source_excerpt": str(args.flee_source_excerpt).strip(),
                     "map_patch": escaped,
                     "end_turn": ended_turn,
@@ -4757,6 +4919,12 @@ async def _auto_run(
                 cast_arguments["declaration"] = {"target_id": spell_target_id}
             cast = await client.domain("combat_cast_spell", cast_arguments)
             spell_result: dict[str, Any] = {"cast": cast}
+            source_flee_observations = _record_source_flee_damage(
+                cast,
+                flee_actor_ids=set(args.flee_actor_id),
+                damage_taken_by_actor=damage_taken_by_flee_actor,
+                critical_hit_actor_ids=critical_hit_flee_actor_ids,
+            )
             pending_reaction = cast.get("status") == "pending_reaction"
             if spell_id == GUIDING_BOLT_ID:
                 if cast.get("status") != "pending_resolution":
@@ -4779,6 +4947,14 @@ async def _auto_run(
                     },
                 )
                 spell_result["settlement"] = settled
+                source_flee_observations.extend(
+                    _record_source_flee_damage(
+                        settled,
+                        flee_actor_ids=set(args.flee_actor_id),
+                        damage_taken_by_actor=damage_taken_by_flee_actor,
+                        critical_hit_actor_ids=critical_hit_flee_actor_ids,
+                    )
+                )
                 pending_reaction = settled.get("status") == "pending_reaction"
                 if settled.get("status") == "pending_ruling":
                     campaign = await _campaign(client, args.campaign_id)
@@ -4829,6 +5005,7 @@ async def _auto_run(
                     "cast_level": cast_level,
                     "target_id": spell_target_id,
                     "result": spell_result,
+                    "source_flee_observations": source_flee_observations,
                 }
             )
             if pending_reaction:
@@ -4976,6 +5153,12 @@ async def _auto_run(
                 and selected_weapon_id == source_opening_weapon["weapon_id"]
             ):
                 completed_opening_weapon_actor_ids.add(actor_id)
+            source_flee_observations = _record_source_flee_damage(
+                resolved,
+                flee_actor_ids=set(args.flee_actor_id),
+                damage_taken_by_actor=damage_taken_by_flee_actor,
+                critical_hit_actor_ids=critical_hit_flee_actor_ids,
+            )
             on_hit_settlement = None
             if resolved.get("status") == "pending_ruling":
                 choice_id = str(
@@ -5026,6 +5209,7 @@ async def _auto_run(
                         and selected_weapon_id == source_opening_weapon["weapon_id"]
                         else None
                     ),
+                    "source_flee_observations": source_flee_observations,
                     "on_hit_settlement": on_hit_settlement,
                 }
             )
@@ -5083,6 +5267,8 @@ async def _auto_run(
         "visibility_patch": visibility_patch,
         "turns": turns,
         "fled_hostile_ids": sorted(fled_hostile_ids),
+        "source_flee_damage_taken": dict(sorted(damage_taken_by_flee_actor.items())),
+        "source_flee_critical_hit_actor_ids": sorted(critical_hit_flee_actor_ids),
         "truce": (
             {
                 "actor_id": args.truce_actor_id,
