@@ -21,6 +21,7 @@ from scripts.regression_playthrough import (
     _advance_scene,
     _advance_time,
     _apply_source_damage,
+    _apply_source_effect,
     _award_experience,
     _branch_from_snapshot,
     _campaign_phase,
@@ -64,6 +65,7 @@ from scripts.regression_playthrough import (
     _restore_phase_after_failed_refresh,
     _roll_source_table,
     _scene_progress_percent,
+    _set_source_exhaustion,
     _short_rest,
     _source_groups,
     _spend_source_currency,
@@ -1604,6 +1606,113 @@ def test_party_item_claim_driver_uses_atomic_party_to_character_public_tool(
 
 
 @pytest.mark.parametrize("defer_checkpoint", [False, True])
+def test_source_effect_application_uses_public_character_transition(
+    defer_checkpoint: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_ref = {
+        "module_id": "module-1",
+        "scene_id": "scene-1",
+        "chunk_id": "fresco-chunk",
+        "page_start": 96,
+        "page_end": 96,
+        "heading_path": ["Vault", "Enthralling Fresco"],
+        "content_sha256": "a" * 64,
+    }
+    effect = {
+        "id": "fresco-charm",
+        "name": "Enthralling Fresco",
+        "kind": "timed_conditions",
+        "source": "module-chunk:fresco-chunk",
+        "duration": {"period": "hour", "remaining": 24},
+        "changes": [{"path": "conditions", "mode": "add", "value": "charmed"}],
+    }
+
+    class Client:
+        def __init__(self) -> None:
+            self.actor = {
+                "id": "thalia",
+                "name": "Thalia",
+                "campaign_id": "campaign-1",
+                "revision": 9,
+                "sheet": default_character_sheet(),
+                "derived": {"armor_class": 18},
+            }
+            self.change_arguments: dict | None = None
+
+        async def domain(self, tool_id: str, arguments: dict):
+            if tool_id == "module_query":
+                return {
+                    "module_id": "module-1",
+                    "scene_id": "scene-1",
+                    "content": "A failed save charms the creature for 24 hours.",
+                    "spatial": {
+                        "locations": [{"key": "fresco", "title": "Fresco"}]
+                    },
+                }
+            if tool_id == "character_query":
+                return deepcopy(self.actor)
+            if tool_id == "character_state_change":
+                self.change_arguments = deepcopy(arguments)
+                self.actor["sheet"]["effects"] = [
+                    {
+                        **deepcopy(effect),
+                        "active": True,
+                        "concentration": False,
+                        "source_spell_id": "",
+                        "description": "",
+                    }
+                ]
+                self.actor["revision"] += 1
+                return {
+                    "character": deepcopy(self.actor),
+                    "effect_id": "fresco-charm",
+                }
+            raise AssertionError((tool_id, arguments))
+
+    checkpoint_calls = 0
+
+    async def checkpoint(*_args, **_kwargs):
+        nonlocal checkpoint_calls
+        checkpoint_calls += 1
+        return {"snapshot": {"slot": 15}, "verification": {"valid": True}}
+
+    monkeypatch.setattr(regression_playthrough, "_checkpoint", checkpoint)
+    client = Client()
+    result = asyncio.run(
+        _apply_source_effect(
+            client,
+            campaign_id="campaign-1",
+            run_id="run-1",
+            occurrence_id="fresco-charm-thalia",
+            scene_id="scene-1",
+            location_key="fresco",
+            source_excerpt="A failed save charms the creature for 24 hours.",
+            source_ref=source_ref,
+            character_id="thalia",
+            effect=effect,
+            reason="Thalia failed the source-defined Wisdom save.",
+            checkpoint_label="Fresco charm applied",
+            defer_checkpoint=defer_checkpoint,
+        )
+    )
+
+    assert client.change_arguments == {
+        "character_id": "thalia",
+        "action": "effect_add",
+        "payload": {"effect": effect},
+        "expected_revision": 9,
+        "idempotency_key": _mutation_key(
+            "run-1",
+            "source-effect-add",
+            _occurrence_identity("fresco-charm-thalia", "apply-source-effect"),
+        ),
+    }
+    assert result["effect"]["id"] == "fresco-charm"
+    assert checkpoint_calls == (0 if defer_checkpoint else 1)
+
+
+@pytest.mark.parametrize("defer_checkpoint", [False, True])
 def test_source_effect_removal_uses_public_character_transition(
     defer_checkpoint: bool,
     monkeypatch: pytest.MonkeyPatch,
@@ -1709,6 +1818,83 @@ def test_source_effect_removal_uses_public_character_transition(
     }
     assert result["effect"]["id"] == "fear-ray-effect"
     assert checkpoint_calls == (0 if defer_checkpoint else 1)
+
+
+def test_source_exhaustion_uses_public_character_transition() -> None:
+    source_ref = {
+        "module_id": "module-1",
+        "scene_id": "scene-1",
+        "chunk_id": "fresco-chunk",
+        "page_start": 96,
+        "page_end": 96,
+        "heading_path": ["Vault", "Enthralling Fresco"],
+        "content_sha256": "a" * 64,
+    }
+
+    class Client:
+        def __init__(self) -> None:
+            sheet = default_character_sheet()
+            self.actor = {
+                "id": "maris",
+                "name": "Maris",
+                "campaign_id": "campaign-1",
+                "revision": 11,
+                "sheet": sheet,
+                "derived": {"armor_class": 13},
+            }
+            self.change_arguments: dict | None = None
+
+        async def domain(self, tool_id: str, arguments: dict):
+            if tool_id == "module_query":
+                return {
+                    "module_id": "module-1",
+                    "scene_id": "scene-1",
+                    "content": "After 24 hours, the creature gains one level of exhaustion.",
+                    "spatial": {
+                        "locations": [{"key": "fresco", "title": "Fresco"}]
+                    },
+                }
+            if tool_id == "character_query":
+                return deepcopy(self.actor)
+            if tool_id == "character_state_change":
+                self.change_arguments = deepcopy(arguments)
+                self.actor["sheet"]["combat"]["exhaustion"] = 1
+                self.actor["revision"] += 1
+                return {"character": deepcopy(self.actor)}
+            raise AssertionError((tool_id, arguments))
+
+    client = Client()
+    result = asyncio.run(
+        _set_source_exhaustion(
+            client,
+            campaign_id="campaign-1",
+            run_id="run-1",
+            occurrence_id="fresco-exhaustion-maris-day-1",
+            scene_id="scene-1",
+            location_key="fresco",
+            source_excerpt="After 24 hours, the creature gains one level of exhaustion.",
+            source_ref=source_ref,
+            character_id="maris",
+            level=1,
+            reason="Maris remained charmed for 24 hours.",
+            checkpoint_label="",
+            defer_checkpoint=True,
+        )
+    )
+
+    assert client.change_arguments == {
+        "character_id": "maris",
+        "action": "exhaustion_set",
+        "payload": {"value": 1},
+        "expected_revision": 11,
+        "idempotency_key": _mutation_key(
+            "run-1",
+            "source-exhaustion-set",
+            "fresco-exhaustion-maris-day-1",
+        ),
+    }
+    assert result["before"] == 0
+    assert result["after"] == 1
 
 
 def test_currency_pool_driver_uses_public_atomic_party_transfer() -> None:

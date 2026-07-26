@@ -91,6 +91,31 @@ def test_play_hp_changes_use_the_same_zero_hp_and_recovery_rules(tmp_path: Path)
         assert knocked_prone["status"] == "knocked_prone"
         assert knocked_prone["added_condition"] == "prone"
         assert knocked_prone["character"]["sheet"]["conditions"] == ["prone"]
+        exhausted = await call(
+            server,
+            "character_state_change",
+            {
+                "character_id": pc["id"],
+                "action": "exhaustion_set",
+                "payload": {"value": 2},
+                "expected_revision": knocked_prone["character"]["revision"],
+                "idempotency_key": "exhaustion",
+            },
+        )
+        assert exhausted["sheet"]["combat"]["exhaustion"] == 2
+        fatally_exhausted = await call(
+            server,
+            "character_state_change",
+            {
+                "character_id": pc["id"],
+                "action": "exhaustion_set",
+                "payload": {"value": 6},
+                "expected_revision": exhausted["revision"],
+                "idempotency_key": "fatal-exhaustion",
+            },
+        )
+        assert fatally_exhausted["sheet"]["combat"]["exhaustion"] == 6
+        assert "dead" in fatally_exhausted["sheet"]["conditions"]
 
         monster_sheet = default_character_sheet()
         monster_sheet["edition"] = "2014"

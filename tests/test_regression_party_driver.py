@@ -5,12 +5,14 @@ import json
 from copy import deepcopy
 
 import pytest
+from sagasmith_dnd.character_schema import default_character_sheet
 
 from scripts.regression_party import (
     OIL_RULE,
     _background_starting_items,
     _catalog_source,
     _class_starting_supplements,
+    _configure_base_sheet,
     _item_weight_oz,
     _pack_contents,
     _repair_existing_party_equipment,
@@ -52,6 +54,40 @@ def test_party_profiles_have_source_linked_gear_and_complete_ability_input() -> 
     )
     assert all(_class_starting_supplements(profile) for profile in profiles)
     assert all(len(profile["abilities"]) == 6 for profile in profiles)
+
+
+@pytest.mark.parametrize(
+    ("class_name", "expected_class_list"),
+    [("Bard", "bard"), ("Cleric", "cleric"), ("Wizard", "wizard")],
+)
+def test_base_casters_record_their_spell_class_list(
+    class_name: str,
+    expected_class_list: str,
+) -> None:
+    profile = next(
+        item
+        for item in waterdeep_party_profiles()
+        if item["class"] == class_name
+    )
+    actor = {"sheet": default_character_sheet()}
+    catalog = []
+    seen: set[tuple[str, str]] = set()
+    for item in [
+        *profile["items"],
+        *_class_starting_supplements(profile),
+        *_background_starting_items(profile),
+    ]:
+        kind = str(item.get("_source_kind") or "item")
+        name = str(item["source_key"])
+        if (kind, name) not in seen:
+            seen.add((kind, name))
+            catalog.append(
+                {"id": f"{kind}:{len(catalog)}", "kind": kind, "name": name}
+            )
+
+    sheet = _configure_base_sheet(actor, profile, catalog)
+
+    assert sheet["spellcasting"]["class_lists"] == [expected_class_list]
 
 
 def test_starting_equipment_packs_expand_to_rule_accurate_consumable_items() -> None:

@@ -70,6 +70,7 @@ from sagasmith_dnd.character_schema import (
     remove_effect,
     remove_inventory_item,
     resolve_memory,
+    set_exhaustion_level,
     set_resource_value,
     set_spell_prepared,
     update_inventory_item,
@@ -14671,6 +14672,28 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             payload={"resource": resource, "value": value},
         )
 
+    @mcp.tool()
+    def character_exhaustion_set(
+        character_id: str,
+        value: int,
+        principal_id: str = "system:local",
+        expected_revision: int | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Set a character's validated exhaustion level outside combat."""
+        current = characters.get(character_id)
+        require_character_control(current, principal_id)
+        require_outside_active_combat(current, "exhaustion changes")
+        return update_sheet(
+            character_id,
+            set_exhaustion_level(current.sheet, value),
+            operation="character.exhaustion.set",
+            principal_id=principal_id,
+            expected_revision=expected_revision,
+            idempotency_key=idempotency_key,
+            payload={"value": value},
+        )
+
     def character_apply_damage(
         character_id: str,
         parts: list[dict[str, Any]],
@@ -22552,6 +22575,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "effect_add",
             "effect_remove",
             "resource_set",
+            "exhaustion_set",
             "damage",
             "heal",
             "rest",
@@ -22590,6 +22614,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             result = character_resource_set(
                 character_id,
                 required(data, "resource"),
+                required(data, "value"),
+                principal_id,
+                expected_revision,
+                idempotency_key,
+            )
+        elif action == "exhaustion_set":
+            result = character_exhaustion_set(
+                character_id,
                 required(data, "value"),
                 principal_id,
                 expected_revision,
@@ -24259,6 +24291,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         "character_inventory_transfer",
         "character_effect_add",
         "character_effect_remove",
+        "character_exhaustion_set",
         "character_rest",
         "character_cast_spell",
         "character_use_activity",

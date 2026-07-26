@@ -44,7 +44,9 @@ DEFERRED_CHECKPOINT_ACTIONS = frozenset(
         "pool-coins",
         "transfer-source-item",
         "claim-party-item",
+        "apply-source-effect",
         "remove-source-effect",
+        "set-source-exhaustion",
         "acquire-loot",
         "spend-coins",
         "spend-item",
@@ -84,7 +86,9 @@ def _arguments() -> argparse.Namespace:
             "pool-coins",
             "transfer-source-item",
             "claim-party-item",
+            "apply-source-effect",
             "remove-source-effect",
+            "set-source-exhaustion",
             "acquire-loot",
             "spend-coins",
             "spend-item",
@@ -257,7 +261,9 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--pool-reason", default="")
     parser.add_argument("--effect-character-id", default="")
     parser.add_argument("--effect-id", default="")
+    parser.add_argument("--effect-json", type=json.loads)
     parser.add_argument("--effect-reason", default="")
+    parser.add_argument("--exhaustion-level", type=int)
     parser.add_argument("--loot-acquisition-id", default="")
     parser.add_argument("--loot-coins-json", type=json.loads, default={})
     parser.add_argument("--loot-item-json", action="append", type=json.loads, default=[])
@@ -5545,6 +5551,150 @@ async def _pool_character_currency(
     }
 
 
+async def _apply_source_effect(
+    client: ExposureClient,
+    *,
+    campaign_id: str,
+    run_id: str,
+    occurrence_id: str,
+    scene_id: str,
+    location_key: str,
+    source_excerpt: str,
+    source_ref: dict[str, Any] | None,
+    character_id: str,
+    effect: dict[str, Any] | None,
+    reason: str,
+    checkpoint_label: str,
+    defer_checkpoint: bool = False,
+) -> dict[str, Any]:
+    application_identity = _occurrence_identity(occurrence_id, "apply-source-effect")
+    normalized_character_id = character_id.strip()
+    normalized_reason = reason.strip()
+    requested_effect = deepcopy(effect) if isinstance(effect, dict) else {}
+    effect_id = str(requested_effect.get("id") or "").strip()
+    if not all(
+        (
+            scene_id,
+            location_key,
+            source_excerpt.strip(),
+            normalized_character_id,
+            effect_id,
+            normalized_reason,
+        )
+    ):
+        raise ValueError(
+            "apply-source-effect requires scene, location, excerpt, character, "
+            "an effect with id, and reason"
+        )
+
+    scene = await client.domain(
+        "module_query",
+        {
+            "campaign_id": campaign_id,
+            "view": "scene",
+            "payload": {"scene_id": scene_id},
+        },
+    )
+    exact_ref = _validate_source_ref(scene, source_ref, excerpt=source_excerpt)
+    if location_key not in {str(item.get("key") or "") for item in _scene_locations(scene)}:
+        raise ValueError("apply-source-effect location is not present in the scene atlas")
+    expected_source = f"module-chunk:{exact_ref['chunk_id']}"
+    if str(requested_effect.get("source") or "") != expected_source:
+        raise ValueError(
+            "source effect source must be module-chunk:<source_ref.chunk_id>"
+        )
+
+    actor = dict(
+        _facade_value(
+            await client.domain(
+                "character_query",
+                {"view": "get", "payload": {"character_id": normalized_character_id}},
+            )
+        )
+    )
+    if str(actor.get("campaign_id") or "") != campaign_id:
+        raise ValueError("apply-source-effect actor does not belong to the campaign")
+    existing = next(
+        (
+            dict(item)
+            for item in dict(actor.get("sheet") or {}).get("effects", [])
+            if str(item.get("id") or "") == effect_id
+        ),
+        None,
+    )
+    recovered = existing is not None
+    if recovered:
+        if any(
+            existing.get(field) != requested_effect.get(field)
+            for field in ("id", "name", "kind", "source", "duration", "changes")
+        ):
+            raise ValueError(
+                "apply-source-effect id already exists with different effect data"
+            )
+        applied: dict[str, Any] = {
+            "character": actor,
+            "effect_id": effect_id,
+            "status": "recovered",
+        }
+    else:
+        applied = dict(
+            _facade_value(
+                await client.domain(
+                    "character_state_change",
+                    {
+                        "character_id": normalized_character_id,
+                        "action": "effect_add",
+                        "payload": {"effect": requested_effect},
+                        "expected_revision": actor["revision"],
+                        "idempotency_key": _mutation_key(
+                            run_id,
+                            "source-effect-add",
+                            application_identity,
+                        ),
+                    },
+                )
+            )
+        )
+        actor_after = dict(applied.get("character") or applied)
+        added = next(
+            (
+                dict(item)
+                for item in dict(actor_after.get("sheet") or {}).get("effects", [])
+                if str(item.get("id") or "") == effect_id
+            ),
+            None,
+        )
+        if added is None:
+            raise RuntimeError("source effect application did not add the requested effect")
+        existing = added
+
+    checkpoint = (
+        None
+        if defer_checkpoint
+        else await _checkpoint(
+            client,
+            campaign_id=campaign_id,
+            run_id=run_id,
+            label=(
+                checkpoint_label.strip()
+                or f"Full playthrough source effect applied: {effect_id}"
+            ),
+            checkpoint_id=f"source-effect-add:{application_identity}",
+        )
+    )
+    return {
+        "character_id": normalized_character_id,
+        "effect_id": effect_id,
+        "occurrence_id": application_identity,
+        "reason": normalized_reason,
+        "source_ref": exact_ref,
+        "effect": existing,
+        "application": applied,
+        "recovered": recovered,
+        "checkpoint": checkpoint,
+    }
+
+
 async def _remove_source_effect(
     client: ExposureClient,
     *,
@@ -5665,6 +5815,122 @@ async def _remove_source_effect(
         "source_ref": exact_ref,
         "effect": effect,
         "removal": removed,
+        "recovered": recovered,
+        "checkpoint": checkpoint,
+    }
+
+
+async def _set_source_exhaustion(
+    client: ExposureClient,
+    *,
+    campaign_id: str,
+    run_id: str,
+    occurrence_id: str,
+    scene_id: str,
+    location_key: str,
+    source_excerpt: str,
+    source_ref: dict[str, Any] | None,
+    character_id: str,
+    level: int | None,
+    reason: str,
+    checkpoint_label: str,
+    defer_checkpoint: bool = False,
+) -> dict[str, Any]:
+    exhaustion_identity = _occurrence_identity(occurrence_id, "set-source-exhaustion")
+    normalized_character_id = character_id.strip()
+    normalized_reason = reason.strip()
+    if not all(
+        (
+            scene_id,
+            location_key,
+            source_excerpt.strip(),
+            normalized_character_id,
+            normalized_reason,
+        )
+    ):
+        raise ValueError(
+            "set-source-exhaustion requires scene, location, excerpt, character, "
+            "level, and reason"
+        )
+    if level is None or not 0 <= level <= 6:
+        raise ValueError("set-source-exhaustion level must be between 0 and 6")
+
+    scene = await client.domain(
+        "module_query",
+        {
+            "campaign_id": campaign_id,
+            "view": "scene",
+            "payload": {"scene_id": scene_id},
+        },
+    )
+    exact_ref = _validate_source_ref(scene, source_ref, excerpt=source_excerpt)
+    if location_key not in {str(item.get("key") or "") for item in _scene_locations(scene)}:
+        raise ValueError("set-source-exhaustion location is not present in the scene atlas")
+    actor = dict(
+        _facade_value(
+            await client.domain(
+                "character_query",
+                {"view": "get", "payload": {"character_id": normalized_character_id}},
+            )
+        )
+    )
+    if str(actor.get("campaign_id") or "") != campaign_id:
+        raise ValueError("set-source-exhaustion actor does not belong to the campaign")
+    before = int(dict(actor["sheet"].get("combat") or {}).get("exhaustion", 0) or 0)
+    recovered = before == level
+    if recovered:
+        changed: dict[str, Any] = {
+            "character": actor,
+            "status": "recovered",
+        }
+    else:
+        changed = dict(
+            _facade_value(
+                await client.domain(
+                    "character_state_change",
+                    {
+                        "character_id": normalized_character_id,
+                        "action": "exhaustion_set",
+                        "payload": {"value": level},
+                        "expected_revision": actor["revision"],
+                        "idempotency_key": _mutation_key(
+                            run_id,
+                            "source-exhaustion-set",
+                            exhaustion_identity,
+                        ),
+                    },
+                )
+            )
+        )
+        actor_after = dict(changed.get("character") or changed)
+        after = int(
+            dict(actor_after["sheet"].get("combat") or {}).get("exhaustion", 0) or 0
+        )
+        if after != level:
+            raise RuntimeError("source exhaustion update did not set the requested level")
+
+    checkpoint = (
+        None
+        if defer_checkpoint
+        else await _checkpoint(
+            client,
+            campaign_id=campaign_id,
+            run_id=run_id,
+            label=(
+                checkpoint_label.strip()
+                or f"Full playthrough source exhaustion: {normalized_character_id}={level}"
+            ),
+            checkpoint_id=f"source-exhaustion:{exhaustion_identity}",
+        )
+    )
+    return {
+        "character_id": normalized_character_id,
+        "occurrence_id": exhaustion_identity,
+        "before": before,
+        "after": level,
+        "reason": normalized_reason,
+        "source_ref": exact_ref,
+        "change": changed,
         "recovered": recovered,
         "checkpoint": checkpoint,
     }
@@ -8434,6 +8700,25 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     reason=args.pool_reason,
                     defer_checkpoint=args.defer_checkpoint,
                 )
+            elif args.action == "apply-source-effect":
+                if phase != "play":
+                    raise RuntimeError("apply-source-effect requires the play phase")
+                await client.load("play.characters")
+                report["result"] = await _apply_source_effect(
+                    client,
+                    campaign_id=args.campaign_id,
+                    run_id=args.run_id,
+                    occurrence_id=args.occurrence_id,
+                    scene_id=str(args.scene_id or ""),
+                    location_key=args.location_key,
+                    source_excerpt=args.source_excerpt,
+                    source_ref=args.source_ref_json,
+                    character_id=args.effect_character_id,
+                    effect=args.effect_json,
+                    reason=args.effect_reason,
+                    checkpoint_label=args.checkpoint_label,
+                    defer_checkpoint=args.defer_checkpoint,
+                )
             elif args.action == "remove-source-effect":
                 if phase != "play":
                     raise RuntimeError("remove-source-effect requires the play phase")
@@ -8449,6 +8734,25 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     source_ref=args.source_ref_json,
                     character_id=args.effect_character_id,
                     effect_id=args.effect_id,
+                    reason=args.effect_reason,
+                    checkpoint_label=args.checkpoint_label,
+                    defer_checkpoint=args.defer_checkpoint,
+                )
+            elif args.action == "set-source-exhaustion":
+                if phase != "play":
+                    raise RuntimeError("set-source-exhaustion requires the play phase")
+                await client.load("play.characters")
+                report["result"] = await _set_source_exhaustion(
+                    client,
+                    campaign_id=args.campaign_id,
+                    run_id=args.run_id,
+                    occurrence_id=args.occurrence_id,
+                    scene_id=str(args.scene_id or ""),
+                    location_key=args.location_key,
+                    source_excerpt=args.source_excerpt,
+                    source_ref=args.source_ref_json,
+                    character_id=args.effect_character_id,
+                    level=args.exhaustion_level,
                     reason=args.effect_reason,
                     checkpoint_label=args.checkpoint_label,
                     defer_checkpoint=args.defer_checkpoint,
