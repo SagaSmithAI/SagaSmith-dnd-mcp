@@ -251,6 +251,8 @@ def test_manifest_syncs_canonical_state_and_verifies_source_defined_ending(
             "recovers_on": "long_rest",
         }
         actor_sheet["combat"]["death_saves"]["successes"] = 1
+        actor_sheet["combat"]["hp"] = {"value": 30, "max": 38, "temp": 0}
+        actor_sheet["combat"]["exhaustion"] = 4
         actor_sheet["spellcasting"]["spell_slots"]["1"] = {
             "label": "1st-level spell slots",
             "value": 1,
@@ -392,6 +394,9 @@ def test_manifest_syncs_canonical_state_and_verifies_source_defined_ending(
         assert synced_member["resources"]["spell_slots"]["1"]["value"] == 1
         assert synced_member["resources"]["hit_dice"]["d8"]["value"] == 1
         assert synced_member["resources"]["death_saves"]["successes"] == 1
+        assert synced_member["hit_points"]["current"] == 19
+        assert synced_member["hit_points"]["maximum"] == 19
+        assert synced_member["resources"]["exhaustion"] == 4
         assert synced_member["wallet"] == synced["runtime"]["party_members"][0]["wallet"]
         assert synced["runtime"]["world_state"]["combat_active"] is False
         assert synced["manifest"]["random_stream"]["position"] == 0

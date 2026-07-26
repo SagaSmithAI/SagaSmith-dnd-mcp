@@ -3394,6 +3394,14 @@ def test_party_projection_keeps_knowledge_bound_to_the_new_actor() -> None:
         "id": "replacement-actor",
         "name": "Replacement",
         "sheet": sheet,
+        "derived": {
+            "hit_points": {
+                "value": 5,
+                "max": 5,
+                "temp": 2,
+                "base_max": 10,
+            }
+        },
     }
 
     member = _party_member(
@@ -3407,7 +3415,8 @@ def test_party_projection_keeps_knowledge_bound_to_the_new_actor() -> None:
     assert member["actor_id"] == "replacement-actor"
     assert member["knowledge_scope_actor_id"] == "replacement-actor"
     assert member["xp"] == 300
-    assert member["hit_points"]["current"] == 7
+    assert member["hit_points"]["current"] == 5
+    assert member["hit_points"]["maximum"] == 5
     assert member["wallet"] == sheet["inventory"]["wallet"]
 
 

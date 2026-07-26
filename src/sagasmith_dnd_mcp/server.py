@@ -23306,6 +23306,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             sheet = validate_character_sheet(actor.sheet)
             progression = dict(sheet["progression"])
             hp = dict(sheet["combat"]["hp"])
+            effective_hp = dict(derive_character_sheet(sheet)["hit_points"])
             conditions = {str(item) for item in sheet.get("conditions") or []}
             status = "dead" if "dead" in conditions else str(member["status"])
             if status == "dead" and "dead" not in conditions:
@@ -23329,8 +23330,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "level": int(progression["level"]),
                 "xp": int(progression["xp"]),
                 "hit_points": {
-                    "current": int(hp["value"]),
-                    "maximum": int(hp["max"]),
+                    "current": int(effective_hp["value"]),
+                    "maximum": int(effective_hp["max"]),
                     "temporary": int(hp["temp"]),
                     "conditions": sorted(conditions),
                 },

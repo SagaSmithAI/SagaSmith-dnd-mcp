@@ -1216,6 +1216,7 @@ def _party_member(actor: dict[str, Any], selection: dict[str, Any]) -> dict[str,
     sheet = dict(actor["sheet"])
     progression = dict(sheet["progression"])
     hp = dict(sheet["combat"]["hp"])
+    effective_hp = dict(dict(actor.get("derived") or {}).get("hit_points") or {})
     return {
         "actor_id": actor_id,
         "name": str(actor["name"]),
@@ -1225,8 +1226,8 @@ def _party_member(actor: dict[str, Any], selection: dict[str, Any]) -> dict[str,
         "level": int(progression["level"]),
         "xp": int(progression["xp"]),
         "hit_points": {
-            "current": int(hp["value"]),
-            "maximum": int(hp["max"]),
+            "current": int(effective_hp.get("value", hp["value"])),
+            "maximum": int(effective_hp.get("max", hp["max"])),
             "temporary": int(hp["temp"]),
         },
         "resources": deepcopy(dict(sheet.get("resources") or {})),
