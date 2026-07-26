@@ -21,6 +21,7 @@ from typing import Any
 from mcp import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
 from sagasmith_dnd.lifecycle import allows_trance_rest
+from sagasmith_dnd.module_profile import DndModuleProfile
 from sagasmith_dnd.playthrough import validate_playthrough_manifest
 
 from scripts.regression_modules import PRINCIPAL_ID, ExposureClient, _token
@@ -579,7 +580,8 @@ def _extend_manifest_for_module_revision(
     replacement = scene_map.get(current_scene_id)
     if replacement is None:
         raise ValueError("current scene has no stable-key match in the new module revision")
-    value["module_ids"].append(new_module_id)
+    if new_module_id != old_module_id:
+        value["module_ids"].append(new_module_id)
     value["current"].update(
         {
             "module_id": new_module_id,
@@ -598,6 +600,10 @@ def _extend_manifest_for_module_revision(
                 scene_ids.append(str(mapped["scene_id"]))
         traversal[field] = scene_ids
     return value
+
+
+def _module_refresh_manifest_action(old_module_id: str, new_module_id: str) -> str:
+    return "replace" if new_module_id == old_module_id else "extend_modules"
 
 
 def _normalized_source_text(value: Any) -> str:
@@ -687,6 +693,7 @@ def _module_refresh_identity(
     source_key: str,
     source_path: Path,
     title: str,
+    parser_revision: str,
 ) -> str:
     digest = hashlib.sha256()
     with source_path.open("rb") as source:
@@ -698,6 +705,7 @@ def _module_refresh_identity(
             "source_key": source_key,
             "source_sha256": digest.hexdigest(),
             "title": title,
+            "parser_revision": parser_revision,
         },
         ensure_ascii=False,
         sort_keys=True,
@@ -6597,6 +6605,7 @@ async def _refresh_module(
         source_key=source_key,
         source_path=resolved_source_path,
         title=resolved_title,
+        parser_revision=f"{DndModuleProfile.name}:{DndModuleProfile.version}",
     )
     branches = await client.domain(
         "branch_query",
@@ -6704,9 +6713,12 @@ async def _refresh_module(
     extended = await _manifest_mutation(
         client,
         campaign_id=campaign_id,
-        action="extend_modules",
+        action=_module_refresh_manifest_action(old_module_id, new_module_id),
         run_id=run_id,
-        identity=f"refresh-module-manifest:{old_module_id}:{new_module_id}",
+        identity=(
+            f"refresh-module-manifest:{old_module_id}:{new_module_id}:"
+            f"{refresh_identity}"
+        ),
         payload={"manifest": refreshed_manifest},
     )
     if target_phase == "play":
@@ -6735,7 +6747,7 @@ async def _refresh_module(
         campaign_id=campaign_id,
         action="sync",
         run_id=run_id,
-        identity=f"refresh-module-sync:{new_module_id}",
+        identity=f"refresh-module-sync:{new_module_id}:{refresh_identity}",
     )
     return {
         "old_module_id": old_module_id,

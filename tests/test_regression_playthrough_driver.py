@@ -38,6 +38,7 @@ from scripts.regression_playthrough import (
     _long_rest,
     _matching_check_progress,
     _module_refresh_identity,
+    _module_refresh_manifest_action,
     _mutation_key,
     _occurrence_identity,
     _party_member,
@@ -413,12 +414,14 @@ def test_module_refresh_identity_is_retry_stable_and_revision_sensitive(
         source_key="campaign",
         source_path=source,
         title="Campaign",
+        parser_revision="dnd5e:21",
     )
     assert first == _module_refresh_identity(
         old_module_id="module-1",
         source_key="campaign",
         source_path=source,
         title="Campaign",
+        parser_revision="dnd5e:21",
     )
 
     source.write_text("# Second revision", encoding="utf-8")
@@ -427,16 +430,26 @@ def test_module_refresh_identity_is_retry_stable_and_revision_sensitive(
         source_key="campaign",
         source_path=source,
         title="Campaign",
+        parser_revision="dnd5e:21",
     )
     changed_parent = _module_refresh_identity(
         old_module_id="module-2",
         source_key="campaign",
         source_path=source,
         title="Campaign",
+        parser_revision="dnd5e:21",
+    )
+    changed_parser = _module_refresh_identity(
+        old_module_id="module-1",
+        source_key="campaign",
+        source_path=source,
+        title="Campaign",
+        parser_revision="dnd5e:22",
     )
 
     assert changed_content != first
     assert changed_parent != changed_content
+    assert changed_parser != changed_content
 
 
 @pytest.mark.parametrize("defer_checkpoint", [False, True])
@@ -1837,6 +1850,51 @@ def test_module_revision_extension_remaps_current_and_traversed_scenes() -> None
         "scene-v2",
     ]
     assert manifest["module_ids"] == ["module-v1"]
+
+
+def test_in_place_module_refresh_does_not_duplicate_manifest_module_id() -> None:
+    manifest = {
+        "module_ids": ["module-v1"],
+        "current": {
+            "module_id": "module-v1",
+            "chapter_id": "chapter-v1",
+            "chapter_title": "Chapter",
+            "scene_id": "scene-v1",
+            "scene_title": "Cave",
+        },
+        "traversal": {
+            "reachable_scene_ids": ["scene-v1"],
+            "visited_scene_ids": ["scene-v1"],
+        },
+    }
+
+    updated = _extend_manifest_for_module_revision(
+        manifest,
+        old_module_id="module-v1",
+        new_module_id="module-v1",
+        old_index=[
+            {"scene_id": "scene-v1", "stable_key": "cave"},
+        ],
+        new_index=[
+            {
+                "scene_id": "scene-v1",
+                "stable_key": "cave",
+                "chapter_id": "chapter-v1",
+                "chapter": "Chapter",
+                "title": "Cave",
+            },
+        ],
+    )
+
+    assert updated["module_ids"] == ["module-v1"]
+    assert updated["current"]["scene_id"] == "scene-v1"
+    assert updated["traversal"]["reachable_scene_ids"] == ["scene-v1"]
+    assert manifest["module_ids"] == ["module-v1"]
+    assert _module_refresh_manifest_action("module-v1", "module-v1") == "replace"
+    assert (
+        _module_refresh_manifest_action("module-v1", "module-v2")
+        == "extend_modules"
+    )
 
 
 def test_scene_progress_percent_accepts_query_and_mutation_shapes() -> None:
