@@ -305,6 +305,16 @@ def _arguments() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--source-contest-activity-json",
+        action="append",
+        type=json.loads,
+        default=[],
+        help=(
+            "Source-bound ability-contest activity with actor_id, activity_id, "
+            "target_is_humanoid, and an exact source_excerpt"
+        ),
+    )
+    parser.add_argument(
         "--source-zero-hp-finisher-json",
         type=json.loads,
         default=None,
@@ -1393,7 +1403,8 @@ def _source_avoidances(
         if (
             report.get("campaign_id") != campaign_id
             or report.get("passed") is not True
-            or event.get("event_type") != "trap_detected"
+            or event.get("event_type")
+            not in {"trap_detected", "trap_locations_shared"}
             or str(payload.get("scene_id") or "") != scene_id
             or not str(event.get("id") or "")
             or not source_excerpt
@@ -1401,7 +1412,7 @@ def _source_avoidances(
         ):
             raise ValueError(
                 f"source avoidance report {index} must be a passed public "
-                "trap_detected event for this campaign and scene with marked cells"
+                "trap knowledge event for this campaign and scene with marked cells"
             )
         actor_ids: list[str] = []
         for item in knowledge:
@@ -1875,6 +1886,90 @@ def _source_save_activities(
     return normalized
 
 
+def _source_contest_activities(
+    values: list[dict[str, Any]],
+    *,
+    participant_ids: list[str],
+    actors: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, dict[str, Any]]:
+    normalized: dict[str, dict[str, Any]] = {}
+    for index, raw in enumerate(values):
+        if not isinstance(raw, dict):
+            raise ValueError(
+                f"source contest activity {index} must be an object"
+            )
+        unknown = set(raw) - {
+            "actor_id",
+            "activity_id",
+            "target_is_humanoid",
+            "source_excerpt",
+        }
+        if unknown:
+            raise ValueError(
+                f"source contest activity {index} has unsupported fields: "
+                f"{', '.join(sorted(unknown))}"
+            )
+        actor_id = str(raw.get("actor_id") or "").strip()
+        activity_id = str(raw.get("activity_id") or "").strip()
+        source_excerpt = " ".join(
+            str(raw.get("source_excerpt") or "").split()
+        )
+        if (
+            actor_id not in participant_ids
+            or actor_id in normalized
+            or not activity_id
+            or raw.get("target_is_humanoid") is not True
+            or not source_excerpt
+        ):
+            raise ValueError(
+                f"source contest activity {index} requires one unique "
+                "participant, an activity_id, a true target_is_humanoid ruling, "
+                "and an exact excerpt"
+            )
+        if actors is not None:
+            actor = actors.get(actor_id)
+            activity = next(
+                (
+                    item
+                    for item in (
+                        dict(dict(actor or {}).get("sheet") or {})
+                        .get("content", {})
+                        .get("activities", [])
+                    )
+                    if str(item.get("id") or "") == activity_id
+                ),
+                None,
+            )
+            spec = dict(
+                dict(activity or {}).get("choices", {}).get(
+                    "source_contest_effect"
+                )
+                or {}
+            )
+            description = " ".join(
+                str(dict(activity or {}).get("description") or "").split()
+            )
+            if (
+                activity is None
+                or spec.get("kind")
+                != "intellect_devourer_body_thief_2014"
+                or spec.get("target_requirements")
+                != ["incapacitated", "humanoid"]
+                or source_excerpt not in description
+            ):
+                raise ValueError(
+                    f"source contest activity {index} must match its structured "
+                    "actor card and contain the exact excerpt"
+                )
+        normalized[actor_id] = {
+            "actor_id": actor_id,
+            "activity_id": activity_id,
+            "target_is_humanoid": True,
+            "source_excerpt": source_excerpt,
+        }
+    return normalized
+
+
 async def _campaign(client: ExposureClient, campaign_id: str) -> dict[str, Any]:
     return _facade_value(
         await client.core(
@@ -2267,6 +2362,11 @@ async def _start(
         participant_ids=[*party_ids, *all_hostile_ids],
         actors=actors,
     )
+    contest_activities = _source_contest_activities(
+        args.source_contest_activity_json,
+        participant_ids=[*party_ids, *all_hostile_ids],
+        actors=actors,
+    )
     attack_environments = _source_attack_environments(
         args.source_attack_environment_json,
         participant_ids=[*party_ids, *all_hostile_ids],
@@ -2565,6 +2665,7 @@ async def _start(
         "source_passive_allies": list(passive_allies.values()),
         "source_random_activities": list(random_activities.values()),
         "source_save_activities": list(save_activities.values()),
+        "source_contest_activities": list(contest_activities.values()),
         "source_attack_environments": list(attack_environments.values()),
         "source_avoidances": source_avoidance_evidence,
         "source_opening_casts": _source_opening_casts(
@@ -2692,7 +2793,7 @@ def _observable_target_ids(
     observable = []
     for target_id in target_ids:
         target = combatants.get(target_id)
-        if target is None:
+        if target is None or target.get("inside_host"):
             continue
         visible_to = target.get("visible_to_actor_ids")
         if not target.get("hidden") or (
@@ -2700,6 +2801,47 @@ def _observable_target_ids(
         ):
             observable.append(target_id)
     return observable
+
+
+def _body_thief_sides(
+    combat: dict[str, Any],
+    *,
+    party_ids: list[str],
+    hostile_ids: list[str],
+) -> dict[str, Any]:
+    """Map a Body Thief host to its controller without erasing either actor."""
+
+    combatants = {
+        str(item.get("actor_id") or ""): item
+        for item in combat.get("combatants", [])
+        if isinstance(item, dict)
+    }
+    controlled_hosts = {
+        actor_id: str(item.get("controlled_by_actor_id") or "")
+        for actor_id, item in combatants.items()
+        if actor_id in party_ids
+        and str(item.get("controlled_by_actor_id") or "") in hostile_ids
+        and item.get("body_thief_host")
+    }
+    inside_sources = {
+        actor_id
+        for actor_id, item in combatants.items()
+        if actor_id in hostile_ids and item.get("inside_host")
+    }
+    effective_party_ids = [
+        actor_id for actor_id in party_ids if actor_id not in controlled_hosts
+    ]
+    attackable_hostile_ids = [
+        actor_id for actor_id in hostile_ids if actor_id not in inside_sources
+    ] + list(controlled_hosts)
+    hostile_turn_actor_ids = set(attackable_hostile_ids)
+    return {
+        "controlled_hosts": controlled_hosts,
+        "inside_sources": inside_sources,
+        "effective_party_ids": effective_party_ids,
+        "attackable_hostile_ids": attackable_hostile_ids,
+        "hostile_turn_actor_ids": hostile_turn_actor_ids,
+    }
 
 
 def _wound_priority(actor: dict[str, Any]) -> tuple[bool, float]:
@@ -3496,6 +3638,11 @@ async def _auto_run(
         participant_ids=[*party_ids, *hostile_ids],
         actors=initial_actors,
     )
+    contest_activities = _source_contest_activities(
+        args.source_contest_activity_json,
+        participant_ids=[*party_ids, *hostile_ids],
+        actors=initial_actors,
+    )
     attack_environments = _source_attack_environments(
         args.source_attack_environment_json,
         participant_ids=[*party_ids, *hostile_ids],
@@ -3596,6 +3743,20 @@ async def _auto_run(
             for item in combat.get("combatants", [])
             if isinstance(item, dict)
         }
+        body_thief_sides = _body_thief_sides(
+            combat,
+            party_ids=party_ids,
+            hostile_ids=hostile_ids,
+        )
+        effective_party_ids = list(
+            body_thief_sides["effective_party_ids"]
+        )
+        attackable_hostile_ids = list(
+            body_thief_sides["attackable_hostile_ids"]
+        )
+        hostile_turn_actor_ids = set(
+            body_thief_sides["hostile_turn_actor_ids"]
+        )
         defeated_hostiles = [
             actor_id
             for actor_id in hostile_ids
@@ -3611,11 +3772,14 @@ async def _auto_run(
         ]
         unresolved_party = [
             actor_id
-            for actor_id in party_ids
+            for actor_id in effective_party_ids
             if _hit_points(actors[actor_id]) == 0
             and not _conditions(actors[actor_id]) & {"dead", "stable"}
         ]
-        party_down = all(_hit_points(actors[actor_id]) <= 0 for actor_id in party_ids)
+        party_down = all(
+            _hit_points(actors[actor_id]) <= 0
+            for actor_id in effective_party_ids
+        )
         outcome = (
             _source_surrender_outcome(
                 actor_hit_points=_hit_points(actors[args.surrender_actor_id]),
@@ -3828,10 +3992,15 @@ async def _auto_run(
                 }
             )
             continue
-        if _hit_points(actor) == 0 and actor_id in party_ids and not actor_conditions & {
+        if (
+            _hit_points(actor) == 0
+            and actor_id in effective_party_ids
+            and not actor_conditions
+            & {
             "dead",
             "stable",
-        }:
+            }
+        ):
             campaign = await _campaign(client, args.campaign_id)
             saved = await client.domain(
                 "combat_check",
@@ -3862,6 +4031,27 @@ async def _auto_run(
             },
         )
         available_actions = set(available.get("actions") or [])
+        if actor_id in body_thief_sides["inside_sources"]:
+            ended_turn = await _end_turn(
+                client,
+                args,
+                str(branch["id"]),
+                actor_id,
+                sequence,
+            )
+            turns.append(
+                {
+                    "sequence": sequence,
+                    "kind": "body_thief_source_inside_host",
+                    "actor_id": actor_id,
+                    "host_actor_id": dict(
+                        combatants_by_actor[actor_id].get("inside_host")
+                        or {}
+                    ).get("host_actor_id"),
+                    "result": ended_turn,
+                }
+            )
+            continue
         if _should_stand(actor, available_actions):
             campaign = await _campaign(client, args.campaign_id)
             stood = await client.domain(
@@ -3887,6 +4077,148 @@ async def _auto_run(
                 }
             )
             continue
+        contest_activity = contest_activities.get(actor_id)
+        if (
+            contest_activity is not None
+            and _hit_points(actor) > 0
+            and actor_id not in body_thief_sides["inside_sources"]
+        ):
+            combatants = {
+                str(item["actor_id"]): item
+                for item in combat["combatants"]
+            }
+            activity_card = next(
+                item
+                for item in dict(actor.get("sheet") or {})
+                .get("content", {})
+                .get("activities", [])
+                if str(item.get("id") or "")
+                == contest_activity["activity_id"]
+            )
+            contest_range_ft = int(
+                dict(activity_card.get("choices") or {})
+                .get("source_contest_effect", {})
+                .get("range_ft", 0)
+                or 0
+            )
+            eligible_targets = [
+                target_id
+                for target_id in effective_party_ids
+                if _hit_points(actors[target_id]) > 0
+                and "dead" not in _conditions(actors[target_id])
+                and _conditions(actors[target_id])
+                & {
+                    "incapacitated",
+                    "paralyzed",
+                    "petrified",
+                    "stunned",
+                    "unconscious",
+                }
+                and _distance(
+                    dict(
+                        combatants[actor_id].get("position")
+                        or {"x": 0, "y": 0}
+                    ),
+                    dict(
+                        combatants[target_id].get("position")
+                        or {"x": 0, "y": 0}
+                    ),
+                )
+                * 5
+                <= contest_range_ft
+            ]
+            eligible_targets.sort(
+                key=lambda target_id: _distance(
+                    dict(
+                        combatants[actor_id].get("position")
+                        or {"x": 0, "y": 0}
+                    ),
+                    dict(
+                        combatants[target_id].get("position")
+                        or {"x": 0, "y": 0}
+                    ),
+                )
+            )
+            eligible_targets = _prioritize_targets(
+                actor_id,
+                eligible_targets,
+                target_priorities,
+            )
+            if eligible_targets:
+                target_id = eligible_targets[0]
+                campaign = await _campaign(client, args.campaign_id)
+                settled_activity = await client.domain(
+                    "combat_use_activity",
+                    {
+                        "campaign_id": args.campaign_id,
+                        "actor_id": actor_id,
+                        "activity_id": contest_activity["activity_id"],
+                        "declaration": {
+                            "target_id": target_id,
+                            "target_is_humanoid": contest_activity[
+                                "target_is_humanoid"
+                            ],
+                        },
+                        "branch_id": branch["id"],
+                        "expected_revision": campaign["revision"],
+                        "idempotency_key": (
+                            "encounter-source-contest-activity-"
+                            + _token(
+                                f"{args.run_id}:{sequence}:{actor_id}:"
+                                f"{contest_activity['activity_id']}",
+                                length=24,
+                            )
+                        ),
+                    },
+                )
+                if settled_activity.get("status") != "committed":
+                    raise RuntimeError(
+                        "source ability-contest activity did not commit "
+                        "through structured settlement"
+                    )
+                core_effect = dict(
+                    dict(settled_activity.get("result") or {}).get(
+                        "core_effect"
+                    )
+                    or {}
+                )
+                if core_effect.get("success") and (
+                    core_effect.get("knowledge_transfer")
+                    != "all_target_knowledge"
+                    or int(
+                        core_effect.get("knowledge_transfer_count", -1)
+                    )
+                    < 0
+                ):
+                    raise RuntimeError(
+                        "Body Thief did not attest its complete ActorKnowledge "
+                        "transfer"
+                    )
+                turn_entry = {
+                    "sequence": sequence,
+                    "kind": "source_contest_activity",
+                    "actor_id": actor_id,
+                    "activity_id": contest_activity["activity_id"],
+                    "target_id": target_id,
+                    "source_excerpt": contest_activity[
+                        "source_excerpt"
+                    ],
+                    "result": settled_activity,
+                }
+                if _has_blocking_pending(
+                    dict(settled_activity.get("combat") or {})
+                ):
+                    turns.append(turn_entry)
+                    continue
+                turn_entry["end_turn"] = await _end_turn(
+                    client,
+                    args,
+                    str(branch["id"]),
+                    actor_id,
+                    sequence,
+                )
+                turns.append(turn_entry)
+                continue
         save_activity = save_activities.get(actor_id)
         if save_activity is not None and _hit_points(actor) > 0:
             combatant = next(
@@ -3913,11 +4245,11 @@ async def _auto_run(
                 opponents = (
                     [
                         hostile_id
-                        for hostile_id in hostile_ids
+                        for hostile_id in attackable_hostile_ids
                         if hostile_id not in fled_hostile_ids
                     ]
-                    if actor_id in party_ids
-                    else party_ids
+                    if actor_id in effective_party_ids
+                    else effective_party_ids
                 )
                 living_targets = [
                     target_id
@@ -4062,11 +4394,11 @@ async def _auto_run(
             opponents = (
                 [
                     hostile_id
-                    for hostile_id in hostile_ids
+                    for hostile_id in attackable_hostile_ids
                     if hostile_id not in fled_hostile_ids
                 ]
-                if actor_id in party_ids
-                else party_ids
+                if actor_id in effective_party_ids
+                else effective_party_ids
             )
             living_targets = [
                 target_id
@@ -4166,7 +4498,7 @@ async def _auto_run(
             continue
         stabilization_target_id = _postcombat_stabilization_target(
             actor_id=actor_id,
-            party_ids=party_ids,
+            party_ids=effective_party_ids,
             actors=actors,
             defeated_hostiles=len(defeated_hostiles),
             fled_hostiles=len(fled_hostile_ids),
@@ -4538,17 +4870,17 @@ async def _auto_run(
         opponents = (
             [
                 hostile_id
-                for hostile_id in hostile_ids
+                for hostile_id in attackable_hostile_ids
                 if hostile_id not in fled_hostile_ids
             ]
-            if actor_id in party_ids
-            else party_ids
+            if actor_id in effective_party_ids
+            else effective_party_ids
         )
         living_targets = [
             target_id for target_id in opponents if _hit_points(actors[target_id]) > 0
         ]
         combatants = {str(item["actor_id"]): item for item in combat["combatants"]}
-        if actor_id in party_ids:
+        if actor_id in effective_party_ids:
             living_targets = _observable_target_ids(
                 combat,
                 observer_id=actor_id,
@@ -4556,7 +4888,11 @@ async def _auto_run(
             )
         living_targets.sort(
             key=lambda item: (
-                *(_wound_priority(actors[item]) if actor_id in party_ids else (False, 0.0)),
+                *(
+                    _wound_priority(actors[item])
+                    if actor_id in effective_party_ids
+                    else (False, 0.0)
+                ),
                 _distance(
                     dict(combatants[actor_id].get("position") or {"x": 0, "y": 0}),
                     dict(combatants[item].get("position") or {"x": 0, "y": 0}),
@@ -4570,7 +4906,7 @@ async def _auto_run(
         )
         spell_choice = _choose_party_spell(
             actor_id,
-            party_ids=party_ids,
+            party_ids=effective_party_ids,
             actors=actors,
             living_targets=living_targets,
             leveled_spell_available=not bool(
@@ -4680,7 +5016,7 @@ async def _auto_run(
                 continue
             await _end_turn(client, args, str(branch["id"]), actor_id, sequence)
             continue
-        if actor_id in party_ids and not living_targets:
+        if actor_id in effective_party_ids and not living_targets:
             if "dodge" in available_actions:
                 campaign = await _campaign(client, args.campaign_id)
                 dodged = await client.domain(
@@ -4714,10 +5050,15 @@ async def _auto_run(
             and actor_id not in completed_opening_weapon_actor_ids
         ):
             preferred_weapon_id = source_opening_weapon["weapon_id"]
-        elif actor_id in hostile_ids:
+        elif actor_id in hostile_turn_actor_ids:
+            tactical_source_id = str(
+                body_thief_sides["controlled_hosts"].get(
+                    actor_id, actor_id
+                )
+            )
             preferred_weapon_id = _preferred_hostile_weapon_id(
                 actor,
-                hostile_index=hostile_ids.index(actor_id),
+                hostile_index=hostile_ids.index(tactical_source_id),
             )
         active_multiattack = bool(
             dict(combatants[actor_id].get("turn_flags") or {}).get("multiattack")
@@ -4946,6 +5287,7 @@ async def _auto_run(
         "source_passive_allies": list(passive_allies.values()),
         "source_random_activities": list(random_activities.values()),
         "source_save_activities": list(save_activities.values()),
+        "source_contest_activities": list(contest_activities.values()),
         "source_attack_environments": list(attack_environments.values()),
         "source_avoidances": source_avoidance_evidence,
         "source_zero_hp_finisher": source_zero_hp_finisher,

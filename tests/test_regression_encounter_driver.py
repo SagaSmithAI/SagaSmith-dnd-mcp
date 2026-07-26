@@ -10,6 +10,7 @@ from scripts.regression_encounter import (
     GUIDING_BOLT_ON_HIT,
     HEALING_WORD_ID,
     MAGIC_MISSILE_ID,
+    _body_thief_sides,
     _characters,
     _choose_destination,
     _choose_party_spell,
@@ -34,6 +35,7 @@ from scripts.regression_encounter import (
     _should_stand,
     _source_attack_environments,
     _source_avoidances,
+    _source_contest_activities,
     _source_declared_conditions,
     _source_declared_surprise,
     _source_delayed_actions,
@@ -395,6 +397,111 @@ def test_source_save_activity_requires_structured_card_and_brain_ruling() -> Non
                 }
             },
         )
+
+
+def test_source_contest_activity_requires_body_thief_card_and_humanoid_ruling() -> None:
+    excerpt = (
+        "The intellect devourer initiates an Intelligence contest with an "
+        "incapacitated humanoid within 5 feet of it."
+    )
+    values = [
+        {
+            "actor_id": "devourer",
+            "activity_id": "body-thief-action",
+            "target_is_humanoid": True,
+            "source_excerpt": excerpt,
+        }
+    ]
+    actors = {
+        "devourer": {
+            "sheet": {
+                "content": {
+                    "activities": [
+                        {
+                            "id": "body-thief-action",
+                            "description": excerpt,
+                            "choices": {
+                                "source_contest_effect": {
+                                    "kind": (
+                                        "intellect_devourer_body_thief_2014"
+                                    ),
+                                    "target_requirements": [
+                                        "incapacitated",
+                                        "humanoid",
+                                    ],
+                                }
+                            },
+                        }
+                    ]
+                }
+            }
+        }
+    }
+
+    assert _source_contest_activities(
+        values,
+        participant_ids=["devourer", "pc"],
+        actors=actors,
+    ) == {"devourer": values[0]}
+    with pytest.raises(ValueError, match="true target_is_humanoid"):
+        _source_contest_activities(
+            [{**values[0], "target_is_humanoid": False}],
+            participant_ids=["devourer", "pc"],
+            actors=actors,
+        )
+    with pytest.raises(ValueError, match="structured actor card"):
+        _source_contest_activities(
+            values,
+            participant_ids=["devourer", "pc"],
+            actors={
+                "devourer": {
+                    "sheet": {
+                        "content": {
+                            "activities": [
+                                {
+                                    "id": "body-thief-action",
+                                    "description": excerpt,
+                                    "choices": {},
+                                }
+                            ]
+                        }
+                    }
+                }
+            },
+        )
+
+
+def test_body_thief_sides_substitutes_host_without_erasing_actors() -> None:
+    combat = {
+        "combatants": [
+            {
+                "actor_id": "devourer",
+                "inside_host": {
+                    "host_actor_id": "pc-1",
+                    "total_cover": True,
+                },
+            },
+            {
+                "actor_id": "pc-1",
+                "controlled_by_actor_id": "devourer",
+                "body_thief_host": {"source_actor_id": "devourer"},
+            },
+            {"actor_id": "pc-2"},
+            {"actor_id": "kobold"},
+        ]
+    }
+
+    sides = _body_thief_sides(
+        combat,
+        party_ids=["pc-1", "pc-2"],
+        hostile_ids=["devourer", "kobold"],
+    )
+
+    assert sides["controlled_hosts"] == {"pc-1": "devourer"}
+    assert sides["inside_sources"] == {"devourer"}
+    assert sides["effective_party_ids"] == ["pc-2"]
+    assert sides["attackable_hostile_ids"] == ["kobold", "pc-1"]
+    assert sides["hostile_turn_actor_ids"] == {"kobold", "pc-1"}
 def test_encounter_actor_groups_keep_allies_out_of_registered_party_and_reject_overlap(
     tmp_path,
 ) -> None:

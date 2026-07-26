@@ -21,6 +21,7 @@ from sagasmith_core import (
     DOCUMENT_NORMALIZER_VERSION,
     AccessService,
     ActorKnowledgeService,
+    ActorKnowledgeTransfer,
     BranchService,
     CampaignService,
     CharacterService,
@@ -119,6 +120,7 @@ from sagasmith_dnd.combat_engine import (
     resolve_readied_action_window,
     resolve_readied_spell_window,
     resolve_second_wind_to_sheet,
+    resolve_source_contest_effect,
     resolve_source_save_effect,
     resolve_turn_undead_to_sheets,
     roll_attack_action,
@@ -230,6 +232,7 @@ from sagasmith_dnd.statblocks import (
     effective_statblock_rating,
     gazer_eye_ray_spec,
     parse_2014_statblock,
+    source_contest_effect_spec,
     source_save_effect_spec,
 )
 from sagasmith_dnd.system import DND5E
@@ -1614,6 +1617,132 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     ) -> None:
         for combatant in encounter.get("combatants", []):
             if combatant.get("actor_id") == actor_id:
+                body_thief = dict(combatant.get("body_thief_host") or {})
+                hp = int(
+                    dict(dict(sheet.get("combat") or {}).get("hp") or {}).get(
+                        "value", 0
+                    )
+                    or 0
+                )
+                if body_thief and hp <= 0:
+                    source_actor_id = str(
+                        body_thief.get("source_actor_id") or ""
+                    )
+                    source_combatant = next(
+                        (
+                            item
+                            for item in encounter.get("combatants", [])
+                            if str(item.get("actor_id") or "")
+                            == source_actor_id
+                        ),
+                        None,
+                    )
+                    if source_combatant is None:
+                        raise CombatEngineError(
+                            "Body Thief source combatant is missing"
+                        )
+                    origin = dict(combatant.get("position") or {})
+                    battle_map = dict(encounter.get("battle_map") or {})
+                    width = int(battle_map.get("width", 0) or 0)
+                    height = int(battle_map.get("height", 0) or 0)
+                    blocked = {
+                        (int(item["x"]), int(item["y"]))
+                        for item in battle_map.get("blocked_cells", [])
+                        if isinstance(item, dict)
+                        and set(item) >= {"x", "y"}
+                    }
+                    occupied = {
+                        (
+                            int(dict(item.get("position") or {})["x"]),
+                            int(dict(item.get("position") or {})["y"]),
+                        )
+                        for item in encounter.get("combatants", [])
+                        if str(item.get("actor_id") or "")
+                        not in {source_actor_id, actor_id}
+                        and set(dict(item.get("position") or {})) == {"x", "y"}
+                        and "dead"
+                        not in {
+                            str(value).casefold()
+                            for value in item.get("conditions", [])
+                        }
+                    }
+                    candidates = sorted(
+                        (
+                            {"x": int(origin["x"]) + dx, "y": int(origin["y"]) + dy}
+                            for dx, dy in (
+                                (-1, -1),
+                                (-1, 0),
+                                (-1, 1),
+                                (0, -1),
+                                (0, 1),
+                                (1, -1),
+                                (1, 0),
+                                (1, 1),
+                            )
+                            if set(origin) == {"x", "y"}
+                        ),
+                        key=lambda item: (item["y"], item["x"]),
+                    )
+                    destination = next(
+                        (
+                            item
+                            for item in candidates
+                            if (not width or 0 <= item["x"] < width)
+                            and (not height or 0 <= item["y"] < height)
+                            and (item["x"], item["y"]) not in blocked
+                            and (item["x"], item["y"]) not in occupied
+                        ),
+                        None,
+                    )
+                    if destination is None:
+                        raise NeedsRulingError(
+                            "Body Thief must leave a zero-HP host but has no "
+                            "recorded unoccupied adjacent space",
+                            missing=("body_thief_ejection_space",),
+                        )
+                    source_combatant["position"] = destination
+                    source_combatant.pop("inside_host", None)
+                    source_combatant["hidden"] = False
+                    source_combatant.pop("visible_to_actor_ids", None)
+                    combatant["disposition"] = body_thief[
+                        "original_disposition"
+                    ]
+                    combatant["death_saves"] = bool(
+                        body_thief.get("original_death_saves", False)
+                    )
+                    combatant["zero_hp_recovery"] = bool(
+                        body_thief.get("original_zero_hp_recovery", False)
+                    )
+                    combatant.pop("controlled_by_actor_id", None)
+                    combatant.pop("body_thief_host", None)
+                    for effect in sheet.get("effects", []):
+                        if (
+                            effect.get("active")
+                            and str(effect.get("id") or "")
+                            == str(body_thief.get("effect_instance_id") or "")
+                        ):
+                            effect["active"] = False
+                            effect["ended_reason"] = "host_zero_hit_points"
+                    sheet["conditions"] = sorted(
+                        {
+                            *(
+                                str(item).casefold()
+                                for item in sheet.get("conditions", [])
+                            ),
+                            "dead",
+                        }
+                        - {"unconscious", "stable", "stunned", "incapacitated"}
+                    )
+                    encounter["log"] = [
+                        *list(encounter.get("log") or []),
+                        {
+                            "type": "body_thief_ejected",
+                            "source_actor_id": source_actor_id,
+                            "host_actor_id": actor_id,
+                            "reason": "host_zero_hit_points",
+                            "destination": destination,
+                        },
+                    ][-100:]
                 combatant["conditions"] = list(sheet.get("conditions") or [])
                 combatant["condition_sources"] = timed_condition_sources(sheet)
                 combatant["speed_multiplier"] = source_speed_multiplier(sheet)
@@ -9950,11 +10079,17 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             branch_id=resolved_branch_id,
         )
         random_save_spec = gazer_eye_ray_spec(current.sheet, activity_id)
+        source_contest_spec = source_contest_effect_spec(
+            current.sheet, activity_id
+        )
         source_save_spec = source_save_effect_spec(current.sheet, activity_id)
         random_target_records: dict[str, Any] = {}
         random_targets: list[dict[str, Any]] = []
         source_save_target_record = None
         source_save_target: dict[str, Any] | None = None
+        source_contest_target_record = None
+        source_contest_target: dict[str, Any] | None = None
+        source_contest_knowledge_count = 0
         if random_save_spec is not None:
             if not is_dm(campaign_id, principal_id):
                 raise PermissionError(
@@ -10146,6 +10281,119 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 control=True,
             )
             source_save_target = combat_actor_snapshot(target_id)
+        if source_contest_spec is not None:
+            if not is_dm(campaign_id, principal_id):
+                raise PermissionError(
+                    "source ability-contest activity settlement requires the DM"
+                )
+            declared = dict(declaration or {})
+            if set(declared) != {"target_id", "target_is_humanoid"}:
+                raise CombatEngineError(
+                    "source ability-contest activity declaration requires "
+                    "target_id and target_is_humanoid"
+                )
+            target_id = str(declared.get("target_id") or "").strip()
+            if (
+                not target_id
+                or target_id == actor_id
+                or declared.get("target_is_humanoid") is not True
+            ):
+                raise CombatEngineError(
+                    "Body Thief requires one other target confirmed to be humanoid"
+                )
+            source_combatant = next(
+                (
+                    item
+                    for item in encounter.get("combatants", [])
+                    if str(item.get("actor_id") or "") == actor_id
+                ),
+                None,
+            )
+            target_combatant = next(
+                (
+                    item
+                    for item in encounter.get("combatants", [])
+                    if str(item.get("actor_id") or "") == target_id
+                ),
+                None,
+            )
+            if source_combatant is None or target_combatant is None:
+                raise CombatEngineError(
+                    "Body Thief source and target must be combatants"
+                )
+            if source_combatant.get("inside_host"):
+                raise CombatEngineError(
+                    "intellect devourer is already inside a host"
+                )
+            source_position = dict(source_combatant.get("position") or {})
+            target_position = dict(target_combatant.get("position") or {})
+            if set(source_position) != {"x", "y"} or set(target_position) != {
+                "x",
+                "y",
+            }:
+                raise NeedsRulingError(
+                    "Body Thief requires battle-map positions",
+                    missing=("source_contest_effect_positions",),
+                )
+            target_conditions = {
+                str(item).casefold()
+                for item in target_combatant.get("conditions", [])
+            }
+            incapacitated = bool(
+                target_conditions
+                & {
+                    "incapacitated",
+                    "paralyzed",
+                    "petrified",
+                    "stunned",
+                    "unconscious",
+                }
+            )
+            if (
+                not incapacitated
+                or "dead" in target_conditions
+                or target_combatant.get("body_thief_host")
+            ):
+                raise CombatEngineError(
+                    "Body Thief target must be a living incapacitated humanoid "
+                    "that is not already a host"
+                )
+            distance = (
+                max(
+                    abs(
+                        int(source_position["x"])
+                        - int(target_position["x"])
+                    ),
+                    abs(
+                        int(source_position["y"])
+                        - int(target_position["y"])
+                    ),
+                )
+                * 5
+            )
+            if distance > int(
+                source_contest_spec.get("range_ft", 0) or 0
+            ):
+                raise CombatEngineError(
+                    "Body Thief target is outside the recorded range"
+                )
+            source_contest_target_record = require_campaign_actor(
+                campaign_id, target_id
+            )
+            access.require_actor(
+                campaign_id,
+                target_id,
+                principal_id,
+                control=True,
+            )
+            source_contest_target = combat_actor_snapshot(target_id)
+            source_contest_knowledge_count = len(
+                knowledge.list(
+                    campaign_id,
+                    actor_id=target_id,
+                    branch_id=resolved_branch_id,
+                )
+            )
         turn_undead = (
             activity_id == "dnd5e.content.srd2014.feature.cleric-channel-divinity"
             and str(dict(declaration or {}).get("option") or "")
@@ -10485,6 +10733,103 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "activation_payment": activity_activation_payment,
                 "requires_ruling": False,
             }
+        actor_knowledge_transfers: list[ActorKnowledgeTransfer] = []
+        if source_contest_spec is not None:
+            assert source_contest_target_record is not None
+            assert source_contest_target is not None
+            source_actor = combat_actor_snapshot(actor_id)
+            source_actor["sheet"] = applied["sheet"]
+            source_actor["derived"] = derive_character_sheet(
+                applied["sheet"]
+            )
+            target_id = str(source_contest_target["id"])
+            settled_contest = resolve_source_contest_effect(
+                source_actor,
+                source_contest_target,
+                spec=source_contest_spec,
+                rules=rule_context,
+            )
+            target_sheet = validate_character_sheet(
+                settled_contest["sheet"]
+            )
+            if settled_contest["result"]["success"]:
+                source_combatant = next(
+                    item
+                    for item in next_encounter.get("combatants", [])
+                    if str(item.get("actor_id") or "") == actor_id
+                )
+                target_combatant = next(
+                    item
+                    for item in next_encounter.get("combatants", [])
+                    if str(item.get("actor_id") or "") == target_id
+                )
+                effect_instance_id = str(
+                    settled_contest["result"]["effect_instance_id"]
+                )
+                target_combatant["body_thief_host"] = {
+                    "source_actor_id": actor_id,
+                    "effect_instance_id": effect_instance_id,
+                    "original_disposition": str(
+                        target_combatant.get("disposition") or "neutral"
+                    ),
+                    "original_death_saves": bool(
+                        target_combatant.get("death_saves", False)
+                    ),
+                    "original_zero_hp_recovery": bool(
+                        target_combatant.get("zero_hp_recovery", False)
+                    ),
+                }
+                target_combatant["controlled_by_actor_id"] = actor_id
+                target_combatant["disposition"] = str(
+                    source_combatant.get("disposition") or "hostile"
+                )
+                target_combatant["death_saves"] = False
+                target_combatant["zero_hp_recovery"] = False
+                source_combatant["position"] = deepcopy(
+                    target_combatant["position"]
+                )
+                source_combatant["inside_host"] = {
+                    "host_actor_id": target_id,
+                    "effect_instance_id": effect_instance_id,
+                    "total_cover": True,
+                }
+                source_combatant["hidden"] = True
+                source_combatant["visible_to_actor_ids"] = []
+                sync_combatant_conditions(
+                    next_encounter, target_id, target_sheet
+                )
+                actor_knowledge_transfers.append(
+                    ActorKnowledgeTransfer(
+                        source_actor_id=target_id,
+                        destination_actor_id=actor_id,
+                        knowledge_key_prefix=(
+                            f"body-thief.{target_id}"
+                        ),
+                    )
+                )
+                additional_updates.append(
+                    CharacterStateUpdate(
+                        character_id=target_id,
+                        sheet=target_sheet,
+                        notes=validate_character_notes(
+                            source_contest_target_record.notes
+                        ),
+                        expected_revision=(
+                            source_contest_target_record.revision
+                        ),
+                    )
+                )
+            core_effect = {
+                **settled_contest["result"],
+                "kind": "source_contest_effect",
+                "activation_payment": activity_activation_payment,
+                "knowledge_transfer_count": (
+                    source_contest_knowledge_count
+                    if settled_contest["result"]["success"]
+                    else 0
+                ),
+                "requires_ruling": False,
+            }
         if turn_undead:
             source_actor = combat_actor_snapshot(actor_id)
             source_actor["sheet"] = applied["sheet"]
@@ -10540,6 +10885,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "turn_undead": "dnd5e.core.activity.turn_undead",
                 "random_save_effects": "dnd5e.core.activity.random_save_effects",
                 "source_save_effect": "dnd5e.core.activity.source_save_effect",
+                "source_contest_effect": (
+                    "dnd5e.core.activity.source_contest_effect"
+                ),
             }[str(core_effect["kind"])]
             applied["rule_receipts"] = [
                 *list(applied.get("rule_receipts") or []),
@@ -10580,6 +10928,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 ),
                 *additional_updates,
             ],
+            actor_knowledge_transfers=actor_knowledge_transfers,
             expected_campaign_revision=campaign.revision,
             operation="combat.activity.use",
             actor=principal_id,
