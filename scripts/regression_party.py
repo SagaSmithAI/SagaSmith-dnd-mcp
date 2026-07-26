@@ -22,6 +22,7 @@ from mcp import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
 
 from scripts.regression_modules import ExposureClient, _token
+from scripts.regression_rulings import raise_for_pending_ruling, ruling_failure_fields
 
 ABILITY_NAMES = (
     "strength",
@@ -1613,12 +1614,15 @@ async def _apply_artifact(
         },
     )
     value = _facade_value(result)
-    if value.get("status") == "pending_ruling":
-        raise RuntimeError(
-            "catalog artifact returns to the Agent adjudicator "
-            f"({value.get('ruling_kind', 'agent_dm_adjudication')}): "
-            f"{artifact['name']}: {value['reason']}"
-        )
+    raise_for_pending_ruling(
+        value,
+        operation="character_content_apply.party",
+        context={
+            "actor_id": str(actor["id"]),
+            "artifact_id": str(artifact["id"]),
+            "artifact_name": str(artifact["name"]),
+        },
+    )
     return dict(value)
 
 
@@ -2077,12 +2081,34 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
 
 def main() -> int:
     args = _arguments()
-    report = asyncio.run(_run(args))
+    try:
+        report = asyncio.run(_run(args))
+    except Exception as error:
+
+        def leaf_messages(item: BaseException) -> list[str]:
+            nested = getattr(item, "exceptions", ())
+            if nested:
+                return [message for child in nested for message in leaf_messages(child)]
+            return [f"{type(item).__name__}: {item}"]
+
+        report = {
+            "action": (
+                "repair-campaign-party-equipment"
+                if args.repair_existing_party_report is not None
+                else "build-campaign-party"
+            ),
+            "campaign_id": args.campaign_id,
+            "run_id": args.run_id,
+            "campaign_line_id": args.party,
+            "passed": False,
+            "error": "; ".join(leaf_messages(error)),
+            **ruling_failure_fields(error),
+        }
     output = args.output.expanduser().resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps(report, ensure_ascii=False, indent=2))
-    return 0
+    return 0 if report.get("passed", True) else 1
 
 
 if __name__ == "__main__":

@@ -9,6 +9,7 @@ from sagasmith_dnd.character_schema import default_character_sheet
 
 from scripts.regression_party import (
     OIL_RULE,
+    _apply_artifact,
     _background_starting_items,
     _catalog_source,
     _class_starting_supplements,
@@ -24,6 +25,7 @@ from scripts.regression_party import (
     tyranny_party_profiles,
     waterdeep_party_profiles,
 )
+from scripts.regression_rulings import RegressionRulingRequiredError
 
 
 def test_lost_mine_party_uses_source_maximum_and_diverse_core_models() -> None:
@@ -36,6 +38,39 @@ def test_lost_mine_party_uses_source_maximum_and_diverse_core_models() -> None:
     assert audit["spell_resource_models"] == ["known", "prepared", "spellbook"]
     assert audit["pregenerated_first"]["official_sheets_present_in_corpus"] is False
     assert "excluded" in audit["pregenerated_first"]["associated_pc_smalls_disposition"]
+
+
+def test_party_catalog_ruling_returns_structured_control_to_agent() -> None:
+    class Client:
+        async def domain(self, tool_id: str, arguments: dict) -> dict:
+            assert tool_id == "character_content_apply"
+            return {
+                "status": "pending_ruling",
+                "default_resolver": "agent",
+                "ruling_kind": "source_or_scene_fact",
+                "reason": "confirm the current scene prerequisite",
+                "committed": False,
+            }
+
+    with pytest.raises(RegressionRulingRequiredError) as raised:
+        asyncio.run(
+            _apply_artifact(
+                Client(),
+                actor={"id": "actor-1", "revision": 3},
+                artifact={"id": "feat-1", "name": "Scene Feat"},
+                selection={},
+                key="apply-feat-1",
+            )
+        )
+
+    requirement = raised.value.requirement
+    assert requirement["operation"] == "character_content_apply.party"
+    assert requirement["context"] == {
+        "actor_id": "actor-1",
+        "artifact_id": "feat-1",
+        "artifact_name": "Scene Feat",
+    }
+    assert requirement["ruling"]["default_resolver"] == "agent"
 
 
 def test_party_profiles_have_source_linked_gear_and_complete_ability_input() -> None:

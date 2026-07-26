@@ -25,6 +25,10 @@ from sagasmith_dnd.module_profile import DndModuleProfile
 from sagasmith_dnd.playthrough import validate_playthrough_manifest
 
 from scripts.regression_modules import PRINCIPAL_ID, ExposureClient, _token
+from scripts.regression_rulings import (
+    raise_for_pending_ruling,
+    ruling_failure_fields,
+)
 
 DEFERRED_CHECKPOINT_ACTIONS = frozenset(
     {
@@ -992,6 +996,15 @@ def _check_identity(occurrence_id: str) -> str:
 def _committed_check_result(settled: dict[str, Any]) -> dict[str, Any]:
     """Accept full tool responses and compact dynamic-exposure facades."""
 
+    raise_for_pending_ruling(
+        {
+            **settled,
+            "reason": str(
+                settled.get("reason") or "source-cited character check did not commit"
+            ),
+        },
+        operation="character_check",
+    )
     if settled.get("status") == "committed" and isinstance(settled.get("result"), dict):
         return dict(settled["result"])
     if "success" in settled and ("total" in settled or settled.get("automatic_failure")):
@@ -1079,6 +1092,15 @@ def _contest_knowledge_key(run_id: str, occurrence_id: str) -> str:
 def _committed_contest_result(settled: dict[str, Any]) -> dict[str, Any]:
     """Accept full tool responses and compact dynamic-exposure facades."""
 
+    raise_for_pending_ruling(
+        {
+            **settled,
+            "reason": str(
+                settled.get("reason") or "source-cited ability contest did not commit"
+            ),
+        },
+        operation="character_check.contest",
+    )
     if settled.get("status") == "committed" and isinstance(settled.get("result"), dict):
         return dict(settled["result"])
     if settled.get("kind") == "ability_contest" and "outcome" in settled:
@@ -8362,12 +8384,15 @@ async def _advance_level(
                 },
             )
         )
-        if applied.get("status") == "pending_ruling":
-            raise RuntimeError(
-                "subclass selection returns to the Agent adjudicator "
-                f"({applied.get('ruling_kind', 'agent_dm_adjudication')}): "
-                f"{applied['reason']}"
-            )
+        raise_for_pending_ruling(
+            applied,
+            operation="character_content_apply.subclass",
+            context={
+                "actor_id": actor_id,
+                "artifact_id": subclass_artifact_id,
+                "target_level": target_level,
+            },
+        )
         actor = dict(applied.get("character") or applied)
     elif subclass_artifact_id:
         raise ValueError("this level advancement does not offer a subclass selection")
@@ -8438,12 +8463,15 @@ async def _advance_level(
                 },
             )
         )
-        if applied.get("status") == "pending_ruling":
-            raise RuntimeError(
-                "level feature returns to the Agent adjudicator "
-                f"({applied.get('ruling_kind', 'agent_dm_adjudication')}): "
-                f"{artifact_id}: {applied['reason']}"
-            )
+        raise_for_pending_ruling(
+            applied,
+            operation="character_content_apply.level_feature",
+            context={
+                "actor_id": actor_id,
+                "artifact_id": artifact_id,
+                "target_level": target_level,
+            },
+        )
         feature_spell_grants.extend(deepcopy(list(applied.get("feature_spell_grants") or [])))
         actor = dict(applied.get("character") or applied)
         applied_features.append({"artifact_id": artifact_id, "selection": deepcopy(selection)})
@@ -8519,12 +8547,15 @@ async def _advance_level(
                 },
             )
         )
-        if applied.get("status") == "pending_ruling":
-            raise RuntimeError(
-                "level spell returns to the Agent adjudicator "
-                f"({applied.get('ruling_kind', 'agent_dm_adjudication')}): "
-                f"{artifact_id}: {applied['reason']}"
-            )
+        raise_for_pending_ruling(
+            applied,
+            operation="character_content_apply.level_spell",
+            context={
+                "actor_id": actor_id,
+                "artifact_id": artifact_id,
+                "target_level": target_level,
+            },
+        )
         actor = dict(applied.get("character") or applied)
         applied_spells.append(artifact_id)
 
@@ -9906,6 +9937,7 @@ def main() -> int:
             "run_id": args.run_id,
             "passed": False,
             "error": "; ".join(leaf_messages(error)),
+            **ruling_failure_fields(error),
         }
     rendered = json.dumps(report, ensure_ascii=False, indent=2)
     args.output.parent.mkdir(parents=True, exist_ok=True)

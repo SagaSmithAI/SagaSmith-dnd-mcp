@@ -84,6 +84,7 @@ from scripts.regression_playthrough import (
     _use_activity,
     _use_shared_consumable,
 )
+from scripts.regression_rulings import RegressionRulingRequiredError
 
 
 def _manifest_source_ref() -> dict:
@@ -4564,8 +4565,9 @@ def test_character_check_accepts_full_and_compact_exposure_shapes() -> None:
 
     assert _committed_check_result({"status": "committed", "result": result}) == result
     assert _committed_check_result(result) == result
-    with pytest.raises(RuntimeError, match="did not commit"):
+    with pytest.raises(RegressionRulingRequiredError, match="did not commit") as raised:
         _committed_check_result({"status": "pending_ruling"})
+    assert raised.value.requirement["ruling"]["default_resolver"] == "agent"
 
 
 def test_check_recovery_identity_includes_actor_and_roll_mode() -> None:
@@ -4655,8 +4657,9 @@ def test_ability_contest_accepts_full_and_compact_exposure_shapes() -> None:
 
     assert _committed_contest_result({"status": "committed", "result": result}) == result
     assert _committed_contest_result(result) == result
-    with pytest.raises(RuntimeError, match="did not commit"):
+    with pytest.raises(RegressionRulingRequiredError, match="did not commit") as raised:
         _committed_contest_result({"status": "pending_ruling"})
+    assert raised.value.requirement["ruling"]["default_resolver"] == "agent"
 
 
 def test_contest_recovery_identity_binds_both_actors_and_roll_modes() -> None:

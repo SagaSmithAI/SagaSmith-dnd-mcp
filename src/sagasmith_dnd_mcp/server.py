@@ -382,6 +382,11 @@ def _facade_result(action: str, result: Any) -> dict[str, Any]:
 def _needs_ruling_kind(error: NeedsRulingError) -> str:
     """Keep source defects out of the Agent's ordinary adjudication lane."""
 
+    explicit_kind = str(
+        getattr(error, "ruling_kind", "") or "agent_dm_adjudication"
+    )
+    if explicit_kind != "agent_dm_adjudication":
+        return explicit_kind
     message = str(error).casefold()
     missing = {str(item).casefold() for item in error.missing}
     if (
@@ -390,7 +395,7 @@ def _needs_ruling_kind(error: NeedsRulingError) -> str:
         or "unsupported source contract" in message
     ):
         return "missing_or_conflicting_source_review"
-    return "agent_dm_adjudication"
+    return explicit_kind
 
 
 def _agent_ruling_boundary(function: _RULING_FUNCTION) -> _RULING_FUNCTION:

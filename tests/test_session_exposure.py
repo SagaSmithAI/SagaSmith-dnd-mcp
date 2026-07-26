@@ -133,6 +133,23 @@ def test_needs_ruling_boundary_keeps_source_defects_external() -> None:
     assert result["retry_contract"]["resolver"] == "external_input"
 
 
+def test_needs_ruling_boundary_preserves_an_explicit_player_choice() -> None:
+    @_agent_ruling_boundary
+    def operation() -> None:
+        raise NeedsRulingError(
+            "active rule pack needs the actor's choice",
+            missing=("choose-recovery",),
+            ruling_kind="player_owned_choice",
+        )
+
+    result = operation()
+
+    assert result["status"] == "pending_ruling"
+    assert result["default_resolver"] == "external_input"
+    assert result["ruling_kind"] == "player_owned_choice"
+    assert result["retry_contract"]["resolver"] == "external_input"
+
+
 def test_exposure_call_marks_live_dm_ruling_for_agent(
     tmp_path: Path, monkeypatch
 ) -> None:
