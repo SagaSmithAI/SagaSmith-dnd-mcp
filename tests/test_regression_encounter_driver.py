@@ -10,6 +10,8 @@ from scripts.regression_encounter import (
     GUIDING_BOLT_ON_HIT,
     HEALING_WORD_ID,
     MAGIC_MISSILE_ID,
+    _apply_source_casualty_rolls,
+    _apply_source_separations,
     _body_thief_sides,
     _body_thief_target_ids,
     _characters,
@@ -39,9 +41,11 @@ from scripts.regression_encounter import (
     _resolve_pending,
     _roll_total,
     _selected_prepared_actor_ids,
+    _settle_source_casualty_pool_turn,
     _should_stand,
     _source_attack_environments,
     _source_avoidances,
+    _source_casualty_pools,
     _source_contest_activities,
     _source_declared_conditions,
     _source_declared_surprise,
@@ -57,6 +61,8 @@ from scripts.regression_encounter import (
     _source_precombat_casts,
     _source_random_activities,
     _source_save_activities,
+    _source_separation_target,
+    _source_separations,
     _source_surrender_outcome,
     _source_target_priorities,
     _source_traits,
@@ -201,6 +207,55 @@ def test_preflight_capture_uses_only_melee_and_declares_knockout() -> None:
     }
     assert plan["knock_out"] is True
     assert [call["action"] for call in client.calls] == [action]
+
+
+def test_preflight_tries_a_recorded_thrown_weapon_at_range() -> None:
+    class Client:
+        def __init__(self) -> None:
+            self.calls: list[dict] = []
+
+        async def domain(self, tool_id: str, arguments: dict) -> dict:
+            assert tool_id == "combat_preflight_attack"
+            self.calls.append(arguments)
+            if arguments["action"]["attack_mode"] == "melee":
+                raise RuntimeError("target is beyond melee reach")
+            return {"status": "ready", **arguments["action"]}
+
+    client = Client()
+    actor = {
+        "id": "pc-1",
+        "derived": {
+            "inventory": {
+                "weapon_attacks": [
+                    {
+                        "item_id": "dagger",
+                        "attack_type": "melee",
+                        "properties": ["finesse", "light", "thrown"],
+                        "thrown_range_ft": {"normal": 20, "long": 60},
+                    }
+                ]
+            }
+        },
+    }
+
+    target_id, action, _ = asyncio.run(
+        _preflight_attack(
+            client,
+            SimpleNamespace(campaign_id="campaign-1"),
+            actor,
+            ["dragon-1"],
+        )
+    )
+
+    assert target_id == "dragon-1"
+    assert action == {
+        "weapon_id": "dagger",
+        "attack_mode": "ranged",
+    }
+    assert [call["action"]["attack_mode"] for call in client.calls] == [
+        "melee",
+        "ranged",
+    ]
 
 
 def test_status_uses_play_character_exposure_before_combat() -> None:
@@ -1297,6 +1352,350 @@ def test_source_flee_damage_history_restores_interrupted_combat_counter() -> Non
 
     assert damage == {"lennithon": 18}
     assert critical == {"lennithon"}
+
+
+def test_source_casualty_pool_requires_exact_cohort_dice_and_reviewed_recharge() -> None:
+    source_excerpt = (
+        "There are twenty NPC defenders on the walls at the beginning of the mission. "
+        "Every breath attack not directed at them kills 1d4 NPC defenders and injures "
+        "1d6 more. After each attack, Lennithon swoops away until his breath weapon "
+        "recharges, then swings in for another attack."
+    )
+    pools = _source_casualty_pools(
+        [
+            {
+                "actor_id": "lennithon",
+                "pool_key": "greenest-wall-defenders",
+                "initial_count": 20,
+                "activity_name": "Lightning Breath (Recharge 5-6)",
+                "kill_expression": "1d4",
+                "injury_expression": "1d6",
+                "source_excerpt": source_excerpt,
+            }
+        ],
+        hostile_ids=["lennithon"],
+        actors={
+            "lennithon": {
+                "sheet": {
+                    "content": {
+                        "activities": [
+                            {
+                                "id": "lightning-breath",
+                                "name": "Lightning Breath (Recharge 5-6)",
+                                "source_key": "monster-manual/adult-blue-dragon",
+                                "rule_refs": [{"page": 92}],
+                                "description": "The dragon exhales lightning.",
+                                "choices": {
+                                    "manual_ruling": {
+                                        "kind": "descriptive_activity",
+                                        "source_excerpt": (
+                                            "The dragon exhales lightning."
+                                        ),
+                                    }
+                                },
+                            }
+                        ]
+                    }
+                }
+            }
+        },
+        encounter_source_excerpt=f"Dragon Attack. {source_excerpt} Rewards.",
+    )
+
+    assert pools["lennithon"] == {
+        "actor_id": "lennithon",
+        "pool_key": "greenest-wall-defenders",
+        "initial_count": 20,
+        "activity_id": "lightning-breath",
+        "activity_name": "Lightning Breath (Recharge 5-6)",
+        "activity_source_key": "monster-manual/adult-blue-dragon",
+        "activity_rule_refs": [{"page": 92}],
+        "kill_expression": "1d4",
+        "injury_expression": "1d6",
+        "recharge_expression": "1d6",
+        "recharge_minimum": 5,
+        "recharge_maximum": 6,
+        "source_excerpt": source_excerpt,
+    }
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("initial_count", 19, "does not match"),
+        ("kill_expression", "1d6", "does not match"),
+        ("activity_name", "Lightning Breath", "reviewed rechargeable"),
+    ],
+)
+def test_source_casualty_pool_fails_closed_on_uncorroborated_facts(
+    field: str,
+    value: object,
+    message: str,
+) -> None:
+    source_excerpt = (
+        "There are twenty NPC defenders on the walls. Every breath attack kills "
+        "1d4 NPC defenders and injures 1d6 more. Lennithon swoops away until his "
+        "breath weapon recharges."
+    )
+    declaration = {
+        "actor_id": "lennithon",
+        "pool_key": "greenest-wall-defenders",
+        "initial_count": 20,
+        "activity_name": "Lightning Breath (Recharge 5-6)",
+        "kill_expression": "1d4",
+        "injury_expression": "1d6",
+        "source_excerpt": source_excerpt,
+    }
+    declaration[field] = value
+    with pytest.raises(ValueError, match=message):
+        _source_casualty_pools(
+            [declaration],
+            hostile_ids=["lennithon"],
+            actors={
+                "lennithon": {
+                    "sheet": {
+                        "content": {
+                            "activities": [
+                                {
+                                    "id": "lightning-breath",
+                                    "name": "Lightning Breath (Recharge 5-6)",
+                                }
+                            ]
+                        }
+                    }
+                }
+            },
+            encounter_source_excerpt=source_excerpt,
+        )
+
+
+def test_source_casualty_pool_requires_a_descriptive_agent_ruling_marker() -> None:
+    source_excerpt = (
+        "There are twenty NPC defenders on the walls. Every breath attack kills "
+        "1d4 NPC defenders and injures 1d6 more. Lennithon swoops away until his "
+        "breath weapon recharges."
+    )
+
+    with pytest.raises(ValueError, match="descriptive activity"):
+        _source_casualty_pools(
+            [
+                {
+                    "actor_id": "lennithon",
+                    "pool_key": "greenest-wall-defenders",
+                    "initial_count": 20,
+                    "activity_name": "Lightning Breath (Recharge 5-6)",
+                    "kill_expression": "1d4",
+                    "injury_expression": "1d6",
+                    "source_excerpt": source_excerpt,
+                }
+            ],
+            hostile_ids=["lennithon"],
+            actors={
+                "lennithon": {
+                    "sheet": {
+                        "content": {
+                            "activities": [
+                                {
+                                    "id": "lightning-breath",
+                                    "name": "Lightning Breath (Recharge 5-6)",
+                                    "description": "The dragon exhales lightning.",
+                                    "choices": {},
+                                }
+                            ]
+                        }
+                    }
+                }
+            },
+            encounter_source_excerpt=source_excerpt,
+        )
+
+
+def test_source_casualty_pool_state_is_bounded_and_idempotent() -> None:
+    declaration = {
+        "actor_id": "lennithon",
+        "initial_count": 5,
+        "activity_name": "Lightning Breath (Recharge 5-6)",
+        "kill_expression": "1d4",
+        "injury_expression": "1d6",
+        "recharge_minimum": 5,
+        "recharge_maximum": 6,
+    }
+    first, event, replayed = _apply_source_casualty_rolls(
+        None,
+        declaration=declaration,
+        combat_id="combat-1",
+        round_number=1,
+        recharge_roll=None,
+        kill_roll=4,
+        injury_roll=6,
+    )
+    assert replayed is False
+    assert event["killed"] == 4
+    assert event["injured"] == 1
+    assert first["able"] == 0
+    assert first["killed"] == 4
+    assert first["injured"] == 1
+
+    restored, repeated, replayed = _apply_source_casualty_rolls(
+        first,
+        declaration=declaration,
+        combat_id="combat-1",
+        round_number=1,
+        recharge_roll=None,
+        kill_roll=1,
+        injury_roll=1,
+    )
+    assert replayed is True
+    assert repeated == event
+    assert restored == first
+
+    waited, wait_event, replayed = _apply_source_casualty_rolls(
+        first,
+        declaration=declaration,
+        combat_id="combat-1",
+        round_number=2,
+        recharge_roll=4,
+        kill_roll=None,
+        injury_roll=None,
+    )
+    assert replayed is False
+    assert wait_event["recharged"] is False
+    assert waited["attacks"] == 1
+    assert waited["able"] == 0
+
+
+def test_source_casualty_pool_turn_uses_only_public_action_dice_and_manifest() -> None:
+    calls: list[tuple[str, dict]] = []
+
+    class Client:
+        revision = 7
+
+        async def core(self, tool_id: str, arguments: dict) -> dict:
+            assert tool_id == "campaign_query"
+            return {"revision": self.revision}
+
+        async def domain(self, tool_id: str, arguments: dict) -> dict:
+            calls.append((tool_id, arguments))
+            if tool_id == "playthrough_manifest" and arguments["action"] == "get":
+                return {"manifest": {"world_state": {}}}
+            if tool_id == "combat_use_activity":
+                self.revision += 1
+                return {
+                    "status": "pending_ruling",
+                    "result": {"activity_id": "lightning-breath"},
+                }
+            if tool_id == "dnd_dice_roll":
+                self.revision += 1
+                return {"total": 2 if arguments["expression"] == "1d4" else 3}
+            if tool_id == "playthrough_manifest" and arguments["action"] == "replace":
+                self.revision += 1
+                return {"manifest": arguments["payload"]["manifest"]}
+            raise AssertionError((tool_id, arguments))
+
+    result = asyncio.run(
+        _settle_source_casualty_pool_turn(
+            Client(),
+            SimpleNamespace(
+                campaign_id="campaign-1",
+                run_id="run-1",
+                operation_scope="encounter-1",
+            ),
+            branch_id="branch-1",
+            combat={"id": "combat-1", "round": 1},
+            declaration={
+                "actor_id": "lennithon",
+                "pool_key": "greenest-wall-defenders",
+                "initial_count": 20,
+                "activity_id": "lightning-breath",
+                "activity_name": "Lightning Breath (Recharge 5-6)",
+                "kill_expression": "1d4",
+                "injury_expression": "1d6",
+                "recharge_expression": "1d6",
+                "recharge_minimum": 5,
+                "recharge_maximum": 6,
+                "source_excerpt": "Exact module excerpt.",
+            },
+        )
+    )
+
+    assert [item[0] for item in calls] == [
+        "playthrough_manifest",
+        "combat_use_activity",
+        "dnd_dice_roll",
+        "dnd_dice_roll",
+        "playthrough_manifest",
+        "playthrough_manifest",
+    ]
+    assert result["event"]["killed"] == 2
+    assert result["event"]["injured"] == 3
+    replaced_manifest = calls[-1][1]["payload"]["manifest"]
+    pool = replaced_manifest["world_state"]["source_casualty_pools"][
+        "greenest-wall-defenders"
+    ]
+    assert pool["able"] == 15
+    assert calls[1][1]["activity_id"] == "lightning-breath"
+    assert calls[1][1]["declaration"]["kind"] == "source_casualty_pool_activity"
+    assert calls[2][1]["branch_id"] == "branch-1"
+
+
+def test_source_separation_is_cited_and_places_dragon_at_least_twenty_five_feet_away() -> None:
+    excerpt = (
+        "During this attack, Lennithon flies over the keep and uses his breath "
+        "weapon without moving closer than 25 feet from the parapet."
+    )
+    separation = _source_separations(
+        [
+            {
+                "actor_id": "lennithon",
+                "other_actor_ids": ["pc-1", "pc-2"],
+                "minimum_distance_ft": 25,
+                "source_excerpt": excerpt,
+            }
+        ],
+        participant_ids=["pc-1", "pc-2", "lennithon"],
+        hostile_ids=["lennithon"],
+        encounter_source_excerpt=f"Dragon Attack. {excerpt} The defenders hold.",
+    )
+    positioned = _apply_source_separations(
+        [
+            {"actor_id": "pc-1", "position": {"x": 1, "y": 1}},
+            {"actor_id": "pc-2", "position": {"x": 1, "y": 2}},
+            {"actor_id": "lennithon", "position": {"x": 2, "y": 2}},
+        ],
+        separation,
+    )
+    by_actor = {item["actor_id"]: item for item in positioned}
+
+    assert max(
+        abs(by_actor["lennithon"]["position"]["x"] - by_actor["pc-1"]["position"]["x"]),
+        abs(by_actor["lennithon"]["position"]["y"] - by_actor["pc-1"]["position"]["y"]),
+    ) >= 5
+    assert max(
+        abs(by_actor["lennithon"]["position"]["x"] - by_actor["pc-2"]["position"]["x"]),
+        abs(by_actor["lennithon"]["position"]["y"] - by_actor["pc-2"]["position"]["y"]),
+    ) >= 5
+    assert _source_separation_target("pc-1", ["lennithon"], separation) == separation[
+        "lennithon"
+    ]
+    assert _source_separation_target("outsider", ["lennithon"], separation) is None
+
+
+def test_source_separation_rejects_an_uncorroborated_distance() -> None:
+    excerpt = "Lennithon does not move closer than 25 feet from the parapet."
+    with pytest.raises(ValueError, match="not corroborated"):
+        _source_separations(
+            [
+                {
+                    "actor_id": "lennithon",
+                    "other_actor_ids": ["pc-1"],
+                    "minimum_distance_ft": 30,
+                    "source_excerpt": excerpt,
+                }
+            ],
+            participant_ids=["pc-1", "lennithon"],
+            hostile_ids=["lennithon"],
+            encounter_source_excerpt=excerpt,
+        )
 
 
 def test_source_flee_does_not_end_while_other_hostiles_remain() -> None:

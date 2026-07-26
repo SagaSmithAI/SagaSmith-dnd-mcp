@@ -17,7 +17,7 @@ from mcp import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
 
 from scripts.regression_modules import PRINCIPAL_ID, ExposureClient, _token
-from scripts.regression_playthrough import _checkpoint, _manifest_get
+from scripts.regression_playthrough import _checkpoint, _manifest_get, _manifest_mutation
 
 GUIDING_BOLT_ID = "dnd5e.content.srd2014.spell.guiding-bolt"
 GUIDING_BOLT_ON_HIT = (
@@ -277,6 +277,27 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--flee-on-start-actor-id", default="")
     parser.add_argument("--flee-destination-location-key", default="")
     parser.add_argument("--flee-source-excerpt", default="")
+    parser.add_argument(
+        "--source-casualty-pool-json",
+        action="append",
+        type=json.loads,
+        default=[],
+        help=(
+            "Source-authored non-PC casualty cohort with actor_id, pool_key, "
+            "initial_count, activity_name, kill_expression, injury_expression, "
+            "and exact source_excerpt"
+        ),
+    )
+    parser.add_argument(
+        "--source-separation-json",
+        action="append",
+        type=json.loads,
+        default=[],
+        help=(
+            "Source-authored minimum separation with actor_id, other_actor_ids, "
+            "minimum_distance_ft, and exact source_excerpt"
+        ),
+    )
     parser.add_argument("--truce-after-defeated", type=int, default=0)
     parser.add_argument("--truce-actor-id", default="")
     parser.add_argument("--truce-source-excerpt", default="")
@@ -710,6 +731,143 @@ def _source_departure_patch(
     }
 
 
+def _source_separations(
+    declarations: list[dict[str, Any]],
+    *,
+    participant_ids: list[str],
+    hostile_ids: list[str],
+    encounter_source_excerpt: str,
+) -> dict[str, dict[str, Any]]:
+    """Validate source-authored minimum combat-map separations."""
+
+    participants = set(participant_ids)
+    hostiles = set(hostile_ids)
+    encounter_excerpt = _normalized_source_text(encounter_source_excerpt)
+    by_actor: dict[str, dict[str, Any]] = {}
+    allowed = {
+        "actor_id",
+        "other_actor_ids",
+        "minimum_distance_ft",
+        "source_excerpt",
+    }
+    for index, declaration in enumerate(declarations):
+        if not isinstance(declaration, dict):
+            raise ValueError(f"source separation {index} must be an object")
+        unknown = set(declaration) - allowed
+        if unknown:
+            raise ValueError(
+                f"source separation {index} has unsupported fields: "
+                + ", ".join(sorted(unknown))
+            )
+        actor_id = str(declaration.get("actor_id") or "").strip()
+        other_actor_ids = [
+            str(item).strip() for item in declaration.get("other_actor_ids") or []
+        ]
+        minimum_distance_ft = declaration.get("minimum_distance_ft")
+        source_excerpt = str(declaration.get("source_excerpt") or "").strip()
+        if (
+            actor_id not in hostiles
+            or actor_id in by_actor
+            or not other_actor_ids
+            or any(not item for item in other_actor_ids)
+            or len(other_actor_ids) != len(set(other_actor_ids))
+            or actor_id in other_actor_ids
+            or not set(other_actor_ids) <= participants
+            or isinstance(minimum_distance_ft, bool)
+            or not isinstance(minimum_distance_ft, int)
+            or minimum_distance_ft <= 0
+            or minimum_distance_ft % 5
+            or not source_excerpt
+            or _normalized_source_text(source_excerpt) not in encounter_excerpt
+        ):
+            raise ValueError(
+                f"source separation {index} requires one unique hostile, unique other "
+                "participants, a positive five-foot-grid distance, and an exact excerpt"
+            )
+        distance_match = re.search(
+            r"\bwithout moving closer than (?P<distance>\d+) feet from the parapet\b",
+            _normalized_source_text(source_excerpt),
+        )
+        if (
+            distance_match is None
+            or int(distance_match.group("distance")) != minimum_distance_ft
+        ):
+            raise ValueError(
+                f"source separation {index} distance is not corroborated by the excerpt"
+            )
+        by_actor[actor_id] = {
+            "actor_id": actor_id,
+            "other_actor_ids": other_actor_ids,
+            "minimum_distance_ft": minimum_distance_ft,
+            "source_excerpt": source_excerpt,
+        }
+    return by_actor
+
+
+def _apply_source_separations(
+    configs: list[dict[str, Any]],
+    separations: dict[str, dict[str, Any]],
+    *,
+    width_cells: int = 12,
+    height_cells: int = 12,
+) -> list[dict[str, Any]]:
+    """Place source-separated actors at the closest valid temporary-map cells."""
+
+    values = deepcopy(configs)
+    by_actor = {str(item["actor_id"]): item for item in values}
+    for actor_id, separation in separations.items():
+        actor = by_actor[actor_id]
+        others = [by_actor[item] for item in separation["other_actor_ids"]]
+        minimum_cells = int(separation["minimum_distance_ft"]) // 5
+        occupied = {
+            (int(item["position"]["x"]), int(item["position"]["y"]))
+            for item in values
+            if item["actor_id"] != actor_id and isinstance(item.get("position"), dict)
+        }
+        current = dict(actor.get("position") or {"x": 0, "y": 0})
+        candidates = [
+            {"x": x, "y": y}
+            for x in range(width_cells)
+            for y in range(height_cells)
+            if (x, y) not in occupied
+            and all(
+                _distance({"x": x, "y": y}, dict(other["position"])) >= minimum_cells
+                for other in others
+            )
+        ]
+        if not candidates:
+            raise ValueError("source separation does not fit the temporary battle-map bounds")
+        candidates.sort(
+            key=lambda position: (
+                max(_distance(position, dict(other["position"])) for other in others),
+                abs(int(position["x"]) - int(current["x"]))
+                + abs(int(position["y"]) - int(current["y"])),
+                int(position["x"]),
+                int(position["y"]),
+            )
+        )
+        actor["position"] = candidates[0]
+    return values
+
+
+def _source_separation_target(
+    acting_actor_id: str,
+    target_ids: list[str],
+    separations: dict[str, dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Return a source separation that forbids approaching a current target."""
+
+    return next(
+        (
+            separation
+            for target_id in target_ids
+            if (separation := separations.get(target_id)) is not None
+            and acting_actor_id in separation["other_actor_ids"]
+        ),
+        None,
+    )
+
+
 def _participant_config(
     party_ids: list[str],
     hostile_ids: list[str],
@@ -721,6 +879,7 @@ def _participant_config(
     visible_to_actor_ids_by_hostile: dict[str, list[str]] | None = None,
     source_conditions_by_actor: dict[str, list[dict[str, Any]]] | None = None,
     source_traits_by_actor: dict[str, list[dict[str, Any]]] | None = None,
+    source_separations: dict[str, dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     allies = list(ally_ids or [])
     if len(party_ids) + len(allies) > 10 or len(hostile_ids) > 10:
@@ -800,7 +959,7 @@ def _participant_config(
         }
         for index, actor_id in enumerate(hostile_ids)
     )
-    return configs
+    return _apply_source_separations(configs, dict(source_separations or {}))
 
 
 def _reinforcement_config(actor_id: str, index: int) -> dict[str, Any]:
@@ -2360,6 +2519,18 @@ async def _start(
         participant_ids=[*party_ids, *all_hostile_ids],
         actors=actors,
     )
+    source_casualty_pools = _source_casualty_pools(
+        args.source_casualty_pool_json,
+        hostile_ids=initial_hostile_ids,
+        actors=actors,
+        encounter_source_excerpt=str(args.source_excerpt or ""),
+    )
+    source_separations = _source_separations(
+        args.source_separation_json,
+        participant_ids=[*party_ids, *initial_hostile_ids],
+        hostile_ids=initial_hostile_ids,
+        encounter_source_excerpt=str(args.source_excerpt or ""),
+    )
     _, source_avoidance_evidence = _source_avoidances(
         args.source_avoidance_report,
         campaign_id=args.campaign_id,
@@ -2562,6 +2733,7 @@ async def _start(
             visible_to_actor_ids_by_hostile=visible_to_actor_ids_by_hostile,
             source_conditions_by_actor=source_conditions_by_actor,
             source_traits_by_actor=source_traits_by_actor,
+            source_separations=source_separations,
         ),
         "participant_manifest": _participant_manifest(
             hostile_ids,
@@ -2636,6 +2808,8 @@ async def _start(
         "source_save_activities": list(save_activities.values()),
         "source_contest_activities": list(contest_activities.values()),
         "source_attack_environments": list(attack_environments.values()),
+        "source_casualty_pools": list(source_casualty_pools.values()),
+        "source_separations": list(source_separations.values()),
         "source_avoidances": source_avoidance_evidence,
         "source_opening_casts": _source_opening_casts(
             args.source_opening_cast_json,
@@ -3318,6 +3492,260 @@ def _source_flee_damage_history(
     return damage_taken_by_actor, critical_hit_actor_ids
 
 
+def _source_casualty_pools(
+    declarations: list[dict[str, Any]],
+    *,
+    hostile_ids: list[str],
+    actors: dict[str, dict[str, Any]],
+    encounter_source_excerpt: str,
+) -> dict[str, dict[str, Any]]:
+    """Validate source-authored non-PC casualty cohorts and recharge mechanics."""
+
+    allowed = {
+        "actor_id",
+        "pool_key",
+        "initial_count",
+        "activity_name",
+        "kill_expression",
+        "injury_expression",
+        "source_excerpt",
+    }
+    number_words = {
+        "one": 1,
+        "two": 2,
+        "three": 3,
+        "four": 4,
+        "five": 5,
+        "six": 6,
+        "seven": 7,
+        "eight": 8,
+        "nine": 9,
+        "ten": 10,
+        "eleven": 11,
+        "twelve": 12,
+        "thirteen": 13,
+        "fourteen": 14,
+        "fifteen": 15,
+        "sixteen": 16,
+        "seventeen": 17,
+        "eighteen": 18,
+        "nineteen": 19,
+        "twenty": 20,
+    }
+    encounter_excerpt = _normalized_source_text(encounter_source_excerpt)
+    by_actor: dict[str, dict[str, Any]] = {}
+    pool_keys: set[str] = set()
+    for index, declaration in enumerate(declarations):
+        if not isinstance(declaration, dict):
+            raise ValueError(f"source casualty pool {index} must be an object")
+        unknown = set(declaration) - allowed
+        if unknown:
+            raise ValueError(
+                f"source casualty pool {index} has unsupported fields: "
+                + ", ".join(sorted(unknown))
+            )
+        actor_id = str(declaration.get("actor_id") or "").strip()
+        pool_key = str(declaration.get("pool_key") or "").strip()
+        activity_name = str(declaration.get("activity_name") or "").strip()
+        kill_expression = str(declaration.get("kill_expression") or "").strip().casefold()
+        injury_expression = str(declaration.get("injury_expression") or "").strip().casefold()
+        source_excerpt = str(declaration.get("source_excerpt") or "").strip()
+        initial_count = declaration.get("initial_count")
+        if (
+            actor_id not in hostile_ids
+            or actor_id in by_actor
+            or not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,79}", pool_key)
+            or pool_key in pool_keys
+            or isinstance(initial_count, bool)
+            or not isinstance(initial_count, int)
+            or initial_count <= 0
+            or not activity_name
+            or re.fullmatch(r"\d+d\d+(?:[+-]\d+)?", kill_expression) is None
+            or re.fullmatch(r"\d+d\d+(?:[+-]\d+)?", injury_expression) is None
+            or not source_excerpt
+            or _normalized_source_text(source_excerpt) not in encounter_excerpt
+        ):
+            raise ValueError(
+                f"source casualty pool {index} requires one unique hostile actor and "
+                "pool key, a positive initial count, dice expressions, an activity, "
+                "and an exact contained source excerpt"
+            )
+        normalized_excerpt = _normalized_source_text(source_excerpt)
+        count_match = re.search(
+            r"\bthere are (?P<count>\d+|"
+            + "|".join(number_words)
+            + r") npc defenders\b",
+            normalized_excerpt,
+        )
+        parsed_count = None
+        if count_match is not None:
+            raw_count = str(count_match.group("count"))
+            parsed_count = int(raw_count) if raw_count.isdigit() else number_words[raw_count]
+        casualty_pattern = re.compile(
+            rf"\bkills {re.escape(kill_expression)} npc defenders and "
+            rf"injures {re.escape(injury_expression)} more\b"
+        )
+        if (
+            parsed_count != initial_count
+            or casualty_pattern.search(normalized_excerpt) is None
+            or re.search(
+                r"\buntil (?:his|its|the dragon(?:'s)?) breath weapon recharges\b",
+                normalized_excerpt,
+            )
+            is None
+        ):
+            raise ValueError(
+                f"source casualty pool {index} does not match the authored initial "
+                "count, casualty dice, and recharge instruction"
+            )
+        actor = actors.get(actor_id)
+        activities = (
+            list(
+                dict(dict(actor or {}).get("sheet") or {})
+                .get("content", {})
+                .get("activities", [])
+            )
+            if actor is not None
+            else []
+        )
+        activity = next(
+            (
+                item
+                for item in activities
+                if isinstance(item, dict)
+                and str(item.get("name") or "").strip().casefold() == activity_name.casefold()
+            ),
+            None,
+        )
+        manual_ruling = dict(
+            dict(activity.get("choices") or {}).get("manual_ruling") or {}
+        ) if activity is not None else {}
+        recharge_match = re.search(
+            r"(?i)\brecharge\s+(?P<minimum>[1-6])"
+            r"(?:\s*[-\u2013]\s*(?P<maximum>[1-6]))?",
+            activity_name,
+        )
+        if (
+            activity is None
+            or not str(activity.get("id") or "").strip()
+            or recharge_match is None
+            or manual_ruling.get("kind") != "descriptive_activity"
+            or _normalized_source_text(str(manual_ruling.get("source_excerpt") or ""))
+            != _normalized_source_text(str(activity.get("description") or ""))
+        ):
+            raise ValueError(
+                f"source casualty pool {index} activity is not a reviewed rechargeable "
+                "descriptive activity on the hostile actor card"
+            )
+        recharge_minimum = int(recharge_match.group("minimum"))
+        recharge_maximum = int(recharge_match.group("maximum") or recharge_minimum)
+        if recharge_minimum > recharge_maximum:
+            raise ValueError(f"source casualty pool {index} has an invalid recharge range")
+        value = {
+            "actor_id": actor_id,
+            "pool_key": pool_key,
+            "initial_count": initial_count,
+            "activity_id": str(activity.get("id") or ""),
+            "activity_name": activity_name,
+            "activity_source_key": str(activity.get("source_key") or ""),
+            "activity_rule_refs": deepcopy(list(activity.get("rule_refs") or [])),
+            "kill_expression": kill_expression,
+            "injury_expression": injury_expression,
+            "recharge_expression": "1d6",
+            "recharge_minimum": recharge_minimum,
+            "recharge_maximum": recharge_maximum,
+            "source_excerpt": source_excerpt,
+        }
+        by_actor[actor_id] = value
+        pool_keys.add(pool_key)
+    return by_actor
+
+
+def _apply_source_casualty_rolls(
+    state: dict[str, Any] | None,
+    *,
+    declaration: dict[str, Any],
+    combat_id: str,
+    round_number: int,
+    recharge_roll: int | None,
+    kill_roll: int | None,
+    injury_roll: int | None,
+) -> tuple[dict[str, Any], dict[str, Any], bool]:
+    """Apply one idempotent cohort recharge/breath event to manifest world state."""
+
+    value = deepcopy(dict(state or {}))
+    if value:
+        immutable = {
+            "actor_id": declaration["actor_id"],
+            "initial_count": declaration["initial_count"],
+            "activity_name": declaration["activity_name"],
+            "kill_expression": declaration["kill_expression"],
+            "injury_expression": declaration["injury_expression"],
+        }
+        if any(value.get(key) != expected for key, expected in immutable.items()):
+            raise RuntimeError("source casualty pool state conflicts with its declaration")
+    else:
+        value = {
+            "actor_id": declaration["actor_id"],
+            "initial_count": declaration["initial_count"],
+            "activity_name": declaration["activity_name"],
+            "kill_expression": declaration["kill_expression"],
+            "injury_expression": declaration["injury_expression"],
+            "killed": 0,
+            "injured": 0,
+            "able": declaration["initial_count"],
+            "attacks": 0,
+            "events": [],
+        }
+    event_id = f"{combat_id}:{round_number}:{declaration['actor_id']}"
+    existing = next(
+        (
+            item
+            for item in value.get("events", [])
+            if isinstance(item, dict) and str(item.get("id") or "") == event_id
+        ),
+        None,
+    )
+    if existing is not None:
+        return value, deepcopy(existing), True
+    recharged = recharge_roll is None or (
+        declaration["recharge_minimum"]
+        <= recharge_roll
+        <= declaration["recharge_maximum"]
+    )
+    event = {
+        "id": event_id,
+        "round": round_number,
+        "recharge_roll": recharge_roll,
+        "recharged": recharged,
+        "kill_roll": None,
+        "injury_roll": None,
+        "killed": 0,
+        "injured": 0,
+        "able_before": int(value["able"]),
+        "able_after": int(value["able"]),
+    }
+    if recharged:
+        if kill_roll is None or injury_roll is None:
+            raise ValueError("a recharged casualty activity requires both casualty rolls")
+        available = int(value["able"])
+        killed = min(max(0, kill_roll), available)
+        injured = min(max(0, injury_roll), available - killed)
+        value["killed"] = int(value["killed"]) + killed
+        value["injured"] = int(value["injured"]) + injured
+        value["able"] = available - killed - injured
+        value["attacks"] = int(value["attacks"]) + 1
+        event.update(
+            kill_roll=kill_roll,
+            injury_roll=injury_roll,
+            killed=killed,
+            injured=injured,
+            able_after=int(value["able"]),
+        )
+    value["events"] = [*list(value.get("events") or []), event]
+    return value, event, False
+
+
 def _source_truce_outcome(
     *,
     defeated_hostiles: int,
@@ -3548,32 +3976,42 @@ async def _preflight_attack(
     weapons.sort(key=lambda item: item.get("item_id") != preferred_weapon_id)
     for target_id in target_ids:
         for weapon in weapons or [{"item_id": "unarmed-strike", "attack_type": "melee"}]:
-            attack_mode = str(weapon.get("attack_type") or "melee")
-            if target_id in knock_out_targets and attack_mode != "melee":
-                continue
-            action = {
-                "weapon_id": weapon.get("item_id"),
-                "attack_mode": attack_mode,
+            attack_modes = [str(weapon.get("attack_type") or "melee")]
+            properties = {
+                str(item).strip().casefold() for item in weapon.get("properties", [])
             }
-            if target_id in knock_out_targets:
-                action["knock_out"] = True
-            if action_context:
-                action["context"] = dict(action_context)
-            if multiattack_option_id:
-                action["multiattack_option_id"] = multiattack_option_id
-            try:
-                plan = await client.domain(
-                    "combat_preflight_attack",
-                    {
-                        "campaign_id": args.campaign_id,
-                        "actor_id": actor["id"],
-                        "target_id": target_id,
-                        "action": action,
-                    },
-                )
-            except RuntimeError:
-                continue
-            return target_id, action, plan
+            if (
+                "thrown" in properties
+                and int(dict(weapon.get("thrown_range_ft") or {}).get("normal", 0) or 0) > 0
+                and "ranged" not in attack_modes
+            ):
+                attack_modes.append("ranged")
+            for attack_mode in attack_modes:
+                if target_id in knock_out_targets and attack_mode != "melee":
+                    continue
+                action = {
+                    "weapon_id": weapon.get("item_id"),
+                    "attack_mode": attack_mode,
+                }
+                if target_id in knock_out_targets:
+                    action["knock_out"] = True
+                if action_context:
+                    action["context"] = dict(action_context)
+                if multiattack_option_id:
+                    action["multiattack_option_id"] = multiattack_option_id
+                try:
+                    plan = await client.domain(
+                        "combat_preflight_attack",
+                        {
+                            "campaign_id": args.campaign_id,
+                            "actor_id": actor["id"],
+                            "target_id": target_id,
+                            "action": action,
+                        },
+                    )
+                except RuntimeError:
+                    continue
+                return target_id, action, plan
     return None
 
 
@@ -3602,6 +4040,160 @@ async def _end_turn(
             ),
         },
     )
+
+
+async def _settle_source_casualty_pool_turn(
+    client: ExposureClient,
+    args: argparse.Namespace,
+    *,
+    branch_id: str,
+    combat: dict[str, Any],
+    declaration: dict[str, Any],
+) -> dict[str, Any]:
+    """Pay and persist one source-authored non-PC casualty-pool turn."""
+
+    actor_id = str(declaration["actor_id"])
+    combat_id = str(combat["id"])
+    round_number = int(combat.get("round", 1) or 1)
+    event_id = f"{combat_id}:{round_number}:{actor_id}"
+    manifest_result = await _manifest_get(client, args.campaign_id)
+    manifest = deepcopy(dict(manifest_result["manifest"]))
+    world_state = deepcopy(dict(manifest.get("world_state") or {}))
+    pools = deepcopy(dict(world_state.get("source_casualty_pools") or {}))
+    prior_state = deepcopy(dict(pools.get(declaration["pool_key"]) or {}))
+    existing = next(
+        (
+            item
+            for item in prior_state.get("events", [])
+            if isinstance(item, dict) and str(item.get("id") or "") == event_id
+        ),
+        None,
+    )
+    if existing is not None:
+        return {
+            "status": "replayed_from_manifest",
+            "event": deepcopy(existing),
+            "pool": prior_state,
+        }
+
+    async def roll_source(expression: str, purpose: str) -> dict[str, Any]:
+        campaign = await _campaign(client, args.campaign_id)
+        return await client.domain(
+            "dnd_dice_roll",
+            {
+                "campaign_id": args.campaign_id,
+                "expression": expression,
+                "branch_id": branch_id,
+                "expected_campaign_revision": campaign["revision"],
+                "idempotency_key": (
+                    "encounter-source-casualty-roll-"
+                    + _operation_token(
+                        args,
+                        combat_id,
+                        round_number,
+                        actor_id,
+                        purpose,
+                    )
+                ),
+            },
+        )
+
+    attack_count = int(prior_state.get("attacks", 0) or 0)
+    recharge_result = None
+    recharge_roll = None
+    if attack_count > 0:
+        recharge_result = await roll_source(declaration["recharge_expression"], "recharge")
+        recharge_roll = _roll_total(recharge_result)
+    recharged = recharge_roll is None or (
+        declaration["recharge_minimum"]
+        <= recharge_roll
+        <= declaration["recharge_maximum"]
+    )
+
+    action_result = None
+    kill_result = None
+    injury_result = None
+    kill_roll = None
+    injury_roll = None
+    if recharged:
+        campaign = await _campaign(client, args.campaign_id)
+        action_result = await client.domain(
+            "combat_use_activity",
+            {
+                "campaign_id": args.campaign_id,
+                "actor_id": actor_id,
+                "activity_id": declaration["activity_id"],
+                "declaration": {
+                    "kind": "source_casualty_pool_activity",
+                    "pool_key": declaration["pool_key"],
+                    "source_excerpt": declaration["source_excerpt"],
+                },
+                "branch_id": branch_id,
+                "expected_revision": campaign["revision"],
+                "idempotency_key": (
+                    "encounter-source-casualty-action-"
+                    + _operation_token(
+                        args,
+                        combat_id,
+                        round_number,
+                        actor_id,
+                    )
+                ),
+            },
+        )
+        if (
+            action_result.get("status") != "pending_ruling"
+            or str(dict(action_result.get("result") or {}).get("activity_id") or "")
+            != declaration["activity_id"]
+        ):
+            raise RuntimeError(
+                "source casualty activity must pay its reviewed descriptive card "
+                "and retain the DM ruling boundary"
+            )
+        kill_result = await roll_source(declaration["kill_expression"], "killed")
+        injury_result = await roll_source(declaration["injury_expression"], "injured")
+        kill_roll = _roll_total(kill_result)
+        injury_roll = _roll_total(injury_result)
+
+    latest_manifest_result = await _manifest_get(client, args.campaign_id)
+    manifest = deepcopy(dict(latest_manifest_result["manifest"]))
+    world_state = deepcopy(dict(manifest.get("world_state") or {}))
+    pools = deepcopy(dict(world_state.get("source_casualty_pools") or {}))
+    latest_prior_state = deepcopy(dict(pools.get(declaration["pool_key"]) or {}))
+    if latest_prior_state != prior_state:
+        raise RuntimeError("source casualty pool changed concurrently during settlement")
+    next_state, event, replayed = _apply_source_casualty_rolls(
+        latest_prior_state,
+        declaration=declaration,
+        combat_id=combat_id,
+        round_number=round_number,
+        recharge_roll=recharge_roll,
+        kill_roll=kill_roll,
+        injury_roll=injury_roll,
+    )
+    if replayed:
+        raise RuntimeError("source casualty event appeared concurrently during settlement")
+    pools[declaration["pool_key"]] = next_state
+    world_state["source_casualty_pools"] = pools
+    manifest["world_state"] = world_state
+    replaced = await _manifest_mutation(
+        client,
+        campaign_id=args.campaign_id,
+        action="replace",
+        run_id=args.run_id,
+        identity=f"source-casualty:{event_id}",
+        payload={"manifest": manifest},
+    )
+    return {
+        "status": "committed",
+        "event": event,
+        "pool": next_state,
+        "recharge": recharge_result,
+        "action": action_result,
+        "killed_roll": kill_result,
+        "injured_roll": injury_result,
+        "manifest": replaced,
+    }
 
 
 async def _auto_run(
@@ -3726,6 +4318,18 @@ async def _auto_run(
         client,
         args.campaign_id,
         [*party_ids, *hostile_ids],
+    )
+    source_casualty_pools = _source_casualty_pools(
+        args.source_casualty_pool_json,
+        hostile_ids=hostile_ids,
+        actors=initial_actors,
+        encounter_source_excerpt=str(args.source_excerpt or ""),
+    )
+    source_separations = _source_separations(
+        args.source_separation_json,
+        participant_ids=[*party_ids, *hostile_ids],
+        hostile_ids=hostile_ids,
+        encounter_source_excerpt=str(args.source_excerpt or ""),
     )
     random_activities = _source_random_activities(
         args.source_random_activity_json,
@@ -4032,6 +4636,38 @@ async def _auto_run(
                     ),
                     "source_excerpt": str(args.flee_source_excerpt).strip(),
                     "map_patch": escaped,
+                    "end_turn": ended_turn,
+                }
+            )
+            continue
+        source_casualty_pool = source_casualty_pools.get(actor_id)
+        if (
+            source_casualty_pool is not None
+            and _hit_points(actor) > 0
+            and not actor_conditions
+            & {"dead", "unconscious", "stunned", "incapacitated", "paralyzed", "petrified"}
+        ):
+            settled_pool = await _settle_source_casualty_pool_turn(
+                client,
+                args,
+                branch_id=str(branch["id"]),
+                combat=combat,
+                declaration=source_casualty_pool,
+            )
+            ended_turn = await _end_turn(
+                client,
+                args,
+                str(branch["id"]),
+                actor_id,
+                sequence,
+            )
+            turns.append(
+                {
+                    "sequence": sequence,
+                    "kind": "source_casualty_pool",
+                    "actor_id": actor_id,
+                    "source_excerpt": source_casualty_pool["source_excerpt"],
+                    "result": settled_pool,
                     "end_turn": ended_turn,
                 }
             )
@@ -5076,7 +5712,12 @@ async def _auto_run(
                 knock_out_hostile_ids if actor_id in effective_party_ids else None
             ),
         )
-        if plan is None and living_targets:
+        source_separation_target = _source_separation_target(
+            actor_id,
+            living_targets,
+            source_separations,
+        )
+        if plan is None and living_targets and source_separation_target is None:
             destination = _choose_destination(
                 combat,
                 actor_id,
@@ -5125,6 +5766,17 @@ async def _auto_run(
                         knock_out_hostile_ids if actor_id in effective_party_ids else None
                     ),
                 )
+        if plan is None and source_separation_target is not None:
+            turns.append(
+                {
+                    "sequence": sequence,
+                    "kind": "source_separation_no_legal_attack",
+                    "actor_id": actor_id,
+                    "target_id": source_separation_target["actor_id"],
+                    "minimum_distance_ft": source_separation_target["minimum_distance_ft"],
+                    "source_excerpt": source_separation_target["source_excerpt"],
+                }
+            )
         if plan is not None:
             target_id, action, preflight = plan
             campaign = await _campaign(client, args.campaign_id)
@@ -5269,6 +5921,8 @@ async def _auto_run(
         "fled_hostile_ids": sorted(fled_hostile_ids),
         "source_flee_damage_taken": dict(sorted(damage_taken_by_flee_actor.items())),
         "source_flee_critical_hit_actor_ids": sorted(critical_hit_flee_actor_ids),
+        "source_casualty_pools": list(source_casualty_pools.values()),
+        "source_separations": list(source_separations.values()),
         "truce": (
             {
                 "actor_id": args.truce_actor_id,
