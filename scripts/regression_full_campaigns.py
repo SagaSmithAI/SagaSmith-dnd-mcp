@@ -307,6 +307,7 @@ def _build_playthrough_manifest(
     module_ids: list[str],
     run_id: str,
     review_blocks: list[dict[str, Any]],
+    source_refs: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     requirements = dict(line["play_requirements"])
     party_size = dict(requirements["recommended_party_size"])
@@ -316,7 +317,13 @@ def _build_playthrough_manifest(
         "campaign_line_id": str(line["id"]),
         "module_ids": list(module_ids),
         "status": "lobby",
-        "source_refs": deepcopy(list(requirements.get("source_refs") or [])),
+        "source_refs": deepcopy(
+            list(
+                source_refs
+                if source_refs is not None
+                else requirements.get("source_refs") or []
+            )
+        ),
         "current": {
             "module_id": module_ids[0],
             "chapter_id": "",
@@ -370,11 +377,117 @@ def _build_playthrough_manifest(
     }
 
 
+async def _resolve_playthrough_source_refs(
+    client: ExposureClient,
+    *,
+    campaign_id: str,
+    line: dict[str, Any],
+    module_documents: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Resolve corpus metadata citations to exact MCP-managed chunks."""
+
+    modules_by_checksum: dict[str, dict[str, Any]] = {}
+    for raw_document in module_documents:
+        document = dict(raw_document)
+        checksum = str(document.get("checksum") or "").casefold()
+        module_id = str(document.get("module_id") or "")
+        if not checksum or not module_id:
+            raise RuntimeError("imported module metadata is missing checksum or module_id")
+        previous = modules_by_checksum.get(checksum)
+        if previous is not None and str(previous["module_id"]) != module_id:
+            raise RuntimeError(
+                f"imported module checksum identifies multiple modules: {checksum}"
+            )
+        modules_by_checksum[checksum] = document
+    resolved: list[dict[str, Any]] = []
+    for index, raw in enumerate(
+        list(dict(line["play_requirements"]).get("source_refs") or [])
+    ):
+        source = deepcopy(dict(raw))
+        asset_sha256 = str(source.get("asset_sha256") or "").casefold()
+        module_document = modules_by_checksum.get(asset_sha256)
+        if module_document is None:
+            raise RuntimeError(
+                f"source_refs[{index}] asset hash does not identify an imported module"
+            )
+        module_id = str(module_document.get("module_id") or "")
+        heading_path = [str(item) for item in source.get("heading_path") or []]
+        query = next(
+            (item.strip() for item in reversed(heading_path) if item.strip()),
+            "",
+        )
+        if not query:
+            raise RuntimeError(f"source_refs[{index}] has no searchable heading")
+        hits = await client.domain(
+            "module_search",
+            {
+                "campaign_id": campaign_id,
+                "module_ids": [module_id],
+                "query": query,
+                "top_k": 50,
+            },
+        )
+        if isinstance(hits, dict) and isinstance(hits.get("result"), list):
+            hits = hits["result"]
+        if not isinstance(hits, list) or any(
+            not isinstance(hit, dict) for hit in hits
+        ):
+            raise RuntimeError(
+                f"source_refs[{index}] module_search returned an invalid collection"
+            )
+        matches: dict[str, dict[str, Any]] = {}
+        for hit in hits or []:
+            chunk_id = str(hit.get("chunk_id") or hit.get("id") or "")
+            if not chunk_id or chunk_id in matches:
+                continue
+            expanded = await client.domain("module_expand", {"chunk_id": chunk_id})
+            managed_ref = dict(expanded.get("source_ref") or {})
+            content = str(expanded.get("content") or "")
+            content_sha256 = str(expanded.get("content_sha256") or "").casefold()
+            if hashlib.sha256(content.encode("utf-8")).hexdigest() != content_sha256:
+                raise RuntimeError(
+                    f"source_refs[{index}] expanded content hash is inconsistent"
+                )
+            if (
+                str(managed_ref.get("module_id") or "") != module_id
+                or content_sha256
+                != str(source.get("chunk_content_sha256") or "").casefold()
+                or int(managed_ref.get("page_start") or 0)
+                != int(source.get("page_start") or 0)
+                or int(managed_ref.get("page_end") or 0)
+                != int(source.get("page_end") or 0)
+            ):
+                continue
+            scene_id = str(managed_ref.get("scene_id") or "")
+            if not scene_id:
+                raise RuntimeError(
+                    f"source_refs[{index}] exact chunk has no managed scene_id"
+                )
+            matches[chunk_id] = {
+                **source,
+                "page_start": int(managed_ref["page_start"]),
+                "page_end": int(managed_ref["page_end"]),
+                "heading_path": list(managed_ref.get("heading_path") or []),
+                "chunk_content_sha256": content_sha256,
+                "module_id": module_id,
+                "scene_id": scene_id,
+                "chunk_id": chunk_id,
+                "excerpt": content.strip(),
+            }
+        if len(matches) != 1:
+            raise RuntimeError(
+                f"source_refs[{index}] must resolve exactly once: "
+                f"{query!r} -> {len(matches)}"
+            )
+        resolved.append(next(iter(matches.values())))
+    return resolved
+
+
 async def _initialize_playthrough_manifest(
     client: ExposureClient,
     *,
     line: dict[str, Any],
-    module_ids: list[str],
+    module_documents: list[dict[str, Any]],
     campaign_id: str,
     run_id: str,
     review_blocks: list[dict[str, Any]],
@@ -389,11 +502,19 @@ async def _initialize_playthrough_manifest(
     )
     if isinstance(campaign, dict) and "result" in campaign:
         campaign = campaign["result"]
+    module_ids = [str(document["module_id"]) for document in module_documents]
+    source_refs = await _resolve_playthrough_source_refs(
+        client,
+        campaign_id=campaign_id,
+        line=line,
+        module_documents=module_documents,
+    )
     manifest = _build_playthrough_manifest(
         line=line,
         module_ids=module_ids,
         run_id=run_id,
         review_blocks=review_blocks,
+        source_refs=source_refs,
     )
     identity = _token(f"{run_id}\0{line['id']}\0playthrough-manifest")
     return await client.domain(
@@ -548,8 +669,8 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     ] = await _initialize_playthrough_manifest(
                         client,
                         line=line,
-                        module_ids=[
-                            str(modules_by_sequence[index]["module_id"])
+                        module_documents=[
+                            dict(modules_by_sequence[index])
                             for index in sorted(modules_by_sequence)
                         ],
                         campaign_id=campaign_id,

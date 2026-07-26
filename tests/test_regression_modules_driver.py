@@ -13,6 +13,7 @@ from scripts.regression_full_campaigns import (
     _create_campaign,
     _line_review_blocks,
     _load_and_verify_manifest,
+    _resolve_playthrough_source_refs,
     _selected_lines,
 )
 from scripts.regression_modules import (
@@ -411,3 +412,146 @@ def test_playthrough_manifest_builder_preserves_unknown_party_size_review() -> N
     assert manifest["party"]["party_size_review"] == {}
     assert manifest["party"]["use_pregenerated_first"] is True
     assert manifest["review_blocks"] == review
+
+
+def test_corpus_source_refs_resolve_to_one_exact_managed_chunk() -> None:
+    content = (
+        "Characters begin at 1st level. The ideal party size is four characters."
+    )
+    content_sha256 = hashlib.sha256(content.encode("utf-8")).hexdigest()
+    line = {
+        "id": "tyranny-of-dragons",
+        "play_requirements": {
+            "source_refs": [
+                {
+                    "purpose": "party_size",
+                    "asset_path": "Hoard.pdf",
+                    "asset_sha256": "a" * 64,
+                    "page_start": 6,
+                    "page_end": 6,
+                    "heading_path": ["Front Matter", "Introduction"],
+                    "chunk_content_sha256": content_sha256,
+                }
+            ]
+        },
+    }
+
+    class Client:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict]] = []
+
+        async def domain(self, tool_id: str, arguments: dict):
+            self.calls.append((tool_id, arguments))
+            if tool_id == "module_search":
+                assert arguments == {
+                    "campaign_id": "campaign-1",
+                    "module_ids": ["module-1"],
+                    "query": "Introduction",
+                    "top_k": 50,
+                }
+                return {"status": "ok", "result": [{"id": "chunk-1"}]}
+            assert tool_id == "module_expand"
+            assert arguments == {"chunk_id": "chunk-1"}
+            return {
+                "chunk_id": "chunk-1",
+                "content": content,
+                "content_sha256": content_sha256,
+                "source_ref": {
+                    "module_id": "module-1",
+                    "scene_id": "scene-1",
+                    "chunk_id": "chunk-1",
+                    "page_start": 6,
+                    "page_end": 6,
+                    "heading_path": ["Front Matter", "Introduction"],
+                    "content_sha256": content_sha256,
+                },
+            }
+
+    client = Client()
+    resolved = asyncio.run(
+        _resolve_playthrough_source_refs(
+            client,
+            campaign_id="campaign-1",
+            line=line,
+            module_documents=[
+                {
+                    "module_id": "module-1",
+                    "checksum": "a" * 64,
+                }
+            ],
+        )
+    )
+
+    assert resolved == [
+        {
+            **line["play_requirements"]["source_refs"][0],
+            "module_id": "module-1",
+            "scene_id": "scene-1",
+            "chunk_id": "chunk-1",
+            "excerpt": content,
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    ("search_hits", "expanded_scene_id", "expected"),
+    [
+        ([], "scene-1", "must resolve exactly once"),
+        ([{"id": "chunk-1"}, {"id": "chunk-2"}], "scene-1", "must resolve exactly once"),
+        ([{"id": "chunk-1"}], "", "has no managed scene_id"),
+    ],
+)
+def test_corpus_source_ref_resolution_fails_closed(
+    search_hits: list[dict[str, str]],
+    expanded_scene_id: str,
+    expected: str,
+) -> None:
+    content = "The ideal party size is four characters."
+    content_sha256 = hashlib.sha256(content.encode("utf-8")).hexdigest()
+    line = {
+        "id": "tyranny-of-dragons",
+        "play_requirements": {
+            "source_refs": [
+                {
+                    "asset_sha256": "a" * 64,
+                    "page_start": 6,
+                    "page_end": 6,
+                    "heading_path": ["Introduction"],
+                    "chunk_content_sha256": content_sha256,
+                }
+            ]
+        },
+    }
+
+    class Client:
+        async def domain(self, tool_id: str, arguments: dict):
+            if tool_id == "module_search":
+                return {"result": search_hits}
+            chunk_id = str(arguments["chunk_id"])
+            return {
+                "content": content,
+                "content_sha256": content_sha256,
+                "source_ref": {
+                    "module_id": "module-1",
+                    "scene_id": expanded_scene_id,
+                    "chunk_id": chunk_id,
+                    "page_start": 6,
+                    "page_end": 6,
+                    "heading_path": ["Introduction"],
+                },
+            }
+
+    with pytest.raises(RuntimeError, match=expected):
+        asyncio.run(
+            _resolve_playthrough_source_refs(
+                Client(),
+                campaign_id="campaign-1",
+                line=line,
+                module_documents=[
+                    {
+                        "module_id": "module-1",
+                        "checksum": "a" * 64,
+                    }
+                ],
+            )
+        )
