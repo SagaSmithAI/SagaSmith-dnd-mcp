@@ -45,6 +45,7 @@ from scripts.regression_encounter import (
     _record_source_flee_damage,
     _reinforcement_config,
     _require_live_active_party,
+    _require_pending_on_hit_choice_id,
     _resolve_pending,
     _roll_total,
     _selected_prepared_actor_ids,
@@ -310,6 +311,43 @@ def test_preflight_returns_agent_ruling_instead_of_misclassifying_it_as_on_hit()
     assert requirement["target_id"] == "pc-1"
     assert requirement["ruling"] == pending
     assert "--source-attack-environment-json" in requirement["retry_hint"]
+
+
+def test_unclassified_encounter_ruling_defaults_to_agent_reasoning() -> None:
+    error = EncounterRulingRequiredError(
+        {"reason": "the module has a one-off narrative procedure"},
+        operation="module_special_procedure",
+    )
+
+    ruling = error.requirement["ruling"]
+    assert ruling["status"] == "pending_ruling"
+    assert ruling["default_resolver"] == "agent"
+    assert ruling["ruling_kind"] == "agent_dm_adjudication"
+
+
+def test_precommit_attack_ruling_is_not_treated_as_owned_on_hit_window() -> None:
+    pending = {
+        "status": "pending_ruling",
+        "default_resolver": "agent",
+        "ruling_kind": "environmental_consequence",
+        "reason": "direct sunlight must be established from the scene",
+        "committed": False,
+        "result": {},
+    }
+
+    with pytest.raises(EncounterRulingRequiredError) as raised:
+        _require_pending_on_hit_choice_id(
+            pending,
+            operation="combat_resolve_attack.guiding_bolt",
+            actor_id="cleric",
+            target_id="kobold",
+            action={"spell_id": GUIDING_BOLT_ID},
+            retry_hint="Resolve the environmental fact and retry.",
+        )
+
+    assert raised.value.requirement["ruling"]["ruling_kind"] == (
+        "environmental_consequence"
+    )
 
 
 def test_status_uses_play_character_exposure_before_combat() -> None:
@@ -1795,7 +1833,10 @@ def test_source_casualty_pool_turn_uses_only_public_action_dice_and_manifest() -
                 self.revision += 1
                 return {
                     "status": "pending_ruling",
-                    "result": {"activity_id": "lightning-breath"},
+                    "result": {
+                        "activity_id": "lightning-breath",
+                        "payment": {"kind": "main_action"},
+                    },
                 }
             if tool_id == "dnd_dice_roll":
                 self.revision += 1
@@ -1849,6 +1890,60 @@ def test_source_casualty_pool_turn_uses_only_public_action_dice_and_manifest() -
     assert calls[1][1]["activity_id"] == "lightning-breath"
     assert calls[1][1]["declaration"]["kind"] == "source_casualty_pool_activity"
     assert calls[2][1]["branch_id"] == "branch-1"
+
+
+def test_source_casualty_pool_stops_on_precommit_activity_ruling() -> None:
+    calls: list[str] = []
+
+    class Client:
+        async def core(self, tool_id: str, arguments: dict) -> dict:
+            assert tool_id == "campaign_query"
+            return {"revision": 7}
+
+        async def domain(self, tool_id: str, arguments: dict) -> dict:
+            calls.append(tool_id)
+            if tool_id == "playthrough_manifest":
+                return {"manifest": {"world_state": {}}}
+            if tool_id == "combat_use_activity":
+                return {
+                    "status": "pending_ruling",
+                    "default_resolver": "agent",
+                    "ruling_kind": "module_specific_procedure",
+                    "reason": "the scene fact must be adjudicated before payment",
+                    "committed": False,
+                    "result": {"activity_id": "lightning-breath"},
+                }
+            raise AssertionError("casualty dice must not roll before activity payment")
+
+    with pytest.raises(EncounterRulingRequiredError) as raised:
+        asyncio.run(
+            _settle_source_casualty_pool_turn(
+                Client(),
+                SimpleNamespace(
+                    campaign_id="campaign-1",
+                    run_id="run-1",
+                    operation_scope="encounter-1",
+                ),
+                branch_id="branch-1",
+                combat={"id": "combat-1", "round": 1},
+                declaration={
+                    "actor_id": "lennithon",
+                    "pool_key": "greenest-wall-defenders",
+                    "initial_count": 20,
+                    "activity_id": "lightning-breath",
+                    "activity_name": "Lightning Breath (Recharge 5-6)",
+                    "kill_expression": "1d4",
+                    "injury_expression": "1d6",
+                    "recharge_expression": "",
+                    "recharge_minimum": 5,
+                    "recharge_maximum": 6,
+                    "source_excerpt": "Exact module excerpt.",
+                },
+            )
+        )
+
+    assert calls == ["playthrough_manifest", "combat_use_activity"]
+    assert raised.value.requirement["ruling"]["default_resolver"] == "agent"
 
 
 def test_source_separation_is_cited_and_places_dragon_at_least_twenty_five_feet_away() -> None:

@@ -5,6 +5,32 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any
 
+EXTERNAL_RULING_KINDS = frozenset(
+    {
+        "player_owned_choice",
+        "owner_approval",
+        "permission_escalation",
+        "missing_or_conflicting_source_review",
+    }
+)
+
+
+def normalize_pending_ruling(ruling: dict[str, Any]) -> dict[str, Any]:
+    """Default unclassified DM work to the Agent without erasing exceptions."""
+
+    normalized = deepcopy(dict(ruling))
+    normalized.setdefault("status", "pending_ruling")
+    normalized.setdefault("ruling_kind", "agent_dm_adjudication")
+    normalized.setdefault(
+        "default_resolver",
+        (
+            "external_input"
+            if normalized["ruling_kind"] in EXTERNAL_RULING_KINDS
+            else "agent"
+        ),
+    )
+    return normalized
+
 
 class RegressionRulingRequiredError(RuntimeError):
     """Preserve a public ruling response for the acting Agent or external owner."""
@@ -17,10 +43,7 @@ class RegressionRulingRequiredError(RuntimeError):
         context: dict[str, Any] | None = None,
         retry_hint: str = "",
     ) -> None:
-        normalized = deepcopy(dict(ruling))
-        normalized.setdefault("status", "pending_ruling")
-        normalized.setdefault("default_resolver", "agent")
-        normalized.setdefault("ruling_kind", "agent_dm_adjudication")
+        normalized = normalize_pending_ruling(ruling)
         self.requirement = {
             "operation": str(operation),
             "context": deepcopy(context or {}),

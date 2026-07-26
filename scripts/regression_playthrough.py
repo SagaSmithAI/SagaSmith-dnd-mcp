@@ -4466,11 +4466,25 @@ async def _cast_source_spell(
             ),
         },
     )
+    payment = dict(dict(acted.get("result") or {}).get("payment") or {})
+    if acted.get("status") == "pending_ruling" and not payment:
+        raise_for_pending_ruling(
+            acted,
+            operation="character_action.cast_source_spell",
+            context={
+                "actor_id": normalized_actor_id,
+                "spell_id": normalized_spell_id,
+                "source_item_id": normalized_item_id,
+            },
+            retry_hint=(
+                "Resolve the typed pre-commit ruling and retry at the current "
+                "character revision."
+            ),
+        )
     if acted.get("status") not in {"committed", "pending_ruling"}:
         raise RuntimeError(
             f"source spell cast did not consume its canonical resources: {acted.get('status')}"
         )
-    payment = dict(dict(acted.get("result") or {}).get("payment") or {})
     if (
         payment.get("economy") != "item_charges"
         or str(payment.get("item_id") or "") != normalized_item_id
@@ -4696,6 +4710,23 @@ async def _cast_healing_spell(
             ),
         },
     )
+    if (
+        cast.get("status") == "pending_ruling"
+        and not dict(cast.get("result") or {}).get("payment")
+    ):
+        raise_for_pending_ruling(
+            cast,
+            operation="character_action.cast_healing_spell",
+            context={
+                "actor_id": normalized_actor_id,
+                "target_id": normalized_target_id,
+                "spell_id": normalized_spell_id,
+            },
+            retry_hint=(
+                "Resolve the typed pre-commit ruling and retry before rolling "
+                "or applying healing."
+            ),
+        )
     if cast.get("status") not in {"committed", "pending_ruling"}:
         raise RuntimeError("healing spell did not consume its canonical resource")
     branches = await client.domain(

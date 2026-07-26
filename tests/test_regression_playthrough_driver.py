@@ -2173,6 +2173,97 @@ def test_healing_spell_driver_pays_rolls_and_applies_public_healing(
     assert result["roll"]["total"] == 7
 
 
+def test_healing_spell_driver_returns_precommit_ruling_before_rolling() -> None:
+    source_ref = {
+        "module_id": "module-1",
+        "scene_id": "scene-1",
+        "chunk_id": "bridge-chunk",
+        "page_start": 95,
+        "page_end": 96,
+        "heading_path": ["Vault", "Bridge"],
+        "content_sha256": "a" * 64,
+    }
+    caster_sheet = default_character_sheet()
+    caster_sheet["content"]["spells"] = [
+        {
+            "id": "healing-word",
+            "name": "Healing Word",
+            "level": 1,
+            "resolution": {
+                "kind": "healing",
+                "healing": {
+                    "base_dice": "1d4",
+                    "per_slot_dice": "1d4",
+                    "slot_base_level": 1,
+                    "add_spellcasting_modifier": False,
+                },
+            },
+        }
+    ]
+
+    class Client:
+        async def domain(self, tool_id: str, arguments: dict):
+            if tool_id == "module_query":
+                return {
+                    "module_id": "module-1",
+                    "scene_id": "scene-1",
+                    "content": "A failed save causes a 60-foot fall.",
+                    "spatial": {"locations": [{"key": "bridge", "title": "Bridge"}]},
+                }
+            if tool_id == "character_query":
+                actor_id = arguments["payload"]["character_id"]
+                return {
+                    "id": actor_id,
+                    "name": actor_id.title(),
+                    "campaign_id": "campaign-1",
+                    "revision": 7,
+                    "sheet": deepcopy(
+                        caster_sheet
+                        if actor_id == "cleric"
+                        else default_character_sheet()
+                    ),
+                }
+            if tool_id == "character_action":
+                return {
+                    "status": "pending_ruling",
+                    "default_resolver": "agent",
+                    "ruling_kind": "environmental_consequence",
+                    "reason": "the active rule pack needs the scene weather",
+                    "committed": False,
+                    "result": {
+                        "status": "pending_ruling",
+                        "pending": [{"id": "weather"}],
+                    },
+                }
+            raise AssertionError("a pre-commit ruling must stop before later public writes")
+
+    with pytest.raises(RegressionRulingRequiredError) as raised:
+        asyncio.run(
+            _cast_healing_spell(
+                Client(),
+                campaign_id="campaign-1",
+                run_id="run-1",
+                occurrence_id="heal-fallen",
+                scene_id="scene-1",
+                source_excerpt="A failed save causes a 60-foot fall.",
+                source_ref=source_ref,
+                location_key="bridge",
+                actor_id="cleric",
+                target_id="fallen",
+                spell_id="healing-word",
+                cast_level=1,
+                component_ruling=None,
+                reason="The cleric attempted to restore the fallen ally.",
+                knowledge_actor_ids=[],
+            )
+        )
+
+    requirement = raised.value.requirement
+    assert requirement["operation"] == "character_action.cast_healing_spell"
+    assert requirement["ruling"]["default_resolver"] == "agent"
+    assert requirement["ruling"]["committed"] is False
+
+
 def test_currency_pool_driver_uses_public_atomic_party_transfer() -> None:
     source_ref = {
         "module_id": "module-1",
@@ -5581,6 +5672,96 @@ def test_source_spell_driver_consumes_item_charge_and_preserves_dm_boundary(
     assert result["cast_recovered"] is False
     assert result["knowledge_actor_ids"] == ["pip"]
     assert ("snapshot" in result["continuity"]) is not defer_checkpoint
+
+
+def test_source_spell_driver_returns_precommit_ruling_without_charge_assumption() -> None:
+    source_ref = {
+        "module_id": "module-1",
+        "scene_id": "stone-reference",
+        "chunk_id": "stone-chunk",
+        "page_start": 193,
+        "page_end": 193,
+        "heading_path": ["Appendix A", "Stone of Golorr"],
+        "content_sha256": "c" * 64,
+    }
+
+    class Client:
+        async def domain(self, tool_id: str, arguments: dict):
+            if tool_id == "module_query":
+                scene_id = arguments["payload"]["scene_id"]
+                return {
+                    "module_id": "module-1",
+                    "scene_id": scene_id,
+                    "content": (
+                        "The party studies the Stone."
+                        if scene_id == "occurrence-scene"
+                        else (
+                            "While holding the stone, you can expend 1 of its "
+                            "charges to cast the legend lore spell."
+                        )
+                    ),
+                    "locations": (
+                        [{"key": "safe-room"}]
+                        if scene_id == "occurrence-scene"
+                        else []
+                    ),
+                }
+            if tool_id == "character_query":
+                sheet = default_character_sheet()
+                sheet["inventory"]["items"].append(
+                    {
+                        "id": "stone-of-golorr",
+                        "name": "Stone of Golorr",
+                        "kind": "magic_item",
+                        "charges": {"value": 3, "max": 3},
+                    }
+                )
+                return {
+                    "id": "pip",
+                    "name": "Pip",
+                    "campaign_id": "campaign-1",
+                    "revision": 7,
+                    "sheet": sheet,
+                }
+            if tool_id == "character_action":
+                return {
+                    "status": "pending_ruling",
+                    "default_resolver": "agent",
+                    "ruling_kind": "module_specific_procedure",
+                    "reason": "the source-defined answer needs Agent adjudication",
+                    "committed": False,
+                    "result": {"status": "pending_ruling"},
+                }
+            raise AssertionError("a pre-commit ruling must stop before continuity writes")
+
+    with pytest.raises(RegressionRulingRequiredError) as raised:
+        asyncio.run(
+            _cast_source_spell(
+                Client(),
+                campaign_id="campaign-1",
+                run_id="run-1",
+                occurrence_id="stone-legend-lore-1",
+                scene_id="occurrence-scene",
+                source_scene_id="stone-reference",
+                location_key="safe-room",
+                source_excerpt="expend 1 of its charges to cast the legend lore spell",
+                source_ref=source_ref,
+                actor_id="pip",
+                spell_id="dnd5e.content.srd2014.spell.legend-lore",
+                source_item_id="stone-of-golorr",
+                cast_level=None,
+                component_ruling=None,
+                reason="Pip attempted to invoke the Stone.",
+                knowledge_actor_ids=[],
+            )
+        )
+
+    assert raised.value.requirement["operation"] == (
+        "character_action.cast_source_spell"
+    )
+    assert raised.value.requirement["ruling"]["ruling_kind"] == (
+        "module_specific_procedure"
+    )
 
 
 def test_dm_event_keeps_enemy_knowledge_out_of_party_event_stream() -> None:

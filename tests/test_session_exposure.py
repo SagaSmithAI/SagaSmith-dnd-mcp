@@ -14,6 +14,7 @@ from mcp.types import ImageContent
 from pypdf import PdfWriter
 from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 from sagasmith_dnd.combat_engine import NeedsRulingError
+from sagasmith_dnd.rule_engine import RuleEventRulingRequiredError
 
 from sagasmith_dnd_mcp.config import McpConfig
 from sagasmith_dnd_mcp.exposure import ExposureError, ExposureRegistry
@@ -21,6 +22,7 @@ from sagasmith_dnd_mcp.server import (
     _agent_ruling_boundary,
     _agent_ruling_resolution,
     _facade_result,
+    _pending_result_ruling_kind,
     _ruling_status,
     create_server,
 )
@@ -148,6 +150,90 @@ def test_needs_ruling_boundary_preserves_an_explicit_player_choice() -> None:
     assert result["default_resolver"] == "external_input"
     assert result["ruling_kind"] == "player_owned_choice"
     assert result["retry_contract"]["resolver"] == "external_input"
+
+
+def test_declarative_rule_pause_returns_to_its_typed_resolver() -> None:
+    @_agent_ruling_boundary
+    def agent_operation() -> None:
+        raise RuleEventRulingRequiredError(
+            "active pack needs an environmental ruling",
+            event="character.validate",
+            status="pending_ruling",
+            pending=(
+                {
+                    "mechanic_id": "weather-rule",
+                    "op": "ruling.require",
+                    "id": "weather",
+                    "default_resolver": "agent",
+                    "ruling_kind": "environmental_consequence",
+                },
+            ),
+        )
+
+    agent_result = agent_operation()
+    assert agent_result["default_resolver"] == "agent"
+    assert agent_result["ruling_kind"] == "environmental_consequence"
+    assert agent_result["missing"] == ["weather-rule"]
+    assert agent_result["ruling_requirements"][0]["id"] == "weather"
+
+    @_agent_ruling_boundary
+    def player_operation() -> None:
+        raise RuleEventRulingRequiredError(
+            "active pack needs the player's choice",
+            event="character.validate",
+            status="pending_choice",
+            pending=(
+                {
+                    "mechanic_id": "form-rule",
+                    "op": "choice.require",
+                    "id": "choose-form",
+                    "default_resolver": "external_input",
+                    "ruling_kind": "player_owned_choice",
+                },
+            ),
+        )
+
+    player_result = player_operation()
+    assert player_result["default_resolver"] == "external_input"
+    assert player_result["ruling_kind"] == "player_owned_choice"
+
+
+def test_nested_pending_results_default_to_agent_and_preserve_exceptions() -> None:
+    assert (
+        _pending_result_ruling_kind(
+            {
+                "status": "pending_ruling",
+                "pending": [
+                    {
+                        "ruling_kind": "module_specific_procedure",
+                        "default_resolver": "agent",
+                    }
+                ],
+            }
+        )
+        == "module_specific_procedure"
+    )
+    assert (
+        _pending_result_ruling_kind(
+            {
+                "status": "pending_ruling",
+                "pending": [
+                    {
+                        "ruling_kind": "environmental_consequence",
+                        "default_resolver": "agent",
+                    },
+                    {
+                        "ruling_kind": "missing_or_conflicting_source_review",
+                        "default_resolver": "external_input",
+                    },
+                ],
+            }
+        )
+        == "missing_or_conflicting_source_review"
+    )
+    assert _pending_result_ruling_kind({"status": "pending_ruling"}) == (
+        "agent_dm_adjudication"
+    )
 
 
 def test_exposure_call_marks_live_dm_ruling_for_agent(

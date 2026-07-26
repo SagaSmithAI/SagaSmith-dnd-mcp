@@ -194,6 +194,7 @@ from sagasmith_dnd.random_stream import (
 from sagasmith_dnd.rule_engine import (
     ResolutionContext,
     RuleCompilationError,
+    RuleEventRulingRequiredError,
     apply_rule_event,
     compile_mechanics,
     context_with_facts,
@@ -370,6 +371,39 @@ def _ruling_status(status: str, ruling_kind: str) -> dict[str, Any]:
     return result
 
 
+def _pending_result_ruling_kind(
+    result: dict[str, Any],
+    *,
+    fallback: str = "agent_dm_adjudication",
+) -> str:
+    """Preserve a nested rule pause's owner while defaulting unclassified DM work."""
+
+    if result.get("status") == "pending_choice":
+        return "player_owned_choice"
+    requirements: list[dict[str, Any]] = []
+    requirements.extend(
+        item for item in result.get("pending", []) if isinstance(item, dict)
+    )
+    requirement = result.get("ruling_requirement")
+    if isinstance(requirement, dict):
+        requirements.append(requirement)
+    requirements.extend(
+        item
+        for item in result.get("ruling_requirements", [])
+        if isinstance(item, dict)
+    )
+    kinds = {
+        str(item.get("ruling_kind") or "")
+        for item in requirements
+        if str(item.get("ruling_kind") or "")
+    }
+    external = [kind for kind in EXTERNAL_RULING_INPUT_KINDS if kind in kinds]
+    if external:
+        return external[0]
+    agent = [kind for kind in AGENT_RULING_KINDS if kind in kinds]
+    return agent[0] if agent else fallback
+
+
 def _facade_result(action: str, result: Any) -> dict[str, Any]:
     """Preserve a nested domain ruling's ownership at the public facade."""
 
@@ -381,7 +415,9 @@ def _facade_result(action: str, result: Any) -> dict[str, Any]:
     return response
 
 
-def _needs_ruling_kind(error: NeedsRulingError) -> str:
+def _needs_ruling_kind(
+    error: NeedsRulingError | RuleEventRulingRequiredError,
+) -> str:
     """Keep source defects out of the Agent's ordinary adjudication lane."""
 
     explicit_kind = str(
@@ -390,7 +426,10 @@ def _needs_ruling_kind(error: NeedsRulingError) -> str:
     if explicit_kind != "agent_dm_adjudication":
         return explicit_kind
     message = str(error).casefold()
-    missing = {str(item).casefold() for item in error.missing}
+    missing = {
+        str(item).casefold()
+        for item in getattr(error, "missing", ())
+    }
     if (
         any(item.startswith(("weapon.range:", "spell.range:")) for item in missing)
         or "unresolved rules" in message
@@ -407,14 +446,24 @@ def _agent_ruling_boundary(function: _RULING_FUNCTION) -> _RULING_FUNCTION:
     def wrapped(*args: Any, **kwargs: Any) -> Any:
         try:
             return function(*args, **kwargs)
-        except NeedsRulingError as exc:
+        except (NeedsRulingError, RuleEventRulingRequiredError) as exc:
             ruling_kind = _needs_ruling_kind(exc)
             resolution = _ruling_resolution_for_kind(ruling_kind)
+            requirements = [
+                deepcopy(item)
+                for item in getattr(exc, "requirements", ())
+                if isinstance(item, dict)
+            ]
             return {
                 "status": "pending_ruling",
                 **resolution,
                 "reason": str(exc),
-                "missing": list(exc.missing),
+                "missing": list(getattr(exc, "missing", ())),
+                **(
+                    {"ruling_requirements": requirements}
+                    if requirements
+                    else {}
+                ),
                 "committed": False,
                 "retry_contract": {
                     "resolver": resolution["default_resolver"],
@@ -3912,6 +3961,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
 
     @mcp.tool()
+    @_agent_ruling_boundary
     def rule_import_job_ingest(
         campaign_id: str,
         job_id: str,
@@ -3937,8 +3987,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             raise ValueError("rule import job must be inspected before indexing")
         warnings = list(dict(job.inspection or {}).get("warnings") or [])
         if warnings and not acknowledge_warnings:
-            raise ValueError(
-                "rule import inspection has warnings; DM must set acknowledge_warnings=true"
+            raise NeedsRulingError(
+                "rule import inspection has warnings; the Agent acting as DM must "
+                "review them before setting acknowledge_warnings=true",
+                missing=("rule_import_warning_acknowledgement",),
+                ruling_kind="source_or_scene_fact",
             )
         values = dict(job.payload)
         embedder, vectors = storage.dense_components()
@@ -5162,6 +5215,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         }
 
     @mcp.tool()
+    @_agent_ruling_boundary
     def chase_take_turn(
         campaign_id: str,
         actor_id: str,
@@ -9100,7 +9154,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         if applied.get("status") in {"pending_choice", "pending_ruling"}:
             return {
-                **_ruling_status(applied["status"], "agent_dm_adjudication"),
+                **_ruling_status(
+                    applied["status"],
+                    _pending_result_ruling_kind(applied),
+                ),
                 "result": {key: value for key, value in applied.items() if key != "sheet"},
                 "campaign_revision": campaign.revision,
             }
@@ -9115,8 +9172,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         elif normalized_casting_time.startswith("1 action"):
             payment = "main_action"
         else:
-            raise CombatEngineError(
-                "this spell's casting time requires an explicit out-of-combat time ruling"
+            raise NeedsRulingError(
+                "this spell's casting time requires an explicit out-of-combat time ruling",
+                missing=("casting_time",),
+                ruling_kind="source_or_scene_fact",
             )
         if payment == "reaction":
             window = next(
@@ -10683,7 +10742,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             raise CombatEngineError(str(exc)) from exc
         if applied.get("status") in {"pending_choice", "pending_ruling"}:
             return {
-                **_ruling_status(applied["status"], "agent_dm_adjudication"),
+                **_ruling_status(
+                    applied["status"],
+                    _pending_result_ruling_kind(applied),
+                ),
                 "result": {key: value for key, value in applied.items() if key != "sheet"},
                 "campaign_revision": campaign.revision,
             }
@@ -13026,6 +13088,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         return snapshots.regenerate_recap(campaign_id, slot)
 
     @mcp.tool()
+    @_agent_ruling_boundary
     def character_create(
         name: str,
         campaign_id: str | None = None,
@@ -13092,6 +13155,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         ]
 
     @mcp.tool()
+    @_agent_ruling_boundary
     def character_instantiate(
         template_id: str,
         campaign_id: str,
@@ -13115,6 +13179,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
 
     @mcp.tool()
+    @_agent_ruling_boundary
     def character_build(
         campaign_id: str,
         name: str,
@@ -13163,6 +13228,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             )
         return character_view(current)
 
+    @_agent_ruling_boundary
     def update_sheet(
         character_id: str,
         sheet: dict[str, Any],
@@ -13199,6 +13265,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
 
     @mcp.tool()
+    @_agent_ruling_boundary
     def character_sheet_replace(
         character_id: str,
         sheet: dict[str, Any],
@@ -13618,6 +13685,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
 
     @mcp.tool()
+    @_agent_ruling_boundary
     def character_rest(
         character_id: str,
         rest_type: str,
@@ -13671,9 +13739,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             song_die_sides = validate_song_of_rest_source(song_source.sheet)
         if attune_item_id:
             if attunement_prerequisite_confirmed is not True:
-                raise CombatEngineError(
+                raise NeedsRulingError(
                     "attunement requires explicit DM confirmation that the actor "
-                    "satisfies every source-defined prerequisite"
+                    "satisfies every source-defined prerequisite",
+                    missing=("attunement_prerequisite",),
+                    ruling_kind="source_or_scene_fact",
                 )
             if not is_dm(current.campaign_id, principal_id):
                 raise PermissionError(
@@ -13765,7 +13835,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         if applied.get("status") in {"pending_choice", "pending_ruling"}:
             response = {
-                **_ruling_status(applied["status"], "environmental_consequence"),
+                **_ruling_status(
+                    applied["status"],
+                    _pending_result_ruling_kind(
+                        applied,
+                        fallback="environmental_consequence",
+                    ),
+                ),
                 "result": {
                     key: value
                     for key, value in applied.items()
@@ -14537,6 +14613,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         }
 
     @mcp.tool()
+    @_agent_ruling_boundary
     def character_cast_spell(
         character_id: str,
         spell_id: str,
@@ -14609,7 +14686,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         if applied.get("status") in {"pending_choice", "pending_ruling"}:
             return {
-                **_ruling_status(applied["status"], "agent_dm_adjudication"),
+                **_ruling_status(
+                    applied["status"],
+                    _pending_result_ruling_kind(applied),
+                ),
                 "result": {key: value for key, value in applied.items() if key != "sheet"},
                 "character": character_view(current),
             }
@@ -15123,7 +15203,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             raise ValueError(str(exc)) from exc
         if applied.get("status") in {"pending_choice", "pending_ruling"}:
             return {
-                **_ruling_status(applied["status"], "agent_dm_adjudication"),
+                **_ruling_status(
+                    applied["status"],
+                    _pending_result_ruling_kind(applied),
+                ),
                 "result": {key: value for key, value in applied.items() if key != "sheet"},
                 "character": character_view(current),
             }
@@ -22818,6 +22901,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         return facade_result(action, result)
 
     @mcp.tool()
+    @_agent_ruling_boundary
     def character_query(
         view: Literal[
             "get",
@@ -22926,9 +23010,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             attune_item_id = str(data.get("attune_item_id") or "").strip() or None
             if attune_item_id is not None:
                 if data.get("attunement_prerequisite_confirmed") is not True:
-                    raise CombatEngineError(
+                    raise NeedsRulingError(
                         "attunement requires explicit DM confirmation that the actor "
-                        "satisfies every source-defined prerequisite"
+                        "satisfies every source-defined prerequisite",
+                        missing=("attunement_prerequisite",),
+                        ruling_kind="source_or_scene_fact",
                     )
                 if not is_dm(current.campaign_id, principal_id):
                     raise PermissionError(

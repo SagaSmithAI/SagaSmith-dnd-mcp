@@ -794,17 +794,23 @@ def test_statblock_spellcasting_binds_slots_and_active_content(tmp_path: Path) -
         )
         assert variant["variant_evidence"]["id"] == source_chunk_id
         ray_id = spells["Ray of Sickness"]["id"]
-        with pytest.raises(Exception, match="source_components_confirmed"):
-            await _call(
-                server,
-                "character_cast_spell",
-                {
-                    "character_id": actor["id"],
-                    "spell_id": ray_id,
-                    "expected_revision": actor["revision"],
-                    "idempotency_key": "cast-without-component-ruling",
-                },
-            )
+        pending_components = await _call(
+            server,
+            "character_cast_spell",
+            {
+                "character_id": actor["id"],
+                "spell_id": ray_id,
+                "expected_revision": actor["revision"],
+                "idempotency_key": "cast-without-component-ruling",
+            },
+        )
+        assert pending_components["status"] == "pending_ruling"
+        assert pending_components["default_resolver"] == "external_input"
+        assert pending_components["ruling_kind"] == (
+            "missing_or_conflicting_source_review"
+        )
+        assert pending_components["committed"] is False
+        assert pending_components["missing"] == ["source_components"]
         cast = await _call(
             server,
             "character_cast_spell",

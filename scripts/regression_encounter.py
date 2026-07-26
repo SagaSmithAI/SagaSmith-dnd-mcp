@@ -18,6 +18,7 @@ from mcp.client.stdio import StdioServerParameters, stdio_client
 
 from scripts.regression_modules import PRINCIPAL_ID, ExposureClient, _token
 from scripts.regression_playthrough import _checkpoint, _manifest_get, _manifest_mutation
+from scripts.regression_rulings import normalize_pending_ruling
 
 GUIDING_BOLT_ID = "dnd5e.content.srd2014.spell.guiding-bolt"
 GUIDING_BOLT_ON_HIT = (
@@ -40,17 +41,44 @@ class EncounterRulingRequiredError(RuntimeError):
         action: dict[str, Any] | None = None,
         retry_hint: str = "",
     ) -> None:
+        normalized = normalize_pending_ruling(ruling)
         self.requirement = {
             "operation": operation,
             "actor_id": actor_id,
             "target_id": target_id,
             "action": deepcopy(action or {}),
-            "ruling": deepcopy(ruling),
+            "ruling": normalized,
             **({"retry_hint": retry_hint} if retry_hint else {}),
         }
-        reason = str(ruling.get("reason") or "Agent adjudication is required")
-        resolver = str(ruling.get("default_resolver") or "agent")
+        reason = str(normalized.get("reason") or "Agent adjudication is required")
+        resolver = str(normalized["default_resolver"])
         super().__init__(f"{operation} returns to {resolver}: {reason}")
+
+
+def _require_pending_on_hit_choice_id(
+    result: dict[str, Any],
+    *,
+    operation: str,
+    actor_id: str,
+    target_id: str,
+    action: dict[str, Any],
+    retry_hint: str,
+) -> str:
+    """Reject a pre-commit Agent ruling before treating it as an owned window."""
+
+    choice_id = str(
+        dict(result.get("result") or {}).get("pending_on_hit_ruling_id") or ""
+    )
+    if choice_id:
+        return choice_id
+    raise EncounterRulingRequiredError(
+        result,
+        operation=operation,
+        actor_id=actor_id,
+        target_id=target_id,
+        action=action,
+        retry_hint=retry_hint,
+    )
 
 
 def _encounter_operation_scope(
@@ -2969,6 +2997,23 @@ async def _start(
                 ),
             },
         )
+        if (
+            settled.get("status") == "pending_ruling"
+            and not dict(settled.get("result") or {}).get("payment")
+        ):
+            raise EncounterRulingRequiredError(
+                settled,
+                operation="character_action.precombat_spell",
+                actor_id=str(cast["actor_id"]),
+                action={
+                    "spell_id": str(cast["spell_id"]),
+                    "cast_level": int(cast["cast_level"]),
+                },
+                retry_hint=(
+                    "Resolve the typed pre-commit ruling and retry before "
+                    "starting the encounter."
+                ),
+            )
         if settled.get("status") not in {"committed", "pending_ruling"}:
             raise RuntimeError(
                 "source precombat spell did not pay canonical resources and "
@@ -4553,10 +4598,27 @@ async def _settle_source_casualty_pool_turn(
                 ),
             },
         )
+        activity_result = dict(action_result.get("result") or {})
+        if (
+            action_result.get("status") == "pending_ruling"
+            and not activity_result.get("payment")
+        ):
+            raise EncounterRulingRequiredError(
+                action_result,
+                operation="combat_use_activity.source_casualty_pool",
+                actor_id=actor_id,
+                action={
+                    "activity_id": declaration["activity_id"],
+                    "pool_key": declaration["pool_key"],
+                },
+                retry_hint=(
+                    "Resolve the typed pre-commit ruling and retry before "
+                    "rolling source casualty dice."
+                ),
+            )
         if (
             action_result.get("status") != "pending_ruling"
-            or str(dict(action_result.get("result") or {}).get("activity_id") or "")
-            != declaration["activity_id"]
+            or str(activity_result.get("activity_id") or "") != declaration["activity_id"]
         ):
             raise RuntimeError(
                 "source casualty activity must pay its reviewed descriptive card "
@@ -6005,6 +6067,22 @@ async def _auto_run(
                 )
                 pending_reaction = settled.get("status") == "pending_reaction"
                 if settled.get("status") == "pending_ruling":
+                    choice_id = _require_pending_on_hit_choice_id(
+                        settled,
+                        operation="combat_resolve_attack.guiding_bolt",
+                        actor_id=actor_id,
+                        target_id=spell_target_id,
+                        action={
+                            "spell_id": GUIDING_BOLT_ID,
+                            "spell_resolution_id": str(
+                                cast["result"]["resolution_id"]
+                            ),
+                        },
+                        retry_hint=(
+                            "Resolve the typed pre-commit ruling and retry "
+                            "at the current revision."
+                        ),
+                    )
                     campaign = await _campaign(client, args.campaign_id)
                     ruling = _facade_value(
                         await client.domain(
@@ -6014,7 +6092,7 @@ async def _auto_run(
                                 "action": "on_hit_ruling",
                                 "actor_id": spell_target_id,
                                 "payload": {
-                                    "choice_id": str(settled["result"]["pending_on_hit_ruling_id"]),
+                                    "choice_id": choice_id,
                                     "selection": {
                                         "id": "next_attack_advantage",
                                         "source_excerpt": GUIDING_BOLT_ON_HIT,
@@ -6027,7 +6105,7 @@ async def _auto_run(
                                     + _operation_token(
                                         args,
                                         sequence,
-                                        settled["result"]["pending_on_hit_ruling_id"],
+                                        choice_id,
                                     )
                                 ),
                             },
@@ -6225,22 +6303,18 @@ async def _auto_run(
             )
             on_hit_settlement = None
             if resolved.get("status") == "pending_ruling":
-                choice_id = str(
-                    dict(resolved.get("result") or {}).get("pending_on_hit_ruling_id") or ""
+                choice_id = _require_pending_on_hit_choice_id(
+                    resolved,
+                    operation="combat_resolve_attack",
+                    actor_id=actor_id,
+                    target_id=target_id,
+                    action=action,
+                    retry_hint=(
+                        "Inspect the typed missing facts, adjudicate them as the "
+                        "Agent, and retry at the current revision."
+                    ),
                 )
                 ruling = on_hit_rulings.get((actor_id, selected_weapon_id))
-                if not choice_id:
-                    raise EncounterRulingRequiredError(
-                        resolved,
-                        operation="combat_resolve_attack",
-                        actor_id=actor_id,
-                        target_id=target_id,
-                        action=action,
-                        retry_hint=(
-                            "Inspect the typed missing facts, adjudicate them as the "
-                            "Agent, and retry at the current revision."
-                        ),
-                    )
                 if ruling is None:
                     raise EncounterRulingRequiredError(
                         resolved,

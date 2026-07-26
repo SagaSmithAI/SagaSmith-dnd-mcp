@@ -59,6 +59,26 @@ def test_external_source_review_is_not_relabelled_as_agent_ruling() -> None:
     )
 
 
+def test_external_kind_alone_recovers_its_external_resolver() -> None:
+    try:
+        raise_for_pending_ruling(
+            {
+                "status": "pending_ruling",
+                "ruling_kind": "player_owned_choice",
+                "reason": "the player must choose a target",
+            },
+            operation="spell_target",
+        )
+    except RegressionRulingRequiredError as error:
+        fields = ruling_failure_fields(error)
+    else:
+        raise AssertionError("player choice did not stop the driver")
+
+    ruling = fields["ruling_requirements"][0]["ruling"]
+    assert ruling["default_resolver"] == "external_input"
+    assert fields["default_resolver"] == "external_input"
+
+
 def test_party_driver_writes_structured_agent_handoff(
     tmp_path: Path,
     monkeypatch,

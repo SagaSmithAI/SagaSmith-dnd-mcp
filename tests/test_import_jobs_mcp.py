@@ -498,16 +498,19 @@ def test_rule_import_requires_explicit_dm_acknowledgement_for_warnings(tmp_path:
                     "idempotency_key": "ingest-string-false",
                 },
             )
-        with pytest.raises(Exception, match="acknowledge_warnings"):
-            await server.call_tool(
-                "rule_import",
-                {
-                    "campaign_id": campaign["id"],
-                    "action": "ingest",
-                    "payload": {"job_id": job_id},
-                    "idempotency_key": "ingest-blocked",
-                },
-            )
+        _, blocked = await server.call_tool(
+            "rule_import",
+            {
+                "campaign_id": campaign["id"],
+                "action": "ingest",
+                "payload": {"job_id": job_id},
+                "idempotency_key": "ingest-blocked",
+            },
+        )
+        assert blocked["status"] == "pending_ruling"
+        assert blocked["default_resolver"] == "agent"
+        assert blocked["ruling_kind"] == "source_or_scene_fact"
+        assert blocked["result"]["committed"] is False
         _, ingested = await server.call_tool(
             "rule_import",
             {
