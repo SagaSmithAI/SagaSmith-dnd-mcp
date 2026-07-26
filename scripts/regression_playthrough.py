@@ -1421,14 +1421,20 @@ async def _advance_scene(
     run_id: str,
     occurrence_id: str,
     scene_id: str,
+    source_scene_id: str,
+    source_excerpt: str,
+    source_ref: dict[str, Any] | None,
     objective: str,
     mark_visited: bool,
     reachable_scene_ids: list[str],
     excluded_scenes: list[dict[str, Any]],
 ) -> dict[str, Any]:
     scene_identity = _occurrence_identity(occurrence_id, "advance-scene")
-    if not scene_id:
-        raise ValueError("advance-scene requires --scene-id")
+    if not all((scene_id, source_scene_id, source_excerpt)):
+        raise ValueError(
+            "advance-scene requires --scene-id, --source-scene-id, "
+            "--source-excerpt, and --source-ref-json"
+        )
     scene = await client.domain(
         "module_query",
         {
@@ -1441,6 +1447,60 @@ async def _advance_scene(
         raise RuntimeError("scene is redacted or does not belong to this campaign")
     current = await _manifest_get(client, campaign_id)
     manifest = deepcopy(current["manifest"])
+    source_scene = await client.domain(
+        "module_query",
+        {
+            "campaign_id": campaign_id,
+            "view": "scene",
+            "payload": {"scene_id": source_scene_id},
+        },
+    )
+    exact_ref = _validate_source_ref(
+        source_scene,
+        source_ref,
+        excerpt=source_excerpt,
+    )
+    current_scene_id = str(dict(manifest.get("current") or {}).get("scene_id") or "")
+    transitions = deepcopy(
+        dict(
+            dict(manifest.get("world_state") or {}).get("scene_transitions")
+            or {}
+        )
+    )
+    transition_record = {
+        "from_scene_id": source_scene_id,
+        "to_scene_id": scene_id,
+        "source_excerpt": source_excerpt,
+        "source_ref": exact_ref,
+    }
+    existing_transition = transitions.get(scene_identity)
+    exact_retry = (
+        existing_transition == transition_record
+        and current_scene_id == scene_id
+    )
+    initial_scene_selection = (
+        not current_scene_id
+        and source_scene_id == scene_id
+        and not transitions
+    )
+    if (
+        current_scene_id != source_scene_id
+        and not exact_retry
+        and not initial_scene_selection
+    ):
+        raise ValueError(
+            "advance-scene source scene must be the manifest current scene "
+            "or the exact initial scene"
+        )
+    if existing_transition is not None and existing_transition != transition_record:
+        raise ValueError(
+            "advance-scene occurrence id already exists with different transition evidence"
+        )
+    transitions[scene_identity] = transition_record
+    manifest["world_state"] = {
+        **deepcopy(dict(manifest.get("world_state") or {})),
+        "scene_transitions": transitions,
+    }
     module_id = str(scene["module_id"])
     if module_id not in manifest["module_ids"]:
         raise RuntimeError("scene module is not declared by the playthrough manifest")
@@ -5557,6 +5617,8 @@ async def _start_play(
     run_id: str,
     initial_phase: str,
     scene_id: str,
+    source_excerpt: str,
+    source_ref: dict[str, Any] | None,
     objective: str,
     reachable_scene_ids: list[str],
 ) -> dict[str, Any]:
@@ -5609,9 +5671,12 @@ async def _start_play(
         client,
         campaign_id=campaign_id,
         run_id=run_id,
-        occurrence_id=f"start-play:{scene_id}",
-        scene_id=scene_id,
-        objective=objective,
+            occurrence_id=f"start-play:{scene_id}",
+            scene_id=scene_id,
+            source_scene_id=scene_id,
+            source_excerpt=source_excerpt,
+            source_ref=source_ref,
+            objective=objective,
         mark_visited=True,
         reachable_scene_ids=reachable_scene_ids,
         excluded_scenes=[],
@@ -6972,6 +7037,8 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     run_id=args.run_id,
                     initial_phase=phase,
                     scene_id=str(args.scene_id or ""),
+                    source_excerpt=args.source_excerpt,
+                    source_ref=args.source_ref_json,
                     objective=args.objective,
                     reachable_scene_ids=args.reachable_scene_id,
                 )
@@ -7028,6 +7095,9 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     run_id=args.run_id,
                     occurrence_id=args.occurrence_id,
                     scene_id=str(args.scene_id or ""),
+                    source_scene_id=args.source_scene_id,
+                    source_excerpt=args.source_excerpt,
+                    source_ref=args.source_ref_json,
                     objective=args.objective,
                     mark_visited=args.mark_visited,
                     reachable_scene_ids=args.reachable_scene_id,

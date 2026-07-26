@@ -225,6 +225,17 @@ def test_configure_ending_uses_public_manifest_replace_and_rejects_redefinition(
 
 
 def test_advance_scene_identity_supports_exact_retry_and_later_revisit() -> None:
+    source_excerpt = 'Proceed to "Town."'
+    source_ref = {
+        "module_id": "module-1",
+        "scene_id": "scene-old",
+        "chunk_id": "chunk-transition",
+        "page_start": 1,
+        "page_end": 1,
+        "heading_path": ["Chapter", "Next"],
+        "content_sha256": "a" * 64,
+    }
+
     class Client:
         def __init__(self) -> None:
             self.revision = 1
@@ -253,7 +264,17 @@ def test_advance_scene_identity_supports_exact_retry_and_later_revisit() -> None
 
         async def domain(self, tool_id: str, arguments: dict):
             if tool_id == "module_query":
-                assert arguments["payload"]["scene_id"] == "scene-town"
+                requested_scene_id = arguments["payload"]["scene_id"]
+                if requested_scene_id == "scene-old":
+                    return {
+                        "module_id": "module-1",
+                        "chapter_id": "chapter-1",
+                        "chapter": "Chapter",
+                        "scene_id": "scene-old",
+                        "title": "Road",
+                        "content": source_excerpt,
+                    }
+                assert requested_scene_id == "scene-town"
                 return {
                     "module_id": "module-1",
                     "chapter_id": "chapter-1",
@@ -283,6 +304,9 @@ def test_advance_scene_identity_supports_exact_retry_and_later_revisit() -> None
             run_id="run-1",
             occurrence_id=occurrence_id,
             scene_id="scene-town",
+            source_scene_id="scene-old",
+            source_excerpt=source_excerpt,
+            source_ref=source_ref,
             objective="Return the rescued family.",
             mark_visited=True,
             reachable_scene_ids=[],
@@ -300,9 +324,24 @@ def test_advance_scene_identity_supports_exact_retry_and_later_revisit() -> None
     )
 
     client.manifest["world_state"]["visit_marker"] = 2
+    client.manifest["current"]["scene_id"] = "scene-old"
     asyncio.run(advance(client, "town-visit-2"))
     revisit_key = client.replace_calls[2]["idempotency_key"]
     assert revisit_key != first_key
+    assert client.manifest["world_state"]["scene_transitions"] == {
+        "town-visit-1": {
+            "from_scene_id": "scene-old",
+            "to_scene_id": "scene-town",
+            "source_excerpt": source_excerpt,
+            "source_ref": source_ref,
+        },
+        "town-visit-2": {
+            "from_scene_id": "scene-old",
+            "to_scene_id": "scene-town",
+            "source_excerpt": source_excerpt,
+            "source_ref": source_ref,
+        },
+    }
 
 
 def test_core_relock_driver_requires_current_checkpoint_and_public_profile() -> None:
@@ -5026,6 +5065,17 @@ def test_record_outcome_resumes_after_matching_progress_was_already_saved() -> N
 
 
 def test_start_play_uses_public_quality_gate_phase_and_scene_tools() -> None:
+    source_excerpt = "The adventure begins here."
+    source_ref = {
+        "module_id": "module-1",
+        "scene_id": "scene-1",
+        "chunk_id": "chunk-opening",
+        "page_start": 1,
+        "page_end": 1,
+        "heading_path": ["Chapter 1", "Opening"],
+        "content_sha256": "b" * 64,
+    }
+
     class Client:
         def __init__(self) -> None:
             self.calls: list[tuple[str, dict]] = []
@@ -5070,9 +5120,10 @@ def test_start_play_uses_public_quality_gate_phase_and_scene_tools() -> None:
                     "module_id": "module-1",
                     "scene_id": "scene-1",
                     "chapter_id": "chapter-1",
-                    "chapter": "Chapter 1",
-                    "title": "Opening",
-                }
+                        "chapter": "Chapter 1",
+                        "title": "Opening",
+                        "content": source_excerpt,
+                    }
             raise AssertionError((tool_id, arguments))
 
     client = Client()
@@ -5081,9 +5132,11 @@ def test_start_play_uses_public_quality_gate_phase_and_scene_tools() -> None:
             client,
             campaign_id="campaign-1",
             run_id="run-1",
-            initial_phase="lobby",
-            scene_id="scene-1",
-            objective="Survive the ambush",
+                initial_phase="lobby",
+                scene_id="scene-1",
+                source_excerpt=source_excerpt,
+                source_ref=source_ref,
+                objective="Survive the ambush",
             reachable_scene_ids=["scene-2"],
         )
     )
