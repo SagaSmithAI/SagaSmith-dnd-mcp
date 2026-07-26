@@ -27,7 +27,7 @@ def _config(tmp_path: Path) -> McpConfig:
     )
 
 
-def test_character_contest_is_atomic_branch_scoped_and_replayable(
+def test_character_check_contest_is_atomic_branch_scoped_and_replayable(
     tmp_path: Path,
 ) -> None:
     async def exercise() -> None:
@@ -72,6 +72,22 @@ def test_character_contest_is_atomic_branch_scoped_and_replayable(
             "campaign_get",
             {"campaign_id": campaign["id"]},
         )
+        await _call(
+            server,
+            "game_phase",
+            {
+                "campaign_id": campaign["id"],
+                "action": "set",
+                "tool_profile": "play",
+                "expected_revision": current["revision"],
+                "idempotency_key": "enter-play",
+            },
+        )
+        current = await _call(
+            server,
+            "campaign_get",
+            {"campaign_id": campaign["id"]},
+        )
         branches = await _call(
             server,
             "branch_query",
@@ -80,18 +96,21 @@ def test_character_contest_is_atomic_branch_scoped_and_replayable(
         branch_id = next(item["id"] for item in branches if item["is_current"])
         arguments = {
             "campaign_id": campaign["id"],
-            "source_actor_id": source["id"],
-            "target_actor_id": target["id"],
-            "source_ability": "deception",
-            "target_ability": "insight",
-            "target_advantage": True,
+            "action": "contest",
+            "payload": {
+                "source_actor_id": source["id"],
+                "target_actor_id": target["id"],
+                "source_ability": "deception",
+                "target_ability": "insight",
+                "target_advantage": True,
+            },
             "expected_revision": current["revision"],
             "branch_id": branch_id,
             "idempotency_key": "contest",
         }
 
-        settled = await _call(server, "character_contest", arguments)
-        replay = await _call(server, "character_contest", arguments)
+        settled = await _call(server, "character_check", arguments)
+        replay = await _call(server, "character_check", arguments)
 
         assert replay == settled
         assert settled["kind"] == "ability_contest"
@@ -122,7 +141,7 @@ def test_character_contest_is_atomic_branch_scoped_and_replayable(
     asyncio.run(exercise())
 
 
-def test_character_contest_rejects_2024_campaigns(tmp_path: Path) -> None:
+def test_character_check_contest_rejects_2024_campaigns(tmp_path: Path) -> None:
     async def exercise() -> None:
         server = create_server(_config(tmp_path))
         campaign = await _call(
@@ -152,17 +171,36 @@ def test_character_contest_rejects_2024_campaigns(tmp_path: Path) -> None:
             "campaign_get",
             {"campaign_id": campaign["id"]},
         )
+        await _call(
+            server,
+            "game_phase",
+            {
+                "campaign_id": campaign["id"],
+                "action": "set",
+                "tool_profile": "play",
+                "expected_revision": current["revision"],
+                "idempotency_key": "enter-play",
+            },
+        )
+        current = await _call(
+            server,
+            "campaign_get",
+            {"campaign_id": campaign["id"]},
+        )
 
         with pytest.raises(Exception, match="2014 rules procedure"):
             await _call(
                 server,
-                "character_contest",
+                "character_check",
                 {
                     "campaign_id": campaign["id"],
-                    "source_actor_id": actors[0]["id"],
-                    "target_actor_id": actors[1]["id"],
-                    "source_ability": "strength",
-                    "target_ability": "strength",
+                    "action": "contest",
+                    "payload": {
+                        "source_actor_id": actors[0]["id"],
+                        "target_actor_id": actors[1]["id"],
+                        "source_ability": "strength",
+                        "target_ability": "strength",
+                    },
                     "expected_revision": current["revision"],
                     "idempotency_key": "contest",
                 },

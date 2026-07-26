@@ -139,24 +139,23 @@ def test_text_module_statblock_candidate_can_create_a_source_bound_actor(
             await _call(server, "module_expand", {"chunk_id": chunk_id})
             for chunk_id in candidate["source_chunk_ids"]
         ]
-        assert candidate["execution_state"] == "review_ready", candidate.get(
-            "review_error"
-        )
-        assert [item["chunk_id"] for item in source_chunks] == candidate[
-            "source_chunk_ids"
-        ]
+        assert candidate["execution_state"] == "review_ready", candidate.get("review_error")
+        assert [item["chunk_id"] for item in source_chunks] == candidate["source_chunk_ids"]
         assert candidate["validation"]["name"] == "GOBLIN"
         reviewed = await _call(
             server,
-            "module_content_review",
+            "module_review",
             {
                 "campaign_id": campaign["id"],
-                "module_id": ingested["module_id"],
-                "scene_id": candidate["scene_id"],
-                "content_key": "goblin",
-                "normalized_content": candidate["normalized_content"],
-                "source_chunk_ids": candidate["source_chunk_ids"],
-                "observation": "Reviewed normalized text against all source chunks.",
+                "action": "submit_content",
+                "payload": {
+                    "module_id": ingested["module_id"],
+                    "scene_id": candidate["scene_id"],
+                    "content_key": "goblin",
+                    "normalized_content": candidate["normalized_content"],
+                    "source_chunk_ids": candidate["source_chunk_ids"],
+                    "observation": "Reviewed normalized text against all source chunks.",
+                },
                 "idempotency_key": "review-goblin",
             },
         )
@@ -274,15 +273,18 @@ def test_text_module_spellcaster_ocr_hydrates_source_bound_spells(
 
         reviewed = await _call(
             server,
-            "module_content_review",
+            "module_review",
             {
                 "campaign_id": campaign["id"],
-                "module_id": ingested["module_id"],
-                "scene_id": candidate["scene_id"],
-                "content_key": "evil-mage",
-                "normalized_content": candidate["normalized_content"],
-                "source_chunk_ids": candidate["source_chunk_ids"],
-                "observation": "Reviewed normalized text against all source chunks.",
+                "action": "submit_content",
+                "payload": {
+                    "module_id": ingested["module_id"],
+                    "scene_id": candidate["scene_id"],
+                    "content_key": "evil-mage",
+                    "normalized_content": candidate["normalized_content"],
+                    "source_chunk_ids": candidate["source_chunk_ids"],
+                    "observation": "Reviewed normalized text against all source chunks.",
+                },
                 "idempotency_key": "review-evil-mage",
             },
         )

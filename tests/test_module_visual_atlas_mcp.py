@@ -47,11 +47,7 @@ def _write_text_pdf(path: Path) -> None:
         }
     )
     resources = DictionaryObject(
-        {
-            NameObject("/Font"): DictionaryObject(
-                {NameObject("/F1"): writer._add_object(font)}
-            )
-        }
+        {NameObject("/Font"): DictionaryObject({NameObject("/F1"): writer._add_object(font)})}
     )
     page[NameObject("/Resources")] = resources
     lines = [
@@ -162,18 +158,19 @@ def test_pdf_page_review_becomes_snapshot_managed_scene_atlas(tmp_path: Path) ->
         source_asset = next(item for item in assets if item["media_type"] == "application/pdf")
         rendered = await _call(
             server,
-            "module_page_render",
+            "module_review",
             {
                 "campaign_id": campaign["id"],
-                "module_id": module_id,
-                "page_number": 1,
+                "action": "render_page",
+                "payload": {"module_id": module_id, "page_number": 1},
             },
         )
-        assert isinstance(rendered[0], TextContent)
-        assert isinstance(rendered[1], ImageContent)
-        render_metadata = json.loads(rendered[0].text)
+        assert isinstance(rendered.content[0], TextContent)
+        assert isinstance(rendered.content[1], ImageContent)
+        render_metadata = json.loads(rendered.content[0].text)
         assert render_metadata["asset"]["metadata"]["source_page"] == 1
-        assert rendered[1].mimeType == "image/png"
+        assert rendered.structuredContent == render_metadata
+        assert rendered.content[1].mimeType == "image/png"
 
         opened = await _call(
             server,
@@ -189,11 +186,11 @@ def test_pdf_page_review_becomes_snapshot_managed_scene_atlas(tmp_path: Path) ->
             "exposure_call",
             {
                 "exposure_id": opened["exposure_id"],
-                "tool_id": "module_page_render",
+                "tool_id": "module_review",
                 "arguments": {
                     "campaign_id": campaign["id"],
-                    "module_id": module_id,
-                    "page_number": 1,
+                    "action": "render_page",
+                    "payload": {"module_id": module_id, "page_number": 1},
                 },
             },
         )
@@ -201,7 +198,7 @@ def test_pdf_page_review_becomes_snapshot_managed_scene_atlas(tmp_path: Path) ->
         assert isinstance(fallback.content[0], TextContent)
         assert isinstance(fallback.content[1], ImageContent)
         fallback_envelope = json.loads(fallback.content[0].text)
-        assert fallback_envelope["tool_id"] == "module_page_render"
+        assert fallback_envelope["tool_id"] == "module_review"
         assert fallback_envelope["result"]["asset"]["metadata"]["source_page"] == 1
         assert fallback.structuredContent == fallback_envelope
         assert fallback.content[1].mimeType == "image/png"
@@ -257,16 +254,21 @@ def test_pdf_page_review_becomes_snapshot_managed_scene_atlas(tmp_path: Path) ->
 
         reviewed = await _call(
             server,
-            "module_content_review",
+            "module_review",
             {
                 "campaign_id": campaign["id"],
-                "module_id": module_id,
-                "scene_id": scene["scene_id"],
-                "content_key": "necromite-of-myrkul",
-                "normalized_content": NECROMITE,
-                "source_asset_id": source_asset["id"],
-                "page_number": 1,
-                "observation": "The reviewed page visibly contains the complete creature card.",
+                "action": "submit_content",
+                "payload": {
+                    "module_id": module_id,
+                    "scene_id": scene["scene_id"],
+                    "content_key": "necromite-of-myrkul",
+                    "normalized_content": NECROMITE,
+                    "source_asset_id": source_asset["id"],
+                    "page_number": 1,
+                    "observation": (
+                        "The reviewed page visibly contains the complete creature card."
+                    ),
+                },
                 "idempotency_key": "review-necromite",
             },
         )

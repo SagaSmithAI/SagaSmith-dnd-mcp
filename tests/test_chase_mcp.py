@@ -41,15 +41,10 @@ def _config(tmp_path: Path, import_root: Path) -> McpConfig:
     )
 
 
-def test_chase_tools_are_a_play_phase_group() -> None:
+def test_chase_facade_is_a_play_phase_group() -> None:
     group = GROUP_BY_ID["play.chase"]
     assert group.phase == "play"
-    assert group.tools == {
-        "chase_start",
-        "chase_query",
-        "chase_take_turn",
-        "chase_end",
-    }
+    assert group.tools == {"chase"}
 
 
 def test_public_chase_uses_exact_module_source_and_no_combat_map(
@@ -114,9 +109,7 @@ def test_public_chase_uses_exact_module_source_and_no_combat_map(
                     "idempotency_key": action,
                 },
             )
-        current_campaign = await _call(
-            server, "campaign_get", {"campaign_id": campaign["id"]}
-        )
+        current_campaign = await _call(server, "campaign_get", {"campaign_id": campaign["id"]})
         await _call(
             server,
             "module_import",
@@ -141,9 +134,7 @@ def test_public_chase_uses_exact_module_source_and_no_combat_map(
             "module_expand",
             {"chunk_id": hits[0]["id"]},
         )
-        transition_excerpt = (
-            "when the characters are close, the kenku ducks into an old tower."
-        )
+        transition_excerpt = "when the characters are close, the kenku ducks into an old tower."
         transition_expanded = expanded
         source_ref = {
             "module_id": expanded["module"]["id"],
@@ -152,9 +143,7 @@ def test_public_chase_uses_exact_module_source_and_no_combat_map(
             "page_start": expanded["page_start"],
             "page_end": expanded["page_end"],
             "heading_path": expanded["heading_path"],
-            "content_sha256": hashlib.sha256(
-                expanded["content"].encode("utf-8")
-            ).hexdigest(),
+            "content_sha256": hashlib.sha256(expanded["content"].encode("utf-8")).hexdigest(),
         }
         transition_source_ref = {
             "module_id": transition_expanded["module"]["id"],
@@ -192,9 +181,7 @@ def test_public_chase_uses_exact_module_source_and_no_combat_map(
                 "idempotency_key": "quarry",
             },
         )
-        current_campaign = await _call(
-            server, "campaign_get", {"campaign_id": campaign["id"]}
-        )
+        current_campaign = await _call(server, "campaign_get", {"campaign_id": campaign["id"]})
         phase = await _call(
             server,
             "game_phase",
@@ -209,19 +196,22 @@ def test_public_chase_uses_exact_module_source_and_no_combat_map(
         with pytest.raises(Exception, match="source_ref"):
             await _call(
                 server,
-                "chase_start",
+                "chase",
                 {
                     "campaign_id": campaign["id"],
-                    "participant_ids": [pursuer["id"], quarry["id"]],
-                    "quarry_ids": [quarry["id"]],
-                    "initial_distance_ft": 60,
-                    "scene_id": expanded["scene"]["id"],
-                    "source_ref": source_ref,
-                    "source_excerpt": source_excerpt,
-                    "close_transition": {
-                        "distance_ft": 0,
-                        "status": "destination_reached",
-                        "summary": transition_excerpt,
+                    "action": "start",
+                    "payload": {
+                        "participant_ids": [pursuer["id"], quarry["id"]],
+                        "quarry_ids": [quarry["id"]],
+                        "initial_distance_ft": 60,
+                        "scene_id": expanded["scene"]["id"],
+                        "source_ref": source_ref,
+                        "source_excerpt": source_excerpt,
+                        "close_transition": {
+                            "distance_ft": 0,
+                            "status": "destination_reached",
+                            "summary": transition_excerpt,
+                        },
                     },
                     "expected_revision": phase["campaign_revision"],
                     "idempotency_key": "chase-start-without-transition-evidence",
@@ -229,25 +219,28 @@ def test_public_chase_uses_exact_module_source_and_no_combat_map(
             )
         started = await _call(
             server,
-            "chase_start",
+            "chase",
             {
                 "campaign_id": campaign["id"],
-                "participant_ids": [pursuer["id"], quarry["id"]],
-                "quarry_ids": [quarry["id"]],
-                "initial_distance_ft": 60,
-                "scene_id": expanded["scene"]["id"],
-                "source_ref": source_ref,
-                "source_excerpt": source_excerpt,
-                "participant_config": [
-                    {"actor_id": pursuer["id"], "initiative": 20, "tie_breaker": 0},
-                    {"actor_id": quarry["id"], "initiative": 10, "tie_breaker": 1},
-                ],
-                "close_transition": {
-                    "distance_ft": 0,
-                    "status": "destination_reached",
-                    "summary": transition_excerpt,
-                    "source_ref": transition_source_ref,
-                    "source_excerpt": transition_excerpt,
+                "action": "start",
+                "payload": {
+                    "participant_ids": [pursuer["id"], quarry["id"]],
+                    "quarry_ids": [quarry["id"]],
+                    "initial_distance_ft": 60,
+                    "scene_id": expanded["scene"]["id"],
+                    "source_ref": source_ref,
+                    "source_excerpt": source_excerpt,
+                    "participant_config": [
+                        {"actor_id": pursuer["id"], "initiative": 20, "tie_breaker": 0},
+                        {"actor_id": quarry["id"], "initiative": 10, "tie_breaker": 1},
+                    ],
+                    "close_transition": {
+                        "distance_ft": 0,
+                        "status": "destination_reached",
+                        "summary": transition_excerpt,
+                        "source_ref": transition_source_ref,
+                        "source_excerpt": transition_excerpt,
+                    },
                 },
                 "expected_revision": phase["campaign_revision"],
                 "idempotency_key": "chase-start",
@@ -267,18 +260,19 @@ def test_public_chase_uses_exact_module_source_and_no_combat_map(
             for receipt in started["rule_receipts"]
         )
 
-        current_pursuer = await _call(
-            server, "character_get", {"character_id": pursuer["id"]}
-        )
+        current_pursuer = await _call(server, "character_get", {"character_id": pursuer["id"]})
         turn = await _call(
             server,
-            "chase_take_turn",
+            "chase",
             {
                 "campaign_id": campaign["id"],
-                "actor_id": pursuer["id"],
-                "action": "dash",
+                "action": "take_turn",
+                "payload": {
+                    "actor_id": pursuer["id"],
+                    "turn_action": "dash",
+                    "expected_actor_revision": current_pursuer["revision"],
+                },
                 "expected_revision": started["campaign_revision"],
-                "expected_actor_revision": current_pursuer["revision"],
                 "idempotency_key": "pursuer-turn",
             },
         )
@@ -287,7 +281,9 @@ def test_public_chase_uses_exact_module_source_and_no_combat_map(
         assert turn["chase"]["active"] is False
         assert turn["chase"]["outcome"]["status"] == "destination_reached"
         queried = await _call(
-            server, "chase_query", {"campaign_id": campaign["id"]}
+            server,
+            "chase",
+            {"campaign_id": campaign["id"], "action": "query"},
         )
         assert queried["chase"]["outcome"] == turn["chase"]["outcome"]
 

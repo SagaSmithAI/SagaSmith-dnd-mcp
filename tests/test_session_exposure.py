@@ -31,11 +31,7 @@ def _write_exposure_module_pdf(path: Path) -> None:
         }
     )
     page[NameObject("/Resources")] = DictionaryObject(
-        {
-            NameObject("/Font"): DictionaryObject(
-                {NameObject("/F1"): writer._add_object(font)}
-            )
-        }
+        {NameObject("/Font"): DictionaryObject({NameObject("/F1"): writer._add_object(font)})}
     )
     lines = [
         "Chapter 1: Dungeon",
@@ -119,15 +115,15 @@ def test_phase_groups_separate_player_reads_from_dm_control() -> None:
     assert GROUP_BY_ID["play.combat_control"].roles == frozenset({"owner", "dm"})
 
     assert "combat_end" not in GROUP_BY_ID["combat.turn"].tools
+    assert "combat_choice" in GROUP_BY_ID["combat.turn"].tools
+    assert "combat_choice" in GROUP_BY_ID["combat.actions"].tools
     assert "branch_query" in GROUP_BY_ID["combat.observe"].tools
     assert GROUP_BY_ID["combat.control"].roles == frozenset({"owner", "dm"})
     assert GROUP_BY_ID["combat.save"].roles == frozenset({"owner", "dm"})
     assert "branch_change" in GROUP_BY_ID["combat.save"].tools
     assert "snapshot_restore" in GROUP_BY_ID["combat.save"].tools
     assert GROUP_BY_ID["combat.maintenance"].roles == frozenset({"owner", "dm"})
-    assert GROUP_BY_ID["combat.maintenance"].tools == frozenset(
-        {"campaign_core_relock", "campaign_rules"}
-    )
+    assert GROUP_BY_ID["combat.maintenance"].tools == frozenset({"campaign_rules"})
     assert GROUP_BY_ID["combat.map"].roles == frozenset({"owner", "dm"})
 
 
@@ -225,6 +221,54 @@ def test_exposure_ttl_is_deterministic_and_expired_sessions_are_pruned() -> None
         registry.require_tool(exposure, "combat_check")
 
 
+@pytest.mark.parametrize(
+    ("retired_name", "replacement"),
+    [
+        ("chase_start", "chase(action='start')"),
+        ("chase_query", "chase(action='query')"),
+        ("chase_take_turn", "chase(action='take_turn')"),
+        ("chase_end", "chase(action='end')"),
+        ("character_contest", "character_check(action='contest')"),
+        ("campaign_core_relock", "campaign_rules(action='core_relock')"),
+        ("rule_document_page_render", "rule_import(action='render_page')"),
+        ("module_page_render", "module_review(action='render_page')"),
+        ("module_content_review", "module_review(action='submit_content')"),
+        ("continuity_commit", "memory_change(action='commit')"),
+        ("continuity_diagnostics", "memory_query(view='diagnostics')"),
+        ("combat_on_hit_ruling", "combat_choice(action='on_hit_ruling')"),
+    ],
+)
+def test_exposure_call_explains_retired_tool_replacements(
+    tmp_path: Path,
+    retired_name: str,
+    replacement: str,
+) -> None:
+    config = McpConfig(
+        home=tmp_path / "home",
+        database_url=None,
+        chroma_url=None,
+        chroma_path_override=None,
+        dnd_skills_dir=tmp_path / "dnd",
+        modulegen_skills_dir=tmp_path / "modulegen",
+        auto_seed_rules=False,
+    )
+
+    async def exercise() -> None:
+        server = create_server(config)
+        with pytest.raises(Exception, match="is retired") as caught:
+            await server.call_tool(
+                "exposure_call",
+                {
+                    "exposure_id": "unused-for-retired-tool",
+                    "tool_id": retired_name,
+                    "arguments": {},
+                },
+            )
+        assert replacement in str(caught.value)
+
+    asyncio.run(exercise())
+
+
 def test_native_tool_list_starts_core_and_expands_per_session(tmp_path) -> None:
     config = McpConfig(
         home=tmp_path / "home",
@@ -279,9 +323,7 @@ def test_stdio_session_uses_native_refresh_and_exposure_call_fallback(tmp_path) 
                 assert {tool.name for tool in (await session.list_tools()).tools} == set(CORE_TOOLS)
 
                 principal_id = "discord:user-42"
-                opened = await session.call_tool(
-                    "exposure_open", {"principal_id": principal_id}
-                )
+                opened = await session.call_tool("exposure_open", {"principal_id": principal_id})
                 exposure_id = json.loads(opened.content[0].text)["exposure_id"]
                 loaded = await session.call_tool(
                     "exposure_load",
@@ -322,9 +364,7 @@ def test_stdio_session_uses_native_refresh_and_exposure_call_fallback(tmp_path) 
                     {"exposure_id": exposure_id, "group_id": "lobby.rules"},
                 )
                 assert not loaded.isError
-                assert "rule_document_page_render" in {
-                    tool.name for tool in (await session.list_tools()).tools
-                }
+                assert "rule_import" in {tool.name for tool in (await session.list_tools()).tools}
                 fallback = await session.call_tool(
                     "exposure_call",
                     {
@@ -481,18 +521,21 @@ def test_stdio_exposure_fallback_preserves_rendered_image_content(tmp_path: Path
                     "exposure_call",
                     {
                         "exposure_id": exposure_id,
-                        "tool_id": "module_page_render",
+                        "tool_id": "module_review",
                         "arguments": {
                             "campaign_id": campaign_id,
-                            "module_id": module_id,
-                            "page_number": 1,
-                            "scale": 0.5,
+                            "action": "render_page",
+                            "payload": {
+                                "module_id": module_id,
+                                "page_number": 1,
+                                "scale": 0.5,
+                            },
                         },
                     },
                     timeout_seconds=90,
                 )
                 envelope = decoded(rendered)
-                assert envelope["tool_id"] == "module_page_render"
+                assert envelope["tool_id"] == "module_review"
                 assert envelope["result"]["asset"]["metadata"]["source_page"] == 1
                 assert len(rendered.content[0].text) < 10_000
                 images = [item for item in rendered.content if isinstance(item, ImageContent)]

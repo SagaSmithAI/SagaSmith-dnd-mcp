@@ -136,9 +136,10 @@ def test_core_srd_content_catalog_is_structured_and_selectable(tmp_path: Path) -
         assert selected["sheet"]["progression"]["classes"][1]["subclass"] == (
             "Path of the Berserker"
         )
-        assert selected["sheet"]["content"]["selections"][0]["pack_version"] == berserker[
-            "pack_version"
-        ]
+        assert (
+            selected["sheet"]["content"]["selections"][0]["pack_version"]
+            == berserker["pack_version"]
+        )
 
         life_domain = next(
             item
@@ -177,10 +178,7 @@ def test_core_srd_content_catalog_is_structured_and_selectable(tmp_path: Path) -
                 "idempotency_key": "catalog-life-domain",
             },
         )
-        domain_spells = {
-            spell["name"]: spell
-            for spell in cleric["sheet"]["content"]["spells"]
-        }
+        domain_spells = {spell["name"]: spell for spell in cleric["sheet"]["content"]["spells"]}
         assert set(domain_spells) == {"Bless", "Cure Wounds"}
         for spell in domain_spells.values():
             assert spell["grant"] == {
@@ -253,9 +251,7 @@ def test_core_srd_content_catalog_is_structured_and_selectable(tmp_path: Path) -
                 "idempotency_key": "catalog-wounded",
             },
         )
-        current_campaign = await call(
-            server, "campaign_get", {"campaign_id": campaign["id"]}
-        )
+        current_campaign = await call(server, "campaign_get", {"campaign_id": campaign["id"]})
         cure_wounds = domain_spells["Cure Wounds"]
         healed_facade = await call(
             server,
@@ -325,8 +321,7 @@ def test_core_srd_content_catalog_is_structured_and_selectable(tmp_path: Path) -
             {
                 "character_id": bard["id"],
                 "artifact_id": (
-                    "dnd5e.content.srd2014.feature."
-                    "college-of-lore-bonus-proficiencies"
+                    "dnd5e.content.srd2014.feature.college-of-lore-bonus-proficiencies"
                 ),
                 "selection": {"skills": ["arcana", "investigation", "persuasion"]},
                 "expected_revision": bard["revision"],
@@ -446,12 +441,11 @@ def test_core_srd_content_catalog_is_structured_and_selectable(tmp_path: Path) -
         assert custom_sheet["progression"]["background_grants"]["equipment_item_ids"] == [
             "custom-vestments"
         ]
-        assert custom_sheet["progression"]["background_grants"]["choices"][
-            "base_background"
-        ] == "Acolyte"
-        assert custom_sheet["progression"]["background_grants"]["choices"][
-            "customized"
-        ] is True
+        assert (
+            custom_sheet["progression"]["background_grants"]["choices"]["base_background"]
+            == "Acolyte"
+        )
+        assert custom_sheet["progression"]["background_grants"]["choices"]["customized"] is True
         assert custom_sheet["skills"]["persuasion"]["proficiency"] == "proficient"
         assert custom_sheet["skills"]["history"]["proficiency"] == "proficient"
 
@@ -575,8 +569,7 @@ def test_core_srd_content_catalog_is_structured_and_selectable(tmp_path: Path) -
             }
         ]
         assert any(
-            item["name"] == "Dwarven Toughness"
-            for item in dwarf["sheet"]["content"]["features"]
+            item["name"] == "Dwarven Toughness" for item in dwarf["sheet"]["content"]["features"]
         )
 
         fire_bolt = next(
@@ -1067,18 +1060,33 @@ def test_rulebook_import_source_bound_pack_and_noncombat_settlement(tmp_path: Pa
             },
         )
         current = await call(server, "campaign_get", {"campaign_id": campaign["id"]})
+        await call(
+            server,
+            "game_phase",
+            {
+                "campaign_id": campaign["id"],
+                "action": "set",
+                "tool_profile": "play",
+                "expected_revision": current["revision"],
+                "idempotency_key": "xgte-enter-play",
+            },
+        )
+        current = await call(server, "campaign_get", {"campaign_id": campaign["id"]})
         settled = await call(
             server,
             "character_check",
             {
                 "campaign_id": campaign["id"],
-                "actor_id": character["id"],
-                "kind": "check",
-                "ability": "intelligence",
-                "dc": 12,
-                "rule_facts": {
-                    "skill_proficiency_applies": True,
-                    "tool_proficiency_applies": True,
+                "action": "check",
+                "payload": {
+                    "actor_id": character["id"],
+                    "kind": "check",
+                    "ability": "intelligence",
+                    "dc": 12,
+                    "rule_facts": {
+                        "skill_proficiency_applies": True,
+                        "tool_proficiency_applies": True,
+                    },
                 },
                 "expected_revision": current["revision"],
                 "idempotency_key": "xgte-tool-check",
@@ -1197,21 +1205,22 @@ def test_checkpointed_core_relock_preserves_profile_and_adopts_current_runtime(
         )
         branch = next(
             item
-            for item in await call(
-                server, "branch_list", {"campaign_id": campaign["id"]}
-            )
+            for item in await call(server, "branch_list", {"campaign_id": campaign["id"]})
             if item["is_current"]
         )
         relocked = await call(
             server,
-            "campaign_core_relock",
+            "campaign_rules",
             {
                 "campaign_id": campaign["id"],
-                "expected_core_fingerprint": "old-core-fingerprint",
-                "reason": "Reviewed runtime upgrade during a checkpointed encounter.",
+                "action": "core_relock",
+                "payload": {
+                    "expected_core_fingerprint": "old-core-fingerprint",
+                    "reason": "Reviewed runtime upgrade during a checkpointed encounter.",
+                    "expected_head_snapshot_id": snapshot["id"],
+                },
                 "branch_id": branch["id"],
                 "expected_revision": changed["revision"],
-                "expected_head_snapshot_id": snapshot["id"],
                 "idempotency_key": "adopt-current-core",
             },
         )
@@ -1225,14 +1234,17 @@ def test_checkpointed_core_relock_preserves_profile_and_adopts_current_runtime(
         assert relocked["checkpoint_snapshot_id"] == snapshot["id"]
         replayed = await call(
             server,
-            "campaign_core_relock",
+            "campaign_rules",
             {
                 "campaign_id": campaign["id"],
-                "expected_core_fingerprint": "old-core-fingerprint",
-                "reason": "Reviewed runtime upgrade during a checkpointed encounter.",
+                "action": "core_relock",
+                "payload": {
+                    "expected_core_fingerprint": "old-core-fingerprint",
+                    "reason": "Reviewed runtime upgrade during a checkpointed encounter.",
+                    "expected_head_snapshot_id": snapshot["id"],
+                },
                 "branch_id": branch["id"],
                 "expected_revision": changed["revision"],
-                "expected_head_snapshot_id": snapshot["id"],
                 "idempotency_key": "adopt-current-core",
             },
         )
@@ -1248,9 +1260,9 @@ def test_checkpointed_core_relock_preserves_profile_and_adopts_current_runtime(
             },
         )
         assert lock_view["core_pack"]["fingerprint"] == "old-core-fingerprint"
-        assert lock_view["available_core_pack"]["fingerprint"] == relocked["core_pack"][
-            "fingerprint"
-        ]
+        assert (
+            lock_view["available_core_pack"]["fingerprint"] == relocked["core_pack"]["fingerprint"]
+        )
         assert lock_view["conversion_required"] is True
         conversion_arguments = {
             "campaign_id": campaign["id"],
@@ -1280,9 +1292,10 @@ def test_checkpointed_core_relock_preserves_profile_and_adopts_current_runtime(
         )
         assert converted_profile["profile"]["locale"] == "zh-CN"
         assert converted_profile["profile"]["options"]["house_option"] == "preserved"
-        assert converted_profile["effective"]["core_pack"]["fingerprint"] == relocked["core_pack"][
-            "fingerprint"
-        ]
+        assert (
+            converted_profile["effective"]["core_pack"]["fingerprint"]
+            == relocked["core_pack"]["fingerprint"]
+        )
 
     asyncio.run(exercise())
 

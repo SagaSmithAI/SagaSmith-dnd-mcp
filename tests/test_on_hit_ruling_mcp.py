@@ -170,32 +170,38 @@ def test_public_on_hit_ruling_applies_and_escapes_web_condition(
             Exception,
             match="explicit structured on-hit effect cannot be dismissed",
         ):
-            await raw(
-                "combat_on_hit_ruling",
+            await call(
+                "combat_choice",
                 {
                     "campaign_id": campaign["id"],
-                    "target_id": target["id"],
-                    "choice_id": choice_id,
-                    "selection": {
-                        "id": "dismiss",
-                        "source_excerpt": web_effect,
+                    "action": "on_hit_ruling",
+                    "actor_id": target["id"],
+                    "payload": {
+                        "choice_id": choice_id,
+                        "selection": {
+                            "id": "dismiss",
+                            "source_excerpt": web_effect,
+                        },
                     },
                     "expected_revision": attacked["campaign_revision"],
                     "idempotency_key": "invalid-dismiss-web",
                 },
             )
-        ruled = await raw(
-            "combat_on_hit_ruling",
+        ruled = await call(
+            "combat_choice",
             {
                 "campaign_id": campaign["id"],
-                "target_id": target["id"],
-                "choice_id": choice_id,
-                "selection": {
-                    "id": "apply_condition",
-                    "condition": "restrained",
-                    "escape_dc": 12,
-                    "escape_abilities": ["strength"],
-                    "source_excerpt": web_effect,
+                "action": "on_hit_ruling",
+                "actor_id": target["id"],
+                "payload": {
+                    "choice_id": choice_id,
+                    "selection": {
+                        "id": "apply_condition",
+                        "condition": "restrained",
+                        "escape_dc": 12,
+                        "escape_abilities": ["strength"],
+                        "source_excerpt": web_effect,
+                    },
                 },
                 "expected_revision": attacked["campaign_revision"],
                 "idempotency_key": "rule-web",
@@ -237,9 +243,7 @@ def test_public_on_hit_ruling_applies_and_escapes_web_condition(
         )
         assert target_after_escape["sheet"]["conditions"] == []
         target_combatant = next(
-            item
-            for item in escaped["combat"]["combatants"]
-            if item["actor_id"] == target["id"]
+            item for item in escaped["combat"]["combatants"] if item["actor_id"] == target["id"]
         )
         assert target_combatant["turn_budget"]["main_action"] == 0
         assert escaped["combat"]["ongoing_effects"][0]["active"] is False
@@ -345,9 +349,7 @@ def test_public_guiding_bolt_effect_grants_and_consumes_next_attack_advantage(
                         },
                     }
                 ]
-                sheet["inventory"]["equipment_slots"]["main_hand"] = (
-                    "guiding-bolt-test"
-                )
+                sheet["inventory"]["equipment_slots"]["main_hand"] = "guiding-bolt-test"
             await call(
                 "character_sheet_replace",
                 {
@@ -408,18 +410,20 @@ def test_public_guiding_bolt_effect_grants_and_consumes_next_attack_advantage(
             if item["id"] == attacked["result"]["pending_on_hit_ruling_id"]
         )
         assert any(
-            candidate["id"] == "next_attack_advantage"
-            for candidate in pending["candidates"]
+            candidate["id"] == "next_attack_advantage" for candidate in pending["candidates"]
         )
-        ruled = await raw(
-            "combat_on_hit_ruling",
+        ruled = await call(
+            "combat_choice",
             {
                 "campaign_id": campaign["id"],
-                "target_id": target["id"],
-                "choice_id": attacked["result"]["pending_on_hit_ruling_id"],
-                "selection": {
-                    "id": "next_attack_advantage",
-                    "source_excerpt": effect,
+                "action": "on_hit_ruling",
+                "actor_id": target["id"],
+                "payload": {
+                    "choice_id": attacked["result"]["pending_on_hit_ruling_id"],
+                    "selection": {
+                        "id": "next_attack_advantage",
+                        "source_excerpt": effect,
+                    },
                 },
                 "expected_revision": attacked["campaign_revision"],
                 "idempotency_key": "rule-guiding-bolt",
@@ -464,14 +468,9 @@ def test_public_guiding_bolt_effect_grants_and_consumes_next_attack_advantage(
                 "idempotency_key": "consume-guiding-bolt",
             },
         )
-        assert (
-            consumed["result"]["consumed_next_attack_advantage_effect_id"]
-            == effect_id
-        )
+        assert consumed["result"]["consumed_next_attack_advantage_effect_id"] == effect_id
         stored = next(
-            item
-            for item in consumed["combat"]["ongoing_effects"]
-            if item["id"] == effect_id
+            item for item in consumed["combat"]["ongoing_effects"] if item["id"] == effect_id
         )
         assert stored["active"] is False
         assert stored["resolution"]["kind"] == "attack_roll"
@@ -648,25 +647,28 @@ def test_public_on_hit_ruling_resolves_spider_bite_poison(
             },
         )
         assert attacked["status"] == "pending_ruling"
-        ruled = await raw(
-            "combat_on_hit_ruling",
+        ruled = await call(
+            "combat_choice",
             {
                 "campaign_id": campaign["id"],
-                "target_id": target["id"],
-                "choice_id": attacked["result"]["pending_on_hit_ruling_id"],
-                "selection": {
-                    "id": "saving_throw_damage",
-                    "save_ability": "constitution",
-                    "save_dc": 11,
-                    "damage_formula": "2d8",
-                    "damage_type": "poison",
-                    "half_on_success": True,
-                    "zero_hp_effect": {
-                        "stable": True,
-                        "conditions": ["poisoned", "paralyzed"],
-                        "duration": {"period": "hour", "remaining": 1},
+                "action": "on_hit_ruling",
+                "actor_id": target["id"],
+                "payload": {
+                    "choice_id": attacked["result"]["pending_on_hit_ruling_id"],
+                    "selection": {
+                        "id": "saving_throw_damage",
+                        "save_ability": "constitution",
+                        "save_dc": 11,
+                        "damage_formula": "2d8",
+                        "damage_type": "poison",
+                        "half_on_success": True,
+                        "zero_hp_effect": {
+                            "stable": True,
+                            "conditions": ["poisoned", "paralyzed"],
+                            "duration": {"period": "hour", "remaining": 1},
+                        },
+                        "source_excerpt": bite_effect,
                     },
-                    "source_excerpt": bite_effect,
                 },
                 "expected_revision": attacked["campaign_revision"],
                 "idempotency_key": "rule-bite",

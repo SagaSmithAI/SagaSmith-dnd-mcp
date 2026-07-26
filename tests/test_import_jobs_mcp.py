@@ -63,16 +63,10 @@ def test_rule_import_renders_a_checksum_bound_review_page(tmp_path: Path) -> Non
     )
     font_ref = writer._add_object(font)
     page[NameObject("/Resources")] = DictionaryObject(
-        {
-            NameObject("/Font"): DictionaryObject(
-                {NameObject("/F1"): font_ref}
-            )
-        }
+        {NameObject("/Font"): DictionaryObject({NameObject("/F1"): font_ref})}
     )
     content = DecodedStreamObject()
-    content.set_data(
-        b"BT /F1 12 Tf 20 160 Td (Commoner rulebook review page) Tj ET"
-    )
+    content.set_data(b"BT /F1 12 Tf 20 160 Td (Commoner rulebook review page) Tj ET")
     page[NameObject("/Contents")] = writer._add_object(content)
     with source.open("wb") as stream:
         writer.write(stream)
@@ -108,20 +102,21 @@ def test_rule_import_renders_a_checksum_bound_review_page(tmp_path: Path) -> Non
         )
         job_id = staged["result"]["job"]["id"]
         rendered = await server.call_tool(
-            "rule_document_page_render",
+            "rule_import",
             {
                 "campaign_id": campaign["id"],
-                "job_id": job_id,
-                "page_number": 1,
+                "action": "render_page",
+                "payload": {"job_id": job_id, "page_number": 1},
             },
         )
 
-        assert isinstance(rendered[0], TextContent)
-        assert isinstance(rendered[1], ImageContent)
-        metadata = json.loads(rendered[0].text)
+        assert isinstance(rendered.content[0], TextContent)
+        assert isinstance(rendered.content[1], ImageContent)
+        metadata = json.loads(rendered.content[0].text)
         assert metadata["page_number"] == 1
         assert metadata["source_checksum"] == staged["result"]["checksum"]
-        assert rendered[1].mimeType == "image/png"
+        assert rendered.structuredContent == metadata
+        assert rendered.content[1].mimeType == "image/png"
 
         _, inspected = await server.call_tool(
             "rule_import",
@@ -139,9 +134,7 @@ def test_rule_import_renders_a_checksum_bound_review_page(tmp_path: Path) -> Non
                 "action": "ingest",
                 "payload": {
                     "job_id": job_id,
-                    "acknowledge_warnings": bool(
-                        inspected["result"]["inspection"]["warnings"]
-                    ),
+                    "acknowledge_warnings": bool(inspected["result"]["inspection"]["warnings"]),
                 },
                 "idempotency_key": "ingest",
             },
@@ -203,8 +196,9 @@ def test_rule_import_renders_a_checksum_bound_review_page(tmp_path: Path) -> Non
         created = created["result"]
         assert created["source"]["normalized_content_sha256"]
         assert created["character"]["derived"]["hit_points"]["max"] == 4
-        assert "Reviewed rule statblock: rule-source:" in (
-            created["character"]["notes"]["profile"]["dm_notes"]
+        assert (
+            "Reviewed rule statblock: rule-source:"
+            in (created["character"]["notes"]["profile"]["dm_notes"])
         )
 
     asyncio.run(exercise())
@@ -651,9 +645,10 @@ def test_module_import_facade_stages_only_allowlisted_documents(tmp_path: Path) 
         )
         assert inspected["preview"]["valid"] is True
         assert inspected["preview"]["metadata"]["normalization_cache_hit"] is True
-        assert inspected["preview"]["profile_metadata"]["runtime_manifest"][
-            "module_key"
-        ] == "managed-adventure"
+        assert (
+            inspected["preview"]["profile_metadata"]["runtime_manifest"]["module_key"]
+            == "managed-adventure"
+        )
         validated = await call(
             server,
             "module_import",

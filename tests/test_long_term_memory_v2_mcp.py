@@ -107,11 +107,14 @@ def test_memory_facade_supports_stable_upsert_revision_and_supersede(tmp_path: P
             },
         )
         assert superseded["status"] == "superseded"
-        assert await _call(
-            server,
-            "memory_query",
-            {"campaign_id": campaign["id"], "view": "list"},
-        ) == []
+        assert (
+            await _call(
+                server,
+                "memory_query",
+                {"campaign_id": campaign["id"], "view": "list"},
+            )
+            == []
+        )
         history = await _call(
             server,
             "memory_query",
@@ -126,7 +129,7 @@ def test_memory_facade_supports_stable_upsert_revision_and_supersede(tmp_path: P
     asyncio.run(exercise())
 
 
-def test_continuity_commit_is_atomic_idempotent_and_pins_skill_manifest(tmp_path: Path) -> None:
+def test_memory_commit_is_atomic_idempotent_and_pins_skill_manifest(tmp_path: Path) -> None:
     async def exercise() -> None:
         server = create_server(_config(tmp_path))
         campaign = await _call(
@@ -145,6 +148,7 @@ def test_continuity_commit_is_atomic_idempotent_and_pins_skill_manifest(tmp_path
         )
         arguments = {
             "campaign_id": campaign["id"],
+            "action": "commit",
             "payload": {
                 "event": {
                     "summary": "The witness hears the midnight bell.",
@@ -170,20 +174,19 @@ def test_continuity_commit_is_atomic_idempotent_and_pins_skill_manifest(tmp_path
             "expected_revision": campaign["revision"],
             "idempotency_key": "scene-commit",
         }
-        committed = await _call(server, "continuity_commit", arguments)
-        replayed = await _call(server, "continuity_commit", arguments)
+        committed = await _call(server, "memory_change", arguments)
+        replayed = await _call(server, "memory_change", arguments)
 
         assert replayed["event"]["id"] == committed["event"]["id"]
         assert committed["snapshot"] is not None
         assert len(committed["skill_manifest"]) == 2
         assert all(len(item["checksum"]) == 64 for item in committed["skill_manifest"])
-        assert committed["event"]["payload"]["_sagasmith_skill_manifest"] == (
-            committed["skill_manifest"]
+        assert (
+            committed["event"]["payload"]["_sagasmith_skill_manifest"]
+            == (committed["skill_manifest"])
         )
         assert committed["facts"][0]["source_event_ids"] == [committed["event"]["id"]]
-        assert committed["actor_knowledge"][0]["source_event_id"] == (
-            committed["event"]["id"]
-        )
+        assert committed["actor_knowledge"][0]["source_event_id"] == (committed["event"]["id"])
         context = await _call(
             server,
             "continuity_context",
@@ -195,13 +198,11 @@ def test_continuity_commit_is_atomic_idempotent_and_pins_skill_manifest(tmp_path
             },
         )
         assert context["retrieval"]["budget_chars"] == 1_000
-        assert context["retrieval"]["strategy"] == (
-            "lexical_structured_shared_budget_v2"
-        )
+        assert context["retrieval"]["strategy"] == ("lexical_structured_shared_budget_v2")
         diagnostics = await _call(
             server,
-            "continuity_diagnostics",
-            {"campaign_id": campaign["id"]},
+            "memory_query",
+            {"campaign_id": campaign["id"], "view": "diagnostics"},
         )
         assert diagnostics["facts"]["active"] == 1
         assert diagnostics["actor_knowledge"]["active"] == 1
@@ -216,14 +217,13 @@ def test_continuity_commit_is_atomic_idempotent_and_pins_skill_manifest(tmp_path
         with pytest.raises(Exception, match="live character"):
             await _call(
                 server,
-                "continuity_commit",
+                "memory_change",
                 {
                     "campaign_id": campaign["id"],
+                    "action": "commit",
                     "payload": {
                         "event": {"summary": "This unit must roll back."},
-                        "facts": [
-                            {"fact_key": "rollback:test", "content": "Must roll back."}
-                        ],
+                        "facts": [{"fact_key": "rollback:test", "content": "Must roll back."}],
                         "actor_knowledge": [
                             {
                                 "actor_id": "missing",

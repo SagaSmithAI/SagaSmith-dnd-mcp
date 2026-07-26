@@ -111,9 +111,7 @@ async def _campaign_with_narrative_module(tmp_path: Path):
         "page_start": expanded["page_start"] or 1,
         "page_end": expanded["page_end"] or expanded["page_start"] or 1,
         "heading_path": expanded["heading_path"],
-        "content_sha256": hashlib.sha256(
-            expanded["content"].encode("utf-8")
-        ).hexdigest(),
+        "content_sha256": hashlib.sha256(expanded["content"].encode("utf-8")).hexdigest(),
     }
     return server, campaign["id"], source_ref
 
@@ -122,9 +120,7 @@ def test_narrative_npc_is_source_bound_and_explicitly_noncombat(
     tmp_path: Path,
 ) -> None:
     async def exercise() -> None:
-        server, campaign_id, source_ref = await _campaign_with_narrative_module(
-            tmp_path
-        )
+        server, campaign_id, source_ref = await _campaign_with_narrative_module(tmp_path)
         arguments = {
             "mode": "narrative_npc",
             "payload": {
@@ -160,9 +156,7 @@ def test_narrative_npc_is_source_bound_and_explicitly_noncombat(
             "role": "Pragmatic farmer and source of local guidance.",
             "combat_statblock": "not_imported",
             "source_ref": source_ref,
-            "source_excerpt": (
-                "Qelline Alderleaf is a pragmatic halfling farmer and a kind host."
-            ),
+            "source_excerpt": ("Qelline Alderleaf is a pragmatic halfling farmer and a kind host."),
             "combat_eligible": False,
         }
         evidence_prefix = "sagasmith:narrative-npc-source:"
@@ -172,6 +166,22 @@ def test_narrative_npc_is_source_bound_and_explicitly_noncombat(
         assert evidence["source_ref"] == source_ref
         assert evidence["combat_statblock"] == "not_imported"
 
+        campaign = await _call(
+            server,
+            "campaign_query",
+            {"view": "get", "payload": {"campaign_id": campaign_id}},
+        )
+        await _call(
+            server,
+            "game_phase",
+            {
+                "campaign_id": campaign_id,
+                "action": "set",
+                "tool_profile": "play",
+                "expected_revision": campaign["revision"],
+                "idempotency_key": "enter-play",
+            },
+        )
         campaign = await _call(
             server,
             "campaign_query",
@@ -189,10 +199,13 @@ def test_narrative_npc_is_source_bound_and_explicitly_noncombat(
                 "character_check",
                 {
                     "campaign_id": campaign_id,
-                    "actor_id": created["character"]["id"],
-                    "kind": "ability",
-                    "ability": "wisdom",
-                    "dc": 10,
+                    "action": "check",
+                    "payload": {
+                        "actor_id": created["character"]["id"],
+                        "kind": "ability",
+                        "ability": "wisdom",
+                        "dc": 10,
+                    },
                     "expected_revision": campaign["revision"],
                     "branch_id": branch_id,
                     "idempotency_key": "narrative-check",
@@ -218,18 +231,14 @@ def test_narrative_npc_rejects_unverifiable_identity_and_source(
     tmp_path: Path,
 ) -> None:
     async def exercise() -> None:
-        server, campaign_id, source_ref = await _campaign_with_narrative_module(
-            tmp_path
-        )
+        server, campaign_id, source_ref = await _campaign_with_narrative_module(tmp_path)
         payload = {
             "campaign_id": campaign_id,
             "name": "Invented Stranger",
             "role": "Unsupported identity.",
             "summary": "This actor is not in the cited source.",
             "source_ref": source_ref,
-            "source_excerpt": (
-                "Qelline Alderleaf is a pragmatic halfling farmer and a kind host."
-            ),
+            "source_excerpt": ("Qelline Alderleaf is a pragmatic halfling farmer and a kind host."),
         }
         with pytest.raises(Exception, match="name is not present"):
             await _call(
@@ -261,9 +270,7 @@ def test_narrative_npc_supports_distinct_anonymous_source_instances(
     tmp_path: Path,
 ) -> None:
     async def exercise() -> None:
-        server, campaign_id, source_ref = await _campaign_with_narrative_module(
-            tmp_path
-        )
+        server, campaign_id, source_ref = await _campaign_with_narrative_module(tmp_path)
         created = []
         for index in (1, 2):
             instance_key = f"retreat-{index}"
@@ -296,9 +303,10 @@ def test_narrative_npc_supports_distinct_anonymous_source_instances(
         for index, item in enumerate(created, start=1):
             assert item["narrative_npc"]["source_identity"] == "Townsfolk"
             assert item["narrative_npc"]["instance_key"] == f"retreat-{index}"
-            assert "anonymous_source_instance" in item["character"]["sheet"][
-                "adventure_state"
-            ]["status_tags"]
+            assert (
+                "anonymous_source_instance"
+                in item["character"]["sheet"]["adventure_state"]["status_tags"]
+            )
 
         with pytest.raises(Exception, match="anonymous narrative NPC name"):
             await _call(
@@ -327,9 +335,7 @@ def test_narrative_npc_accepts_two_part_name_split_by_source_appositive(
     tmp_path: Path,
 ) -> None:
     async def exercise() -> None:
-        server, campaign_id, source_ref = await _campaign_with_narrative_module(
-            tmp_path
-        )
+        server, campaign_id, source_ref = await _campaign_with_narrative_module(tmp_path)
         created = await _call(
             server,
             "character_create_from",
@@ -341,9 +347,7 @@ def test_narrative_npc_accepts_two_part_name_split_by_source_appositive(
                     "role": "Hidden noble and witness.",
                     "summary": "Renaer waits in hiding after an attack.",
                     "source_ref": source_ref,
-                    "source_excerpt": (
-                        "Renaer—the son of Lord Dagult Neverember—waits in hiding."
-                    ),
+                    "source_excerpt": ("Renaer—the son of Lord Dagult Neverember—waits in hiding."),
                 },
                 "idempotency_key": "narrative-renaer",
             },

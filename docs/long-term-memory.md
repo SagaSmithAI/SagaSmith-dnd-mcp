@@ -6,7 +6,7 @@ actor knowledge, module progress, and snapshots belong to the campaign database.
 
 ## Write path
 
-Use `continuity_commit` after a resolved scene. It writes one event, zero or more
+Use `memory_change(action="commit")` after a resolved scene. It writes one event, zero or more
 stable-keyed facts, zero or more actor-knowledge revisions, and an optional
 snapshot in one database transaction. A failed item rolls back the entire unit.
 Every call requires an idempotency key. Updates to existing facts or knowledge
@@ -37,7 +37,7 @@ what a character knows.
 
 `continuity_context` ranks all eligible ledgers under one `budget_chars` limit and
 returns retrieval counts so truncation is visible. Owner/DM callers can use
-`continuity_diagnostics` for inactive revisions, orphan event references,
+`memory_query(view="diagnostics")` for inactive revisions, orphan event references,
 unsnapshotted events, checkpoint size, recap evidence, and Skill-manifest drift;
 the diagnostic response contains no narrative content. Snapshot recaps always
 retain a deterministic canonical delta. Optional generated presentation text must

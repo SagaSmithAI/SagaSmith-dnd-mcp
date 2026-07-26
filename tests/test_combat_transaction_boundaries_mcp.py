@@ -82,14 +82,11 @@ def test_end_turn_does_not_revision_unchanged_character_documents(tmp_path: Path
             },
         )
         current = [
-            await _call(server, "character_get", {"character_id": item["id"]})
-            for item in actors
+            await _call(server, "character_get", {"character_id": item["id"]}) for item in actors
         ]
 
         assert [item["entity_type"] for item in ended["revisions"]] == ["campaign"]
-        assert [item["revision"] for item in current] == [
-            item["revision"] for item in actors
-        ]
+        assert [item["revision"] for item in current] == [item["revision"] for item in actors]
 
     asyncio.run(exercise())
 
@@ -102,9 +99,7 @@ def test_available_actions_explicitly_discovers_required_death_save(
     def deterministic_death_save(sheet, **kwargs):
         return original_death_save(sheet, **kwargs, rng=random.Random(1))
 
-    monkeypatch.setattr(
-        server_module, "resolve_death_save_to_sheet", deterministic_death_save
-    )
+    monkeypatch.setattr(server_module, "resolve_death_save_to_sheet", deterministic_death_save)
 
     async def exercise() -> None:
         server = create_server(_config(tmp_path))
@@ -202,6 +197,18 @@ def test_invalid_branch_is_rejected_before_noncombat_check_rolls(
             },
         )
         campaign = await _call(server, "campaign_get", {"campaign_id": campaign["id"]})
+        await _call(
+            server,
+            "game_phase",
+            {
+                "campaign_id": campaign["id"],
+                "action": "set",
+                "tool_profile": "play",
+                "expected_revision": campaign["revision"],
+                "idempotency_key": "enter-play",
+            },
+        )
+        campaign = await _call(server, "campaign_get", {"campaign_id": campaign["id"]})
 
         with pytest.raises(Exception, match="checked-out branch"):
             await _call(
@@ -209,10 +216,13 @@ def test_invalid_branch_is_rejected_before_noncombat_check_rolls(
                 "character_check",
                 {
                     "campaign_id": campaign["id"],
-                    "actor_id": actor["id"],
-                    "kind": "check",
-                    "ability": "wisdom",
-                    "dc": 10,
+                    "action": "check",
+                    "payload": {
+                        "actor_id": actor["id"],
+                        "kind": "check",
+                        "ability": "wisdom",
+                        "dc": 10,
+                    },
                     "branch_id": "not-the-current-branch",
                     "expected_revision": campaign["revision"],
                     "idempotency_key": "invalid-branch-check",
@@ -258,24 +268,39 @@ def test_jack_of_all_trades_is_applied_and_receipted_by_public_tools(
             },
         )
         campaign = await _call(server, "campaign_get", {"campaign_id": campaign["id"]})
+        await _call(
+            server,
+            "game_phase",
+            {
+                "campaign_id": campaign["id"],
+                "action": "set",
+                "tool_profile": "play",
+                "expected_revision": campaign["revision"],
+                "idempotency_key": "enter-play",
+            },
+        )
+        campaign = await _call(server, "campaign_get", {"campaign_id": campaign["id"]})
         checked = await _call(
             server,
             "character_check",
             {
                 "campaign_id": campaign["id"],
-                "actor_id": actor["id"],
-                "kind": "check",
-                "ability": "intimidation",
-                "dc": 0,
+                "action": "check",
+                "payload": {
+                    "actor_id": actor["id"],
+                    "kind": "check",
+                    "ability": "intimidation",
+                    "dc": 0,
+                },
                 "expected_revision": campaign["revision"],
                 "idempotency_key": "untrained-check",
             },
         )
         assert checked["ability_modifier"] == 3
         assert checked["bonus"] == 1
-        assert [
-            item["mechanic_id"] for item in checked["rule_receipts"]
-        ] == ["dnd5e.core.check.jack_of_all_trades"]
+        assert [item["mechanic_id"] for item in checked["rule_receipts"]] == [
+            "dnd5e.core.check.jack_of_all_trades"
+        ]
 
         campaign = await _call(server, "campaign_get", {"campaign_id": campaign["id"]})
         started = await _call(
@@ -290,9 +315,7 @@ def test_jack_of_all_trades_is_applied_and_receipted_by_public_tools(
         )
         combatant = started["combat"]["combatants"][0]
         assert combatant["initiative_bonus"] == 3
-        assert started["combat"]["rule_boundary_ids"] == [
-            "dnd5e.core.check.jack_of_all_trades"
-        ]
+        assert started["combat"]["rule_boundary_ids"] == ["dnd5e.core.check.jack_of_all_trades"]
 
         receipts = await _call(
             server,
@@ -382,9 +405,7 @@ def test_action_surge_is_settled_without_a_manual_ruling(tmp_path: Path) -> None
             item["mechanic_id"] == "dnd5e.core.activity.action_surge"
             for item in surged["result"]["rule_receipts"]
         )
-        actor_after = await _call(
-            server, "character_get", {"character_id": actor["id"]}
-        )
+        actor_after = await _call(server, "character_get", {"character_id": actor["id"]})
         assert actor_after["sheet"]["content"]["features"][0]["uses"]["value"] == 0
 
     asyncio.run(exercise())
@@ -532,9 +553,7 @@ def test_second_wind_heals_and_advances_random_stream_outside_combat(
             "idempotency_key": "second-wind",
         }
 
-        before = await _call(
-            server, "campaign_get", {"campaign_id": campaign["id"]}
-        )
+        before = await _call(server, "campaign_get", {"campaign_id": campaign["id"]})
         stream = server_module.CampaignRandomStream.from_campaign_state(
             campaign["id"],
             before["state"],
@@ -551,17 +570,12 @@ def test_second_wind_heals_and_advances_random_stream_outside_combat(
         assert effect["fighter_level"] == 1
         assert 4 <= effect["after_hp"] <= 12
         assert effect["after_hp"] == result["character"]["sheet"]["combat"]["hp"]["value"]
-        assert (
-            result["character"]["sheet"]["content"]["features"][0]["uses"]["value"]
-            == 0
-        )
+        assert result["character"]["sheet"]["content"]["features"][0]["uses"]["value"] == 0
         assert any(
             item["mechanic_id"] == "dnd5e.core.activity.second_wind"
             for item in result["result"]["rule_receipts"]
         )
-        current = await _call(
-            server, "campaign_get", {"campaign_id": campaign["id"]}
-        )
+        current = await _call(server, "campaign_get", {"campaign_id": campaign["id"]})
         assert current["state"]["random_stream"]["position"] == 1
 
     asyncio.run(exercise())
@@ -730,8 +744,7 @@ def test_combat_move_charges_reviewed_difficult_cells_and_records_core_receipt(
             {"campaign_id": campaign["id"]},
         )
         assert any(
-            item["mechanic_id"] == "dnd5e.core.movement.difficult_terrain"
-            for item in receipts
+            item["mechanic_id"] == "dnd5e.core.movement.difficult_terrain" for item in receipts
         )
         revealed = await _call_raw(
             server,
@@ -754,9 +767,7 @@ def test_combat_move_charges_reviewed_difficult_cells_and_records_core_receipt(
             },
         )
         mover_after = next(
-            item
-            for item in revealed["combat"]["combatants"]
-            if item["actor_id"] == mover["id"]
+            item for item in revealed["combat"]["combatants"] if item["actor_id"] == mover["id"]
         )
         assert mover_after["hidden"] is False
         assert mover_after["visible_to_actor_ids"] is None
@@ -781,9 +792,7 @@ def test_combat_move_charges_reviewed_difficult_cells_and_records_core_receipt(
             },
         )
         other_after = next(
-            item
-            for item in departed["combat"]["combatants"]
-            if item["actor_id"] == other["id"]
+            item for item in departed["combat"]["combatants"] if item["actor_id"] == other["id"]
         )
         assert other_after["departed"] == {
             "reason": "The source says one guard flees to warn the leader.",

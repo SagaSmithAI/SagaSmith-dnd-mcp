@@ -250,6 +250,15 @@ from sagasmith_dnd_mcp.random_state import (
 )
 from sagasmith_dnd_mcp.skills import SkillCatalog
 from sagasmith_dnd_mcp.storage import SagaSmithStorage
+from sagasmith_dnd_mcp.tool_budget import (
+    BASELINE_INPUT_SCHEMA_BYTES,
+    BASELINE_PUBLIC_TOOL_COUNT,
+    PROFILE_TOOL_LIMITS,
+    TARGET_CORE_TOOL_COUNT,
+    TARGET_INPUT_SCHEMA_BYTES,
+    TARGET_PUBLIC_TOOL_COUNT,
+    TOOL_BUDGET_VERSION,
+)
 from sagasmith_dnd_mcp.tool_profiles import (
     CORE_TOOLS,
     GROUP_BY_ID,
@@ -868,9 +877,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         """Allow one setup list for an actor introduced after live play began."""
 
         preparation = dict(
-            dict(character.sheet or {}).get("spellcasting", {}).get(
-                "preparation", {}
-            )
+            dict(character.sheet or {}).get("spellcasting", {}).get("preparation", {})
         )
         if list(preparation.get("selected_spell_ids") or []):
             return False
@@ -1324,8 +1331,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         removed_subjects.update(
             "-".join(str(action_id).strip().casefold().split())
             for action_id, override in dict(variant.get("action_overrides") or {}).items()
-            if isinstance(override, dict)
-            and override.get("remove_on_hit_effect") is True
+            if isinstance(override, dict) and override.get("remove_on_hit_effect") is True
         )
         return [
             warning
@@ -1370,9 +1376,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             or isinstance(expected_revision, bool)
             or expected_revision < 1
         ):
-            raise ValueError(
-                "replacement statblock actor requires a positive expected_revision"
-            )
+            raise ValueError("replacement statblock actor requires a positive expected_revision")
         if not idempotency_key:
             raise ValueError("replacement statblock actor requires idempotency_key")
         return character_update(
@@ -1620,29 +1624,19 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         for combatant in encounter.get("combatants", []):
             if combatant.get("actor_id") == actor_id:
                 body_thief = dict(combatant.get("body_thief_host") or {})
-                hp = int(
-                    dict(dict(sheet.get("combat") or {}).get("hp") or {}).get(
-                        "value", 0
-                    )
-                    or 0
-                )
+                hp = int(dict(dict(sheet.get("combat") or {}).get("hp") or {}).get("value", 0) or 0)
                 if body_thief and hp <= 0:
-                    source_actor_id = str(
-                        body_thief.get("source_actor_id") or ""
-                    )
+                    source_actor_id = str(body_thief.get("source_actor_id") or "")
                     source_combatant = next(
                         (
                             item
                             for item in encounter.get("combatants", [])
-                            if str(item.get("actor_id") or "")
-                            == source_actor_id
+                            if str(item.get("actor_id") or "") == source_actor_id
                         ),
                         None,
                     )
                     if source_combatant is None:
-                        raise CombatEngineError(
-                            "Body Thief source combatant is missing"
-                        )
+                        raise CombatEngineError("Body Thief source combatant is missing")
                     origin = dict(combatant.get("position") or {})
                     battle_map = dict(encounter.get("battle_map") or {})
                     width = int(battle_map.get("width", 0) or 0)
@@ -1650,8 +1644,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     blocked = {
                         (int(item["x"]), int(item["y"]))
                         for item in battle_map.get("blocked_cells", [])
-                        if isinstance(item, dict)
-                        and set(item) >= {"x", "y"}
+                        if isinstance(item, dict) and set(item) >= {"x", "y"}
                     }
                     occupied = {
                         (
@@ -1659,14 +1652,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                             int(dict(item.get("position") or {})["y"]),
                         )
                         for item in encounter.get("combatants", [])
-                        if str(item.get("actor_id") or "")
-                        not in {source_actor_id, actor_id}
+                        if str(item.get("actor_id") or "") not in {source_actor_id, actor_id}
                         and set(dict(item.get("position") or {})) == {"x", "y"}
                         and "dead"
-                        not in {
-                            str(value).casefold()
-                            for value in item.get("conditions", [])
-                        }
+                        not in {str(value).casefold() for value in item.get("conditions", [])}
                     }
                     candidates = sorted(
                         (
@@ -1706,31 +1695,22 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     source_combatant.pop("inside_host", None)
                     source_combatant["hidden"] = False
                     source_combatant.pop("visible_to_actor_ids", None)
-                    combatant["disposition"] = body_thief[
-                        "original_disposition"
-                    ]
-                    combatant["death_saves"] = bool(
-                        body_thief.get("original_death_saves", False)
-                    )
+                    combatant["disposition"] = body_thief["original_disposition"]
+                    combatant["death_saves"] = bool(body_thief.get("original_death_saves", False))
                     combatant["zero_hp_recovery"] = bool(
                         body_thief.get("original_zero_hp_recovery", False)
                     )
                     combatant.pop("controlled_by_actor_id", None)
                     combatant.pop("body_thief_host", None)
                     for effect in sheet.get("effects", []):
-                        if (
-                            effect.get("active")
-                            and str(effect.get("id") or "")
-                            == str(body_thief.get("effect_instance_id") or "")
+                        if effect.get("active") and str(effect.get("id") or "") == str(
+                            body_thief.get("effect_instance_id") or ""
                         ):
                             effect["active"] = False
                             effect["ended_reason"] = "host_zero_hit_points"
                     sheet["conditions"] = sorted(
                         {
-                            *(
-                                str(item).casefold()
-                                for item in sheet.get("conditions", [])
-                            ),
+                            *(str(item).casefold() for item in sheet.get("conditions", [])),
                             "dead",
                         }
                         - {"unconscious", "stable", "stunned", "incapacitated"}
@@ -1753,10 +1733,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 return
 
     def combatant_zero_hp_buffered(combatant: dict[str, Any]) -> bool:
-        return bool(
-            combatant.get("death_saves", False)
-            or combatant.get("zero_hp_recovery", False)
-        )
+        return bool(combatant.get("death_saves", False) or combatant.get("zero_hp_recovery", False))
 
     def source_regeneration_trait(character: Any, raw: dict[str, Any]) -> dict[str, Any]:
         allowed = {"kind", "feature_id", "source_excerpt"}
@@ -1770,27 +1747,18 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         feature = next(
             (
                 item
-                for item in dict(character.sheet.get("content") or {}).get(
-                    "features", []
-                )
+                for item in dict(character.sheet.get("content") or {}).get("features", [])
                 if str(item.get("id") or "") == feature_id
-                and str(item.get("name") or "").strip().casefold()
-                == "regeneration"
+                and str(item.get("name") or "").strip().casefold() == "regeneration"
             ),
             None,
         )
         if feature is None:
-            raise ValueError(
-                "source regeneration feature_id is not recorded on the actor card"
-            )
+            raise ValueError("source regeneration feature_id is not recorded on the actor card")
         description = str(feature.get("description") or "").strip()
         if not excerpt or " ".join(excerpt.split()) not in " ".join(description.split()):
-            raise ValueError(
-                "source regeneration excerpt is not contained in the recorded feature"
-            )
-        structured = dict(
-            dict(feature.get("choices") or {}).get("source_trait") or {}
-        )
+            raise ValueError("source regeneration excerpt is not contained in the recorded feature")
+        structured = dict(dict(feature.get("choices") or {}).get("source_trait") or {})
         if structured:
             amount = structured.get("amount")
             damage_types = structured.get("suppressed_by_damage_types")
@@ -1807,9 +1775,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             )
             if not valid_structured:
                 raise ValueError("recorded regeneration source trait is malformed")
-            suppressed_by = [
-                str(item).strip().casefold() for item in damage_types
-            ]
+            suppressed_by = [str(item).strip().casefold() for item in damage_types]
         else:
             amount_match = re.search(
                 r"(?i)\bregains\s+(\d+)\s+hit points at the start of "
@@ -1830,9 +1796,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 description,
             )
             if not amount_match or not suppression_match or not death_match:
-                raise ValueError(
-                    "recorded regeneration text is not mechanically complete"
-                )
+                raise ValueError("recorded regeneration text is not mechanically complete")
             amount = int(amount_match.group(1))
             suppressed_by = [
                 item.strip().casefold()
@@ -1882,9 +1846,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 action_match,
             )
         ):
-            raise CombatEngineError(
-                "the reviewed attachment effect is not mechanically complete"
-            )
+            raise CombatEngineError("the reviewed attachment effect is not mechanically complete")
         formula = str(drain_match.group(1)).replace(" ", "")
         if re.fullmatch(r"\d+d\d+(?:[+\-]\d+)?", formula, re.IGNORECASE) is None:
             raise CombatEngineError("attachment drain formula is unsupported")
@@ -2037,10 +1999,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 and trait.get("kind") == "regeneration"
                 and str(trait.get("actor_id") or "") == target_id
                 and damage_types
-                & {
-                    str(item).casefold()
-                    for item in trait.get("suppressed_by_damage_types") or []
-                }
+                & {str(item).casefold() for item in trait.get("suppressed_by_damage_types") or []}
             ):
                 trait["suppressed_at_next_turn"] = True
                 trait["last_suppressing_damage_types"] = sorted(
@@ -2059,13 +2018,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         actor_id: str,
         sheet: dict[str, Any],
     ) -> list[str]:
-        hp = int(
-            dict(dict(sheet.get("combat") or {}).get("hp") or {}).get("value", 0)
-            or 0
-        )
-        conditions = {
-            str(item).strip().casefold() for item in sheet.get("conditions", [])
-        }
+        hp = int(dict(dict(sheet.get("combat") or {}).get("hp") or {}).get("value", 0) or 0)
+        conditions = {str(item).strip().casefold() for item in sheet.get("conditions", [])}
         ended: list[str] = []
         for effect in encounter.get("ongoing_effects", []):
             if (
@@ -2079,10 +2033,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 hp <= 0 or "dead" in conditions
             ):
                 reason = "source_incapacitated"
-            elif (
-                str(effect.get("target_id") or "") == actor_id
-                and "dead" in conditions
-            ):
+            elif str(effect.get("target_id") or "") == actor_id and "dead" in conditions:
                 reason = "target_dead"
             if reason:
                 effect["active"] = False
@@ -2125,9 +2076,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "actor_id": actor_id,
                 "feature_id": str(trait.get("feature_id") or ""),
                 "source_excerpt": str(trait.get("source_excerpt") or ""),
-                "result": {
-                    key: value for key, value in result.items() if key != "sheet"
-                },
+                "result": {key: value for key, value in result.items() if key != "sheet"},
             }
             settlements.append(settlement)
             encounter["log"] = [
@@ -2150,12 +2099,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 continue
             target_id = str(effect.get("target_id") or "")
             if target_id not in sheets:
-                raise CombatEngineError(
-                    "attachment target is not an encounter combatant"
-                )
+                raise CombatEngineError("attachment target is not an encounter combatant")
             target_conditions = {
-                str(item).strip().casefold()
-                for item in sheets[target_id].get("conditions", [])
+                str(item).strip().casefold() for item in sheets[target_id].get("conditions", [])
             }
             if "dead" in target_conditions:
                 effect["active"] = False
@@ -2171,24 +2117,19 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 sheets[target_id],
                 amount=int(drain_roll["total"]),
                 death_saves=bool(target_combatant.get("death_saves", False)),
-                zero_hp_recovery=bool(
-                    target_combatant.get("zero_hp_recovery", False)
-                ),
+                zero_hp_recovery=bool(target_combatant.get("zero_hp_recovery", False)),
             )
             sheets[target_id] = drained["sheet"]
-            effect["drained_hit_points"] = int(
-                effect.get("drained_hit_points", 0) or 0
-            ) + int(drained["hit_point_loss"])
+            effect["drained_hit_points"] = int(effect.get("drained_hit_points", 0) or 0) + int(
+                drained["hit_point_loss"]
+            )
             target_conditions = {
-                str(item).strip().casefold()
-                for item in sheets[target_id].get("conditions", [])
+                str(item).strip().casefold() for item in sheets[target_id].get("conditions", [])
             }
             detach_reason = ""
             if "dead" in target_conditions:
                 detach_reason = "target_dead"
-            elif int(effect["drained_hit_points"]) >= int(
-                effect["detach_after_hit_point_loss"]
-            ):
+            elif int(effect["drained_hit_points"]) >= int(effect["detach_after_hit_point_loss"]):
                 detach_reason = "drain_threshold"
             if detach_reason:
                 effect["active"] = False
@@ -2212,9 +2153,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "target_id": target_id,
                 "source_excerpt": str(effect.get("source_excerpt") or ""),
                 "roll": drain_roll,
-                "result": {
-                    key: value for key, value in drained.items() if key != "sheet"
-                },
+                "result": {key: value for key, value in drained.items() if key != "sheet"},
                 "drained_hit_points": int(effect["drained_hit_points"]),
                 "detached": bool(detach_reason),
                 "detach_reason": detach_reason,
@@ -3305,7 +3244,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "rule_import(discover)",
                     "rule_import(stage)",
                     "rule_import(inspect)",
-                    "rule_document_page_render",
+                    "rule_import(render_page)",
                     "rule_import(ingest)",
                     "rule_import(review_statblock)",
                     "rule_import(extract_candidates)",
@@ -3349,8 +3288,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "module_import(activate)",
                     "module_import(attach_asset)",
                     "module_query(assets)",
-                    "module_page_render",
-                    "module_content_review",
+                    "module_review(render_page)",
+                    "module_review(submit_content)",
                     "module_set_progress(spatial_review)",
                 ],
                 "stage_inputs": ["source_path", "name+content", "module-scoped asset"],
@@ -3366,6 +3305,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "write_requirements": ["principal_id", "expected_revision", "idempotency_key"],
             "tool_exposure": {
                 "owner": "sagasmith-dnd-mcp",
+                "budget": {
+                    "version": TOOL_BUDGET_VERSION,
+                    "baseline_public_tools": BASELINE_PUBLIC_TOOL_COUNT,
+                    "baseline_input_schema_bytes": BASELINE_INPUT_SCHEMA_BYTES,
+                    "target_public_tools": TARGET_PUBLIC_TOOL_COUNT,
+                    "target_core_tools": TARGET_CORE_TOOL_COUNT,
+                    "target_input_schema_bytes": TARGET_INPUT_SCHEMA_BYTES,
+                    "profile_limits": PROFILE_TOOL_LIMITS,
+                },
                 "phases": [PROFILE_LOBBY, PROFILE_PLAY, PROFILE_COMBAT],
                 "core_tools": sorted(CORE_TOOLS),
                 "groups": group_catalog(),
@@ -3511,6 +3459,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "profiles": profile_catalog(),
             "groups": group_catalog(),
             "core_tools": sorted(CORE_TOOLS),
+            "budget": {
+                "version": TOOL_BUDGET_VERSION,
+                "baseline_public_tools": BASELINE_PUBLIC_TOOL_COUNT,
+                "baseline_input_schema_bytes": BASELINE_INPUT_SCHEMA_BYTES,
+                "target_public_tools": TARGET_PUBLIC_TOOL_COUNT,
+                "target_core_tools": TARGET_CORE_TOOL_COUNT,
+                "target_input_schema_bytes": TARGET_INPUT_SCHEMA_BYTES,
+                "profile_limits": PROFILE_TOOL_LIMITS,
+            },
         }
 
     @mcp.tool()
@@ -3571,8 +3528,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if profile == PROFILE_PLAY:
             if not state.get("adventure_started", False):
                 state["adventure_started_actor_ids"] = sorted(
-                    character.id
-                    for character in characters.list(campaign_id=campaign_id)
+                    character.id for character in characters.list(campaign_id=campaign_id)
                 )
             state["adventure_started"] = True
         revisions_result = StateMutationService(storage.database).replace(
@@ -4736,10 +4692,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         chunk_sha256 = hashlib.sha256(chunk_content.encode("utf-8")).hexdigest()
         if str(source_ref["content_sha256"]).casefold() != chunk_sha256:
             raise ValueError("chase source_ref content_sha256 does not match its chunk")
-        if (
-            source_ref["page_start"] != expanded.get("page_start")
-            or source_ref["page_end"] != expanded.get("page_end")
-        ):
+        if source_ref["page_start"] != expanded.get("page_start") or source_ref[
+            "page_end"
+        ] != expanded.get("page_end"):
             raise ValueError("chase source_ref pages do not match its chunk")
         if [str(item) for item in source_ref["heading_path"]] != [
             str(item) for item in expanded.get("heading_path", [])
@@ -4797,10 +4752,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             }
             unknown = sorted(set(close_transition) - allowed)
             if unknown:
-                raise ValueError(
-                    "unsupported chase close_transition fields: "
-                    + ", ".join(unknown)
-                )
+                raise ValueError("unsupported chase close_transition fields: " + ", ".join(unknown))
             transition_evidence = reviewed_chase_source(
                 campaign_id,
                 scene_id=scene_id,
@@ -4826,9 +4778,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 raise ValueError("each chase participant_config entry needs actor_id")
             unknown = set(raw) - {"actor_id", "initiative", "tie_breaker"}
             if unknown:
-                raise ValueError(
-                    f"unsupported chase participant_config fields: {sorted(unknown)}"
-                )
+                raise ValueError(f"unsupported chase participant_config fields: {sorted(unknown)}")
             identifier = str(raw["actor_id"])
             if identifier not in participant_ids or identifier in config_by_actor:
                 raise ValueError("chase participant_config actor_id is invalid or duplicated")
@@ -4891,9 +4841,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         chase["source_ref"] = evidence
         if resolved_close_transition:
-            chase["close_transition"]["source_ref"] = resolved_close_transition[
-                "source_ref"
-            ]
+            chase["close_transition"]["source_ref"] = resolved_close_transition["source_ref"]
         next_state = deepcopy(campaign.state)
         next_state["chase"] = chase
         receipts = core_receipts(
@@ -4937,9 +4885,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         actor_views = []
         for item in chase.get("participants", []):
             try:
-                actor_views.append(
-                    character_view(characters.get(str(item["actor_id"])))
-                )
+                actor_views.append(character_view(characters.get(str(item["actor_id"]))))
             except LookupError:
                 continue
         return {
@@ -5030,9 +4976,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             character_updates.append(
                 CharacterStateUpdate(
                     character_id=current_actor.id,
-                    sheet=validate_character_sheet(
-                        settled["sheet"], rules=rules_context
-                    ),
+                    sheet=validate_character_sheet(settled["sheet"], rules=rules_context),
                     notes=validate_character_notes(
                         current_actor.notes,
                         character_type=current_actor.character_type,
@@ -5402,9 +5346,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     and str(item.get("feature_id") or "") == trait["feature_id"]
                     for item in source_trait_records
                 ):
-                    raise ValueError(
-                        "source traits must identify unique actor feature records"
-                    )
+                    raise ValueError("source traits must identify unique actor feature records")
                 source_trait_records.append(trait)
         supported_source_conditions = {
             "blinded",
@@ -5592,9 +5534,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     sheet,
                     rules=effective_rule_context(campaign_id),
                 ),
-                notes=validate_character_notes(
-                    source_condition_characters[actor_id_value].notes
-                ),
+                notes=validate_character_notes(source_condition_characters[actor_id_value].notes),
                 expected_revision=source_condition_characters[actor_id_value].revision,
             )
             for actor_id_value, sheet in initial_sheets.items()
@@ -5973,9 +5913,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             target_id=target_id,
         )
         if consumed_attack_advantage:
-            attack_roll["consumed_next_attack_advantage_effect_id"] = (
-                consumed_attack_advantage
-            )
+            attack_roll["consumed_next_attack_advantage_effect_id"] = consumed_attack_advantage
         if spell_resolution is not None:
             attack_roll.update(
                 spell_id=str(spell_resolution["spell_id"]),
@@ -6325,24 +6263,17 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 f"expected {expected_revision}, found {campaign.revision}"
             )
         window = next(
-            (
-                item
-                for item in encounter.get("pending", [])
-                if item.get("id") == choice_id
-            ),
+            (item for item in encounter.get("pending", []) if item.get("id") == choice_id),
             None,
         )
         if (
             not isinstance(window, dict)
             or window.get("kind") != "ruling"
-            or window.get("trigger")
-            not in {"attack_on_hit_effect", "critical_body_part_loss"}
+            or window.get("trigger") not in {"attack_on_hit_effect", "critical_body_part_loss"}
             or str(window.get("target_id") or "") != target_id
             or str(window.get("actor_id") or "") != target_id
         ):
-            raise CombatEngineError(
-                "choice_id is not this target's pending attack on-hit ruling"
-            )
+            raise CombatEngineError("choice_id is not this target's pending attack on-hit ruling")
         selection_id = str(normalized_selection.get("id") or "").strip().casefold()
         if selection_id not in {
             "apply_condition",
@@ -6358,14 +6289,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "a critical follow-up, or dismiss it"
             )
         effect = str(window.get("effect") or "").strip()
-        is_critical_body_part_loss = (
-            window.get("trigger") == "critical_body_part_loss"
-        )
+        is_critical_body_part_loss = window.get("trigger") == "critical_body_part_loss"
         if is_critical_body_part_loss:
             allowed_fields = {"id", "source_excerpt", "target_has_limbs"}
-            source_excerpt = str(
-                normalized_selection.get("source_excerpt") or ""
-            ).strip()
+            source_excerpt = str(normalized_selection.get("source_excerpt") or "").strip()
             target_has_limbs = normalized_selection.get("target_has_limbs")
             followup = dict(window.get("critical_followup") or {})
             if (
@@ -6375,10 +6302,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 or not source_excerpt
                 or source_excerpt.casefold() != effect.casefold()
                 or not followup.get("anatomical_loss_triggered")
-                or int(
-                    dict(followup.get("followup_roll") or {}).get("total", 0)
-                    or 0
-                )
+                or int(dict(followup.get("followup_roll") or {}).get("total", 0) or 0)
                 != int(followup.get("anatomical_loss_natural", 20) or 20)
             ):
                 raise CombatEngineError(
@@ -6396,9 +6320,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if selection_id == "dismiss":
             allowed_fields = {"id", "source_excerpt"}
             unknown_fields = set(normalized_selection) - allowed_fields
-            source_excerpt = str(
-                normalized_selection.get("source_excerpt") or ""
-            ).strip()
+            source_excerpt = str(normalized_selection.get("source_excerpt") or "").strip()
             explicit_conditions = {
                 "blinded",
                 "charmed",
@@ -6414,8 +6336,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "unconscious",
             }
             states_structured_condition = any(
-                re.search(rf"(?i)\b{re.escape(condition)}\b", effect)
-                is not None
+                re.search(rf"(?i)\b{re.escape(condition)}\b", effect) is not None
                 for condition in explicit_conditions
             )
             candidate_ids = {
@@ -6428,17 +6349,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 or not source_excerpt
                 or source_excerpt.casefold() != effect.casefold()
             ):
-                raise CombatEngineError(
-                    "dismissal requires the exact reviewed attack excerpt"
-                )
+                raise CombatEngineError("dismissal requires the exact reviewed attack excerpt")
             if (
                 has_explicit_save_damage
                 or states_structured_condition
                 or candidate_ids & {"attachment", "next_attack_advantage"}
             ):
-                raise CombatEngineError(
-                    "an explicit structured on-hit effect cannot be dismissed"
-                )
+                raise CombatEngineError("an explicit structured on-hit effect cannot be dismissed")
         if selection_id == "apply_condition" and has_explicit_save_damage:
             raise CombatEngineError(
                 "an explicit saving-throw damage effect requires save-and-damage settlement"
@@ -6454,9 +6371,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if selection_id == "next_attack_advantage":
             allowed_fields = {"id", "source_excerpt"}
             unknown_fields = set(normalized_selection) - allowed_fields
-            source_excerpt = str(
-                normalized_selection.get("source_excerpt") or ""
-            ).strip()
+            source_excerpt = str(normalized_selection.get("source_excerpt") or "").strip()
             if (
                 unknown_fields
                 or not states_next_attack_advantage
@@ -6482,9 +6397,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         elif selection_id == "attachment":
             allowed_fields = {"id", "source_excerpt"}
             unknown_fields = set(normalized_selection) - allowed_fields
-            source_excerpt = str(
-                normalized_selection.get("source_excerpt") or ""
-            ).strip()
+            source_excerpt = str(normalized_selection.get("source_excerpt") or "").strip()
             candidate_ids = {
                 str(item.get("id") or "")
                 for item in window.get("candidates", [])
@@ -6496,9 +6409,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 or not source_excerpt
                 or source_excerpt.casefold() not in effect.casefold()
             ):
-                raise CombatEngineError(
-                    "attachment requires the exact reviewed attack excerpt"
-                )
+                raise CombatEngineError("attachment requires the exact reviewed attack excerpt")
             source_attachment_effect(effect)
         next_encounter = resolve_choice_window(
             encounter,
@@ -6512,11 +6423,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         rule_receipts: list[dict[str, Any]] = []
         if selection_id == "critical_followup":
             source_excerpt = str(normalized_selection["source_excerpt"]).strip()
-            part_category = (
-                "limb"
-                if normalized_selection["target_has_limbs"]
-                else "body_portion"
-            )
+            part_category = "limb" if normalized_selection["target_has_limbs"] else "body_portion"
             effect_id = f"{choice_id}:anatomical-loss"
             updated_sheet, _ = add_effect(
                 updated_sheet,
@@ -6615,12 +6522,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             unknown_fields = set(normalized_selection) - allowed_fields
             if unknown_fields:
                 raise CombatEngineError(
-                    "unsupported on-hit ruling fields: "
-                    + ", ".join(sorted(unknown_fields))
+                    "unsupported on-hit ruling fields: " + ", ".join(sorted(unknown_fields))
                 )
-            condition = str(
-                normalized_selection.get("condition") or ""
-            ).strip().casefold()
+            condition = str(normalized_selection.get("condition") or "").strip().casefold()
             supported_conditions = {
                 "blinded",
                 "charmed",
@@ -6641,9 +6545,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 for item in normalized_selection.get("escape_abilities") or []
                 if str(item).strip()
             ]
-            source_excerpt = str(
-                normalized_selection.get("source_excerpt") or ""
-            ).strip()
+            source_excerpt = str(normalized_selection.get("source_excerpt") or "").strip()
             if condition not in supported_conditions:
                 raise CombatEngineError("on-hit ruling condition is unsupported")
             if re.search(rf"(?i)\b{re.escape(condition)}\b", effect) is None:
@@ -6679,12 +6581,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 re.search(rf"(?i)\b{re.escape(ability)}\b", effect) is None
                 for ability in escape_abilities
             ):
-                raise CombatEngineError(
-                    "escape DC or ability is not stated by the reviewed attack"
-                )
+                raise CombatEngineError("escape DC or ability is not stated by the reviewed attack")
             conditions = {
-                str(item).strip().casefold()
-                for item in updated_sheet.get("conditions", [])
+                str(item).strip().casefold() for item in updated_sheet.get("conditions", [])
             }
             if condition not in conditions:
                 updated_sheet.setdefault("conditions", []).append(condition)
@@ -6722,23 +6621,19 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             unknown_fields = set(normalized_selection) - allowed_fields
             if unknown_fields:
                 raise CombatEngineError(
-                    "unsupported on-hit save-damage fields: "
-                    + ", ".join(sorted(unknown_fields))
+                    "unsupported on-hit save-damage fields: " + ", ".join(sorted(unknown_fields))
                 )
-            save_ability = str(
-                normalized_selection.get("save_ability") or ""
-            ).strip().casefold()
+            save_ability = str(normalized_selection.get("save_ability") or "").strip().casefold()
             save_dc = normalized_selection.get("save_dc")
-            damage_formula = str(
-                normalized_selection.get("damage_formula") or ""
-            ).strip().casefold().replace(" ", "")
-            damage_type = str(
-                normalized_selection.get("damage_type") or ""
-            ).strip().casefold()
+            damage_formula = (
+                str(normalized_selection.get("damage_formula") or "")
+                .strip()
+                .casefold()
+                .replace(" ", "")
+            )
+            damage_type = str(normalized_selection.get("damage_type") or "").strip().casefold()
             half_on_success = normalized_selection.get("half_on_success")
-            source_excerpt = str(
-                normalized_selection.get("source_excerpt") or ""
-            ).strip()
+            source_excerpt = str(normalized_selection.get("source_excerpt") or "").strip()
             zero_hp_effect = normalized_selection.get("zero_hp_effect")
             supported_abilities = {
                 "strength",
@@ -6763,35 +6658,45 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "on-hit save damage requires exact reviewed save, damage, "
                     "success, and excerpt terms"
                 )
-            if re.search(
-                rf"(?i)\bDC\s*{save_dc}\s+{re.escape(save_ability)}\s+saving throw\b",
-                effect,
-            ) is None:
-                raise CombatEngineError(
-                    "save DC or ability is not stated by the reviewed attack"
+            if (
+                re.search(
+                    rf"(?i)\bDC\s*{save_dc}\s+{re.escape(save_ability)}\s+saving throw\b",
+                    effect,
                 )
-            if re.search(
-                rf"(?i)(?<![A-Za-z0-9]){re.escape(damage_formula)}(?![A-Za-z0-9])",
-                effect.replace(" ", ""),
-            ) is None or re.search(
-                rf"(?i)\b{re.escape(damage_type)}\s+damage\b",
-                effect,
-            ) is None:
+                is None
+            ):
+                raise CombatEngineError("save DC or ability is not stated by the reviewed attack")
+            if (
+                re.search(
+                    rf"(?i)(?<![A-Za-z0-9]){re.escape(damage_formula)}(?![A-Za-z0-9])",
+                    effect.replace(" ", ""),
+                )
+                is None
+                or re.search(
+                    rf"(?i)\b{re.escape(damage_type)}\s+damage\b",
+                    effect,
+                )
+                is None
+            ):
                 raise CombatEngineError(
                     "damage formula or type is not stated by the reviewed attack"
                 )
-            states_half_damage = re.search(
-                r"(?i)\bhalf as much damage on a successful one\b",
-                effect,
-            ) is not None
-            if half_on_success != states_half_damage:
-                raise CombatEngineError(
-                    "success damage does not match the reviewed attack"
+            states_half_damage = (
+                re.search(
+                    r"(?i)\bhalf as much damage on a successful one\b",
+                    effect,
                 )
-            states_zero_hp_effect = re.search(
-                r"(?i)\b(?:the poison|it)\s+reduces the target to 0 hit points\b",
-                effect,
-            ) is not None
+                is not None
+            )
+            if half_on_success != states_half_damage:
+                raise CombatEngineError("success damage does not match the reviewed attack")
+            states_zero_hp_effect = (
+                re.search(
+                    r"(?i)\b(?:the poison|it)\s+reduces the target to 0 hit points\b",
+                    effect,
+                )
+                is not None
+            )
             normalized_zero_hp_effect: dict[str, Any] | None = None
             if states_zero_hp_effect:
                 if not isinstance(zero_hp_effect, dict):
@@ -6805,9 +6710,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 }
                 raw_duration = zero_hp_effect.get("duration")
                 raw_zero_conditions = zero_hp_effect.get("conditions")
-                if not isinstance(raw_duration, dict) or not isinstance(
-                    raw_zero_conditions, list
-                ):
+                if not isinstance(raw_duration, dict) or not isinstance(raw_zero_conditions, list):
                     raise CombatEngineError(
                         "zero-hit-point conditions and duration must be structured"
                     )
@@ -6828,8 +6731,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     or str(duration.get("period") or "").strip().casefold() != "hour"
                     or isinstance(duration_remaining, bool)
                     or duration_remaining != 1
-                    or re.search(r"(?i)\bstable but poisoned for 1 hour\b", effect)
-                    is None
+                    or re.search(r"(?i)\bstable but poisoned for 1 hour\b", effect) is None
                     or re.search(
                         r"(?i)\bparalyzed while poisoned in this way\b",
                         effect,
@@ -6899,9 +6801,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     actor_id=target_id,
                     sheet=updated_sheet,
                 )
-                damaged_result = {
-                    key: value for key, value in damaged.items() if key != "sheet"
-                }
+                damaged_result = {key: value for key, value in damaged.items() if key != "sheet"}
                 add_concentration_window(
                     next_encounter,
                     target_id,
@@ -6915,8 +6815,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     and int(damaged.get("applied_amount", 0) or 0) > 0
                 ):
                     zero_conditions = {
-                        str(item).strip().casefold()
-                        for item in updated_sheet.get("conditions", [])
+                        str(item).strip().casefold() for item in updated_sheet.get("conditions", [])
                     }
                     zero_conditions.discard("dead")
                     zero_conditions.discard("stable")
@@ -6925,8 +6824,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     stabilized = stabilize_sheet(updated_sheet)
                     updated_sheet = stabilized["sheet"]
                     before_special_conditions = {
-                        str(item).strip().casefold()
-                        for item in updated_sheet.get("conditions", [])
+                        str(item).strip().casefold() for item in updated_sheet.get("conditions", [])
                     }
                     added_conditions = [
                         condition
@@ -6934,8 +6832,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         if condition not in before_special_conditions
                     ]
                     updated_sheet["conditions"] = sorted(
-                        before_special_conditions
-                        | set(normalized_zero_hp_effect["conditions"])
+                        before_special_conditions | set(normalized_zero_hp_effect["conditions"])
                     )
                     effect_id = f"{choice_id}:zero-hp"
                     updated_sheet, _ = add_effect(
@@ -6962,9 +6859,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         "effect_id": effect_id,
                         "added_conditions": added_conditions,
                         "stabilization": {
-                            key: value
-                            for key, value in stabilized.items()
-                            if key != "sheet"
+                            key: value for key, value in stabilized.items() if key != "sheet"
                         },
                     }
                     ongoing_effect = {
@@ -7112,11 +7007,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         skipped_source_ids.reverse()
         source_turn_actor_ids = [
             *skipped_source_ids,
-            *(
-                [str(next_combatant.get("actor_id") or "")]
-                if next_combatant is not None
-                else []
-            ),
+            *([str(next_combatant.get("actor_id") or "")] if next_combatant is not None else []),
         ]
         source_duration_expired: list[str] = []
         for target_id, sheet in list(source_sheets.items()):
@@ -7135,9 +7026,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 source_sheets[next_actor_id],
                 period="turn_start",
             )
-            source_sheets[next_actor_id] = started_effects_by_actor[next_actor_id][
-                "sheet"
-            ]
+            source_sheets[next_actor_id] = started_effects_by_actor[next_actor_id]["sheet"]
             source_turn_start = settle_source_start_turn(
                 next_state["combat"],
                 actor_id=next_actor_id,
@@ -7515,9 +7404,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 character_expired.extend(result["expired"])
             else:
                 for effect_period, amount in effect_steps.items():
-                    result = advance_effect_durations(
-                        sheet, period=effect_period, amount=amount
-                    )
+                    result = advance_effect_durations(sheet, period=effect_period, amount=amount)
                     extension = apply_rule_event(
                         result["sheet"],
                         "duration.advance",
@@ -7720,9 +7607,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             target_id=target_id,
         )
         if consumed_attack_advantage:
-            attack_roll["consumed_next_attack_advantage_effect_id"] = (
-                consumed_attack_advantage
-            )
+            attack_roll["consumed_next_attack_advantage_effect_id"] = consumed_attack_advantage
         combatant = next(
             item for item in next_encounter["combatants"] if item.get("actor_id") == actor_id
         )
@@ -7923,8 +7808,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         response = {
             "status": (
                 "pending_ruling"
-                if on_hit_window is not None
-                or critical_followup_window is not None
+                if on_hit_window is not None or critical_followup_window is not None
                 else "committed"
             ),
             "result": result,
@@ -8213,8 +8097,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         response = {
             "status": (
                 "pending_ruling"
-                if on_hit_window is not None
-                or critical_followup_window is not None
+                if on_hit_window is not None or critical_followup_window is not None
                 else "committed"
             ),
             "result": result,
@@ -8452,9 +8335,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if normalized_action == "detach_attachment":
             effect_id = str(dict(payload or {}).get("effect_id") or "").strip()
             if not effect_id:
-                raise CombatEngineError(
-                    "detach_attachment requires payload.effect_id"
-                )
+                raise CombatEngineError("detach_attachment requires payload.effect_id")
             next_encounter = detach_attachment(
                 encounter,
                 actor_id_value=actor_id,
@@ -10081,9 +9962,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             branch_id=resolved_branch_id,
         )
         random_save_spec = gazer_eye_ray_spec(current.sheet, activity_id)
-        source_contest_spec = source_contest_effect_spec(
-            current.sheet, activity_id
-        )
+        source_contest_spec = source_contest_effect_spec(current.sheet, activity_id)
         source_save_spec = source_save_effect_spec(current.sheet, activity_id)
         random_target_records: dict[str, Any] = {}
         random_targets: list[dict[str, Any]] = []
@@ -10094,9 +9973,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         source_contest_knowledge_count = 0
         if random_save_spec is not None:
             if not is_dm(campaign_id, principal_id):
-                raise PermissionError(
-                    "source-random multi-actor settlement requires the DM"
-                )
+                raise PermissionError("source-random multi-actor settlement requires the DM")
             declared = dict(declaration or {})
             if set(declared) != {"target_ids"}:
                 raise CombatEngineError(
@@ -10104,17 +9981,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 )
             target_ids = declared.get("target_ids")
             if not isinstance(target_ids, list):
-                raise CombatEngineError(
-                    "random saving-throw activity target_ids must be a list"
-                )
+                raise CombatEngineError("random saving-throw activity target_ids must be a list")
             normalized_target_ids = [str(item).strip() for item in target_ids]
             target_bounds = dict(random_save_spec.get("target_count") or {})
             minimum_targets = int(target_bounds.get("minimum", 1) or 1)
             maximum_targets = int(target_bounds.get("maximum", 1) or 1)
             if not minimum_targets <= len(normalized_target_ids) <= maximum_targets:
-                raise CombatEngineError(
-                    "random saving-throw activity has an invalid target count"
-                )
+                raise CombatEngineError("random saving-throw activity has an invalid target count")
             if (
                 any(not item for item in normalized_target_ids)
                 or len(normalized_target_ids) != len(set(normalized_target_ids))
@@ -10138,8 +10011,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     missing=("random_effect_source_position",),
                 )
             source_conditions = {
-                str(item).casefold()
-                for item in (source_combatant or {}).get("conditions", [])
+                str(item).casefold() for item in (source_combatant or {}).get("conditions", [])
             }
             if "blinded" in source_conditions:
                 raise CombatEngineError(
@@ -10156,12 +10028,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     None,
                 )
                 if target_combatant is None:
-                    raise CombatEngineError(
-                        "random saving-throw target is not a combatant"
-                    )
+                    raise CombatEngineError("random saving-throw target is not a combatant")
                 target_conditions = {
-                    str(item).casefold()
-                    for item in target_combatant.get("conditions", [])
+                    str(item).casefold() for item in target_combatant.get("conditions", [])
                 }
                 visible_to = target_combatant.get("visible_to_actor_ids")
                 if (
@@ -10173,9 +10042,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         and actor_id not in {str(item) for item in visible_to}
                     )
                 ):
-                    raise CombatEngineError(
-                        "random saving-throw target must be living and visible"
-                    )
+                    raise CombatEngineError("random saving-throw target must be living and visible")
                 target_position = dict(target_combatant.get("position") or {})
                 if set(target_position) != {"x", "y"}:
                     raise NeedsRulingError(
@@ -10194,16 +10061,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         "random saving-throw target is outside the recorded range"
                     )
                 target = require_campaign_actor(campaign_id, target_id)
-                access.require_actor(
-                    campaign_id, target_id, principal_id, control=True
-                )
+                access.require_actor(campaign_id, target_id, principal_id, control=True)
                 random_target_records[target_id] = target
                 random_targets.append(combat_actor_snapshot(target_id))
         if source_save_spec is not None:
             if not is_dm(campaign_id, principal_id):
-                raise PermissionError(
-                    "source saving-throw activity settlement requires the DM"
-                )
+                raise PermissionError("source saving-throw activity settlement requires the DM")
             declared = dict(declaration or {})
             if set(declared) != {"target_id", "target_has_brain"}:
                 raise CombatEngineError(
@@ -10247,8 +10110,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     missing=("source_save_effect_positions",),
                 )
             target_conditions = {
-                str(item).casefold()
-                for item in (target_combatant or {}).get("conditions", [])
+                str(item).casefold() for item in (target_combatant or {}).get("conditions", [])
             }
             visible_to = (target_combatant or {}).get("visible_to_actor_ids")
             if (
@@ -10272,9 +10134,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 * 5
             )
             if distance > int(source_save_spec.get("range_ft", 0) or 0):
-                raise CombatEngineError(
-                    "source saving-throw target is outside the recorded range"
-                )
+                raise CombatEngineError("source saving-throw target is outside the recorded range")
             source_save_target_record = require_campaign_actor(campaign_id, target_id)
             access.require_actor(
                 campaign_id,
@@ -10285,9 +10145,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             source_save_target = combat_actor_snapshot(target_id)
         if source_contest_spec is not None:
             if not is_dm(campaign_id, principal_id):
-                raise PermissionError(
-                    "source ability-contest activity settlement requires the DM"
-                )
+                raise PermissionError("source ability-contest activity settlement requires the DM")
             declared = dict(declaration or {})
             if set(declared) != {"target_id", "target_is_humanoid"}:
                 raise CombatEngineError(
@@ -10320,13 +10178,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 None,
             )
             if source_combatant is None or target_combatant is None:
-                raise CombatEngineError(
-                    "Body Thief source and target must be combatants"
-                )
+                raise CombatEngineError("Body Thief source and target must be combatants")
             if source_combatant.get("inside_host"):
-                raise CombatEngineError(
-                    "intellect devourer is already inside a host"
-                )
+                raise CombatEngineError("intellect devourer is already inside a host")
             source_position = dict(source_combatant.get("position") or {})
             target_position = dict(target_combatant.get("position") or {})
             if set(source_position) != {"x", "y"} or set(target_position) != {
@@ -10338,8 +10192,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     missing=("source_contest_effect_positions",),
                 )
             target_conditions = {
-                str(item).casefold()
-                for item in target_combatant.get("conditions", [])
+                str(item).casefold() for item in target_combatant.get("conditions", [])
             }
             incapacitated = bool(
                 target_conditions
@@ -10362,26 +10215,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 )
             distance = (
                 max(
-                    abs(
-                        int(source_position["x"])
-                        - int(target_position["x"])
-                    ),
-                    abs(
-                        int(source_position["y"])
-                        - int(target_position["y"])
-                    ),
+                    abs(int(source_position["x"]) - int(target_position["x"])),
+                    abs(int(source_position["y"]) - int(target_position["y"])),
                 )
                 * 5
             )
-            if distance > int(
-                source_contest_spec.get("range_ft", 0) or 0
-            ):
-                raise CombatEngineError(
-                    "Body Thief target is outside the recorded range"
-                )
-            source_contest_target_record = require_campaign_actor(
-                campaign_id, target_id
-            )
+            if distance > int(source_contest_spec.get("range_ft", 0) or 0):
+                raise CombatEngineError("Body Thief target is outside the recorded range")
+            source_contest_target_record = require_campaign_actor(campaign_id, target_id)
             access.require_actor(
                 campaign_id,
                 target_id,
@@ -10511,9 +10352,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             # contract is at-will, so repair only this recognized legacy card
             # as it is first settled and persist the corrected representation.
             activity_sheet = deepcopy(current.sheet)
-            for activity in dict(activity_sheet.get("content") or {}).get(
-                "activities", []
-            ):
+            for activity in dict(activity_sheet.get("content") or {}).get("activities", []):
                 if str(activity.get("id") or "") != activity_id:
                     continue
                 uses = dict(activity.get("uses") or {})
@@ -10576,8 +10415,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             if str(item.get("actor_id") or "") == actor_id
         )
         active_multiattack = dict(
-            dict(actor_combatant.get("turn_flags") or {}).get("multiattack")
-            or {}
+            dict(actor_combatant.get("turn_flags") or {}).get("multiattack") or {}
         )
         remaining_multiattack = list(active_multiattack.get("remaining") or [])
         source_save_is_followup = bool(
@@ -10622,8 +10460,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 spec=random_save_spec,
                 death_saves_by_target={
                     str(item.get("actor_id") or ""): bool(
-                        item.get("death_saves", False)
-                        or item.get("zero_hp_recovery", False)
+                        item.get("death_saves", False) or item.get("zero_hp_recovery", False)
                     )
                     for item in next_encounter.get("combatants", [])
                 },
@@ -10645,12 +10482,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     key: value for key, value in moved.items() if key != "encounter"
                 }
             for target_id, target_record in random_target_records.items():
-                target_sheet = validate_character_sheet(
-                    settled_random["sheets"][target_id]
-                )
-                sync_combatant_conditions(
-                    next_encounter, target_id, target_sheet
-                )
+                target_sheet = validate_character_sheet(settled_random["sheets"][target_id])
+                sync_combatant_conditions(next_encounter, target_id, target_sheet)
                 concentration = next(
                     (
                         dict(item.get("damage") or {}).get("concentration")
@@ -10708,10 +10541,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             target_sheet = validate_character_sheet(settled_source["sheet"])
             sync_combatant_conditions(next_encounter, target_id, target_sheet)
             concentration = dict(
-                dict(settled_source["result"].get("damage") or {}).get(
-                    "concentration"
-                )
-                or {}
+                dict(settled_source["result"].get("damage") or {}).get("concentration") or {}
             )
             add_concentration_window(
                 next_encounter,
@@ -10723,9 +10553,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 CharacterStateUpdate(
                     character_id=target_id,
                     sheet=target_sheet,
-                    notes=validate_character_notes(
-                        source_save_target_record.notes
-                    ),
+                    notes=validate_character_notes(source_save_target_record.notes),
                     expected_revision=source_save_target_record.revision,
                 )
             )
@@ -10741,9 +10569,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             assert source_contest_target is not None
             source_actor = combat_actor_snapshot(actor_id)
             source_actor["sheet"] = applied["sheet"]
-            source_actor["derived"] = derive_character_sheet(
-                applied["sheet"]
-            )
+            source_actor["derived"] = derive_character_sheet(applied["sheet"])
             target_id = str(source_contest_target["id"])
             settled_contest = resolve_source_contest_effect(
                 source_actor,
@@ -10751,9 +10577,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 spec=source_contest_spec,
                 rules=rule_context,
             )
-            target_sheet = validate_character_sheet(
-                settled_contest["sheet"]
-            )
+            target_sheet = validate_character_sheet(settled_contest["sheet"])
             if settled_contest["result"]["success"]:
                 source_combatant = next(
                     item
@@ -10765,18 +10589,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     for item in next_encounter.get("combatants", [])
                     if str(item.get("actor_id") or "") == target_id
                 )
-                effect_instance_id = str(
-                    settled_contest["result"]["effect_instance_id"]
-                )
+                effect_instance_id = str(settled_contest["result"]["effect_instance_id"])
                 target_combatant["body_thief_host"] = {
                     "source_actor_id": actor_id,
                     "effect_instance_id": effect_instance_id,
-                    "original_disposition": str(
-                        target_combatant.get("disposition") or "neutral"
-                    ),
-                    "original_death_saves": bool(
-                        target_combatant.get("death_saves", False)
-                    ),
+                    "original_disposition": str(target_combatant.get("disposition") or "neutral"),
+                    "original_death_saves": bool(target_combatant.get("death_saves", False)),
                     "original_zero_hp_recovery": bool(
                         target_combatant.get("zero_hp_recovery", False)
                     ),
@@ -10787,9 +10605,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 )
                 target_combatant["death_saves"] = False
                 target_combatant["zero_hp_recovery"] = False
-                source_combatant["position"] = deepcopy(
-                    target_combatant["position"]
-                )
+                source_combatant["position"] = deepcopy(target_combatant["position"])
                 source_combatant["inside_host"] = {
                     "host_actor_id": target_id,
                     "effect_instance_id": effect_instance_id,
@@ -10797,28 +10613,20 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 }
                 source_combatant["hidden"] = True
                 source_combatant["visible_to_actor_ids"] = []
-                sync_combatant_conditions(
-                    next_encounter, target_id, target_sheet
-                )
+                sync_combatant_conditions(next_encounter, target_id, target_sheet)
                 actor_knowledge_transfers.append(
                     ActorKnowledgeTransfer(
                         source_actor_id=target_id,
                         destination_actor_id=actor_id,
-                        knowledge_key_prefix=(
-                            f"body-thief.{target_id}"
-                        ),
+                        knowledge_key_prefix=(f"body-thief.{target_id}"),
                     )
                 )
                 additional_updates.append(
                     CharacterStateUpdate(
                         character_id=target_id,
                         sheet=target_sheet,
-                        notes=validate_character_notes(
-                            source_contest_target_record.notes
-                        ),
-                        expected_revision=(
-                            source_contest_target_record.revision
-                        ),
+                        notes=validate_character_notes(source_contest_target_record.notes),
+                        expected_revision=(source_contest_target_record.revision),
                     )
                 )
             core_effect = {
@@ -10826,9 +10634,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "kind": "source_contest_effect",
                 "activation_payment": activity_activation_payment,
                 "knowledge_transfer_count": (
-                    source_contest_knowledge_count
-                    if settled_contest["result"]["success"]
-                    else 0
+                    source_contest_knowledge_count if settled_contest["result"]["success"] else 0
                 ),
                 "requires_ruling": False,
             }
@@ -10887,9 +10693,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "turn_undead": "dnd5e.core.activity.turn_undead",
                 "random_save_effects": "dnd5e.core.activity.random_save_effects",
                 "source_save_effect": "dnd5e.core.activity.source_save_effect",
-                "source_contest_effect": (
-                    "dnd5e.core.activity.source_contest_effect"
-                ),
+                "source_contest_effect": ("dnd5e.core.activity.source_contest_effect"),
             }[str(core_effect["kind"])]
             applied["rule_receipts"] = [
                 *list(applied.get("rule_receipts") or []),
@@ -11083,9 +10887,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 )
         campaign = campaigns.get(campaign_id)
         if str(campaign.settings.get("edition") or "2024") != "2014":
-            raise CombatEngineError(
-                "generic ability contests are a 2014 rules procedure"
-            )
+            raise CombatEngineError("generic ability contests are a 2014 rules procedure")
         require_write_contract(expected_revision, idempotency_key)
         resolved_branch_id = require_current_branch(campaign_id, branch_id)
         source_facts = checked_rule_facts(source_rule_facts)
@@ -11277,9 +11079,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "disadvantage": bool(disadvantage),
             "branch_id": resolved_branch_id,
         }
-        scope = (
-            f"source-object-attack:{campaign_id}:{resolved_branch_id}:{principal_id}"
-        )
+        scope = f"source-object-attack:{campaign_id}:{resolved_branch_id}:{principal_id}"
         replay = replay_idempotent(scope, idempotency_key, payload)
         if replay is not None:
             return replay
@@ -11339,9 +11139,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         else:
             hit_points_before = hit_point_maximum
 
-        exhaustion = int(
-            dict(attacker["sheet"].get("combat") or {}).get("exhaustion", 0) or 0
-        )
+        exhaustion = int(dict(attacker["sheet"].get("combat") or {}).get("exhaustion", 0) or 0)
         attack_bonus = int(attack["attack_bonus"])
         attack_disadvantage = bool(disadvantage)
         if str(attacker["sheet"].get("edition") or "2014") == "2014":
@@ -11791,12 +11589,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                             "escape check requires exactly one matching ongoing effect"
                         )
                     escape_effect = matching_effects[0]
-                    condition = str(
-                        escape_effect.get("condition") or ""
-                    ).strip().casefold()
+                    condition = str(escape_effect.get("condition") or "").strip().casefold()
                     acting_conditions = {
-                        str(item).strip().casefold()
-                        for item in acting.get("conditions", [])
+                        str(item).strip().casefold() for item in acting.get("conditions", [])
                     }
                     if (
                         condition not in acting_conditions
@@ -11841,9 +11636,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                             )
                         )
                         for ongoing in encounter.get("ongoing_effects", []):
-                            if str(ongoing.get("id") or "") == str(
-                                escape_effect.get("id") or ""
-                            ):
+                            if str(ongoing.get("id") or "") == str(escape_effect.get("id") or ""):
                                 ongoing["active"] = False
                                 ongoing["resolution"] = {
                                     "kind": "escape_check",
@@ -12033,18 +11826,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         resolved_branch_id = require_current_branch(campaign_id, branch_id)
         normalized_excerpt = " ".join(str(source_excerpt or "").split()).strip()
         if not 8 <= len(normalized_excerpt) <= 4000:
-            raise ValueError(
-                "source stabilization excerpt must contain 8 to 4000 characters"
-            )
+            raise ValueError("source stabilization excerpt must contain 8 to 4000 characters")
         payload = {
             "target_id": target_id,
             "source_excerpt": normalized_excerpt,
             "branch_id": resolved_branch_id,
         }
-        scope = (
-            f"combat-source-stabilize:{campaign_id}:"
-            f"{resolved_branch_id}:{principal_id}"
-        )
+        scope = f"combat-source-stabilize:{campaign_id}:{resolved_branch_id}:{principal_id}"
         replay = replay_idempotent(scope, idempotency_key, payload)
         if replay is not None:
             return combat_response(campaign_id, principal_id, replay)
@@ -12066,25 +11854,19 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             )
         scene_id = str(encounter.get("scene_id") or "").strip()
         if not scene_id:
-            raise CombatEngineError(
-                "source stabilization requires an encounter scene"
-            )
+            raise CombatEngineError("source stabilization requires an encounter scene")
         source_scene = modules.read_scene(campaign_id, scene_id)
         if _normalize_source_evidence_text(
             normalized_excerpt
         ) not in _normalize_source_evidence_text(source_scene.get("content")):
-            raise ValueError(
-                "source stabilization excerpt is not present in the encounter scene"
-            )
+            raise ValueError("source stabilization excerpt is not present in the encounter scene")
         target = combat_actor_snapshot(target_id)
         applied = stabilize_sheet(target["sheet"])
         updated_sheet = validate_character_sheet(applied["sheet"])
         next_encounter = deepcopy(encounter)
         sync_combatant_conditions(next_encounter, target_id, updated_sheet)
         reconcile_readied_spells(next_encounter, target_id, updated_sheet)
-        result = {
-            key: value for key, value in applied.items() if key != "sheet"
-        }
+        result = {key: value for key, value in applied.items() if key != "sheet"}
         result.update(
             {
                 "kind": "source_stabilization",
@@ -13203,9 +12985,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             and dict(patched_mechanics).get("spellcasting") is not None
         ):
             if current.campaign_id is None:
-                raise ValueError(
-                    "magic item spell hydration requires a campaign-bound character"
-                )
+                raise ValueError("magic item spell hydration requires a campaign-bound character")
             current_item = next(
                 (
                     item
@@ -13649,9 +13429,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             natural_recovery=natural_recovery,
             rest_activity_minutes=rest_activity_minutes,
             food_and_drink=food_and_drink,
-            song_of_rest_source_sheet=(
-                song_source.sheet if song_source is not None else None
-            ),
+            song_of_rest_source_sheet=(song_source.sheet if song_source is not None else None),
             rules=rest_rules,
             world_day=int(
                 dict(dict(campaign.state or {}).get("world_time") or {}).get("day", 0) or 0
@@ -14668,9 +14446,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     spell_ids=member["prepared_spell_ids"],
                     event="long_rest",
                 )
-                required_minutes = int(
-                    preparation_preview.get("preparation_minutes", 0) or 0
-                )
+                required_minutes = int(preparation_preview.get("preparation_minutes", 0) or 0)
                 available_minutes = int(
                     member["rest_schedule"].get("light_activity_minutes", 0) or 0
                 )
@@ -15237,9 +15013,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 raise CombatEngineError(
                     "live prepared-spell changes must be submitted atomically with party_rest"
                 )
-            if preparation_setup_closed(
-                campaign
-            ) and not initial_preparation_allowed_for_new_actor(campaign, current):
+            if preparation_setup_closed(campaign) and not initial_preparation_allowed_for_new_actor(
+                campaign, current
+            ):
                 raise CombatEngineError(
                     "individual preparation edits are initial setup only; after play starts, "
                     "submit the complete list with the edition's legal timing event"
@@ -17483,10 +17259,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         for candidate in candidates:
             local_candidate_id = str(candidate["id"])
-            candidate["id"] = "candidate:" + hashlib.sha256(
-                f"{module_id}\x1f{local_candidate_id}".encode("utf-8")
-            ).hexdigest()[:20]
-            candidate["review_tool"] = "module_content_review"
+            candidate["id"] = (
+                "candidate:"
+                + hashlib.sha256(
+                    f"{module_id}\x1f{local_candidate_id}".encode("utf-8")
+                ).hexdigest()[:20]
+            )
+            candidate["review_tool"] = "module_review"
+            candidate["review_action"] = "submit_content"
             candidate["module_id"] = module_id
             if len(candidate.get("source_scene_ids") or []) != 1:
                 candidate["execution_state"] = "blocked"
@@ -17603,9 +17383,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 raise ValueError("participant evidence must belong to the encounter module")
             source_excerpt = " ".join(str(raw_group.get("source_excerpt") or "").split()).strip()
             if len(source_excerpt) < 8 or len(source_excerpt) > 4000:
-                raise ValueError(
-                    "participant source_excerpt must contain 8 to 4000 characters"
-                )
+                raise ValueError("participant source_excerpt must contain 8 to 4000 characters")
             normalized_excerpt = _normalize_source_evidence_text(source_excerpt)
             normalized_content = _normalize_source_evidence_text(source_scene.get("content"))
             if normalized_excerpt not in normalized_content:
@@ -18808,9 +18586,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 raise ValueError(f"spell_replacements[{index}] must be an object")
             add_spell_id = str(raw.get("add_spell_id") or "").strip()
             if not add_spell_id:
-                raise ValueError(
-                    f"spell_replacements[{index}].add_spell_id is required"
-                )
+                raise ValueError(f"spell_replacements[{index}].add_spell_id is required")
             add_ids.append(add_spell_id)
         if len(add_ids) != len(set(add_ids)):
             raise ValueError("spell replacement targets must be unique")
@@ -18823,11 +18599,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         for add_spell_id in add_ids:
             if add_spell_id in existing_ids:
                 continue
-            matches = [
-                item
-                for item in artifacts
-                if str(item[2].get("id") or "") == add_spell_id
-            ]
+            matches = [item for item in artifacts if str(item[2].get("id") or "") == add_spell_id]
             if len(matches) != 1:
                 raise ValueError(
                     "statblock replacement spell must resolve exactly once in active "
@@ -20084,8 +19856,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 return {
                     "status": "pending_ruling",
                     "reason": (
-                        "custom background requires both custom_name and exactly "
-                        "two skill choices"
+                        "custom background requires both custom_name and exactly two skill choices"
                     ),
                 }
             selected_background = custom_name or base_background
@@ -20111,9 +19882,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             else:
                 if not isinstance(custom_skills_raw, list):
                     raise ValueError("custom background skills must be an array")
-                selected_skills = [
-                    str(item).strip().casefold() for item in custom_skills_raw
-                ]
+                selected_skills = [str(item).strip().casefold() for item in custom_skills_raw]
                 if len(selected_skills) != 2 or any(not item for item in selected_skills):
                     return {
                         "status": "pending_ruling",
@@ -20126,8 +19895,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 ]
                 if unknown_skills:
                     raise ValueError(
-                        "custom background references unknown skills: "
-                        + ", ".join(unknown_skills)
+                        "custom background references unknown skills: " + ", ".join(unknown_skills)
                     )
                 duplicate_skills = [
                     skill
@@ -20139,27 +19907,20 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         "status": "pending_ruling",
                         "reason": (
                             "custom background skill choices must replace proficiencies "
-                            "already granted by another source: "
-                            + ", ".join(duplicate_skills)
+                            "already granted by another source: " + ", ".join(duplicate_skills)
                         ),
                     }
             equipment_item_ids_raw = selection.get("equipment_item_ids", [])
             if not isinstance(equipment_item_ids_raw, list):
                 raise ValueError("background equipment_item_ids must be an array")
-            equipment_item_ids = [
-                str(item).strip() for item in equipment_item_ids_raw
-            ]
+            equipment_item_ids = [str(item).strip() for item in equipment_item_ids_raw]
             if any(not item for item in equipment_item_ids):
                 raise ValueError("background equipment item ids must not be empty")
             if len(equipment_item_ids) != len(set(equipment_item_ids)):
                 raise ValueError("background equipment item ids must be distinct")
-            inventory_item_ids = {
-                str(item["id"]) for item in sheet["inventory"]["items"]
-            }
+            inventory_item_ids = {str(item["id"]) for item in sheet["inventory"]["items"]}
             missing_equipment = [
-                item_id
-                for item_id in equipment_item_ids
-                if item_id not in inventory_item_ids
+                item_id for item_id in equipment_item_ids if item_id not in inventory_item_ids
             ]
             if missing_equipment:
                 raise ValueError(
@@ -21517,12 +21278,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     character_spell_prepare_legacy = character_spell_prepare
     campaign_clock_set_legacy = campaign_clock_set
     campaign_advance_effects_legacy = campaign_advance_effects
+    character_check_legacy = character_check
     # These facade names intentionally replace same-named legacy tools.
     for replaced_tool_name in (
         "character_content_apply",
         "character_spell_prepare",
         "campaign_clock_set",
         "campaign_advance_effects",
+        "character_check",
     ):
         mcp.remove_tool(replaced_tool_name)
 
@@ -21539,6 +21302,30 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             raise ValueError(f"payload.{name} is required")
         return value
 
+    def strict_facade_payload(
+        payload: dict[str, Any] | None,
+        *,
+        action: str,
+        allowed: set[str],
+        required_names: tuple[str, ...] = (),
+    ) -> dict[str, Any]:
+        """Validate one facade action without accepting an untyped payload escape hatch."""
+        data = facade_payload(payload)
+        unknown = sorted(set(data) - allowed)
+        if unknown:
+            raise ValueError(f"unsupported {action} payload fields: {', '.join(unknown)}")
+        for name in required_names:
+            required(data, name)
+        return data
+
+    def require_facade_phase(campaign_id: str, action: str, *phases: str) -> None:
+        phase = authoritative_phase(campaign_id)
+        if phase not in phases:
+            allowed = ", ".join(phases)
+            raise ExposureError(
+                f"{action} is only available during {allowed}; current phase is {phase}."
+            )
+
     def optional_datetime(value: Any, name: str) -> datetime | None:
         if value is None or value == "":
             return None
@@ -21552,6 +21339,257 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     def facade_result(action: str, result: Any) -> dict[str, Any]:
         status = result.get("status", "ok") if isinstance(result, dict) else "ok"
         return {"status": status, "action": action, "result": result}
+
+    def facade_render_result(rendered: Any) -> CallToolResult:
+        """Preserve native image content while satisfying a facade's structured output."""
+        if (
+            not isinstance(rendered, list)
+            or len(rendered) != 2
+            or not isinstance(rendered[0], dict)
+            or not isinstance(rendered[1], Image)
+        ):
+            raise TypeError("render facade received an invalid image result")
+        metadata = dict(rendered[0])
+        return CallToolResult(
+            content=[
+                TextContent(
+                    type="text",
+                    text=json.dumps(
+                        metadata,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ),
+                ),
+                rendered[1].to_image_content(),
+            ],
+            structuredContent=metadata,
+        )
+
+    @mcp.tool()
+    def character_check(
+        campaign_id: str,
+        action: Literal["check", "contest"] = "check",
+        payload: dict[str, Any] | None = None,
+        principal_id: str = "system:local",
+        expected_revision: int | None = None,
+        branch_id: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Resolve one non-combat check or atomic 2014 contest in the Play phase."""
+        require_facade_phase(campaign_id, f"character_check({action})", PROFILE_PLAY)
+        if action == "contest":
+            data = strict_facade_payload(
+                payload,
+                action="character_check(contest)",
+                allowed={
+                    "source_actor_id",
+                    "target_actor_id",
+                    "source_ability",
+                    "target_ability",
+                    "source_proficient",
+                    "target_proficient",
+                    "source_bonus",
+                    "target_bonus",
+                    "source_advantage",
+                    "source_disadvantage",
+                    "target_advantage",
+                    "target_disadvantage",
+                    "source_rule_facts",
+                    "target_rule_facts",
+                },
+                required_names=(
+                    "source_actor_id",
+                    "target_actor_id",
+                    "source_ability",
+                    "target_ability",
+                ),
+            )
+            result = character_contest(
+                campaign_id,
+                data["source_actor_id"],
+                data["target_actor_id"],
+                data["source_ability"],
+                data["target_ability"],
+                data.get("source_proficient", False),
+                data.get("target_proficient", False),
+                data.get("source_bonus", 0),
+                data.get("target_bonus", 0),
+                data.get("source_advantage", False),
+                data.get("source_disadvantage", False),
+                data.get("target_advantage", False),
+                data.get("target_disadvantage", False),
+                data.get("source_rule_facts"),
+                data.get("target_rule_facts"),
+                principal_id,
+                expected_revision,
+                branch_id,
+                idempotency_key,
+            )
+            return result
+        data = strict_facade_payload(
+            payload,
+            action="character_check(check)",
+            allowed={
+                "actor_id",
+                "kind",
+                "ability",
+                "dc",
+                "proficient",
+                "bonus",
+                "advantage",
+                "disadvantage",
+                "rule_facts",
+            },
+            required_names=("actor_id", "kind", "ability"),
+        )
+        result = character_check_legacy(
+            campaign_id,
+            data["actor_id"],
+            data["kind"],
+            data["ability"],
+            data.get("dc", 0),
+            data.get("proficient", False),
+            data.get("bonus", 0),
+            data.get("advantage", False),
+            data.get("disadvantage", False),
+            data.get("rule_facts"),
+            principal_id,
+            expected_revision,
+            branch_id,
+            idempotency_key,
+        )
+        return result
+
+    @mcp.tool()
+    def chase(
+        campaign_id: str,
+        action: Literal["start", "query", "take_turn", "end"],
+        payload: dict[str, Any] | None = None,
+        principal_id: str = "system:local",
+        branch_id: str | None = None,
+        expected_revision: int | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Run the source-reviewed 2014 chase procedure only during Play."""
+        require_facade_phase(campaign_id, f"chase({action})", PROFILE_PLAY)
+        if action == "query":
+            data = strict_facade_payload(
+                payload,
+                action="chase(query)",
+                allowed=set(),
+            )
+            assert not data
+            return facade_result(action, chase_query(campaign_id, principal_id))
+        if action == "start":
+            data = strict_facade_payload(
+                payload,
+                action="chase(start)",
+                allowed={
+                    "participant_ids",
+                    "quarry_ids",
+                    "initial_distance_ft",
+                    "scene_id",
+                    "source_ref",
+                    "source_excerpt",
+                    "name",
+                    "participant_config",
+                    "close_transition",
+                },
+                required_names=(
+                    "participant_ids",
+                    "quarry_ids",
+                    "initial_distance_ft",
+                    "scene_id",
+                    "source_ref",
+                    "source_excerpt",
+                ),
+            )
+            result = chase_start(
+                campaign_id,
+                data["participant_ids"],
+                data["quarry_ids"],
+                data["initial_distance_ft"],
+                data["scene_id"],
+                data["source_ref"],
+                data["source_excerpt"],
+                data.get("name", "Chase"),
+                data.get("participant_config"),
+                data.get("close_transition"),
+                principal_id,
+                branch_id,
+                expected_revision,
+                idempotency_key,
+            )
+        elif action == "take_turn":
+            data = strict_facade_payload(
+                payload,
+                action="chase(take_turn)",
+                allowed={
+                    "actor_id",
+                    "turn_action",
+                    "complication_choice",
+                    "stand_from_prone",
+                    "quarry_visibility",
+                    "expected_actor_revision",
+                },
+                required_names=("actor_id",),
+            )
+            turn_action = data.get("turn_action", "dash")
+            if turn_action not in {"dash", "move", "drop_out"}:
+                raise ValueError("payload.turn_action must be dash, move, or drop_out")
+            result = chase_take_turn(
+                campaign_id,
+                data["actor_id"],
+                turn_action,
+                data.get("complication_choice", ""),
+                data.get("stand_from_prone", True),
+                data.get("quarry_visibility"),
+                principal_id,
+                branch_id,
+                expected_revision,
+                data.get("expected_actor_revision"),
+                idempotency_key,
+            )
+        else:
+            data = strict_facade_payload(
+                payload,
+                action="chase(end)",
+                allowed={
+                    "status",
+                    "summary",
+                    "source_ref",
+                    "source_excerpt",
+                },
+                required_names=(
+                    "status",
+                    "summary",
+                    "source_ref",
+                    "source_excerpt",
+                ),
+            )
+            status = data["status"]
+            if status not in {
+                "caught",
+                "destination_reached",
+                "quarry_escaped",
+                "pursuers_abandoned",
+            }:
+                raise ValueError(
+                    "payload.status must be caught, destination_reached, "
+                    "quarry_escaped, or pursuers_abandoned"
+                )
+            result = chase_end(
+                campaign_id,
+                status,
+                data["summary"],
+                data["source_ref"],
+                data["source_excerpt"],
+                principal_id,
+                branch_id,
+                expected_revision,
+                idempotency_key,
+            )
+        return facade_result(action, result)
 
     @mcp.tool()
     def import_query(
@@ -21576,6 +21614,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "discover",
             "stage",
             "inspect",
+            "render_page",
             "ingest",
             "review_statblock",
             "extract_candidates",
@@ -21616,6 +21655,27 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 idempotency_key,
             )
             return facade_result(action, {**staged, **result})
+        if action == "render_page":
+            require_facade_phase(
+                campaign_id,
+                "rule_import(render_page)",
+                PROFILE_LOBBY,
+            )
+            data = strict_facade_payload(
+                payload,
+                action="rule_import(render_page)",
+                allowed={"job_id", "page_number", "scale"},
+                required_names=("job_id", "page_number"),
+            )
+            return facade_render_result(  # type: ignore[return-value]
+                rule_document_page_render(
+                    campaign_id,
+                    data["job_id"],
+                    data["page_number"],
+                    data.get("scale", 1.5),
+                    principal_id,
+                )
+            )
         job_id = required(data, "job_id")
         if action == "inspect":
             return facade_result(
@@ -21760,6 +21820,93 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             action,
             module_import_job_activate(
                 campaign_id, job_id, principal_id, expected_revision, idempotency_key
+            ),
+        )
+
+    @mcp.tool()
+    def module_review(
+        campaign_id: str,
+        action: Literal["render_page", "submit_content"],
+        payload: dict[str, Any],
+        principal_id: str = "system:local",
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Render managed module evidence or submit a DM-only content review."""
+        if action == "render_page":
+            require_facade_phase(
+                campaign_id,
+                "module_review(render_page)",
+                PROFILE_LOBBY,
+                PROFILE_PLAY,
+            )
+            data = strict_facade_payload(
+                payload,
+                action="module_review(render_page)",
+                allowed={
+                    "module_id",
+                    "page_number",
+                    "source_asset_id",
+                    "scale",
+                },
+                required_names=("module_id", "page_number"),
+            )
+            return facade_render_result(  # type: ignore[return-value]
+                module_page_render(
+                    campaign_id,
+                    data["module_id"],
+                    data["page_number"],
+                    data.get("source_asset_id"),
+                    data.get("scale", 1.5),
+                    principal_id,
+                )
+            )
+        require_facade_phase(
+            campaign_id,
+            "module_review(submit_content)",
+            PROFILE_LOBBY,
+        )
+        data = strict_facade_payload(
+            payload,
+            action="module_review(submit_content)",
+            allowed={
+                "module_id",
+                "scene_id",
+                "content_key",
+                "normalized_content",
+                "observation",
+                "source_asset_id",
+                "page_number",
+                "source_chunk_ids",
+                "content_kind",
+                "metadata",
+            },
+            required_names=(
+                "module_id",
+                "scene_id",
+                "content_key",
+                "normalized_content",
+                "observation",
+            ),
+        )
+        content_kind = data.get("content_kind", "dnd5e_2014_statblock")
+        if content_kind != "dnd5e_2014_statblock":
+            raise ValueError("payload.content_kind must be dnd5e_2014_statblock")
+        return facade_result(
+            action,
+            module_content_review(
+                campaign_id,
+                data["module_id"],
+                data["scene_id"],
+                data["content_key"],
+                data["normalized_content"],
+                data["observation"],
+                data.get("source_asset_id"),
+                data.get("page_number"),
+                data.get("source_chunk_ids"),
+                content_kind,
+                data.get("metadata"),
+                principal_id,
+                idempotency_key,
             ),
         )
 
@@ -21944,7 +22091,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     def campaign_rules(
         campaign_id: str,
         action: Literal[
-            "get_profile", "set_profile", "set_pack", "remove_pack", "explain", "receipts"
+            "get_profile",
+            "set_profile",
+            "set_pack",
+            "remove_pack",
+            "core_relock",
+            "explain",
+            "receipts",
         ],
         payload: dict[str, Any] | None = None,
         principal_id: str = "system:local",
@@ -21986,6 +22139,31 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 principal_id,
                 branch_id,
                 expected_revision,
+                idempotency_key,
+            )
+        elif action == "core_relock":
+            data = strict_facade_payload(
+                payload,
+                action="campaign_rules(core_relock)",
+                allowed={
+                    "expected_core_fingerprint",
+                    "reason",
+                    "expected_head_snapshot_id",
+                },
+                required_names=(
+                    "expected_core_fingerprint",
+                    "reason",
+                    "expected_head_snapshot_id",
+                ),
+            )
+            result = campaign_core_relock(
+                campaign_id,
+                data["expected_core_fingerprint"],
+                data["reason"],
+                principal_id,
+                branch_id,
+                expected_revision,
+                data["expected_head_snapshot_id"],
                 idempotency_key,
             )
         elif action == "explain":
@@ -22100,8 +22278,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 song_source = characters.get(song_source_actor_id)
                 if song_source.campaign_id != current.campaign_id:
                     raise CombatEngineError(
-                        "Song of Rest source must belong to the resting "
-                        "character's campaign"
+                        "Song of Rest source must belong to the resting character's campaign"
                     )
                 song_die_sides = validate_song_of_rest_source(song_source.sheet)
             rest_activity_minutes = validate_rest_activity_minutes(
@@ -22143,9 +22320,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "arcane_recovery": arcane_recovery,
                 "natural_recovery": natural_recovery,
                 "song_of_rest_source_actor_id": song_source_actor_id,
-                "song_of_rest_die": (
-                    f"1d{song_die_sides}" if song_die_sides is not None else None
-                ),
+                "song_of_rest_die": (f"1d{song_die_sides}" if song_die_sides is not None else None),
                 "attune_item_id": attune_item_id,
                 "attunement_prerequisite_confirmed": (True if attune_item_id is not None else None),
                 "rest_activity_minutes": rest_activity_minutes,
@@ -22233,13 +22408,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             if not name or len(name) > 200:
                 raise ValueError("narrative NPC name must contain 1 to 200 characters")
             if not source_identity or len(source_identity) > 200:
-                raise ValueError(
-                    "narrative NPC source_identity must contain 1 to 200 characters"
-                )
+                raise ValueError("narrative NPC source_identity must contain 1 to 200 characters")
             if len(instance_key) > 100:
-                raise ValueError(
-                    "narrative NPC instance_key must not exceed 100 characters"
-                )
+                raise ValueError("narrative NPC instance_key must not exceed 100 characters")
             if instance_key:
                 expected_instance_name = f"{source_identity} [{instance_key}]"
                 if name != expected_instance_name:
@@ -22529,9 +22700,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             result = {
                 "character": character,
                 "source": {
-                    key: value
-                    for key, value in review.items()
-                    if key != "normalized_content"
+                    key: value for key, value in review.items() if key != "normalized_content"
                 },
                 "statblock": {
                     "challenge_rating": challenge_rating,
@@ -23668,12 +23837,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "path": "combat",
                 "operator": "not_active",
                 "expected": False,
-                "actual": bool(
-                    dict(campaign.state.get("combat") or {}).get("active", False)
-                ),
-                "passed": not bool(
-                    dict(campaign.state.get("combat") or {}).get("active", False)
-                ),
+                "actual": bool(dict(campaign.state.get("combat") or {}).get("active", False)),
+                "passed": not bool(dict(campaign.state.get("combat") or {}).get("active", False)),
             }
         )
         return results
@@ -23883,11 +24048,31 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     @mcp.tool()
     def memory_query(
         campaign_id: str,
-        view: Literal["list", "search"] = "list",
+        view: Literal["list", "search", "diagnostics"] = "list",
         payload: dict[str, Any] | None = None,
         principal_id: str = "system:local",
     ) -> dict[str, Any]:
         """Read objective campaign memory; actor knowledge remains a separate subjective store."""
+        if view == "diagnostics":
+            require_facade_phase(
+                campaign_id,
+                "memory_query(diagnostics)",
+                PROFILE_LOBBY,
+                PROFILE_PLAY,
+            )
+            data = strict_facade_payload(
+                payload,
+                action="memory_query(diagnostics)",
+                allowed={"branch_id"},
+            )
+            return facade_result(
+                view,
+                continuity_diagnostics(
+                    campaign_id,
+                    data.get("branch_id"),
+                    principal_id,
+                ),
+            )
         data = facade_payload(payload)
         result = (
             memory_search(
@@ -23912,7 +24097,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     @mcp.tool()
     def memory_change(
         campaign_id: str,
-        action: Literal["add", "upsert", "revise", "supersede"] = "add",
+        action: Literal["add", "upsert", "revise", "supersede", "commit"] = "add",
         payload: dict[str, Any] | None = None,
         content: str | None = None,
         kind: str = "fact",
@@ -23920,12 +24105,46 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         metadata: dict[str, Any] | None = None,
         branch_id: str | None = None,
         principal_id: str = "system:local",
+        expected_revision: int | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Add, upsert, revise, or supersede an objective branch-scoped fact."""
         access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
         if not idempotency_key:
             raise ValueError("idempotency_key is required for memory writes")
+        if action == "commit":
+            require_facade_phase(
+                campaign_id,
+                "memory_change(commit)",
+                PROFILE_LOBBY,
+                PROFILE_PLAY,
+            )
+            commit_payload = strict_facade_payload(
+                payload,
+                action="memory_change(commit)",
+                allowed={
+                    "event",
+                    "facts",
+                    "actor_knowledge",
+                    "snapshot",
+                    "branch_id",
+                },
+                required_names=("event",),
+            )
+            if branch_id is not None and commit_payload.get("branch_id") not in {None, branch_id}:
+                raise ValueError("payload.branch_id conflicts with top-level branch_id")
+            if branch_id is not None:
+                commit_payload["branch_id"] = branch_id
+            return facade_result(
+                action,
+                continuity_commit(
+                    campaign_id,
+                    commit_payload,
+                    principal_id,
+                    expected_revision,
+                    idempotency_key,
+                ),
+            )
         data = {
             "content": content,
             "kind": kind,
@@ -24337,21 +24556,38 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     @mcp.tool()
     def combat_choice(
         campaign_id: str,
-        actor_id: str,
-        action: Literal["open", "resolve", "resolve_defense"],
+        action: Literal["open", "resolve", "resolve_defense", "on_hit_ruling"],
         payload: dict[str, Any],
+        actor_id: str | None = None,
         principal_id: str = "system:local",
         expected_revision: int | None = None,
         branch_id: str | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
-        """Open or resolve a choice window; the engine still decides which choices are legal."""
-        data = facade_payload(payload)
+        """Open or resolve a validated choice window during active combat."""
+        if action == "on_hit_ruling":
+            access.require_campaign(
+                campaign_id,
+                principal_id,
+                roles={"owner", "dm"},
+            )
+        require_facade_phase(
+            campaign_id,
+            f"combat_choice({action})",
+            PROFILE_COMBAT,
+        )
+        resolved_actor_id = str(required({"actor_id": actor_id}, "actor_id"))
         if action == "open":
+            data = strict_facade_payload(
+                payload,
+                action="combat_choice(open)",
+                allowed={"event", "candidates", "kind"},
+                required_names=("event",),
+            )
             result = combat_choice_open(
                 campaign_id,
-                actor_id,
-                required(data, "event"),
+                resolved_actor_id,
+                data["event"],
                 data.get("candidates"),
                 data.get("kind", "reaction"),
                 principal_id,
@@ -24360,6 +24596,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 idempotency_key,
             )
         elif action == "resolve_defense":
+            data = strict_facade_payload(
+                payload,
+                action="combat_choice(resolve_defense)",
+                allowed={"choice_id", "selection"},
+                required_names=("choice_id", "selection"),
+            )
             choice_id = required(data, "choice_id")
             _campaign, encounter = active_encounter(campaign_id)
             window = next(
@@ -24373,7 +24615,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             )
             result = resolver(
                 campaign_id,
-                actor_id,
+                resolved_actor_id,
                 choice_id,
                 required(data, "selection"),
                 principal_id,
@@ -24381,12 +24623,35 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 expected_revision,
                 idempotency_key,
             )
-        else:
+        elif action == "resolve":
+            data = strict_facade_payload(
+                payload,
+                action="combat_choice(resolve)",
+                allowed={"choice_id", "selection"},
+                required_names=("choice_id", "selection"),
+            )
             result = combat_choice_resolve(
                 campaign_id,
-                actor_id,
-                required(data, "choice_id"),
-                required(data, "selection"),
+                resolved_actor_id,
+                data["choice_id"],
+                data["selection"],
+                principal_id,
+                expected_revision,
+                branch_id,
+                idempotency_key,
+            )
+        else:
+            data = strict_facade_payload(
+                payload,
+                action="combat_choice(on_hit_ruling)",
+                allowed={"choice_id", "selection"},
+                required_names=("choice_id", "selection"),
+            )
+            result = combat_on_hit_ruling(
+                campaign_id,
+                resolved_actor_id,
+                data["choice_id"],
+                data["selection"],
                 principal_id,
                 expected_revision,
                 branch_id,
@@ -24598,6 +24863,21 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             exposures.unload(exposure, group_id)
         return exposures.status(exposure)
 
+    retired_tool_replacements = {
+        "chase_start": "chase(action='start')",
+        "chase_query": "chase(action='query')",
+        "chase_take_turn": "chase(action='take_turn')",
+        "chase_end": "chase(action='end')",
+        "character_contest": "character_check(action='contest')",
+        "campaign_core_relock": "campaign_rules(action='core_relock')",
+        "rule_document_page_render": "rule_import(action='render_page')",
+        "module_page_render": "module_review(action='render_page')",
+        "module_content_review": "module_review(action='submit_content')",
+        "continuity_commit": "memory_change(action='commit')",
+        "continuity_diagnostics": "memory_query(view='diagnostics')",
+        "combat_on_hit_ruling": "combat_choice(action='on_hit_ruling')",
+    }
+
     @mcp.tool()
     async def exposure_call(
         exposure_id: str,
@@ -24605,6 +24885,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         arguments: dict[str, Any] | None = None,
     ) -> Any:
         """Call an exposed tool when an MCP host cannot refresh native schemas."""
+        if replacement := retired_tool_replacements.get(tool_id):
+            raise ExposureError(f"Tool {tool_id!r} is retired; use {replacement}.")
         if tool_id in CORE_TOOLS or tool_id.startswith("exposure_"):
             raise ExposureError("exposure_call only dispatches a loaded domain tool.")
         request = mcp._request_session()
@@ -24640,6 +24922,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             if isinstance(called, tuple) and len(called) == 2:
                 content, structured = called
                 result = structured if structured is not None else content
+            elif isinstance(called, CallToolResult):
+                result = list(called.content)
             else:
                 result = called
             exposure_changed = exposures.consume_tool(exposure, tool_id)
@@ -24696,6 +24980,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     # advertises its capability list.  The underlying functions remain local
     # implementation seams so their validation is reused by the facades.
     retired_tool_names = {
+        *retired_tool_replacements,
         "campaign_list",
         "campaign_get",
         "campaign_member_grant",

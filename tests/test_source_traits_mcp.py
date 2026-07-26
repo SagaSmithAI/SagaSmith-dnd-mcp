@@ -296,20 +296,20 @@ def test_public_source_stabilization_requires_scene_evidence_and_no_helper_actor
                 "campaign_id": campaign["id"],
                 "target_id": hero["id"],
                 "action": "damage",
-                "payload": {
-                    "parts": [{"amount": 1, "damage_type": "bludgeoning"}]
-                },
+                "payload": {"parts": [{"amount": 1, "damage_type": "bludgeoning"}]},
                 "expected_revision": started["campaign_revision"],
                 "idempotency_key": "damage",
             },
         )
         revision = (
             damaged.get("campaign_revision")
-            or (await _call(
-                server,
-                "campaign_get",
-                {"campaign_id": campaign["id"]},
-            ))["revision"]
+            or (
+                await _call(
+                    server,
+                    "campaign_get",
+                    {"campaign_id": campaign["id"]},
+                )
+            )["revision"]
         )
         with pytest.raises(Exception, match="not present in the encounter scene"):
             await _call(
@@ -512,16 +512,19 @@ def test_public_stirge_attachment_drains_hit_points_at_source_turn_start(
                 "idempotency_key": "attack",
             },
         )
-        attached = await _raw(
+        attached = await _call(
             server,
-            "combat_on_hit_ruling",
+            "combat_choice",
             {
                 "campaign_id": campaign["id"],
-                "target_id": target["id"],
-                "choice_id": attacked["result"]["pending_on_hit_ruling_id"],
-                "selection": {
-                    "id": "attachment",
-                    "source_excerpt": blood_drain,
+                "action": "on_hit_ruling",
+                "actor_id": target["id"],
+                "payload": {
+                    "choice_id": attacked["result"]["pending_on_hit_ruling_id"],
+                    "selection": {
+                        "id": "attachment",
+                        "source_excerpt": blood_drain,
+                    },
                 },
                 "expected_revision": attacked["campaign_revision"],
                 "idempotency_key": "attach",
@@ -733,21 +736,21 @@ def test_public_grimvault_only_opens_dm_boundary_after_both_natural_twenty_rolls
         assert attacked["status"] == "pending_ruling"
         assert attacked["result"]["damage"]["input_amount"] == 32
         assert attacked["result"]["critical_followup"]["triggered"] is True
-        assert (
-            attacked["result"]["critical_followup"]["anatomical_loss_triggered"]
-            is True
-        )
-        ruled = await _raw(
+        assert attacked["result"]["critical_followup"]["anatomical_loss_triggered"] is True
+        ruled = await _call(
             server,
-            "combat_on_hit_ruling",
+            "combat_choice",
             {
                 "campaign_id": campaign["id"],
-                "target_id": troll["id"],
-                "choice_id": attacked["result"]["pending_on_hit_ruling_id"],
-                "selection": {
-                    "id": "critical_followup",
-                    "target_has_limbs": True,
-                    "source_excerpt": grimvault_effect,
+                "action": "on_hit_ruling",
+                "actor_id": troll["id"],
+                "payload": {
+                    "choice_id": attacked["result"]["pending_on_hit_ruling_id"],
+                    "selection": {
+                        "id": "critical_followup",
+                        "target_has_limbs": True,
+                        "source_excerpt": grimvault_effect,
+                    },
                 },
                 "expected_revision": attacked["campaign_revision"],
                 "idempotency_key": "record-loss",
@@ -762,8 +765,7 @@ def test_public_grimvault_only_opens_dm_boundary_after_both_natural_twenty_rolls
         assert ruled["result"]["part_category"] == "limb"
         assert ruled["result"]["mechanical_effect"] == "dm_unspecified"
         assert any(
-            effect.get("kind") == "anatomical_loss"
-            and effect.get("active")
+            effect.get("kind") == "anatomical_loss" and effect.get("active")
             for effect in troll_after["sheet"]["effects"]
         )
 

@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 from pathlib import Path
 
@@ -7,7 +8,16 @@ from sagasmith_dnd.module_profile import DndModuleProfile
 from sagasmith_dnd_mcp.config import McpConfig
 from sagasmith_dnd_mcp.server import create_server
 from sagasmith_dnd_mcp.skills import SkillCatalog
-from sagasmith_dnd_mcp.tool_profiles import profile_catalog
+from sagasmith_dnd_mcp.tool_budget import (
+    BASELINE_INPUT_SCHEMA_BYTES,
+    BASELINE_PUBLIC_TOOL_COUNT,
+    PROFILE_TOOL_LIMITS,
+    TARGET_CORE_TOOL_COUNT,
+    TARGET_INPUT_SCHEMA_BYTES,
+    TARGET_PUBLIC_TOOL_COUNT,
+    TOOL_BUDGET_VERSION,
+)
+from sagasmith_dnd_mcp.tool_profiles import CORE_TOOLS, profile_catalog
 
 
 def test_config_owns_local_storage(tmp_path: Path) -> None:
@@ -54,9 +64,10 @@ def test_default_rule_import_roots_include_the_dnd_skill_corpus(monkeypatch) -> 
     config = McpConfig.from_environment()
 
     assert config.rule_import_roots[0].name == "DnD-Books"
-    assert config.rule_import_roots[1] == (
-        config.dnd_skills_dir / "full" / "skills" / "dnd-dm" / "srd"
-    ).resolve()
+    assert (
+        config.rule_import_roots[1]
+        == (config.dnd_skills_dir / "full" / "skills" / "dnd-dm" / "srd").resolve()
+    )
 
 
 def test_skill_catalog_reads_both_repositories(tmp_path: Path) -> None:
@@ -75,8 +86,7 @@ def test_skill_catalog_reads_both_repositories(tmp_path: Path) -> None:
     assert catalog.read("modulegen.root") == "# Module Generator\n"
     assert all(len(item.checksum) == 64 for item in catalog.list())
     assert catalog.manifest() == [
-        {"id": item.id, "source": item.source, "checksum": item.checksum}
-        for item in catalog.list()
+        {"id": item.id, "source": item.source, "checksum": item.checksum} for item in catalog.list()
     ]
 
 
@@ -211,6 +221,85 @@ def test_server_tool_profiles_are_complete_and_attached_to_tool_metadata(tmp_pat
     asyncio.run(inspect_tools())
 
 
+def test_compact_public_tool_and_schema_budgets_are_locked(tmp_path: Path) -> None:
+    config = McpConfig(
+        home=tmp_path / "home",
+        database_url=None,
+        chroma_url=None,
+        chroma_path_override=None,
+        dnd_skills_dir=tmp_path / "dnd",
+        modulegen_skills_dir=tmp_path / "modulegen",
+        auto_seed_rules=False,
+    )
+
+    async def inspect_budget() -> None:
+        server = create_server(config)
+        tools = await server.list_tools()
+        schema_bytes = sum(
+            len(
+                json.dumps(
+                    tool.inputSchema,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode()
+            )
+            for tool in tools
+        )
+
+        assert BASELINE_PUBLIC_TOOL_COUNT == 92
+        assert BASELINE_INPUT_SCHEMA_BYTES == 56_611
+        assert len(CORE_TOOLS) == TARGET_CORE_TOOL_COUNT == 12
+        assert len(tools) == TARGET_PUBLIC_TOOL_COUNT == 82
+        assert (
+            {phase: len(names) for phase, names in profile_catalog().items()}
+            == PROFILE_TOOL_LIMITS
+            == {
+                "lobby": 61,
+                "play": 46,
+                "combat": 44,
+            }
+        )
+        assert schema_bytes == TARGET_INPUT_SCHEMA_BYTES == 47_617
+        assert schema_bytes < BASELINE_INPUT_SCHEMA_BYTES
+        by_name = {tool.name: tool for tool in tools}
+        assert by_name["chase"].inputSchema["properties"]["action"]["enum"] == [
+            "start",
+            "query",
+            "take_turn",
+            "end",
+        ]
+        assert by_name["character_check"].inputSchema["properties"]["action"]["enum"] == [
+            "check",
+            "contest",
+        ]
+        assert by_name["module_review"].inputSchema["properties"]["action"]["enum"] == [
+            "render_page",
+            "submit_content",
+        ]
+        assert by_name["combat_choice"].inputSchema["properties"]["action"]["enum"] == [
+            "open",
+            "resolve",
+            "resolve_defense",
+            "on_hit_ruling",
+        ]
+
+        expected_budget = {
+            "version": TOOL_BUDGET_VERSION,
+            "baseline_public_tools": BASELINE_PUBLIC_TOOL_COUNT,
+            "baseline_input_schema_bytes": BASELINE_INPUT_SCHEMA_BYTES,
+            "target_public_tools": TARGET_PUBLIC_TOOL_COUNT,
+            "target_core_tools": TARGET_CORE_TOOL_COUNT,
+            "target_input_schema_bytes": TARGET_INPUT_SCHEMA_BYTES,
+            "profile_limits": PROFILE_TOOL_LIMITS,
+        }
+        _, capabilities = await server.call_tool("server_capabilities", {})
+        assert capabilities["tool_exposure"]["budget"] == expected_budget
+        _, profiles = await server.call_tool("server_tool_profiles", {})
+        assert profiles["budget"] == expected_budget
+
+    asyncio.run(inspect_budget())
+
+
 def test_server_capabilities_publish_the_rulebook_import_contract(tmp_path: Path) -> None:
     config = McpConfig(
         home=tmp_path / "home",
@@ -240,9 +329,7 @@ def test_server_capabilities_publish_the_rulebook_import_contract(tmp_path: Path
         assert "module_import(attach_asset)" in capabilities["module_import"]["stages"]
         assert capabilities["module_import"]["normalization_cache"] == "content-addressed"
         assert capabilities["module_import"]["page_extraction_cache"] == "content-addressed"
-        assert capabilities["module_import"]["normalizer"].startswith(
-            "sagasmith-core/pdf-layout-v"
-        )
+        assert capabilities["module_import"]["normalizer"].startswith("sagasmith-core/pdf-layout-v")
         assert capabilities["module_import"]["parser"] == (
             f"{DndModuleProfile.name}-v{DndModuleProfile.version}"
         )
