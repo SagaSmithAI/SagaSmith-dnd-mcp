@@ -57,6 +57,7 @@ from scripts.regression_playthrough import (
     _refresh_module,
     _register_replacement,
     _relock_core,
+    _remove_source_effect,
     _resolve_check,
     _restore_phase_after_failed_refresh,
     _roll_source_table,
@@ -1313,6 +1314,114 @@ def test_party_item_claim_driver_uses_atomic_party_to_character_public_tool(
         assert result["checkpoint"] is None
     else:
         assert result["checkpoint"]["verification"]["valid"] is True
+
+
+@pytest.mark.parametrize("defer_checkpoint", [False, True])
+def test_source_effect_removal_uses_public_character_transition(
+    defer_checkpoint: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_ref = {
+        "module_id": "module-1",
+        "scene_id": "scene-1",
+        "chunk_id": "gazer-chunk",
+        "page_start": 79,
+        "page_end": 79,
+        "heading_path": ["Old Tower", "Gazer Attack"],
+        "content_sha256": "a" * 64,
+    }
+
+    class Client:
+        def __init__(self) -> None:
+            sheet = default_character_sheet()
+            sheet["conditions"] = ["frightened"]
+            sheet["effects"] = [
+                {
+                    "id": "fear-ray-effect",
+                    "name": "Fear Ray",
+                    "kind": "timed_conditions",
+                    "source": "gazer",
+                    "active": True,
+                    "duration": {"period": "source_turn_start", "remaining": 1},
+                    "changes": [
+                        {
+                            "path": "conditions",
+                            "mode": "add",
+                            "value": "frightened",
+                        }
+                    ],
+                }
+            ]
+            self.actor = {
+                "id": "pip",
+                "name": "Pip",
+                "campaign_id": "campaign-1",
+                "revision": 9,
+                "sheet": sheet,
+                "derived": {"armor_class": 15},
+            }
+            self.change_arguments: dict | None = None
+
+        async def domain(self, tool_id: str, arguments: dict):
+            if tool_id == "module_query":
+                return {
+                    "module_id": "module-1",
+                    "scene_id": "scene-1",
+                    "content": "The target is frightened until the next turn.",
+                    "spatial": {
+                        "locations": [{"key": "upper-level", "title": "Upper Level"}]
+                    },
+                }
+            if tool_id == "character_query":
+                return deepcopy(self.actor)
+            if tool_id == "character_state_change":
+                self.change_arguments = deepcopy(arguments)
+                self.actor["sheet"]["effects"] = []
+                self.actor["sheet"]["conditions"] = []
+                self.actor["revision"] += 1
+                return {"character": deepcopy(self.actor)}
+            raise AssertionError((tool_id, arguments))
+
+    checkpoint_calls = 0
+
+    async def checkpoint(*_args, **_kwargs):
+        nonlocal checkpoint_calls
+        checkpoint_calls += 1
+        return {"snapshot": {"slot": 15}, "verification": {"valid": True}}
+
+    monkeypatch.setattr(regression_playthrough, "_checkpoint", checkpoint)
+    client = Client()
+    result = asyncio.run(
+        _remove_source_effect(
+            client,
+            campaign_id="campaign-1",
+            run_id="run-1",
+            occurrence_id="fear-cleanup-1",
+            scene_id="scene-1",
+            location_key="upper-level",
+            source_excerpt="The target is frightened until the next turn.",
+            source_ref=source_ref,
+            character_id="pip",
+            effect_id="fear-ray-effect",
+            reason="Combat ended before the source's next turn.",
+            checkpoint_label="Fear Ray ended",
+            defer_checkpoint=defer_checkpoint,
+        )
+    )
+
+    assert client.change_arguments == {
+        "character_id": "pip",
+        "action": "effect_remove",
+        "payload": {"effect_id": "fear-ray-effect"},
+        "expected_revision": 9,
+        "idempotency_key": _mutation_key(
+            "run-1",
+            "source-effect-remove",
+            _occurrence_identity("fear-cleanup-1", "remove-source-effect"),
+        ),
+    }
+    assert result["effect"]["id"] == "fear-ray-effect"
+    assert checkpoint_calls == (0 if defer_checkpoint else 1)
 
 
 @pytest.mark.parametrize("defer_checkpoint", [False, True])

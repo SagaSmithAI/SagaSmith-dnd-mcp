@@ -42,6 +42,7 @@ DEFERRED_CHECKPOINT_ACTIONS = frozenset(
         "provision-source-item",
         "transfer-source-item",
         "claim-party-item",
+        "remove-source-effect",
         "acquire-loot",
         "spend-coins",
         "spend-item",
@@ -79,6 +80,7 @@ def _arguments() -> argparse.Namespace:
             "provision-source-item",
             "transfer-source-item",
             "claim-party-item",
+            "remove-source-effect",
             "acquire-loot",
             "spend-coins",
             "spend-item",
@@ -230,6 +232,9 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--transfer-item-id", default="")
     parser.add_argument("--transfer-item-quantity", type=int)
     parser.add_argument("--transfer-reason", default="")
+    parser.add_argument("--effect-character-id", default="")
+    parser.add_argument("--effect-id", default="")
+    parser.add_argument("--effect-reason", default="")
     parser.add_argument("--loot-acquisition-id", default="")
     parser.add_argument("--loot-coins-json", type=json.loads, default={})
     parser.add_argument("--loot-item-json", action="append", type=json.loads, default=[])
@@ -4900,6 +4905,131 @@ async def _claim_party_item_for_character(
     }
 
 
+async def _remove_source_effect(
+    client: ExposureClient,
+    *,
+    campaign_id: str,
+    run_id: str,
+    occurrence_id: str,
+    scene_id: str,
+    location_key: str,
+    source_excerpt: str,
+    source_ref: dict[str, Any] | None,
+    character_id: str,
+    effect_id: str,
+    reason: str,
+    checkpoint_label: str,
+    defer_checkpoint: bool = False,
+) -> dict[str, Any]:
+    removal_identity = _occurrence_identity(occurrence_id, "remove-source-effect")
+    normalized_character_id = character_id.strip()
+    normalized_effect_id = effect_id.strip()
+    normalized_reason = reason.strip()
+    if not all(
+        (
+            scene_id,
+            location_key,
+            source_excerpt.strip(),
+            normalized_character_id,
+            normalized_effect_id,
+            normalized_reason,
+        )
+    ):
+        raise ValueError(
+            "remove-source-effect requires scene, location, excerpt, character, "
+            "effect, and reason"
+        )
+
+    scene = await client.domain(
+        "module_query",
+        {
+            "campaign_id": campaign_id,
+            "view": "scene",
+            "payload": {"scene_id": scene_id},
+        },
+    )
+    exact_ref = _validate_source_ref(scene, source_ref, excerpt=source_excerpt)
+    if location_key not in {str(item.get("key") or "") for item in _scene_locations(scene)}:
+        raise ValueError("remove-source-effect location is not present in the scene atlas")
+
+    actor = dict(
+        _facade_value(
+            await client.domain(
+                "character_query",
+                {"view": "get", "payload": {"character_id": normalized_character_id}},
+            )
+        )
+    )
+    if str(actor.get("campaign_id") or "") != campaign_id:
+        raise ValueError("remove-source-effect actor does not belong to the campaign")
+    effect = next(
+        (
+            dict(item)
+            for item in dict(actor.get("sheet") or {}).get("effects", [])
+            if str(item.get("id") or "") == normalized_effect_id
+        ),
+        None,
+    )
+    recovered = effect is None
+    if recovered:
+        removed: dict[str, Any] = {
+            "character": actor,
+            "status": "recovered",
+        }
+    else:
+        removed = dict(
+            _facade_value(
+                await client.domain(
+                    "character_state_change",
+                    {
+                        "character_id": normalized_character_id,
+                        "action": "effect_remove",
+                        "payload": {"effect_id": normalized_effect_id},
+                        "expected_revision": actor["revision"],
+                        "idempotency_key": _mutation_key(
+                            run_id,
+                            "source-effect-remove",
+                            removal_identity,
+                        ),
+                    },
+                )
+            )
+        )
+        removed_character = dict(removed.get("character") or removed)
+        remaining_ids = {
+            str(item.get("id") or "")
+            for item in dict(removed_character.get("sheet") or {}).get("effects", [])
+        }
+        if normalized_effect_id in remaining_ids:
+            raise RuntimeError("source effect removal did not remove the requested effect")
+
+    checkpoint = (
+        None
+        if defer_checkpoint
+        else await _checkpoint(
+            client,
+            campaign_id=campaign_id,
+            run_id=run_id,
+            label=(
+                checkpoint_label.strip()
+                or f"Full playthrough source effect removed: {normalized_effect_id}"
+            ),
+            checkpoint_id=f"source-effect-remove:{removal_identity}",
+        )
+    )
+    return {
+        "character_id": normalized_character_id,
+        "effect_id": normalized_effect_id,
+        "occurrence_id": removal_identity,
+        "reason": normalized_reason,
+        "source_ref": exact_ref,
+        "effect": effect,
+        "removal": removed,
+        "recovered": recovered,
+        "checkpoint": checkpoint,
+    }
+
+
 async def _acquire_source_loot(
     client: ExposureClient,
     *,
@@ -7138,6 +7268,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
         "sync",
         "transfer-source-item",
         "claim-party-item",
+        "remove-source-effect",
     }:
         _occurrence_identity(args.occurrence_id, args.action)
     server = _server_parameters(args)
@@ -7615,6 +7746,25 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     item_id=args.transfer_item_id,
                     quantity=args.transfer_item_quantity,
                     reason=args.transfer_reason,
+                    checkpoint_label=args.checkpoint_label,
+                    defer_checkpoint=args.defer_checkpoint,
+                )
+            elif args.action == "remove-source-effect":
+                if phase != "play":
+                    raise RuntimeError("remove-source-effect requires the play phase")
+                await client.load("play.characters")
+                report["result"] = await _remove_source_effect(
+                    client,
+                    campaign_id=args.campaign_id,
+                    run_id=args.run_id,
+                    occurrence_id=args.occurrence_id,
+                    scene_id=str(args.scene_id or ""),
+                    location_key=args.location_key,
+                    source_excerpt=args.source_excerpt,
+                    source_ref=args.source_ref_json,
+                    character_id=args.effect_character_id,
+                    effect_id=args.effect_id,
+                    reason=args.effect_reason,
                     checkpoint_label=args.checkpoint_label,
                     defer_checkpoint=args.defer_checkpoint,
                 )
