@@ -24,6 +24,119 @@ async def _raw(server, name: str, arguments: dict):
     return called
 
 
+def test_public_magic_item_update_hydrates_new_spellcasting_mechanics(
+    tmp_path: Path,
+) -> None:
+    workspace = Path(__file__).resolve().parents[2]
+    config = McpConfig(
+        home=tmp_path / "home",
+        database_url=None,
+        chroma_url=None,
+        chroma_path_override=None,
+        dnd_skills_dir=workspace / "SagaSmith-dnd-skills",
+        modulegen_skills_dir=tmp_path / "modulegen",
+        auto_seed_rules=False,
+    )
+
+    async def exercise() -> None:
+        server = create_server(config)
+        campaign = await _call(
+            server,
+            "campaign_create",
+            {
+                "name": "Enrich a source item",
+                "edition": "2014",
+                "idempotency_key": "campaign",
+            },
+        )
+        caster = await _call(
+            server,
+            "character_create",
+            {
+                "campaign_id": campaign["id"],
+                "name": "Caster",
+                "sheet": default_character_sheet(),
+                "idempotency_key": "caster",
+            },
+        )
+        added = await _call(
+            server,
+            "inventory_change",
+            {
+                "owner": "character",
+                "action": "add",
+                "owner_id": caster["id"],
+                "payload": {
+                    "item": {
+                        "id": "source-stone",
+                        "name": "Source Stone",
+                        "kind": "magic_item",
+                        "source_key": "module-chunk:source-stone",
+                        "attunement": "attuned",
+                        "charges": {
+                            "label": "Stone charges",
+                            "value": 3,
+                            "max": 3,
+                            "recovers_on": "dawn",
+                            "source_key": "module-chunk:source-stone",
+                        },
+                        "mechanics": {
+                            "rarity": "artifact",
+                            "requires_attunement": True,
+                        },
+                    }
+                },
+                "expected_revision": caster["revision"],
+                "idempotency_key": "add-stone",
+            },
+        )
+        updated = await _call(
+            server,
+            "inventory_change",
+            {
+                "owner": "character",
+                "action": "update",
+                "owner_id": caster["id"],
+                "payload": {
+                    "item_id": "source-stone",
+                    "patch": {
+                        "mechanics": {
+                            "rarity": "artifact",
+                            "requires_attunement": True,
+                            "spellcasting": {
+                                "requires_attunement": True,
+                                "requires_class_spell_list": False,
+                                "components_required": False,
+                                "spells": [
+                                    {
+                                        "artifact_id": CORE_MAGE_ARMOR_SPELL_ID,
+                                        "charge_cost": 1,
+                                        "casting_time": "1 action",
+                                    }
+                                ],
+                            },
+                        }
+                    },
+                },
+                "expected_revision": added["character"]["revision"],
+                "idempotency_key": "enrich-stone",
+            },
+        )
+        updated_actor = updated.get("character", updated)
+        stone = next(
+            item
+            for item in updated_actor["sheet"]["inventory"]["items"]
+            if item["id"] == "source-stone"
+        )
+        spell = stone["mechanics"]["spellcasting"]["spells"][0]
+        assert spell["artifact_id"] == CORE_MAGE_ARMOR_SPELL_ID
+        assert spell["card"]["id"] == CORE_MAGE_ARMOR_SPELL_ID
+        assert spell["card"]["pack_id"] == "dnd5e.content.srd2014"
+        assert stone["attunement"] == "attuned"
+
+    asyncio.run(exercise())
+
+
 def test_public_magic_item_spell_cast_hydrates_card_and_pays_action_and_charges(
     tmp_path: Path,
 ) -> None:

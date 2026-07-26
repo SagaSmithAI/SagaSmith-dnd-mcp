@@ -12774,7 +12774,32 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         current = characters.get(character_id)
         require_character_control(current, principal_id)
         require_outside_active_combat(current, "inventory changes")
-        if "attunement" in patch:
+        normalized_patch = deepcopy(patch)
+        patched_mechanics = normalized_patch.get("mechanics")
+        if (
+            isinstance(patched_mechanics, dict)
+            and dict(patched_mechanics).get("spellcasting") is not None
+        ):
+            if current.campaign_id is None:
+                raise ValueError(
+                    "magic item spell hydration requires a campaign-bound character"
+                )
+            current_item = next(
+                (
+                    item
+                    for item in current.sheet.get("inventory", {}).get("items", [])
+                    if str(item.get("id") or "") == item_id
+                ),
+                None,
+            )
+            if current_item is None:
+                raise LookupError(item_id)
+            hydrated = hydrate_magic_item_spell_artifacts(
+                current.campaign_id,
+                {**deepcopy(current_item), **normalized_patch, "id": item_id},
+            )
+            normalized_patch["mechanics"] = deepcopy(hydrated["mechanics"])
+        if "attunement" in normalized_patch:
             campaign = campaigns.get(current.campaign_id) if current.campaign_id else None
             phase = (
                 str(dict(campaign.state or {}).get("game_phase") or PROFILE_LOBBY)
@@ -12792,19 +12817,19 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             if (
                 phase != PROFILE_LOBBY
                 and current_item is not None
-                and patch["attunement"] != current_item.get("attunement")
+                and normalized_patch["attunement"] != current_item.get("attunement")
             ):
                 raise CombatEngineError(
                     "attunement cannot be patched during Play; use a short rest"
                 )
         return update_sheet(
             character_id,
-            update_inventory_item(current.sheet, item_id, patch),
+            update_inventory_item(current.sheet, item_id, normalized_patch),
             operation="character.inventory.update",
             principal_id=principal_id,
             expected_revision=expected_revision,
             idempotency_key=idempotency_key,
-            payload={"item_id": item_id, "patch": patch},
+            payload={"item_id": item_id, "patch": normalized_patch},
         )
 
     @mcp.tool()

@@ -24,6 +24,7 @@ from scripts.regression_playthrough import (
     _award_experience,
     _branch_from_snapshot,
     _campaign_phase,
+    _cast_source_spell,
     _check_identity,
     _check_knowledge_key,
     _checkpoint,
@@ -45,6 +46,7 @@ from scripts.regression_playthrough import (
     _party_member,
     _party_selections,
     _phase_groups,
+    _pool_character_currency,
     _preflight_level_completion,
     _prepare_narrative_npc,
     _provision_source_item,
@@ -1137,6 +1139,147 @@ def test_source_item_driver_validates_provenance_hydrates_and_equips(
         assert result["checkpoint"]["verification"]["valid"] is True
 
 
+def test_source_item_driver_enriches_an_existing_item_through_public_update(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_ref = {
+        "module_id": "module-1",
+        "scene_id": "reference-scene",
+        "chunk_id": "stone-chunk",
+        "page_start": 193,
+        "page_end": 193,
+        "heading_path": ["Appendix A", "Stone of Golorr"],
+        "content_sha256": "b" * 64,
+    }
+    requested = {
+        "id": "stone-of-golorr",
+        "name": "Stone of Golorr",
+        "kind": "magic_item",
+        "source_key": "module-chunk:stone-chunk",
+        "attunement": "attuned",
+        "charges": {
+            "label": "Legend Lore charges",
+            "value": 3,
+            "max": 3,
+            "recovers_on": "dawn",
+            "source_key": "module-chunk:stone-chunk",
+        },
+        "mechanics": {
+            "rarity": "artifact",
+            "requires_attunement": True,
+            "spellcasting": {
+                "requires_attunement": True,
+                "requires_class_spell_list": False,
+                "components_required": False,
+                "spells": [
+                    {
+                        "artifact_id": "dnd5e.content.srd2014.spell.legend-lore",
+                        "charge_cost": 1,
+                        "casting_time": "10 minutes",
+                    }
+                ],
+            },
+        },
+    }
+
+    class Client:
+        def __init__(self) -> None:
+            sheet = default_character_sheet()
+            sheet["inventory"]["items"].append(
+                {
+                    "id": "stone-of-golorr",
+                    "name": "Stone of Golorr",
+                    "kind": "magic_item",
+                    "quantity": 1,
+                    "weight_oz": 0,
+                    "price_cp": 0,
+                    "description": "",
+                    "source_key": "module-chunk:stone-chunk",
+                    "container_id": None,
+                    "equipped": False,
+                    "equipped_slot": None,
+                    "identified": False,
+                    "attunement": "attuned",
+                    "condition": "normal",
+                    "uses": {
+                        "label": "",
+                        "value": 0,
+                        "max": 0,
+                        "recovers_on": "none",
+                        "source_key": "",
+                        "slot_level": 0,
+                    },
+                    "charges": deepcopy(requested["charges"]),
+                    "mechanics": {
+                        "rarity": "artifact",
+                        "requires_attunement": True,
+                    },
+                }
+            )
+            self.actor = {
+                "id": "pip",
+                "name": "Pip",
+                "campaign_id": "campaign-1",
+                "revision": 9,
+                "sheet": sheet,
+                "derived": {"armor_class": 15},
+            }
+            self.inventory_arguments: dict | None = None
+
+        async def domain(self, tool_id: str, arguments: dict):
+            if tool_id == "module_query":
+                return {
+                    "module_id": "module-1",
+                    "scene_id": "reference-scene",
+                    "content": "Wondrous item, artifact (requires attunement)",
+                }
+            if tool_id == "character_query":
+                return deepcopy(self.actor)
+            if tool_id == "inventory_change":
+                self.inventory_arguments = deepcopy(arguments)
+                assert arguments["action"] == "update"
+                patch = deepcopy(arguments["payload"]["patch"])
+                patch["mechanics"]["spellcasting"]["spells"][0]["card"] = {
+                    "id": "dnd5e.content.srd2014.spell.legend-lore",
+                    "pack_id": "dnd5e.content.srd2014",
+                }
+                self.actor["sheet"]["inventory"]["items"][0].update(patch)
+                self.actor["revision"] += 1
+                return {"character": deepcopy(self.actor)}
+            raise AssertionError((tool_id, arguments))
+
+    async def checkpoint(*_args, **_kwargs):
+        raise AssertionError("deferred source enrichment must not checkpoint")
+
+    monkeypatch.setattr(regression_playthrough, "_checkpoint", checkpoint)
+    client = Client()
+    result = asyncio.run(
+        _provision_source_item(
+            client,
+            campaign_id="campaign-1",
+            run_id="run-1",
+            actor_id="pip",
+            source_scene_id="reference-scene",
+            source_excerpt="requires attunement",
+            source_ref=source_ref,
+            item=requested,
+            equip_slot="",
+            reason="Bind the source-defined Legend Lore use.",
+            checkpoint_label="",
+            defer_checkpoint=True,
+        )
+    )
+
+    assert client.inventory_arguments is not None
+    assert client.inventory_arguments["action"] == "update"
+    assert result["add_recovered"] is True
+    assert result["update_recovered"] is True
+    assert (
+        result["item"]["mechanics"]["spellcasting"]["spells"][0]["card"]["id"]
+        == "dnd5e.content.srd2014.spell.legend-lore"
+    )
+
+
 @pytest.mark.parametrize("defer_checkpoint", [False, True])
 def test_source_item_transfer_driver_uses_atomic_character_to_party_public_tool(
     defer_checkpoint: bool,
@@ -1566,6 +1709,215 @@ def test_source_effect_removal_uses_public_character_transition(
     }
     assert result["effect"]["id"] == "fear-ray-effect"
     assert checkpoint_calls == (0 if defer_checkpoint else 1)
+
+
+def test_currency_pool_driver_uses_public_atomic_party_transfer() -> None:
+    source_ref = {
+        "module_id": "module-1",
+        "scene_id": "source-scene-1",
+        "chunk_id": "chunk-1",
+        "page_start": 95,
+        "page_end": 95,
+        "heading_path": ["Vault Keys", "Sunlight"],
+        "content_sha256": "a" * 64,
+    }
+
+    class Client:
+        def __init__(self) -> None:
+            self.campaign_revision = 9
+            self.character_revision = 4
+            self.wallet_calls: list[dict] = []
+            self.progress_arguments: dict = {}
+            self.continuity_payload: dict = {}
+
+        async def load(self, *groups: str) -> None:
+            assert groups
+
+        async def core(self, tool_id: str, arguments: dict):
+            assert tool_id == "campaign_query"
+            return {
+                "result": {
+                    "id": "campaign-1",
+                    "revision": self.campaign_revision,
+                    "state": {"game_phase": "play"},
+                }
+            }
+
+        async def domain(self, tool_id: str, arguments: dict):
+            if tool_id == "module_query":
+                if arguments["view"] == "progress":
+                    return []
+                scene_id = arguments["payload"]["scene_id"]
+                if scene_id == "source-scene-1":
+                    return {
+                        "module_id": "module-1",
+                        "scene_id": scene_id,
+                        "content": "Twenty steel mirrors cost 5 gp each.",
+                    }
+                assert scene_id == "scene-1"
+                return {
+                    "module_id": "module-1",
+                    "scene_id": scene_id,
+                    "spatial": {
+                        "locations": [{"key": "market", "title": "Market"}]
+                    },
+                }
+            if tool_id == "character_query":
+                return {
+                    "id": "actor-1",
+                    "campaign_id": "campaign-1",
+                    "revision": self.character_revision,
+                }
+            if tool_id == "wallet_change":
+                self.wallet_calls.append(deepcopy(arguments))
+                expected = arguments["payload"]
+                if expected["expected_campaign_revision"] == 8:
+                    raise RuntimeError("campaign revision conflict: campaign-1")
+                assert expected == {
+                    "character_id": "actor-1",
+                    "expected_campaign_revision": 9,
+                    "expected_character_revision": 4,
+                }
+                self.campaign_revision += 1
+                self.character_revision += 1
+                return {
+                    "result": {
+                        "party": {"inventory": {"wallet": {"gp": 25}}},
+                        "character": {
+                            "id": "actor-1",
+                            "sheet": {"inventory": {"wallet": {"gp": 5}}},
+                        },
+                    }
+                }
+            if tool_id == "module_set_progress":
+                self.progress_arguments = deepcopy(arguments)
+                self.campaign_revision += 1
+                return {
+                    "scene_id": "scene-1",
+                    "scope_id": "party",
+                    "status": "active",
+                    "progress": 0,
+                    "state_version": 1,
+                    "state": deepcopy(arguments["state"]),
+                }
+            if tool_id == "branch_query":
+                return [{"id": "branch-1", "is_current": True}]
+            if tool_id == "continuity_commit":
+                self.continuity_payload = deepcopy(arguments["payload"])
+                self.campaign_revision += 1
+                return {"event": {"id": "event-1"}}
+            if tool_id == "playthrough_manifest":
+                assert arguments["action"] == "sync"
+                return {
+                    "manifest": {"status": "in_progress"},
+                    "campaign_revision": self.campaign_revision,
+                }
+            raise AssertionError((tool_id, arguments))
+
+    client = Client()
+    result = asyncio.run(
+        _pool_character_currency(
+            client,
+            campaign_id="campaign-1",
+            run_id="run-1",
+            occurrence_id="pool-1",
+            scene_id="scene-1",
+            source_scene_id="source-scene-1",
+            location_key="market",
+            source_excerpt="Twenty steel mirrors cost 5 gp each.",
+            source_ref=source_ref,
+            actor_id="actor-1",
+            denomination="gp",
+            amount=10,
+            reason="The actor pools 10 gp for the source-defined mirrors.",
+            defer_checkpoint=True,
+        )
+    )
+
+    assert len(client.wallet_calls) == 2
+    assert client.wallet_calls[-1]["owner"] == "party"
+    assert client.wallet_calls[-1]["action"] == "transfer_from_character"
+    pool_state = client.progress_arguments["state"]["full_playthrough_currency_pools"]
+    assert next(iter(pool_state.values()))["amount"] == 10
+    assert "snapshot" not in client.continuity_payload
+    assert result["recovered"] is False
+
+
+def test_currency_pool_driver_recovers_completed_progress_without_double_transfer() -> None:
+    source_ref = {
+        "module_id": "module-1",
+        "scene_id": "source-scene-1",
+        "chunk_id": "chunk-1",
+        "page_start": 95,
+        "page_end": 95,
+        "heading_path": ["Vault Keys", "Sunlight"],
+        "content_sha256": "a" * 64,
+    }
+    identity = _occurrence_identity("pool-1", "pool-coins")
+    existing = {
+        "occurrence_id": identity,
+        "actor_id": "actor-1",
+        "denomination": "gp",
+        "amount": 10,
+        "reason": "The actor pools 10 gp.",
+        "source_ref": source_ref,
+    }
+
+    class Client:
+        async def domain(self, tool_id: str, arguments: dict):
+            if tool_id == "module_query":
+                if arguments["view"] == "progress":
+                    return [
+                        {
+                            "scene_id": "scene-1",
+                            "scope_id": "party",
+                            "status": "active",
+                            "progress": 0,
+                            "state_version": 1,
+                            "state": {
+                                "full_playthrough_currency_pools": {
+                                    regression_playthrough._token(identity): existing
+                                }
+                            },
+                        }
+                    ]
+                scene_id = arguments["payload"]["scene_id"]
+                if scene_id == "source-scene-1":
+                    return {
+                        "module_id": "module-1",
+                        "scene_id": scene_id,
+                        "content": "Twenty steel mirrors cost 5 gp each.",
+                    }
+                return {
+                    "module_id": "module-1",
+                    "scene_id": scene_id,
+                    "spatial": {
+                        "locations": [{"key": "market", "title": "Market"}]
+                    },
+                }
+            raise AssertionError((tool_id, arguments))
+
+    result = asyncio.run(
+        _pool_character_currency(
+            Client(),
+            campaign_id="campaign-1",
+            run_id="run-1",
+            occurrence_id="pool-1",
+            scene_id="scene-1",
+            source_scene_id="source-scene-1",
+            location_key="market",
+            source_excerpt="Twenty steel mirrors cost 5 gp each.",
+            source_ref=source_ref,
+            actor_id="actor-1",
+            denomination="gp",
+            amount=10,
+            reason="The actor pools 10 gp.",
+            defer_checkpoint=True,
+        )
+    )
+
+    assert result["recovered"] is True
+    assert result["transfer"] is None
 
 
 @pytest.mark.parametrize("defer_checkpoint", [False, True])
@@ -4390,6 +4742,158 @@ def test_play_activity_records_structured_effect_and_random_receipt(
     assert _mutation_key(
         "run-1", "play-activity-continuity", "second-wind-before-pursuit"
     ) in Client.keys
+
+
+@pytest.mark.parametrize("defer_checkpoint", [False, True])
+def test_source_spell_driver_consumes_item_charge_and_preserves_dm_boundary(
+    defer_checkpoint: bool,
+) -> None:
+    source_ref = {
+        "module_id": "module-1",
+        "scene_id": "stone-reference",
+        "chunk_id": "stone-chunk",
+        "page_start": 193,
+        "page_end": 193,
+        "heading_path": ["Appendix A", "Stone of Golorr"],
+        "content_sha256": "c" * 64,
+    }
+
+    class Client:
+        revision = 12
+
+        def actor(self, charges: int) -> dict:
+            sheet = default_character_sheet()
+            sheet["inventory"]["items"].append(
+                {
+                    "id": "stone-of-golorr",
+                    "name": "Stone of Golorr",
+                    "kind": "magic_item",
+                    "quantity": 1,
+                    "weight_oz": 0,
+                    "price_cp": 0,
+                    "description": "",
+                    "source_key": "module-chunk:stone-chunk",
+                    "container_id": None,
+                    "equipped": False,
+                    "equipped_slot": None,
+                    "identified": False,
+                    "attunement": "attuned",
+                    "condition": "normal",
+                    "uses": {},
+                    "charges": {
+                        "label": "Legend Lore charges",
+                        "value": charges,
+                        "max": 3,
+                        "recovers_on": "dawn",
+                        "source_key": "module-chunk:stone-chunk",
+                    },
+                    "mechanics": {},
+                }
+            )
+            return {
+                "id": "pip",
+                "name": "Pip",
+                "campaign_id": "campaign-1",
+                "revision": 7 if charges == 3 else 8,
+                "sheet": sheet,
+            }
+
+        async def core(self, tool_id: str, arguments: dict):
+            assert tool_id == "campaign_query"
+            return {
+                "result": {
+                    "id": "campaign-1",
+                    "revision": self.revision,
+                    "state": {"game_phase": "play"},
+                }
+            }
+
+        async def domain(self, tool_id: str, arguments: dict):
+            if tool_id == "module_query":
+                scene_id = arguments["payload"]["scene_id"]
+                if scene_id == "occurrence-scene":
+                    return {
+                        "module_id": "module-1",
+                        "scene_id": scene_id,
+                        "content": "The party studies the Stone.",
+                        "locations": [{"key": "safe-room"}],
+                    }
+                return {
+                    "module_id": "module-1",
+                    "scene_id": "stone-reference",
+                    "content": (
+                        "While holding the stone, you can expend 1 of its charges "
+                        "to cast the legend lore spell."
+                    ),
+                }
+            if tool_id == "character_query":
+                return self.actor(3)
+            if tool_id == "character_action":
+                assert arguments["action"] == "cast_spell"
+                assert arguments["payload"] == {
+                    "spell_id": "dnd5e.content.srd2014.spell.legend-lore",
+                    "source_item_id": "stone-of-golorr",
+                }
+                self.revision += 1
+                return {
+                    "status": "pending_ruling",
+                    "result": {
+                        "payment": {
+                            "economy": "item_charges",
+                            "item_id": "stone-of-golorr",
+                            "cost": 1,
+                            "level": 5,
+                            "ritual": False,
+                        }
+                    },
+                    "character": self.actor(2),
+                }
+            if tool_id == "branch_query":
+                return [{"id": "branch-1", "is_current": True}]
+            if tool_id == "continuity_commit":
+                event = arguments["payload"]["event"]
+                assert event["event_type"] == "magic_item_spell_cast"
+                assert event["payload"]["resolution_status"] == "pending_ruling"
+                assert ("snapshot" in arguments["payload"]) is not defer_checkpoint
+                self.revision += 1
+                return {
+                    "event": {"id": "event-1"},
+                    **({} if defer_checkpoint else {"snapshot": {"slot": 8}}),
+                }
+            if tool_id == "playthrough_manifest":
+                return {
+                    "manifest": {"status": "in_progress"},
+                    "campaign_revision": self.revision,
+                }
+            raise AssertionError((tool_id, arguments))
+
+    result = asyncio.run(
+        _cast_source_spell(
+            Client(),
+            campaign_id="campaign-1",
+            run_id="run-1",
+            occurrence_id="stone-legend-lore-1",
+            scene_id="occurrence-scene",
+            source_scene_id="stone-reference",
+            location_key="safe-room",
+            source_excerpt="expend 1 of its charges to cast the legend lore spell",
+            source_ref=source_ref,
+            actor_id="pip",
+            spell_id="dnd5e.content.srd2014.spell.legend-lore",
+            source_item_id="stone-of-golorr",
+            cast_level=None,
+            component_ruling=None,
+            reason="Pip expended one Stone charge; the information awaits DM settlement.",
+            knowledge_actor_ids=[],
+            defer_checkpoint=defer_checkpoint,
+        )
+    )
+
+    assert result["cast"]["status"] == "pending_ruling"
+    assert result["charges"] == {"before": 3, "after": 2}
+    assert result["cast_recovered"] is False
+    assert result["knowledge_actor_ids"] == ["pip"]
+    assert ("snapshot" in result["continuity"]) is not defer_checkpoint
 
 
 def test_dm_event_keeps_enemy_knowledge_out_of_party_event_stream() -> None:
