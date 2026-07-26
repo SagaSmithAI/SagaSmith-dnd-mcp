@@ -372,7 +372,7 @@ def test_completed_party_size_dm_review_unblocks_only_with_evidence() -> None:
 
     assert _line_review_blocks(line, []) == []
     del line["play_requirements"]["recommended_party_size"]["review"]
-    with pytest.raises(ValueError, match="completed party-size DM review"):
+    with pytest.raises(ValueError, match="completed party-size Agent-as-DM review"):
         _line_review_blocks(line, [])
 
 

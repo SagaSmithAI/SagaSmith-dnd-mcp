@@ -2087,7 +2087,7 @@ async def _prepare_statblock(args: argparse.Namespace) -> dict[str, Any]:
                 source_chunk_ids = candidate["source_chunk_ids"]
                 review_metadata = None
                 observation = (
-                    "Regression DM reviewed the normalized statblock against "
+                    "The regression Agent acting as DM reviewed the normalized statblock against "
                     "every cited module text chunk."
                 )
                 if args.review_override is not None:

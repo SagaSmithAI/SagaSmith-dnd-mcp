@@ -1352,7 +1352,7 @@ async def _register_party(
     manifest = deepcopy(current["manifest"])
     selected_size = manifest["party"]["selected_size"]
     if selected_size is None:
-        raise RuntimeError("party size still requires explicit DM review")
+        raise RuntimeError("party size still requires explicit Agent-as-DM review")
     if len(selections) != selected_size:
         raise ValueError(
             f"register-party requires exactly the selected maximum of {selected_size} actors"

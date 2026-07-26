@@ -276,7 +276,7 @@ def _line_review_blocks(
             or not isinstance(party_size.get("review"), dict)
         ):
             raise ValueError(
-                "completed party-size DM review requires minimum, maximum, "
+                "completed party-size Agent-as-DM review requires minimum, maximum, "
                 "selected, and review evidence"
             )
     elif party_size_status != "source_confirmed":

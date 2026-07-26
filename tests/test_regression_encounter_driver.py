@@ -10,6 +10,7 @@ from scripts.regression_encounter import (
     GUIDING_BOLT_ON_HIT,
     HEALING_WORD_ID,
     MAGIC_MISSILE_ID,
+    EncounterRulingRequiredError,
     _agent_positions,
     _apply_agent_positions,
     _apply_party_loadouts,
@@ -263,6 +264,51 @@ def test_preflight_tries_a_recorded_thrown_weapon_at_range() -> None:
         "melee",
         "ranged",
     ]
+
+
+def test_preflight_returns_agent_ruling_instead_of_misclassifying_it_as_on_hit() -> None:
+    pending = {
+        "status": "pending_ruling",
+        "default_resolver": "agent",
+        "ruling_kind": "agent_dm_adjudication",
+        "reason": "direct sunlight is required to settle Sunlight Sensitivity",
+        "missing": ["direct_sunlight"],
+        "committed": False,
+        "retry_contract": {"reuse_current_revision": True},
+    }
+
+    class Client:
+        async def domain(self, tool_id: str, arguments: dict) -> dict:
+            assert tool_id == "combat_preflight_attack"
+            return pending
+
+    actor = {
+        "id": "kobold-1",
+        "derived": {
+            "inventory": {
+                "weapon_attacks": [
+                    {"item_id": "dagger", "attack_type": "melee"},
+                ]
+            }
+        },
+    }
+
+    with pytest.raises(EncounterRulingRequiredError) as captured:
+        asyncio.run(
+            _preflight_attack(
+                Client(),
+                SimpleNamespace(campaign_id="campaign-1"),
+                actor,
+                ["pc-1"],
+            )
+        )
+
+    requirement = captured.value.requirement
+    assert requirement["operation"] == "combat_preflight_attack"
+    assert requirement["actor_id"] == "kobold-1"
+    assert requirement["target_id"] == "pc-1"
+    assert requirement["ruling"] == pending
+    assert "--source-attack-environment-json" in requirement["retry_hint"]
 
 
 def test_status_uses_play_character_exposure_before_combat() -> None:
@@ -1198,7 +1244,8 @@ def test_party_defeat_does_not_invent_a_source_defined_aftermath() -> None:
     ) == (
         "defeat",
         "The party was defeated. Combat ended with resolved unconscious or dead "
-        "characters; their later treatment requires explicit source support or DM review.",
+        "characters; their later treatment requires explicit source support or "
+        "Agent-as-DM adjudication.",
     )
 
 
@@ -2201,6 +2248,7 @@ def test_source_attack_environment_requires_the_structured_actor_trait() -> None
                 "actor_id": "kobold",
                 "direct_sunlight": False,
                 "source_excerpt": excerpt,
+                "ruling_reason": "The encounter occurs after midnight.",
             }
         ],
         participant_ids=["kobold"],
@@ -2210,7 +2258,21 @@ def test_source_attack_environment_requires_the_structured_actor_trait() -> None
         "actor_id": "kobold",
         "direct_sunlight": False,
         "source_excerpt": excerpt,
+        "ruling_reason": "The encounter occurs after midnight.",
     }
+
+    with pytest.raises(ValueError, match="ruling reason"):
+        _source_attack_environments(
+            [
+                {
+                    "actor_id": "kobold",
+                    "direct_sunlight": False,
+                    "source_excerpt": excerpt,
+                }
+            ],
+            participant_ids=["kobold"],
+            actors=actors,
+        )
 
     with pytest.raises(ValueError, match="must match"):
         _source_attack_environments(
@@ -2219,6 +2281,7 @@ def test_source_attack_environment_requires_the_structured_actor_trait() -> None
                     "actor_id": "other",
                     "direct_sunlight": True,
                     "source_excerpt": excerpt,
+                    "ruling_reason": "The encounter occurs at noon.",
                 }
             ],
             participant_ids=["other"],

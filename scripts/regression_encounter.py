@@ -27,6 +27,32 @@ HEALING_WORD_ID = "dnd5e.content.srd2014.spell.healing-word"
 MAGIC_MISSILE_ID = "dnd5e.content.srd2014.spell.magic-missile"
 
 
+class EncounterRulingRequiredError(RuntimeError):
+    """Return an unresolved public-tool ruling boundary to the acting Agent."""
+
+    def __init__(
+        self,
+        ruling: dict[str, Any],
+        *,
+        operation: str,
+        actor_id: str = "",
+        target_id: str = "",
+        action: dict[str, Any] | None = None,
+        retry_hint: str = "",
+    ) -> None:
+        self.requirement = {
+            "operation": operation,
+            "actor_id": actor_id,
+            "target_id": target_id,
+            "action": deepcopy(action or {}),
+            "ruling": deepcopy(ruling),
+            **({"retry_hint": retry_hint} if retry_hint else {}),
+        }
+        reason = str(ruling.get("reason") or "Agent adjudication is required")
+        resolver = str(ruling.get("default_resolver") or "agent")
+        super().__init__(f"{operation} returns to {resolver}: {reason}")
+
+
 def _encounter_operation_scope(
     args: argparse.Namespace,
     *,
@@ -366,9 +392,9 @@ def _arguments() -> argparse.Namespace:
         type=json.loads,
         default=[],
         help=(
-            "DM-reviewed attack environment with actor_id, direct_sunlight, "
-            "and the exact source_excerpt for a structured Sunlight Sensitivity "
-            "trait; repeat for each affected participant"
+            "Agent-as-DM attack-environment adjudication with actor_id, "
+            "direct_sunlight, the exact source_excerpt for a structured Sunlight "
+            "Sensitivity trait, and ruling_reason; repeat for each affected participant"
         ),
     )
     parser.add_argument(
@@ -1661,6 +1687,7 @@ def _source_attack_environments(
             "actor_id",
             "direct_sunlight",
             "source_excerpt",
+            "ruling_reason",
         }
         if unknown:
             raise ValueError(
@@ -1669,15 +1696,18 @@ def _source_attack_environments(
             )
         actor_id = str(raw.get("actor_id") or "").strip()
         source_excerpt = " ".join(str(raw.get("source_excerpt") or "").split())
+        ruling_reason = " ".join(str(raw.get("ruling_reason") or "").split())
         if (
             actor_id not in participant_ids
             or actor_id in normalized
             or not isinstance(raw.get("direct_sunlight"), bool)
             or not source_excerpt
+            or not ruling_reason
         ):
             raise ValueError(
                 f"source attack environment {index} requires one unique "
-                "participant, a direct_sunlight DM fact, and an exact excerpt"
+                "participant, an Agent-adjudicated direct_sunlight fact, an exact "
+                "trait excerpt, and a ruling reason"
             )
         if actors is not None:
             actor = actors.get(actor_id)
@@ -1707,6 +1737,7 @@ def _source_attack_environments(
             "actor_id": actor_id,
             "direct_sunlight": bool(raw["direct_sunlight"]),
             "source_excerpt": source_excerpt,
+            "ruling_reason": ruling_reason,
         }
     return normalized
 
@@ -3555,7 +3586,8 @@ def _source_outcome(
         return (
             "defeat",
             "The party was defeated. Combat ended with resolved unconscious or dead "
-            "characters; their later treatment requires explicit source support or DM review.",
+            "characters; their later treatment requires explicit source support or "
+            "Agent-as-DM adjudication.",
         )
     return None
 
@@ -4162,8 +4194,33 @@ async def _resolve_pending(
             )
         )
         if ruling is None:
-            raise RuntimeError(
-                "interrupted source attack has no matching on-hit settlement declaration"
+            raise EncounterRulingRequiredError(
+                {
+                    "status": "pending_ruling",
+                    "default_resolver": "agent",
+                    "ruling_kind": "agent_dm_adjudication",
+                    "reason": (
+                        "the interrupted attack retains an unresolved reviewed "
+                        "on-hit effect"
+                    ),
+                    "committed": True,
+                    "retry_contract": {
+                        "resolver": "agent",
+                        "reuse_current_revision": True,
+                        "use_public_tools_only": True,
+                    },
+                },
+                operation="combat_choice.on_hit_ruling",
+                actor_id=str(pending.get("attacker_id") or ""),
+                target_id=str(pending.get("target_id") or actor_id),
+                action={
+                    "choice_id": str(pending.get("id") or ""),
+                    "weapon_id": str(pending.get("weapon_id") or ""),
+                },
+                retry_hint=(
+                    "Inspect the reviewed attack card and retry with one typed "
+                    "--source-on-hit-ruling-json settlement."
+                ),
             )
         return _facade_value(
             await client.domain(
@@ -4281,6 +4338,19 @@ async def _preflight_attack(
                     )
                 except RuntimeError:
                     continue
+                if plan.get("status") == "pending_ruling":
+                    raise EncounterRulingRequiredError(
+                        plan,
+                        operation="combat_preflight_attack",
+                        actor_id=str(actor["id"]),
+                        target_id=target_id,
+                        action=action,
+                        retry_hint=(
+                            "Inspect the typed missing facts and retry at the current "
+                            "revision. For direct_sunlight, provide "
+                            "--source-attack-environment-json with the Agent's ruling."
+                        ),
+                    )
                 return target_id, action, plan
     return None
 
@@ -4418,7 +4488,7 @@ async def _settle_source_casualty_pool_turn(
         ):
             raise RuntimeError(
                 "source casualty activity must pay its reviewed descriptive card "
-                "and retain the DM ruling boundary"
+                "and retain the Agent-as-DM ruling boundary"
             )
         kill_result = await roll_source(declaration["kill_expression"], "killed")
         injury_result = await roll_source(declaration["injury_expression"], "injured")
@@ -6087,10 +6157,29 @@ async def _auto_run(
                     dict(resolved.get("result") or {}).get("pending_on_hit_ruling_id") or ""
                 )
                 ruling = on_hit_rulings.get((actor_id, selected_weapon_id))
-                if not choice_id or ruling is None:
-                    raise RuntimeError(
-                        "reviewed attack opened an on-hit ruling without a matching "
-                        "source settlement declaration"
+                if not choice_id:
+                    raise EncounterRulingRequiredError(
+                        resolved,
+                        operation="combat_resolve_attack",
+                        actor_id=actor_id,
+                        target_id=target_id,
+                        action=action,
+                        retry_hint=(
+                            "Inspect the typed missing facts, adjudicate them as the "
+                            "Agent, and retry at the current revision."
+                        ),
+                    )
+                if ruling is None:
+                    raise EncounterRulingRequiredError(
+                        resolved,
+                        operation="combat_choice.on_hit_ruling",
+                        actor_id=actor_id,
+                        target_id=target_id,
+                        action=action,
+                        retry_hint=(
+                            "Inspect the reviewed attack card and retry with one typed "
+                            "--source-on-hit-ruling-json settlement."
+                        ),
                     )
                 campaign = await _campaign(client, args.campaign_id)
                 on_hit_settlement = _facade_value(
@@ -6429,17 +6518,48 @@ def _leaf_messages(error: BaseException) -> list[str]:
     return [f"{type(error).__name__}: {error}"]
 
 
+def _leaf_ruling_requirements(error: BaseException) -> list[dict[str, Any]]:
+    nested = getattr(error, "exceptions", ())
+    if nested:
+        return [
+            requirement
+            for child in nested
+            for requirement in _leaf_ruling_requirements(child)
+        ]
+    if isinstance(error, EncounterRulingRequiredError):
+        return [deepcopy(error.requirement)]
+    return []
+
+
 def main() -> int:
     args = _arguments()
     try:
         report = asyncio.run(_run(args))
     except Exception as error:
+        ruling_requirements = _leaf_ruling_requirements(error)
         report = {
             "action": args.action,
             "campaign_id": args.campaign_id,
             "run_id": args.run_id,
             "passed": False,
             "error": "; ".join(_leaf_messages(error)),
+            **(
+                {
+                    "status": "pending_ruling",
+                    "default_resolver": (
+                        "agent"
+                        if all(
+                            str(dict(item.get("ruling") or {}).get("default_resolver") or "agent")
+                            == "agent"
+                            for item in ruling_requirements
+                        )
+                        else "external_input"
+                    ),
+                    "ruling_requirements": ruling_requirements,
+                }
+                if ruling_requirements
+                else {}
+            ),
         }
     rendered = json.dumps(report, ensure_ascii=False, indent=2)
     args.output.parent.mkdir(parents=True, exist_ok=True)

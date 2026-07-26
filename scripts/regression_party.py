@@ -972,7 +972,7 @@ def lost_mine_party_profiles() -> list[dict[str, Any]]:
 
 
 def waterdeep_party_profiles() -> list[dict[str, Any]]:
-    """Return the four-PC party approved by Waterdeep's explicit DM review.
+    """Return the four-PC party approved by Waterdeep's Agent-as-DM review.
 
     Dragon Heist itself specifies the level span but no player-count range. The
     corpus review therefore uses the 2014 Core CR baseline of an appropriately
@@ -1037,7 +1037,7 @@ def audit_profiles(
             "module_mentions_included_characters": False,
             "official_sheets_present_in_corpus": False,
             "associated_templates_present": 0,
-            "disposition": "legally generate all four DM-reviewed seats",
+            "disposition": "legally generate all four Agent-reviewed seats",
         }
     elif campaign_line_id == "tyranny-of-dragons":
         expected_size = 4
