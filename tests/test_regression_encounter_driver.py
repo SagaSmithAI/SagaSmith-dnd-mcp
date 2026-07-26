@@ -885,6 +885,14 @@ def test_source_authored_precombat_and_attack_tactics_are_structured() -> None:
                 ),
             },
             {
+                "actor_id": "duergar",
+                "weapon_id": "war-pick",
+                "id": "dismiss",
+                "source_excerpt": (
+                    "or 11 (2d8 + 2) piercing damage while enlarged."
+                ),
+            },
+            {
                 "actor_id": "spider-1",
                 "weapon_id": "web",
                 "condition": "restrained",
@@ -919,7 +927,7 @@ def test_source_authored_precombat_and_attack_tactics_are_structured() -> None:
                 ),
             },
         ],
-        participant_ids=["nezznar", "spider-1", "durnan", "stirge"],
+        participant_ids=["nezznar", "spider-1", "durnan", "stirge", "duergar"],
     )
     delayed = _source_delayed_actions(
         [
@@ -941,6 +949,12 @@ def test_source_authored_precombat_and_attack_tactics_are_structured() -> None:
     assert rulings[("spider-1", "bite")]["zero_hp_effect"]["stable"] is True
     assert rulings[("durnan", "grimvault")]["target_has_limbs"] is True
     assert rulings[("stirge", "blood-drain")]["id"] == "attachment"
+    assert rulings[("duergar", "war-pick")] == {
+        "actor_id": "duergar",
+        "weapon_id": "war-pick",
+        "id": "dismiss",
+        "source_excerpt": "or 11 (2d8 + 2) piercing damage while enlarged.",
+    }
     assert delayed["nezznar"]["until_round"] == 2
 
 
@@ -1119,6 +1133,60 @@ def test_interrupted_source_attachment_resumes_with_declared_settlement() -> Non
             },
         )
     ]
+
+
+def test_interrupted_source_alternative_damage_resumes_with_reviewed_dismissal() -> None:
+    calls: list[tuple[str, dict]] = []
+    excerpt = "or 11 (2d8 + 2) piercing damage while enlarged."
+
+    class Client:
+        async def core(self, tool_id: str, arguments: dict) -> dict:
+            assert tool_id == "campaign_query"
+            return {"revision": 19}
+
+        async def domain(self, tool_id: str, arguments: dict) -> dict:
+            calls.append((tool_id, arguments))
+            return {"status": "committed"}
+
+    result = asyncio.run(
+        _resolve_pending(
+            Client(),
+            SimpleNamespace(
+                campaign_id="campaign-1",
+                source_on_hit_ruling_json=[
+                    {
+                        "actor_id": "duergar-1",
+                        "weapon_id": "war-pick",
+                        "id": "dismiss",
+                        "source_excerpt": excerpt,
+                    }
+                ],
+            ),
+            "branch-1",
+            {
+                "pending": [
+                    {
+                        "id": "choice-3",
+                        "kind": "ruling",
+                        "actor_id": "target-1",
+                        "attacker_id": "duergar-1",
+                        "target_id": "target-1",
+                        "weapon_id": "war-pick",
+                        "trigger": "attack_on_hit_effect",
+                        "effect": excerpt,
+                        "status": "pending",
+                    }
+                ]
+            },
+        )
+    )
+
+    assert result == {"status": "committed"}
+    assert calls[0][0] == "combat_on_hit_ruling"
+    assert calls[0][1]["selection"] == {
+        "id": "dismiss",
+        "source_excerpt": excerpt,
+    }
 
 
 def test_source_surrender_requires_threshold_life_no_escape_and_resolved_party() -> None:

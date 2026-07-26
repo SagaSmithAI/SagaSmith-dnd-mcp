@@ -199,7 +199,9 @@ def _arguments() -> argparse.Namespace:
         help=(
             "Reviewed attack settlement with actor_id, weapon_id, exact "
             "source_excerpt, and either condition/escape terms or "
-            "id=saving_throw_damage plus save/damage/zero-HP terms"
+            "id=saving_throw_damage plus save/damage/zero-HP terms; use "
+            "id=dismiss when the reviewed text is already represented by the "
+            "selected attack variant and adds no separate structured effect"
         ),
     )
     parser.add_argument(
@@ -1169,6 +1171,7 @@ def _source_on_hit_rulings(
             "saving_throw_damage",
             "attachment",
             "critical_followup",
+            "dismiss",
         }:
             raise ValueError(
                 f"source on-hit ruling {index} has unsupported id {selection_id!r}"
@@ -1218,6 +1221,30 @@ def _source_on_hit_rulings(
                 f"source on-hit ruling {index} target_has_limbs is only valid "
                 "for critical_followup"
             )
+        if selection_id == "dismiss":
+            settlement_fields = {
+                "condition",
+                "escape_dc",
+                "escape_abilities",
+                "save_ability",
+                "save_dc",
+                "damage_formula",
+                "damage_type",
+                "half_on_success",
+                "zero_hp_effect",
+            }
+            if any(raw.get(field) is not None for field in settlement_fields):
+                raise ValueError(
+                    f"source on-hit ruling {index} dismiss accepts only "
+                    "actor, weapon, id, and exact excerpt"
+                )
+            normalized[identity] = {
+                "actor_id": actor_id,
+                "weapon_id": weapon_id,
+                "id": selection_id,
+                "source_excerpt": source_excerpt,
+            }
+            continue
         if selection_id == "attachment":
             attachment_fields = {
                 "condition",

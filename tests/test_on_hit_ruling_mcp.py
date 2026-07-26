@@ -166,6 +166,24 @@ def test_public_on_hit_ruling_applies_and_escapes_web_condition(
         )
         assert attacked["status"] == "pending_ruling"
         choice_id = attacked["result"]["pending_on_hit_ruling_id"]
+        with pytest.raises(
+            Exception,
+            match="explicit structured on-hit effect cannot be dismissed",
+        ):
+            await raw(
+                "combat_on_hit_ruling",
+                {
+                    "campaign_id": campaign["id"],
+                    "target_id": target["id"],
+                    "choice_id": choice_id,
+                    "selection": {
+                        "id": "dismiss",
+                        "source_excerpt": web_effect,
+                    },
+                    "expected_revision": attacked["campaign_revision"],
+                    "idempotency_key": "invalid-dismiss-web",
+                },
+            )
         ruled = await raw(
             "combat_on_hit_ruling",
             {

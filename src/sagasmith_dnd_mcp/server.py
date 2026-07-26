@@ -5790,10 +5790,52 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             re.search(r"(?i)\bsaving throw\b", effect) is not None
             and re.search(r"(?i)\bdamage\b", effect) is not None
         )
-        if selection_id == "dismiss" and has_explicit_save_damage:
-            raise CombatEngineError(
-                "an explicit saving-throw damage effect cannot be dismissed"
+        if selection_id == "dismiss":
+            allowed_fields = {"id", "source_excerpt"}
+            unknown_fields = set(normalized_selection) - allowed_fields
+            source_excerpt = str(
+                normalized_selection.get("source_excerpt") or ""
+            ).strip()
+            explicit_conditions = {
+                "blinded",
+                "charmed",
+                "deafened",
+                "frightened",
+                "grappled",
+                "incapacitated",
+                "paralyzed",
+                "poisoned",
+                "prone",
+                "restrained",
+                "stunned",
+                "unconscious",
+            }
+            states_structured_condition = any(
+                re.search(rf"(?i)\b{re.escape(condition)}\b", effect)
+                is not None
+                for condition in explicit_conditions
             )
+            candidate_ids = {
+                str(item.get("id") or "")
+                for item in window.get("candidates", [])
+                if isinstance(item, dict)
+            }
+            if (
+                unknown_fields
+                or not source_excerpt
+                or source_excerpt.casefold() != effect.casefold()
+            ):
+                raise CombatEngineError(
+                    "dismissal requires the exact reviewed attack excerpt"
+                )
+            if (
+                has_explicit_save_damage
+                or states_structured_condition
+                or candidate_ids & {"attachment", "next_attack_advantage"}
+            ):
+                raise CombatEngineError(
+                    "an explicit structured on-hit effect cannot be dismissed"
+                )
         if selection_id == "apply_condition" and has_explicit_save_damage:
             raise CombatEngineError(
                 "an explicit saving-throw damage effect requires save-and-damage settlement"
