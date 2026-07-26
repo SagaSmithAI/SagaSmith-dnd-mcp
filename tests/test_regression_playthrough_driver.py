@@ -34,6 +34,7 @@ from scripts.regression_playthrough import (
     _checkpoint,
     _claim_party_item_for_character,
     _committed_check_result,
+    _committed_contest_result,
     _configure_advancement,
     _configure_ending_conditions,
     _extend_manifest_for_module_revision,
@@ -43,6 +44,7 @@ from scripts.regression_playthrough import (
     _level_spell_choice_counts,
     _long_rest,
     _matching_check_progress,
+    _matching_contest_progress,
     _module_refresh_identity,
     _module_refresh_manifest_action,
     _module_refresh_manifest_identity,
@@ -60,6 +62,7 @@ from scripts.regression_playthrough import (
     _record_event,
     _record_outcome,
     _recover_committed_check,
+    _recover_committed_contest,
     _recover_stable_party,
     _refresh_module,
     _register_replacement,
@@ -4650,6 +4653,71 @@ def test_check_recovery_identity_includes_actor_and_roll_mode() -> None:
     )
 
 
+def test_ability_contest_accepts_full_and_compact_exposure_shapes() -> None:
+    result = {
+        "kind": "ability_contest",
+        "outcome": "source_wins",
+        "winner_actor_id": "bard",
+    }
+
+    assert _committed_contest_result(
+        {"status": "committed", "result": result}
+    ) == result
+    assert _committed_contest_result(result) == result
+    with pytest.raises(RuntimeError, match="did not commit"):
+        _committed_contest_result({"status": "pending_ruling"})
+
+
+def test_contest_recovery_identity_binds_both_actors_and_roll_modes() -> None:
+    source_ref = {"chunk_id": "chunk-1"}
+    progress = {
+        "current_location_key": "road",
+        "state": {
+            "full_playthrough_contest": {
+                "run_id": "run-1",
+                "occurrence_id": "bluff-group-1",
+                "source_actor_id": "bard",
+                "target_actor_id": "cultist",
+                "source_ability": "deception",
+                "target_ability": "insight",
+                "source_proficient": True,
+                "target_proficient": False,
+                "source_advantage": False,
+                "source_disadvantage": False,
+                "target_advantage": True,
+                "target_disadvantage": False,
+                "source_ref": source_ref,
+            }
+        },
+    }
+    arguments = {
+        "run_id": "run-1",
+        "occurrence_id": "bluff-group-1",
+        "location_key": "road",
+        "source_actor_id": "bard",
+        "target_actor_id": "cultist",
+        "source_ability": "deception",
+        "target_ability": "insight",
+        "source_proficient": True,
+        "target_proficient": False,
+        "source_advantage": False,
+        "source_disadvantage": False,
+        "target_advantage": True,
+        "target_disadvantage": False,
+        "source_ref": source_ref,
+    }
+
+    assert _matching_contest_progress(progress, **arguments)
+    assert not _matching_contest_progress(
+        progress,
+        **{**arguments, "target_actor_id": "different-cultist"},
+    )
+    assert not _matching_contest_progress(
+        progress,
+        **{**arguments, "target_advantage": False},
+    )
+
+
 @pytest.mark.parametrize("defer_checkpoint", [False, True])
 @pytest.mark.parametrize("force_zero_hp", [False, True])
 @pytest.mark.parametrize(("half_damage", "expected_amount"), [(False, 4), (True, 2)])
@@ -5954,6 +6022,47 @@ def test_partially_committed_check_is_recovered_without_reroll() -> None:
             actor_id="actor-1",
             kind="ability",
             dc=10,
+        )
+        is None
+    )
+
+
+def test_partially_committed_contest_is_recovered_without_reroll() -> None:
+    result = {
+        "kind": "ability_contest",
+        "source_actor_id": "bard",
+        "target_actor_id": "cultist",
+        "outcome": "tie_no_change",
+    }
+    campaign = {
+        "state": {
+            "random_stream": {"last_receipt": {"operation": "character_contest"}},
+            "resolution_log": [
+                {
+                    "type": "ability_contest",
+                    "source_actor_id": "bard",
+                    "target_actor_id": "cultist",
+                    "result": result,
+                }
+            ],
+        }
+    }
+
+    assert (
+        _recover_committed_contest(
+            campaign,
+            progress_matches=True,
+            source_actor_id="bard",
+            target_actor_id="cultist",
+        )
+        == result
+    )
+    assert (
+        _recover_committed_contest(
+            campaign,
+            progress_matches=False,
+            source_actor_id="bard",
+            target_actor_id="cultist",
         )
         is None
     )

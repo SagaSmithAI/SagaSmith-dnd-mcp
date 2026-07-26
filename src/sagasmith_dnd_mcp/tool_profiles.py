@@ -256,6 +256,7 @@ TOOL_GROUPS = (
         "dnd_check",
         "dnd_ability_roll",
         "character_check",
+        "character_contest",
         "rule_search",
         "rule_expand",
     ),

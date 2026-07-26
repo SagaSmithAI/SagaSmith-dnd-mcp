@@ -112,6 +112,7 @@ from sagasmith_dnd.combat_engine import (
     preflight_spell_attack,
     queue_combatant,
     resolve_actor_check,
+    resolve_actor_contest,
     resolve_attack_damage,
     resolve_choice_window,
     resolve_common_action,
@@ -11038,6 +11039,142 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             branch_id=resolved_branch_id,
             idempotency_key=idempotency_key,
             rule_receipts=list(result.get("rule_receipts") or []),
+        )
+        response = {
+            "status": "committed",
+            "result": result,
+            "campaign_revision": mutation_revision(campaign_id),
+            "revisions": [asdict(item) for item in revisions_result or []],
+        }
+        return remember_idempotent(
+            scope, idempotency_key, payload, response, campaign_id=campaign_id
+        )
+
+    @mcp.tool()
+    def character_contest(
+        campaign_id: str,
+        source_actor_id: str,
+        target_actor_id: str,
+        source_ability: str,
+        target_ability: str,
+        source_proficient: bool = False,
+        target_proficient: bool = False,
+        source_bonus: int = 0,
+        target_bonus: int = 0,
+        source_advantage: bool = False,
+        source_disadvantage: bool = False,
+        target_advantage: bool = False,
+        target_disadvantage: bool = False,
+        source_rule_facts: dict[str, Any] | None = None,
+        target_rule_facts: dict[str, Any] | None = None,
+        principal_id: str = "system:local",
+        expected_revision: int | None = None,
+        branch_id: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Resolve and audit one non-combat 2014 ability contest atomically."""
+        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        source_actor = require_campaign_actor(campaign_id, source_actor_id)
+        target_actor = require_campaign_actor(campaign_id, target_actor_id)
+        for actor in (source_actor, target_actor):
+            if narrative_only_actor(actor):
+                raise CombatEngineError(
+                    "narrative-only actors cannot make contests without an exact statblock"
+                )
+        campaign = campaigns.get(campaign_id)
+        if str(campaign.settings.get("edition") or "2024") != "2014":
+            raise CombatEngineError(
+                "generic ability contests are a 2014 rules procedure"
+            )
+        require_write_contract(expected_revision, idempotency_key)
+        resolved_branch_id = require_current_branch(campaign_id, branch_id)
+        source_facts = checked_rule_facts(source_rule_facts)
+        target_facts = checked_rule_facts(target_rule_facts)
+        payload = {
+            "source_actor_id": source_actor_id,
+            "target_actor_id": target_actor_id,
+            "source_ability": source_ability,
+            "target_ability": target_ability,
+            "source_proficient": source_proficient,
+            "target_proficient": target_proficient,
+            "source_bonus": source_bonus,
+            "target_bonus": target_bonus,
+            "source_advantage": source_advantage,
+            "source_disadvantage": source_disadvantage,
+            "target_advantage": target_advantage,
+            "target_disadvantage": target_disadvantage,
+            "source_rule_facts": source_facts,
+            "target_rule_facts": target_facts,
+            "branch_id": resolved_branch_id,
+        }
+        scope = f"character-contest:{campaign_id}:{resolved_branch_id}:{principal_id}"
+        replay = replay_idempotent(scope, idempotency_key, payload)
+        if replay is not None:
+            return replay
+        if dict(campaign.state or {}).get("combat", {}).get("active", False):
+            raise CombatEngineError("ability contests require the non-combat play phase")
+        if campaign.revision != expected_revision:
+            raise ValueError(
+                "campaign revision conflict: "
+                f"expected {expected_revision}, found {campaign.revision}"
+            )
+        result = resolve_actor_contest(
+            combat_actor_snapshot(source_actor_id),
+            combat_actor_snapshot(target_actor_id),
+            source_ability=source_ability,
+            target_ability=target_ability,
+            source_proficient=source_proficient,
+            target_proficient=target_proficient,
+            source_bonus=source_bonus,
+            target_bonus=target_bonus,
+            source_advantage=source_advantage,
+            source_disadvantage=source_disadvantage,
+            target_advantage=target_advantage,
+            target_disadvantage=target_disadvantage,
+            source_rules=effective_rule_context(
+                campaign_id,
+                facts={
+                    **source_facts,
+                    "actor_id": source_actor_id,
+                    "contest_side": "source",
+                    "ability": source_ability,
+                },
+                branch_id=resolved_branch_id,
+            ),
+            target_rules=effective_rule_context(
+                campaign_id,
+                facts={
+                    **target_facts,
+                    "actor_id": target_actor_id,
+                    "contest_side": "target",
+                    "ability": target_ability,
+                },
+                branch_id=resolved_branch_id,
+            ),
+        )
+        next_state = dict(campaign.state or {})
+        next_state["resolution_log"] = [
+            *list(next_state.get("resolution_log") or []),
+            {
+                "type": "ability_contest",
+                "source_actor_id": source_actor_id,
+                "target_actor_id": target_actor_id,
+                "result": result,
+            },
+        ][-100:]
+        rule_receipts = [
+            *list(result["source_check"].get("rule_receipts") or []),
+            *list(result["target_check"].get("rule_receipts") or []),
+        ]
+        revisions_result = StateMutationService(storage.database).replace(
+            campaign_id,
+            campaign_state=validate_party_state(next_state),
+            expected_campaign_revision=campaign.revision,
+            operation="character.contest",
+            actor=principal_id,
+            branch_id=resolved_branch_id,
+            idempotency_key=idempotency_key,
+            rule_receipts=rule_receipts,
         )
         response = {
             "status": "committed",

@@ -32,6 +32,7 @@ DEFERRED_CHECKPOINT_ACTIONS = frozenset(
         "apply-damage",
         "roll-source",
         "resolve-check",
+        "resolve-contest",
         "initialize-source-state",
         "stand-up",
         "use-activity",
@@ -73,6 +74,7 @@ def _arguments() -> argparse.Namespace:
             "record-event",
             "record-outcome",
             "resolve-check",
+            "resolve-contest",
             "initialize-source-state",
             "apply-damage",
             "stand-up",
@@ -192,6 +194,19 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--knowledge-actor-id", action="append", default=[])
     parser.add_argument("--success-knowledge", default="")
     parser.add_argument("--failure-knowledge", default="")
+    parser.add_argument("--contest-source-actor-id", default="")
+    parser.add_argument("--contest-target-actor-id", default="")
+    parser.add_argument("--contest-source-ability", default="")
+    parser.add_argument("--contest-target-ability", default="")
+    parser.add_argument("--contest-source-proficient", action="store_true")
+    parser.add_argument("--contest-target-proficient", action="store_true")
+    parser.add_argument("--contest-source-advantage", action="store_true")
+    parser.add_argument("--contest-source-disadvantage", action="store_true")
+    parser.add_argument("--contest-target-advantage", action="store_true")
+    parser.add_argument("--contest-target-disadvantage", action="store_true")
+    parser.add_argument("--source-win-knowledge", default="")
+    parser.add_argument("--target-win-knowledge", default="")
+    parser.add_argument("--tie-knowledge", default="")
     parser.add_argument("--damage-actor-id", default="")
     parser.add_argument(
         "--damage-event-id",
@@ -1056,6 +1071,99 @@ def _recover_committed_check(
         or latest.get("actor_id") != actor_id
         or result.get("dc") != dc
         or "success" not in result
+    ):
+        return None
+    return result
+
+
+def _contest_identity(occurrence_id: str) -> str:
+    return _occurrence_identity(occurrence_id, "resolve-contest")
+
+
+def _contest_knowledge_key(run_id: str, occurrence_id: str) -> str:
+    return (
+        f"playthrough.{_token(run_id)}.contest."
+        f"{_token(_contest_identity(occurrence_id), length=32)}"
+    )
+
+
+def _committed_contest_result(settled: dict[str, Any]) -> dict[str, Any]:
+    """Accept full tool responses and compact dynamic-exposure facades."""
+
+    if settled.get("status") == "committed" and isinstance(settled.get("result"), dict):
+        return dict(settled["result"])
+    if settled.get("kind") == "ability_contest" and "outcome" in settled:
+        return dict(settled)
+    raise RuntimeError("source-cited ability contest did not commit")
+
+
+def _matching_contest_progress(
+    progress: dict[str, Any] | None,
+    *,
+    run_id: str,
+    occurrence_id: str,
+    location_key: str,
+    source_actor_id: str,
+    target_actor_id: str,
+    source_ability: str,
+    target_ability: str,
+    source_proficient: bool,
+    target_proficient: bool,
+    source_advantage: bool,
+    source_disadvantage: bool,
+    target_advantage: bool,
+    target_disadvantage: bool,
+    source_ref: dict[str, Any],
+) -> bool:
+    if not isinstance(progress, dict):
+        return False
+    state = dict(progress.get("state") or {})
+    contest = dict(state.get("full_playthrough_contest") or {})
+    return bool(
+        str(progress.get("current_location_key") or "") == location_key
+        and contest.get("run_id") == run_id
+        and contest.get("occurrence_id") == occurrence_id
+        and contest.get("source_actor_id") == source_actor_id
+        and contest.get("target_actor_id") == target_actor_id
+        and contest.get("source_ability") == source_ability
+        and contest.get("target_ability") == target_ability
+        and bool(contest.get("source_proficient", False)) == source_proficient
+        and bool(contest.get("target_proficient", False)) == target_proficient
+        and bool(contest.get("source_advantage", False)) == source_advantage
+        and bool(contest.get("source_disadvantage", False)) == source_disadvantage
+        and bool(contest.get("target_advantage", False)) == target_advantage
+        and bool(contest.get("target_disadvantage", False)) == target_disadvantage
+        and contest.get("source_ref") == source_ref
+    )
+
+
+def _recover_committed_contest(
+    campaign: dict[str, Any],
+    *,
+    progress_matches: bool,
+    source_actor_id: str,
+    target_actor_id: str,
+) -> dict[str, Any] | None:
+    """Recover a contest committed before a driver-side response failure."""
+
+    if not progress_matches:
+        return None
+    state = dict(campaign.get("state") or {})
+    random_stream = dict(state.get("random_stream") or {})
+    last_receipt = dict(random_stream.get("last_receipt") or {})
+    if last_receipt.get("operation") != "character_contest":
+        return None
+    resolution_log = list(state.get("resolution_log") or [])
+    if not resolution_log:
+        return None
+    latest = dict(resolution_log[-1])
+    result = dict(latest.get("result") or {})
+    if (
+        latest.get("type") != "ability_contest"
+        or latest.get("source_actor_id") != source_actor_id
+        or latest.get("target_actor_id") != target_actor_id
+        or result.get("kind") != "ability_contest"
+        or "outcome" not in result
     ):
         return None
     return result
@@ -2128,6 +2236,291 @@ async def _resolve_check(
         "progress": progress,
         "check": check_result,
         "check_recovered": recovered is not None,
+        "knowledge_actor_ids": recipients,
+        "continuity": committed,
+        "sync": synced,
+    }
+
+
+async def _resolve_contest(
+    client: ExposureClient,
+    *,
+    campaign_id: str,
+    run_id: str,
+    scene_id: str,
+    location_key: str,
+    source_excerpt: str,
+    source_ref: dict[str, Any] | None,
+    occurrence_id: str,
+    source_actor_id: str,
+    target_actor_id: str,
+    source_ability: str,
+    target_ability: str,
+    source_proficient: bool,
+    target_proficient: bool,
+    source_advantage: bool,
+    source_disadvantage: bool,
+    target_advantage: bool,
+    target_disadvantage: bool,
+    knowledge_actor_ids: list[str],
+    source_win_knowledge: str,
+    target_win_knowledge: str,
+    tie_knowledge: str,
+    defer_checkpoint: bool = False,
+) -> dict[str, Any]:
+    contest_identity = _contest_identity(occurrence_id)
+    if not all(
+        (
+            scene_id,
+            location_key,
+            source_excerpt,
+            source_actor_id,
+            target_actor_id,
+            source_ability,
+            target_ability,
+        )
+    ):
+        raise ValueError(
+            "resolve-contest requires scene, location, excerpt, both actors, "
+            "and both abilities"
+        )
+    if source_actor_id == target_actor_id:
+        raise ValueError("resolve-contest requires two different actors")
+    if source_advantage and source_disadvantage:
+        raise ValueError(
+            "resolve-contest source cannot have advantage and disadvantage together"
+        )
+    if target_advantage and target_disadvantage:
+        raise ValueError(
+            "resolve-contest target cannot have advantage and disadvantage together"
+        )
+    scene = await client.domain(
+        "module_query",
+        {
+            "campaign_id": campaign_id,
+            "view": "scene",
+            "payload": {"scene_id": scene_id},
+        },
+    )
+    exact_ref = _validate_source_ref(scene, source_ref, excerpt=source_excerpt)
+    location_keys = {str(item.get("key") or "") for item in _scene_locations(scene)}
+    if location_key not in location_keys:
+        raise ValueError("resolve-contest location is not present in the scene atlas")
+    source_actor = await client.domain(
+        "character_query",
+        {"view": "get", "payload": {"character_id": source_actor_id}},
+    )
+    target_actor = await client.domain(
+        "character_query",
+        {"view": "get", "payload": {"character_id": target_actor_id}},
+    )
+    for label, actor in (("source", source_actor), ("target", target_actor)):
+        if actor.get("campaign_id") != campaign_id:
+            raise ValueError(f"resolve-contest {label} actor does not belong to campaign")
+    progress_rows = await client.domain(
+        "module_query",
+        {"campaign_id": campaign_id, "view": "progress"},
+    )
+    progress_before = next(
+        (item for item in progress_rows if item.get("scene_id") == scene_id),
+        None,
+    )
+    progress_matches = _matching_contest_progress(
+        progress_before,
+        run_id=run_id,
+        occurrence_id=contest_identity,
+        location_key=location_key,
+        source_actor_id=source_actor_id,
+        target_actor_id=target_actor_id,
+        source_ability=source_ability,
+        target_ability=target_ability,
+        source_proficient=source_proficient,
+        target_proficient=target_proficient,
+        source_advantage=source_advantage,
+        source_disadvantage=source_disadvantage,
+        target_advantage=target_advantage,
+        target_disadvantage=target_disadvantage,
+        source_ref=exact_ref,
+    )
+    if progress_matches:
+        progress = deepcopy(progress_before)
+    else:
+        progress = await client.domain(
+            "module_set_progress",
+            {
+                "campaign_id": campaign_id,
+                "scene_id": scene_id,
+                "status": "active",
+                "progress": max(_scene_progress_percent(progress_before), 50),
+                "state": {
+                    **deepcopy(dict((progress_before or {}).get("state") or {})),
+                    "full_playthrough_contest": {
+                        "run_id": run_id,
+                        "occurrence_id": contest_identity,
+                        "source_actor_id": source_actor_id,
+                        "target_actor_id": target_actor_id,
+                        "source_ability": source_ability,
+                        "target_ability": target_ability,
+                        "source_proficient": source_proficient,
+                        "target_proficient": target_proficient,
+                        "source_advantage": source_advantage,
+                        "source_disadvantage": source_disadvantage,
+                        "target_advantage": target_advantage,
+                        "target_disadvantage": target_disadvantage,
+                        "source_ref": exact_ref,
+                    },
+                },
+                "current_location_key": location_key,
+                "expected_state_version": int(
+                    (progress_before or {}).get("state_version", 0) or 0
+                ),
+                "idempotency_key": _mutation_key(
+                    run_id,
+                    "scene-progress",
+                    contest_identity,
+                ),
+            },
+        )
+    branches = await client.domain(
+        "branch_query",
+        {"campaign_id": campaign_id, "view": "list"},
+    )
+    branch = next((item for item in branches if item.get("is_current")), None)
+    if branch is None:
+        raise RuntimeError("campaign has no current branch")
+    campaign = await _campaign(client, campaign_id)
+    recovered = _recover_committed_contest(
+        campaign,
+        progress_matches=progress_matches,
+        source_actor_id=source_actor_id,
+        target_actor_id=target_actor_id,
+    )
+    if recovered is None:
+        settled = await client.domain(
+            "character_contest",
+            {
+                "campaign_id": campaign_id,
+                "source_actor_id": source_actor_id,
+                "target_actor_id": target_actor_id,
+                "source_ability": source_ability,
+                "target_ability": target_ability,
+                "source_proficient": source_proficient,
+                "target_proficient": target_proficient,
+                "source_advantage": source_advantage,
+                "source_disadvantage": source_disadvantage,
+                "target_advantage": target_advantage,
+                "target_disadvantage": target_disadvantage,
+                "branch_id": str(branch["id"]),
+                "expected_revision": campaign["revision"],
+                "idempotency_key": _mutation_key(
+                    run_id,
+                    "character-contest",
+                    contest_identity,
+                ),
+            },
+        )
+        contest_result = _committed_contest_result(settled)
+    else:
+        contest_result = recovered
+    outcome = str(contest_result["outcome"])
+    proposition = {
+        "source_wins": source_win_knowledge.strip(),
+        "target_wins": target_win_knowledge.strip(),
+        "tie_no_change": tie_knowledge.strip(),
+    }.get(outcome, "")
+    if not proposition:
+        proposition = (
+            f"{source_actor['name']} and {target_actor['name']} resolved the "
+            f"{source_ability.title()} versus {target_ability.title()} contest: "
+            f"{outcome.replace('_', ' ')}."
+        )
+    recipients = list(
+        dict.fromkeys([source_actor_id, target_actor_id, *knowledge_actor_ids])
+    )
+    campaign = await _campaign(client, campaign_id)
+    continuity_payload = {
+        "event": {
+            "summary": (
+                f"{source_actor['name']} and {target_actor['name']} resolved a "
+                f"source-cited ability contest at {location_key}: "
+                f"{outcome.replace('_', ' ')}."
+            ),
+            "event_type": "ability_contest",
+            "audience_scope": "party",
+            "payload": {
+                "scene_id": scene_id,
+                "location_key": location_key,
+                "occurrence_id": contest_identity,
+                "source_actor_id": source_actor_id,
+                "target_actor_id": target_actor_id,
+                "source_ability": source_ability,
+                "target_ability": target_ability,
+                "source_advantage": source_advantage,
+                "source_disadvantage": source_disadvantage,
+                "target_advantage": target_advantage,
+                "target_disadvantage": target_disadvantage,
+                "outcome": outcome,
+                "winner_actor_id": contest_result.get("winner_actor_id", ""),
+                "source_excerpt": source_excerpt,
+                "source_ref": exact_ref,
+            },
+        },
+        "actor_knowledge": [
+            {
+                "actor_id": recipient,
+                "knowledge_key": _contest_knowledge_key(
+                    run_id,
+                    contest_identity,
+                ),
+                "proposition": proposition,
+                "disclosure_scope": "owner",
+            }
+            for recipient in recipients
+        ],
+        "branch_id": str(branch["id"]),
+    }
+    if not defer_checkpoint:
+        continuity_payload["snapshot"] = {
+            "label": f"Full playthrough ability contest at {location_key}"
+        }
+    committed = await client.domain(
+        "continuity_commit",
+        {
+            "campaign_id": campaign_id,
+            "payload": continuity_payload,
+            "expected_revision": campaign["revision"],
+            "idempotency_key": _mutation_key(
+                run_id,
+                "continuity",
+                contest_identity,
+            ),
+        },
+    )
+    synced = await _manifest_mutation(
+        client,
+        campaign_id=campaign_id,
+        action="sync",
+        run_id=run_id,
+        identity=f"resolve-contest-sync:{contest_identity}",
+    )
+    return {
+        "scene": {
+            "scene_id": scene_id,
+            "location_key": location_key,
+            "source_ref": exact_ref,
+        },
+        "source_actor": {
+            "id": source_actor_id,
+            "name": source_actor["name"],
+        },
+        "target_actor": {
+            "id": target_actor_id,
+            "name": target_actor["name"],
+        },
+        "occurrence_id": contest_identity,
+        "progress": progress,
+        "contest": contest_result,
+        "contest_recovered": recovered is not None,
         "knowledge_actor_ids": recipients,
         "continuity": committed,
         "sync": synced,
@@ -8958,6 +9351,35 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     knowledge_actor_ids=args.knowledge_actor_id,
                     success_knowledge=args.success_knowledge,
                     failure_knowledge=args.failure_knowledge,
+                    defer_checkpoint=args.defer_checkpoint,
+                )
+            elif args.action == "resolve-contest":
+                if phase != "play":
+                    raise RuntimeError("resolve-contest requires the play phase")
+                await client.load("play.characters", "play.resolution")
+                report["result"] = await _resolve_contest(
+                    client,
+                    campaign_id=args.campaign_id,
+                    run_id=args.run_id,
+                    scene_id=str(args.scene_id or ""),
+                    location_key=args.location_key,
+                    source_excerpt=args.source_excerpt,
+                    source_ref=args.source_ref_json,
+                    occurrence_id=args.occurrence_id,
+                    source_actor_id=args.contest_source_actor_id,
+                    target_actor_id=args.contest_target_actor_id,
+                    source_ability=args.contest_source_ability,
+                    target_ability=args.contest_target_ability,
+                    source_proficient=args.contest_source_proficient,
+                    target_proficient=args.contest_target_proficient,
+                    source_advantage=args.contest_source_advantage,
+                    source_disadvantage=args.contest_source_disadvantage,
+                    target_advantage=args.contest_target_advantage,
+                    target_disadvantage=args.contest_target_disadvantage,
+                    knowledge_actor_ids=args.knowledge_actor_id,
+                    source_win_knowledge=args.source_win_knowledge,
+                    target_win_knowledge=args.target_win_knowledge,
+                    tie_knowledge=args.tie_knowledge,
                     defer_checkpoint=args.defer_checkpoint,
                 )
             elif args.action == "record-event":
