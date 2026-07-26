@@ -2726,7 +2726,10 @@ def test_checkpoint_uses_only_public_manifest_branch_and_snapshot_tools() -> Non
         async def domain(self, tool_id: str, arguments: dict):
             self.calls.append((tool_id, arguments))
             if tool_id == "playthrough_manifest" and arguments["action"] == "sync":
-                return {"campaign_revision": 9, "manifest": {"status": "in_progress"}}
+                return {
+                    "campaign_revision": 9,
+                    "manifest": {"status": "in_progress"},
+                }
             if tool_id == "branch_query":
                 return [
                     {
@@ -2762,6 +2765,7 @@ def test_checkpoint_uses_only_public_manifest_branch_and_snapshot_tools() -> Non
         "snapshot_create",
         "snapshot_query",
         "playthrough_manifest",
+        "playthrough_manifest",
     ]
 
 
@@ -2777,7 +2781,10 @@ def test_checkpoint_recovers_verified_same_branch_snapshot_after_retry_revision_
         async def domain(self, tool_id: str, arguments: dict):
             self.calls.append((tool_id, arguments))
             if tool_id == "playthrough_manifest" and arguments["action"] == "sync":
-                return {"campaign_revision": 10, "manifest": {"status": "in_progress"}}
+                return {
+                    "campaign_revision": 10,
+                    "manifest": {"status": "in_progress"},
+                }
             if tool_id == "branch_query":
                 return [
                     {
@@ -2792,7 +2799,7 @@ def test_checkpoint_recovers_verified_same_branch_snapshot_after_retry_revision_
                 )
             if tool_id == "state_revision" and arguments["action"] == "receipt":
                 return {
-                    "branch_id": "branch-1",
+                    "branch_id": None,
                     "request_hash": regression_playthrough._idempotency_request_hash(
                         {
                             "label": "Scene checkpoint",
@@ -2857,6 +2864,7 @@ def test_checkpoint_recovers_verified_same_branch_snapshot_after_retry_revision_
         "state_revision",
         "snapshot_query",
         "snapshot_query",
+        "playthrough_manifest",
         "playthrough_manifest",
     ]
 

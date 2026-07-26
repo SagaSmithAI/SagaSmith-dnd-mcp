@@ -946,9 +946,12 @@ async def _checkpoint(
                 "payload": {"idempotency_key": snapshot_key},
             },
         )
-        if str(receipt.get("branch_id") or "") != str(current_branch["id"]):
-            raise RuntimeError("checkpoint recovery receipt is from another branch")
         recovered = dict(receipt.get("response") or {})
+        receipt_branch_id = str(
+            receipt.get("branch_id") or recovered.get("branch_id") or ""
+        )
+        if receipt_branch_id != str(current_branch["id"]):
+            raise RuntimeError("checkpoint recovery receipt is from another branch")
         expected_request_hash = _idempotency_request_hash(
             {
                 "label": label,
@@ -991,6 +994,15 @@ async def _checkpoint(
     )
     if not verification.get("valid"):
         raise RuntimeError(f"checkpoint slot {snapshot['slot']} failed integrity verification")
+    post_sync = await _manifest_mutation(
+        client,
+        campaign_id=campaign_id,
+        action="sync",
+        run_id=run_id,
+        identity=(
+            f"checkpoint-post-sync:{checkpoint_identity}:{str(snapshot['id'])}"
+        ),
+    )
     manifest_view = await _manifest_get(client, campaign_id)
     manifest = dict(manifest_view.get("manifest") or {})
     if "snapshot_dag" in manifest:
@@ -1011,6 +1023,7 @@ async def _checkpoint(
         "sync": synced,
         "snapshot": snapshot,
         "verification": verification,
+        "post_sync": post_sync,
         "reused": reused,
         "manifest": manifest_view,
     }
