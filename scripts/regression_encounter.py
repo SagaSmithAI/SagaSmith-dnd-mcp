@@ -1734,6 +1734,7 @@ async def _start(
     opened_play = await client.open(args.campaign_id)
     await client.load(
         "play.scene",
+        "play.scene_control",
         "play.characters",
         "play.resolution",
         "play.combat_control",
