@@ -4649,6 +4649,42 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             source_ref=source_ref,
             source_excerpt=source_excerpt,
         )
+        resolved_close_transition: dict[str, Any] | None = None
+        if close_transition is not None:
+            if not isinstance(close_transition, dict):
+                raise ValueError("chase close_transition must be an object")
+            allowed = {
+                "distance_ft",
+                "status",
+                "summary",
+                "source_ref",
+                "source_excerpt",
+            }
+            unknown = sorted(set(close_transition) - allowed)
+            if unknown:
+                raise ValueError(
+                    "unsupported chase close_transition fields: "
+                    + ", ".join(unknown)
+                )
+            transition_evidence = reviewed_chase_source(
+                campaign_id,
+                scene_id=scene_id,
+                source_ref=close_transition.get("source_ref"),
+                source_excerpt=str(close_transition.get("source_excerpt") or ""),
+            )
+            transition_summary = _normalize_source_evidence_text(
+                str(close_transition.get("summary") or "")
+            )
+            if transition_summary != transition_evidence["source_excerpt"]:
+                raise ValueError(
+                    "chase close_transition summary must equal its exact source_excerpt"
+                )
+            resolved_close_transition = {
+                "distance_ft": close_transition.get("distance_ft"),
+                "status": close_transition.get("status"),
+                "summary": transition_summary,
+                "source_ref": transition_evidence,
+            }
         config_by_actor: dict[str, dict[str, Any]] = {}
         for raw in participant_config or []:
             if not isinstance(raw, dict) or not raw.get("actor_id"):
@@ -4670,7 +4706,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "source_ref": evidence,
             "name": name,
             "participant_config": participant_config or [],
-            "close_transition": close_transition,
+            "close_transition": resolved_close_transition,
             "branch_id": resolved_branch_id,
         }
         scope = f"chase-start:{campaign_id}:{resolved_branch_id}:{principal_id}"
@@ -4709,9 +4745,20 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             ruleset=str(campaign.settings.get("edition") or "2014"),
             scene_id=scene_id,
             name=name,
-            close_transition=close_transition,
+            close_transition=(
+                {
+                    key: resolved_close_transition[key]
+                    for key in ("distance_ft", "status", "summary")
+                }
+                if resolved_close_transition
+                else None
+            ),
         )
         chase["source_ref"] = evidence
+        if resolved_close_transition:
+            chase["close_transition"]["source_ref"] = resolved_close_transition[
+                "source_ref"
+            ]
         next_state = deepcopy(campaign.state)
         next_state["chase"] = chase
         receipts = core_receipts(
