@@ -392,6 +392,7 @@ def test_manifest_syncs_canonical_state_and_verifies_source_defined_ending(
         assert synced_member["resources"]["spell_slots"]["1"]["value"] == 1
         assert synced_member["resources"]["hit_dice"]["d8"]["value"] == 1
         assert synced_member["resources"]["death_saves"]["successes"] == 1
+        assert synced_member["wallet"] == synced["runtime"]["party_members"][0]["wallet"]
         assert synced["runtime"]["world_state"]["combat_active"] is False
         assert synced["manifest"]["random_stream"]["position"] == 0
         persisted = await _call(

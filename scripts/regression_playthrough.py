@@ -364,21 +364,6 @@ async def _query_source(
         raise ValueError("query-source requires --source-query")
     if top_k < 1 or top_k > 50:
         raise ValueError("--source-top-k must be between 1 and 50")
-    search_result = await client.domain(
-        "module_search",
-        {
-            "campaign_id": campaign_id,
-            "query": normalized_query,
-            "top_k": top_k,
-        },
-    )
-    hits = (
-        search_result.get("result")
-        if isinstance(search_result, dict) and isinstance(search_result.get("result"), list)
-        else search_result
-    )
-    if not isinstance(hits, list) or any(not isinstance(hit, dict) for hit in hits):
-        raise RuntimeError("module_search returned an invalid result collection")
     manifest_result = await client.domain(
         "playthrough_manifest",
         {"campaign_id": campaign_id, "action": "get"},
@@ -389,22 +374,34 @@ async def _query_source(
         )
         or ""
     )
+    search_arguments: dict[str, Any] = {
+        "campaign_id": campaign_id,
+        "query": normalized_query,
+        "top_k": top_k,
+    }
     if preferred_module_id:
-        hits = [
-            hit
-            for _, hit in sorted(
-                enumerate(hits),
-                key=lambda item: (
-                    str(
-                        item[1].get("source_id")
-                        or dict(item[1].get("metadata") or {}).get("module_id")
-                        or ""
-                    )
-                    != preferred_module_id,
-                    item[0],
-                ),
-            )
-        ]
+        search_arguments["module_ids"] = [preferred_module_id]
+    search_result = await client.domain(
+        "module_search",
+        search_arguments,
+    )
+    hits = (
+        search_result.get("result")
+        if isinstance(search_result, dict) and isinstance(search_result.get("result"), list)
+        else search_result
+    )
+    if not isinstance(hits, list) or any(not isinstance(hit, dict) for hit in hits):
+        raise RuntimeError("module_search returned an invalid result collection")
+    if preferred_module_id and any(
+        str(
+            hit.get("source_id")
+            or dict(hit.get("metadata") or {}).get("module_id")
+            or preferred_module_id
+        )
+        != preferred_module_id
+        for hit in hits
+    ):
+        raise RuntimeError("module_search returned a hit outside the current manifest module")
     expanded = []
     if expand:
         for hit in hits:
@@ -1048,6 +1045,7 @@ def _party_member(actor: dict[str, Any], selection: dict[str, Any]) -> dict[str,
             "temporary": int(hp["temp"]),
         },
         "resources": deepcopy(dict(sheet.get("resources") or {})),
+        "wallet": deepcopy(dict(sheet["inventory"]["wallet"])),
         "equipment": sorted(str(item["id"]) for item in sheet["inventory"]["items"]),
         "knowledge_scope_actor_id": actor_id,
     }
@@ -6702,15 +6700,21 @@ async def _refresh_module(
     active_modules = dict(
         dict(dict(campaign.get("state") or {}).get("module_imports") or {}).get("active") or {}
     )
-    if not source_key:
-        source_key = next(
-            (
-                key
-                for key, item in active_modules.items()
-                if str(dict(item or {}).get("module_id") or "") == old_module_id
-            ),
-            "",
+    current_source_key = next(
+        (
+            key
+            for key, item in active_modules.items()
+            if str(dict(item or {}).get("module_id") or "") == old_module_id
+        ),
+        "",
+    )
+    if source_key and current_source_key and source_key != current_source_key:
+        raise ValueError(
+            "refresh-module source key must remain stable across parser revisions: "
+            f"current {current_source_key}, requested {source_key}"
         )
+    if not source_key:
+        source_key = current_source_key
     if not source_key:
         raise ValueError("refresh-module could not identify the logical module source key")
     resolved_source_path = source_path.expanduser().resolve()

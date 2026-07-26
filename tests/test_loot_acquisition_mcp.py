@@ -105,8 +105,10 @@ def test_source_bound_loot_is_atomic_idempotent_and_branch_audited(tmp_path: Pat
                 "campaign_id": campaign["id"],
                 "query": "jade frog",
                 "top_k": 3,
+                "module_ids": [ingested["module_id"]],
             },
         )
+        assert {item["source_id"] for item in search} == {ingested["module_id"]}
         chunk_id = search[0]["id"]
         expanded = await _call(server, "module_expand", {"chunk_id": chunk_id})
         assert expanded["source_ref"]["module_id"] == ingested["module_id"]

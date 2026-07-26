@@ -1434,30 +1434,30 @@ def test_query_source_searches_and_expands_only_public_mcp_results() -> None:
     assert result["expanded_chunks"][0]["source_ref"]["content_sha256"] == "a" * 64
     assert client.calls == [
         (
+            "playthrough_manifest",
+            {"campaign_id": "campaign-1", "action": "get"},
+        ),
+        (
             "module_search",
             {
                 "campaign_id": "campaign-1",
                 "query": "captured defeated characters",
                 "top_k": 4,
+                "module_ids": ["module-1"],
             },
-        ),
-        (
-            "playthrough_manifest",
-            {"campaign_id": "campaign-1", "action": "get"},
         ),
         ("module_expand", {"chunk_id": "chunk-1"}),
     ]
 
 
-def test_query_source_prefers_the_current_manifest_module_revision() -> None:
+def test_query_source_scopes_search_to_the_current_manifest_module_revision() -> None:
     class Client:
         async def domain(self, tool_id: str, arguments: dict):
             if tool_id == "module_search":
+                assert arguments["module_ids"] == ["new-module"]
                 return {
                     "result": [
-                        {"id": "old-chunk", "source_id": "old-module", "score": 1.0},
                         {"id": "new-chunk", "source_id": "new-module", "score": 1.0},
-                        {"id": "other-chunk", "source_id": "other-module", "score": 0.5},
                     ]
                 }
             if tool_id == "playthrough_manifest":
@@ -1481,16 +1481,8 @@ def test_query_source_prefers_the_current_manifest_module_revision() -> None:
         )
     )
 
-    assert [item["id"] for item in result["hits"]] == [
-        "new-chunk",
-        "old-chunk",
-        "other-chunk",
-    ]
-    assert [item["chunk_id"] for item in result["expanded_chunks"]] == [
-        "new-chunk",
-        "old-chunk",
-        "other-chunk",
-    ]
+    assert [item["id"] for item in result["hits"]] == ["new-chunk"]
+    assert [item["chunk_id"] for item in result["expanded_chunks"]] == ["new-chunk"]
 
 
 def test_index_source_uses_exact_public_mcp_module_query() -> None:
@@ -2007,6 +1999,56 @@ def test_module_refresh_validates_ingested_scene_mapping_before_activation(
     assert events.index("index:module-v2") < events.index("activate")
 
 
+def test_module_refresh_rejects_changing_the_logical_source_key(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "module.md"
+    source.write_text("# Chapter\n## Cave\nBody.\n", encoding="utf-8")
+
+    class Client:
+        async def load(self, *group_ids: str) -> None:
+            assert group_ids == ("lobby.modules",)
+
+        async def domain(self, tool_id: str, arguments: dict):
+            assert tool_id == "module_query"
+            return [{"scene_id": "scene-v1", "stable_key": "chapter-cave"}]
+
+    async def manifest_get(client, campaign_id: str):
+        return {
+            "manifest": {
+                "current": {"module_id": "module-v1"},
+            }
+        }
+
+    async def campaign_get(client, campaign_id: str):
+        return {
+            "revision": 4,
+            "state": {
+                "module_imports": {
+                    "active": {"stable-module-key": {"module_id": "module-v1"}}
+                }
+            },
+        }
+
+    monkeypatch.setattr(regression_playthrough, "_manifest_get", manifest_get)
+    monkeypatch.setattr(regression_playthrough, "_campaign", campaign_get)
+
+    with pytest.raises(ValueError, match="source key must remain stable"):
+        asyncio.run(
+            _refresh_module(
+                Client(),
+                campaign_id="campaign-1",
+                run_id="run-1",
+                initial_phase="lobby",
+                source_path=source,
+                source_key="versioned-key-v2",
+                title="Module",
+                return_phase="lobby",
+            )
+        )
+
+
 def test_in_place_module_refresh_does_not_duplicate_manifest_module_id() -> None:
     manifest = {
         "module_ids": ["module-v1"],
@@ -2080,6 +2122,7 @@ def test_party_projection_keeps_knowledge_bound_to_the_new_actor() -> None:
     assert member["knowledge_scope_actor_id"] == "replacement-actor"
     assert member["xp"] == 300
     assert member["hit_points"]["current"] == 7
+    assert member["wallet"] == sheet["inventory"]["wallet"]
 
 
 @pytest.mark.parametrize("defer_checkpoint", [False, True])

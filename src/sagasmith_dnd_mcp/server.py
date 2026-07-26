@@ -16801,15 +16801,17 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         campaign_id: str,
         query: str,
         top_k: int = 8,
+        module_ids: list[str] | None = None,
         principal_id: str = "system:local",
     ) -> list[dict[str, Any]]:
-        """Search imported adventure content using SQLite FTS and optional Chroma vectors."""
+        """Search adventure content, optionally scoped to exact active module revisions."""
         membership = access.require_campaign(campaign_id, principal_id)
         embedder, vectors = storage.dense_components()
         hits = modules.search(
             campaign_id=campaign_id,
             query=query,
             top_k=top_k,
+            module_ids=module_ids,
             embedder=embedder,
             vector_store=vectors,
         )
@@ -22455,6 +22457,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "conditions": sorted(conditions),
                 },
                 "resources": resources,
+                "wallet": deepcopy(dict(sheet["inventory"]["wallet"])),
                 "equipment": sorted(str(item["id"]) for item in sheet["inventory"]["items"]),
                 "knowledge_scope_actor_id": actor.id,
             }
