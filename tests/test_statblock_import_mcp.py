@@ -566,6 +566,74 @@ def test_statblock_spellcasting_binds_slots_and_active_content(tmp_path: Path) -
         assert spells["Ray of Sickness"]["mechanic_refs"] == [
             "dnd5e.core.spell.structured_resolution"
         ]
+        source_chunk_id = created["source"]["chunk_ids"][0]
+        variant = await _call(
+            server,
+            "character_create_from",
+            {
+                "mode": "statblock",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "source_id": ingested["source_id"],
+                    "name": "Source Variant Spellcaster",
+                    "character_type": "npc",
+                    "variant": {
+                        "source_ref": f"rule-chunk:{source_chunk_id}",
+                        "size": "small",
+                        "walking_speed_ft": 25,
+                        "maximum_hit_points": 31,
+                        "current_hit_points": 31,
+                        "spell_replacements": [
+                            {
+                                "remove_spell_id": (
+                                    "dnd5e.content.srd2014.spell.shield"
+                                ),
+                                "add_spell_id": (
+                                    "dnd5e.content.srd2014.spell.magic-missile"
+                                ),
+                            }
+                        ],
+                        "expend_all_spell_slots": True,
+                        "add_features": [
+                            {
+                                "id": "variant-brave",
+                                "name": "Brave",
+                                "description": (
+                                    "The actor has advantage on saving throws "
+                                    "against being frightened."
+                                ),
+                            }
+                        ],
+                    },
+                },
+                "idempotency_key": "create-source-variant-spellcaster",
+            },
+        )
+        variant_actor = variant["character"]
+        assert variant_actor["sheet"]["traits"]["size"] == "small"
+        assert variant_actor["sheet"]["combat"]["speed"]["walk"] == 25
+        assert variant_actor["sheet"]["combat"]["hp"] == {
+            "value": 31,
+            "max": 31,
+            "temp": 0,
+        }
+        assert all(
+            slot["value"] == 0
+            for slot in variant_actor["sheet"]["spellcasting"]["spell_slots"].values()
+        )
+        variant_spell_ids = {
+            item["id"] for item in variant_actor["sheet"]["content"]["spells"]
+        }
+        assert "dnd5e.content.srd2014.spell.shield" not in variant_spell_ids
+        assert "dnd5e.content.srd2014.spell.magic-missile" in variant_spell_ids
+        assert "dnd5e.content.srd2014.spell.magic-missile" in (
+            variant_actor["derived"]["spellcasting"]["prepared_spell_ids"]
+        )
+        assert any(
+            item["id"] == "variant-brave"
+            for item in variant_actor["sheet"]["content"]["features"]
+        )
+        assert variant["variant_evidence"]["id"] == source_chunk_id
         ray_id = spells["Ray of Sickness"]["id"]
         with pytest.raises(Exception, match="source_components_confirmed"):
             await _call(

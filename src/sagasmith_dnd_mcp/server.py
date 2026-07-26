@@ -17095,6 +17095,84 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         }
         return validate_character_sheet(sheet), warnings
 
+    def hydrate_statblock_variant_spells(
+        campaign_id: str,
+        sheet: dict[str, Any],
+        variant: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Hydrate source-cited replacement spells from active content.
+
+        Public variants supply only canonical spell ids. They cannot inject
+        arbitrary spell cards; every replacement target must resolve exactly
+        once in the campaign's active D&D content.
+        """
+
+        if variant is None or "spell_replacements" not in variant:
+            return sheet
+        replacements = variant["spell_replacements"]
+        if not isinstance(replacements, list) or not replacements:
+            raise ValueError("spell_replacements must be a non-empty list")
+        add_ids: list[str] = []
+        for index, raw in enumerate(replacements):
+            if not isinstance(raw, dict):
+                raise ValueError(f"spell_replacements[{index}] must be an object")
+            add_spell_id = str(raw.get("add_spell_id") or "").strip()
+            if not add_spell_id:
+                raise ValueError(
+                    f"spell_replacements[{index}].add_spell_id is required"
+                )
+            add_ids.append(add_spell_id)
+        if len(add_ids) != len(set(add_ids)):
+            raise ValueError("spell replacement targets must be unique")
+
+        hydrated = deepcopy(sheet)
+        spells = list(dict(hydrated.get("content") or {}).get("spells") or [])
+        existing_ids = {str(item.get("id") or "") for item in spells}
+        artifacts = available_content_artifacts(campaign_id, kind="spell")
+        variant_source = f"variant:{statblock_variant_source_label(variant)}"
+        for add_spell_id in add_ids:
+            if add_spell_id in existing_ids:
+                continue
+            matches = [
+                item
+                for item in artifacts
+                if str(item[2].get("id") or "") == add_spell_id
+            ]
+            if len(matches) != 1:
+                raise ValueError(
+                    "statblock replacement spell must resolve exactly once in active "
+                    f"content: {add_spell_id}"
+                )
+            pack_id, version, artifact = matches[0]
+            card = deepcopy(dict(artifact.get("card") or {}))
+            card.pop("classes", None)
+            card.update(
+                {
+                    "id": str(artifact["id"]),
+                    "pack_id": pack_id,
+                    "pack_version": version,
+                    "rule_refs": list(artifact.get("rule_refs") or []),
+                    "mechanic_refs": list(artifact.get("mechanic_refs") or []),
+                    "grant": {
+                        "source_type": "statblock_variant",
+                        "source_key": variant_source,
+                        "method": "known",
+                    },
+                    "access": {
+                        "known": True,
+                        "prepared": False,
+                        "always_prepared": False,
+                        "in_spellbook": False,
+                        "ritual_available": False,
+                        "at_will": False,
+                    },
+                }
+            )
+            spells.append(card)
+            existing_ids.add(add_spell_id)
+        hydrated["content"]["spells"] = spells
+        return validate_character_sheet(hydrated)
+
     def hydrate_magic_item_spell_artifacts(
         campaign_id: str,
         item: dict[str, Any],
@@ -20665,6 +20743,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             )
             variant = data.get("variant")
             variant_evidence = statblock_variant_evidence(campaign_id, variant)
+            hydrated_sheet = hydrate_statblock_variant_spells(
+                campaign_id,
+                hydrated_sheet,
+                variant,
+            )
             statblock_warnings = retained_statblock_warnings(
                 [*parsed.warnings, *spell_warnings],
                 variant,
@@ -20765,6 +20848,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             )
             variant = data.get("variant")
             variant_evidence = statblock_variant_evidence(campaign_id, variant)
+            hydrated_sheet = hydrate_statblock_variant_spells(
+                campaign_id,
+                hydrated_sheet,
+                variant,
+            )
             statblock_warnings = retained_statblock_warnings(
                 [*parsed.warnings, *spell_warnings],
                 variant,
@@ -20901,6 +20989,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             )
             variant = data.get("variant")
             variant_evidence = statblock_variant_evidence(campaign_id, variant)
+            hydrated_sheet = hydrate_statblock_variant_spells(
+                campaign_id,
+                hydrated_sheet,
+                variant,
+            )
             statblock_warnings = retained_statblock_warnings(
                 [*parsed.warnings, *spell_warnings],
                 variant,
