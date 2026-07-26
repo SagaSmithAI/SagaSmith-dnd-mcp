@@ -229,6 +229,7 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--item-equip-slot", default="")
     parser.add_argument("--item-reason", default="")
     parser.add_argument("--transfer-character-id", default="")
+    parser.add_argument("--transfer-recipient-character-id", default="")
     parser.add_argument("--transfer-item-id", default="")
     parser.add_argument("--transfer-item-quantity", type=int)
     parser.add_argument("--transfer-reason", default="")
@@ -4609,9 +4610,11 @@ async def _transfer_source_item_to_party(
     reason: str,
     checkpoint_label: str,
     defer_checkpoint: bool = False,
+    recipient_character_id: str = "",
 ) -> dict[str, Any]:
     transfer_identity = _occurrence_identity(occurrence_id, "transfer-source-item")
     normalized_character_id = character_id.strip()
+    normalized_recipient_id = recipient_character_id.strip()
     normalized_item_id = item_id.strip()
     normalized_reason = reason.strip()
     if not all(
@@ -4629,6 +4632,8 @@ async def _transfer_source_item_to_party(
         )
     if quantity is not None and quantity <= 0:
         raise ValueError("transfer-source-item quantity must be positive")
+    if normalized_recipient_id == normalized_character_id:
+        raise ValueError("source and recipient characters must differ")
 
     scene = await client.domain(
         "module_query",
@@ -4670,36 +4675,67 @@ async def _transfer_source_item_to_party(
         ),
         None,
     )
-    party_item = next(
+    recipient = (
+        dict(
+            _facade_value(
+                await client.domain(
+                    "character_query",
+                    {"view": "get", "payload": {"character_id": normalized_recipient_id}},
+                )
+            )
+        )
+        if normalized_recipient_id
+        else None
+    )
+    if recipient is not None and recipient.get("campaign_id") != campaign_id:
+        raise ValueError("source item recipient must belong to the campaign")
+    recipient_items = (
+        recipient["sheet"]["inventory"]["items"]
+        if recipient is not None
+        else party["inventory"]["items"]
+    )
+    recipient_item = next(
         (
             dict(item)
-            for item in party["inventory"]["items"]
+            for item in recipient_items
             if str(item.get("id") or "") == normalized_item_id
         ),
         None,
     )
-    recovered = actor_item is None and party_item is not None
+    recovered = actor_item is None and recipient_item is not None
     if actor_item is None and not recovered:
         raise ValueError("source character does not carry the requested item")
-    if actor_item is not None and party_item is not None:
-        raise RuntimeError("source item id already exists in both inventories")
+    if actor_item is not None and recipient_item is not None:
+        raise RuntimeError("source item id already exists in both source and recipient inventories")
 
     if recovered:
         transferred: dict[str, Any] = {
-            "party": party,
-            "character": actor,
-            "item": party_item,
+            "source": actor,
+            "recipient": recipient or party,
+            "item": recipient_item,
             "status": "recovered",
         }
     else:
         campaign = await _campaign(client, campaign_id)
-        payload: dict[str, Any] = {
-            "campaign_id": campaign_id,
-            "character_id": normalized_character_id,
-            "item_id": normalized_item_id,
-            "expected_campaign_revision": campaign["revision"],
-            "expected_character_revision": actor["revision"],
-        }
+        if recipient is not None:
+            mode = "character_to_character"
+            payload: dict[str, Any] = {
+                "source_character_id": normalized_character_id,
+                "target_character_id": normalized_recipient_id,
+                "item_id": normalized_item_id,
+                "expected_campaign_revision": campaign["revision"],
+                "expected_source_revision": actor["revision"],
+                "expected_target_revision": recipient["revision"],
+            }
+        else:
+            mode = "character_to_party"
+            payload = {
+                "campaign_id": campaign_id,
+                "character_id": normalized_character_id,
+                "item_id": normalized_item_id,
+                "expected_campaign_revision": campaign["revision"],
+                "expected_character_revision": actor["revision"],
+            }
         if quantity is not None:
             payload["quantity"] = quantity
         transferred = dict(
@@ -4707,7 +4743,7 @@ async def _transfer_source_item_to_party(
                 await client.domain(
                     "inventory_transfer",
                     {
-                        "mode": "character_to_party",
+                        "mode": mode,
                         "payload": payload,
                         "idempotency_key": _mutation_key(
                             run_id,
@@ -4739,6 +4775,7 @@ async def _transfer_source_item_to_party(
     )
     return {
         "character_id": normalized_character_id,
+        "recipient_character_id": normalized_recipient_id or None,
         "item_id": normalized_item_id,
         "quantity": quantity,
         "occurrence_id": transfer_identity,
@@ -7728,6 +7765,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     reason=args.transfer_reason,
                     checkpoint_label=args.checkpoint_label,
                     defer_checkpoint=args.defer_checkpoint,
+                    recipient_character_id=args.transfer_recipient_character_id,
                 )
             elif args.action == "claim-party-item":
                 if phase != "play":

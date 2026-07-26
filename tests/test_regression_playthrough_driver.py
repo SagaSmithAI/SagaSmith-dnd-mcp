@@ -1206,6 +1206,108 @@ def test_source_item_transfer_driver_uses_atomic_character_to_party_public_tool(
         assert result["checkpoint"]["verification"]["valid"] is True
 
 
+def test_source_item_transfer_driver_uses_atomic_character_to_character_public_tool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_ref = {
+        "module_id": "module-1",
+        "scene_id": "scene-1",
+        "chunk_id": "ambush-chunk",
+        "page_start": 63,
+        "page_end": 63,
+        "heading_path": ["Encounter 1: Alley"],
+        "content_sha256": "b" * 64,
+    }
+    stone = {
+        "id": "stone-of-golorr",
+        "name": "Stone of Golorr",
+        "kind": "magic_item",
+        "quantity": 1,
+    }
+
+    class Client:
+        def __init__(self) -> None:
+            source_sheet = default_character_sheet()
+            source_sheet["inventory"]["items"].append(deepcopy(stone))
+            self.source = {
+                "id": "pip",
+                "campaign_id": "campaign-1",
+                "revision": 7,
+                "sheet": source_sheet,
+            }
+            self.target = {
+                "id": "morga",
+                "campaign_id": "campaign-1",
+                "revision": 3,
+                "sheet": default_character_sheet(),
+            }
+            self.transfer_arguments: dict | None = None
+
+        async def core(self, tool_id: str, arguments: dict):
+            assert tool_id == "campaign_query"
+            return {"result": {"id": "campaign-1", "revision": 24}}
+
+        async def domain(self, tool_id: str, arguments: dict):
+            if tool_id == "module_query":
+                return {
+                    "module_id": "module-1",
+                    "scene_id": "scene-1",
+                    "content": "If these creatures obtain the stone, they bring it to Xanathar.",
+                    "spatial": {"locations": [{"key": "alley", "title": "Alley"}]},
+                }
+            if tool_id == "character_query":
+                actor_id = arguments["payload"]["character_id"]
+                return deepcopy(self.source if actor_id == "pip" else self.target)
+            if tool_id == "inventory_transfer":
+                self.transfer_arguments = deepcopy(arguments)
+                moved = self.source["sheet"]["inventory"]["items"].pop()
+                self.target["sheet"]["inventory"]["items"].append(deepcopy(moved))
+                return {
+                    "source": deepcopy(self.source),
+                    "target": deepcopy(self.target),
+                    "item": deepcopy(moved),
+                }
+            raise AssertionError((tool_id, arguments))
+
+    async def checkpoint(*_args, **_kwargs):
+        return {"snapshot": {"slot": 51}, "verification": {"valid": True}}
+
+    monkeypatch.setattr(regression_playthrough, "_checkpoint", checkpoint)
+    client = Client()
+    result = asyncio.run(
+        _transfer_source_item_to_party(
+            client,
+            campaign_id="campaign-1",
+            run_id="run-1",
+            occurrence_id="morga-takes-stone",
+            scene_id="scene-1",
+            location_key="alley",
+            source_excerpt="If these creatures obtain the stone, they bring it to Xanathar.",
+            source_ref=source_ref,
+            character_id="pip",
+            recipient_character_id="morga",
+            item_id="stone-of-golorr",
+            quantity=1,
+            reason="Morga takes the Stone from the defeated party.",
+            checkpoint_label="Morga takes the Stone",
+        )
+    )
+
+    assert client.transfer_arguments is not None
+    assert client.transfer_arguments["mode"] == "character_to_character"
+    assert client.transfer_arguments["payload"] == {
+        "source_character_id": "pip",
+        "target_character_id": "morga",
+        "item_id": "stone-of-golorr",
+        "expected_campaign_revision": 24,
+        "expected_source_revision": 7,
+        "expected_target_revision": 3,
+        "quantity": 1,
+    }
+    assert result["recipient_character_id"] == "morga"
+    assert result["transfer"]["item"]["id"] == "stone-of-golorr"
+
+
 @pytest.mark.parametrize("defer_checkpoint", [False, True])
 def test_party_item_claim_driver_uses_atomic_party_to_character_public_tool(
     defer_checkpoint: bool,
