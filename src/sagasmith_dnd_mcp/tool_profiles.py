@@ -269,6 +269,18 @@ TOOL_GROUPS = (
         roles=("owner", "dm"),
     ),
     _group(
+        "play.chase",
+        PROFILE_PLAY,
+        "Chase procedure",
+        "Start, inspect, advance, and close a source-reviewed theater-of-the-mind chase.",
+        "write",
+        "chase_start",
+        "chase_query",
+        "chase_take_turn",
+        "chase_end",
+        roles=("owner", "dm"),
+    ),
+    _group(
         "combat.observe",
         PROFILE_COMBAT,
         "Combat state",

@@ -77,6 +77,13 @@ from sagasmith_dnd.character_schema import (
     validate_party_state,
     validate_world_effect,
 )
+from sagasmith_dnd.chase_engine import (
+    CHASE_BOUNDARY_IDS,
+    advance_chase_turn,
+    current_chase_participant,
+    end_chase,
+    start_chase,
+)
 from sagasmith_dnd.combat_engine import (
     CombatEngineError,
     NeedsRulingError,
@@ -4555,6 +4562,412 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             scope,
             idempotency_key,
             request_payload,
+            response,
+            campaign_id=campaign_id,
+        )
+
+    def reviewed_chase_source(
+        campaign_id: str,
+        *,
+        scene_id: str,
+        source_ref: dict[str, Any],
+        source_excerpt: str,
+    ) -> dict[str, Any]:
+        """Resolve an exact managed module citation for a chase mutation."""
+        if not isinstance(source_ref, dict):
+            raise ValueError("chase source_ref must be an object")
+        required = {
+            "module_id",
+            "scene_id",
+            "chunk_id",
+            "page_start",
+            "page_end",
+            "heading_path",
+            "content_sha256",
+        }
+        missing = sorted(required - set(source_ref))
+        if missing:
+            raise ValueError("chase source_ref is missing: " + ", ".join(missing))
+        expanded = modules.expand(str(source_ref["chunk_id"]))
+        if str(expanded.get("campaign_id") or "") != campaign_id:
+            raise ValueError("chase source chunk does not belong to the campaign")
+        expanded_module_id = str(dict(expanded.get("module") or {}).get("id") or "")
+        expanded_scene_id = str(dict(expanded.get("scene") or {}).get("id") or "")
+        if str(source_ref["module_id"]) != expanded_module_id:
+            raise ValueError("chase source_ref module_id does not match its chunk")
+        if str(source_ref["scene_id"]) != expanded_scene_id or expanded_scene_id != scene_id:
+            raise ValueError("chase source_ref scene_id does not match the chase scene")
+        chunk_content = str(expanded.get("content") or "")
+        chunk_sha256 = hashlib.sha256(chunk_content.encode("utf-8")).hexdigest()
+        if str(source_ref["content_sha256"]).casefold() != chunk_sha256:
+            raise ValueError("chase source_ref content_sha256 does not match its chunk")
+        if (
+            source_ref["page_start"] != expanded.get("page_start")
+            or source_ref["page_end"] != expanded.get("page_end")
+        ):
+            raise ValueError("chase source_ref pages do not match its chunk")
+        if [str(item) for item in source_ref["heading_path"]] != [
+            str(item) for item in expanded.get("heading_path", [])
+        ]:
+            raise ValueError("chase source_ref heading_path does not match its chunk")
+        normalized_excerpt = _normalize_source_evidence_text(source_excerpt)
+        if not normalized_excerpt:
+            raise ValueError("chase source_excerpt is required")
+        if normalized_excerpt not in _normalize_source_evidence_text(chunk_content):
+            raise ValueError("chase source_excerpt is not present in the cited chunk")
+        return {
+            **deepcopy(source_ref),
+            "source_excerpt": normalized_excerpt,
+        }
+
+    @mcp.tool()
+    def chase_start(
+        campaign_id: str,
+        participant_ids: list[str],
+        quarry_ids: list[str],
+        initial_distance_ft: int,
+        scene_id: str,
+        source_ref: dict[str, Any],
+        source_excerpt: str,
+        name: str = "Chase",
+        participant_config: list[dict[str, Any]] | None = None,
+        close_transition: dict[str, Any] | None = None,
+        principal_id: str = "system:local",
+        branch_id: str | None = None,
+        expected_revision: int | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Start a source-reviewed 2014 chase without creating a combat map."""
+        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        require_write_contract(expected_revision, idempotency_key)
+        resolved_branch_id = require_current_branch(campaign_id, branch_id)
+        if not participant_ids or len(participant_ids) != len(set(participant_ids)):
+            raise ValueError("participant_ids must contain unique actors")
+        evidence = reviewed_chase_source(
+            campaign_id,
+            scene_id=scene_id,
+            source_ref=source_ref,
+            source_excerpt=source_excerpt,
+        )
+        config_by_actor: dict[str, dict[str, Any]] = {}
+        for raw in participant_config or []:
+            if not isinstance(raw, dict) or not raw.get("actor_id"):
+                raise ValueError("each chase participant_config entry needs actor_id")
+            unknown = set(raw) - {"actor_id", "initiative", "tie_breaker"}
+            if unknown:
+                raise ValueError(
+                    f"unsupported chase participant_config fields: {sorted(unknown)}"
+                )
+            identifier = str(raw["actor_id"])
+            if identifier not in participant_ids or identifier in config_by_actor:
+                raise ValueError("chase participant_config actor_id is invalid or duplicated")
+            config_by_actor[identifier] = dict(raw)
+        payload = {
+            "participant_ids": list(participant_ids),
+            "quarry_ids": list(quarry_ids),
+            "initial_distance_ft": initial_distance_ft,
+            "scene_id": scene_id,
+            "source_ref": evidence,
+            "name": name,
+            "participant_config": participant_config or [],
+            "close_transition": close_transition,
+            "branch_id": resolved_branch_id,
+        }
+        scope = f"chase-start:{campaign_id}:{resolved_branch_id}:{principal_id}"
+        replay = replay_idempotent(scope, idempotency_key, payload)
+        if replay is not None:
+            return replay
+        campaign = campaigns.get(campaign_id)
+        if campaign.revision != expected_revision:
+            raise ValueError(
+                "campaign revision conflict: "
+                f"expected {expected_revision}, found {campaign.revision}"
+            )
+        if dict(campaign.state.get("combat") or {}).get("active", False):
+            raise CombatEngineError("a chase cannot start while combat is active")
+        if dict(campaign.state.get("chase") or {}).get("active", False):
+            raise CombatEngineError("a chase is already active")
+        rules_context = effective_rule_context(
+            campaign_id,
+            facts={
+                "scene_id": scene_id,
+                "initial_distance_ft": initial_distance_ft,
+            },
+        )
+        actor_snapshots: list[dict[str, Any]] = []
+        for identifier in participant_ids:
+            record = require_campaign_actor(campaign_id, identifier)
+            if int(dict(record.sheet.get("combat") or {}).get("hp", {}).get("value", 0) or 0) <= 0:
+                raise CombatEngineError("incapacitated actors cannot start a chase")
+            snapshot = character_view(record, rules_context=rules_context)
+            snapshot.update(config_by_actor.get(identifier, {}))
+            actor_snapshots.append(snapshot)
+        chase = start_chase(
+            actor_snapshots,
+            quarry_ids=quarry_ids,
+            initial_distance_ft=initial_distance_ft,
+            ruleset=str(campaign.settings.get("edition") or "2014"),
+            scene_id=scene_id,
+            name=name,
+            close_transition=close_transition,
+        )
+        chase["source_ref"] = evidence
+        next_state = deepcopy(campaign.state)
+        next_state["chase"] = chase
+        receipts = core_receipts(
+            rules_context,
+            list(chase["rule_boundary_ids"]),
+            "chase.start",
+        )
+        StateMutationService(storage.database).replace(
+            campaign_id,
+            campaign_state=validate_party_state(next_state),
+            expected_campaign_revision=expected_revision,
+            operation="chase.start",
+            actor=principal_id,
+            branch_id=resolved_branch_id,
+            idempotency_key=idempotency_key,
+            rule_receipts=receipts,
+        )
+        response = {
+            "status": "committed",
+            "chase": chase,
+            "campaign_revision": campaigns.get(campaign_id).revision,
+            "rule_receipts": receipts,
+        }
+        return remember_idempotent(
+            scope,
+            idempotency_key,
+            payload,
+            response,
+            campaign_id=campaign_id,
+        )
+
+    @mcp.tool()
+    def chase_query(
+        campaign_id: str,
+        principal_id: str = "system:local",
+    ) -> dict[str, Any]:
+        """Inspect the current or most recently closed chase and canonical actors."""
+        access.require_campaign(campaign_id, principal_id)
+        campaign = campaigns.get(campaign_id)
+        chase = deepcopy(dict(campaign.state.get("chase") or {}))
+        actor_views = []
+        for item in chase.get("participants", []):
+            try:
+                actor_views.append(
+                    character_view(characters.get(str(item["actor_id"])))
+                )
+            except LookupError:
+                continue
+        return {
+            "chase": chase or None,
+            "current": current_chase_participant(chase) if chase else None,
+            "actors": actor_views,
+            "campaign_revision": campaign.revision,
+        }
+
+    @mcp.tool()
+    def chase_take_turn(
+        campaign_id: str,
+        actor_id: str,
+        action: Literal["dash", "move", "drop_out"] = "dash",
+        complication_choice: str = "",
+        stand_from_prone: bool = True,
+        quarry_visibility: dict[str, bool] | None = None,
+        principal_id: str = "system:local",
+        branch_id: str | None = None,
+        expected_revision: int | None = None,
+        expected_actor_revision: int | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Settle one ordered chase turn and the DMG urban complication stream."""
+        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        require_write_contract(expected_revision, idempotency_key)
+        if expected_actor_revision is None:
+            raise ValueError("expected_actor_revision is required")
+        resolved_branch_id = require_current_branch(campaign_id, branch_id)
+        payload = {
+            "actor_id": actor_id,
+            "action": action,
+            "complication_choice": complication_choice,
+            "stand_from_prone": stand_from_prone,
+            "quarry_visibility": quarry_visibility or {},
+            "branch_id": resolved_branch_id,
+        }
+        scope = f"chase-turn:{campaign_id}:{resolved_branch_id}:{principal_id}"
+        replay = replay_idempotent(scope, idempotency_key, payload)
+        if replay is not None:
+            return replay
+        campaign = campaigns.get(campaign_id)
+        if campaign.revision != expected_revision:
+            raise ValueError(
+                "campaign revision conflict: "
+                f"expected {expected_revision}, found {campaign.revision}"
+            )
+        chase = deepcopy(dict(campaign.state.get("chase") or {}))
+        if not chase.get("active", False):
+            raise CombatEngineError("chase is not active")
+        current_actor = require_campaign_actor(campaign_id, actor_id)
+        if current_actor.revision != expected_actor_revision:
+            raise ValueError(
+                "character revision conflict: "
+                f"expected {expected_actor_revision}, found {current_actor.revision}"
+            )
+        rules_context = effective_rule_context(
+            campaign_id,
+            facts={
+                "chase_id": chase.get("id"),
+                "actor_id": actor_id,
+                "round": chase.get("round"),
+                "action": action,
+            },
+        )
+        settled = advance_chase_turn(
+            chase,
+            character_view(current_actor, rules_context=rules_context),
+            actor_id_value=actor_id,
+            action=action,
+            complication_choice=complication_choice,
+            stand_from_prone=stand_from_prone,
+            quarry_visibility=quarry_visibility,
+            quarry_actors={
+                str(identifier): character_view(
+                    require_campaign_actor(campaign_id, str(identifier)),
+                    rules_context=rules_context,
+                )
+                for identifier in chase.get("quarry_ids", [])
+            },
+            death_saves=current_actor.character_type == "pc",
+            rules=rules_context,
+        )
+        next_state = deepcopy(campaign.state)
+        next_state["chase"] = settled["chase"]
+        character_updates = []
+        if settled["sheet"] != current_actor.sheet:
+            character_updates.append(
+                CharacterStateUpdate(
+                    character_id=current_actor.id,
+                    sheet=validate_character_sheet(
+                        settled["sheet"], rules=rules_context
+                    ),
+                    notes=validate_character_notes(
+                        current_actor.notes,
+                        character_type=current_actor.character_type,
+                    ),
+                    expected_revision=expected_actor_revision,
+                )
+            )
+        receipts = core_receipts(
+            rules_context,
+            list(CHASE_BOUNDARY_IDS),
+            "chase.turn",
+        )
+        StateMutationService(storage.database).replace(
+            campaign_id,
+            campaign_state=validate_party_state(next_state),
+            character_updates=character_updates,
+            expected_campaign_revision=expected_revision,
+            operation="chase.turn",
+            actor=principal_id,
+            branch_id=resolved_branch_id,
+            idempotency_key=idempotency_key,
+            rule_receipts=receipts,
+        )
+        response = {
+            "status": "committed",
+            "chase": settled["chase"],
+            "turn": settled["turn"],
+            "character": character_view(characters.get(actor_id)),
+            "campaign_revision": campaigns.get(campaign_id).revision,
+            "rule_receipts": receipts,
+        }
+        return remember_idempotent(
+            scope,
+            idempotency_key,
+            payload,
+            response,
+            campaign_id=campaign_id,
+        )
+
+    @mcp.tool()
+    def chase_end(
+        campaign_id: str,
+        status: Literal[
+            "caught",
+            "destination_reached",
+            "quarry_escaped",
+            "pursuers_abandoned",
+        ],
+        summary: str,
+        source_ref: dict[str, Any],
+        source_excerpt: str,
+        principal_id: str = "system:local",
+        branch_id: str | None = None,
+        expected_revision: int | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Close a chase only at an exact reviewed source or DM outcome boundary."""
+        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        require_write_contract(expected_revision, idempotency_key)
+        resolved_branch_id = require_current_branch(campaign_id, branch_id)
+        campaign = campaigns.get(campaign_id)
+        chase = deepcopy(dict(campaign.state.get("chase") or {}))
+        scene_id = str(chase.get("scene_id") or "")
+        evidence = reviewed_chase_source(
+            campaign_id,
+            scene_id=scene_id,
+            source_ref=source_ref,
+            source_excerpt=source_excerpt,
+        )
+        payload = {
+            "status": status,
+            "summary": summary,
+            "source_ref": evidence,
+            "branch_id": resolved_branch_id,
+        }
+        scope = f"chase-end:{campaign_id}:{resolved_branch_id}:{principal_id}"
+        replay = replay_idempotent(scope, idempotency_key, payload)
+        if replay is not None:
+            return replay
+        if campaign.revision != expected_revision:
+            raise ValueError(
+                "campaign revision conflict: "
+                f"expected {expected_revision}, found {campaign.revision}"
+            )
+        closed = end_chase(chase, status=status, summary=summary)
+        closed["outcome"]["source_ref"] = evidence
+        next_state = deepcopy(campaign.state)
+        next_state["chase"] = closed
+        rules_context = effective_rule_context(
+            campaign_id,
+            facts={"chase_id": chase.get("id"), "status": status},
+        )
+        receipts = core_receipts(
+            rules_context,
+            ["dnd5e.core.chase.ending"],
+            "chase.end",
+        )
+        StateMutationService(storage.database).replace(
+            campaign_id,
+            campaign_state=validate_party_state(next_state),
+            expected_campaign_revision=expected_revision,
+            operation="chase.end",
+            actor=principal_id,
+            branch_id=resolved_branch_id,
+            idempotency_key=idempotency_key,
+            rule_receipts=receipts,
+        )
+        response = {
+            "status": "committed",
+            "chase": closed,
+            "campaign_revision": campaigns.get(campaign_id).revision,
+            "rule_receipts": receipts,
+        }
+        return remember_idempotent(
+            scope,
+            idempotency_key,
+            payload,
             response,
             campaign_id=campaign_id,
         )
