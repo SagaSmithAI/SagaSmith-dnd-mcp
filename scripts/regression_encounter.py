@@ -28,6 +28,82 @@ HEALING_WORD_ID = "dnd5e.content.srd2014.spell.healing-word"
 MAGIC_MISSILE_ID = "dnd5e.content.srd2014.spell.magic-missile"
 
 
+def _encounter_operation_scope(
+    args: argparse.Namespace,
+    *,
+    branch_id: str,
+    party_ids: list[str],
+    hostile_ids: list[str],
+    additional_hostile_ids: list[str] | None = None,
+    reinforcement_hostile_ids: list[str] | None = None,
+    combat_id: str = "",
+) -> str:
+    excluded = {
+        "action",
+        "checkpoint_label",
+        "home",
+        "operation_scope",
+        "output",
+    }
+    configuration = {
+        key: value
+        for key, value in vars(args).items()
+        if key not in excluded
+    }
+    identity = {
+        "branch_id": branch_id,
+        "combat_id": combat_id,
+        "party_ids": party_ids,
+        "hostile_ids": hostile_ids,
+        "additional_hostile_ids": list(additional_hostile_ids or []),
+        "reinforcement_hostile_ids": list(reinforcement_hostile_ids or []),
+        "configuration": configuration,
+    }
+    return _token(
+        json.dumps(
+            identity,
+            default=str,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ),
+        length=32,
+    )
+
+
+def _operation_scope(args: argparse.Namespace) -> str:
+    return str(getattr(args, "operation_scope", "") or args.run_id)
+
+
+def _operation_token(
+    args: argparse.Namespace,
+    *parts: object,
+    length: int = 24,
+) -> str:
+    identity = ":".join(
+        [_operation_scope(args), *(str(part) for part in parts)]
+    )
+    return _token(identity, length=length)
+
+
+def _encounter_start_operation_token(request: dict[str, Any]) -> str:
+    identity = {
+        key: value
+        for key, value in request.items()
+        if key != "idempotency_key"
+    }
+    return "encounter-start-" + _token(
+        json.dumps(
+            identity,
+            default=str,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ),
+        length=24,
+    )
+
+
 def _arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--home", type=Path, required=True)
@@ -2041,9 +2117,10 @@ async def _roll_hostile_stealth(
                 "expected_revision": campaign["revision"],
                 "idempotency_key": (
                     "encounter-stealth-"
-                    + _token(
-                        f"{args.run_id}:{args.scene_id}:{actor_id}",
-                        length=24,
+                    + _operation_token(
+                        args,
+                        args.scene_id,
+                        actor_id,
                     )
                 ),
             },
@@ -2288,6 +2365,14 @@ async def _start(
     if phase != "play":
         raise RuntimeError("encounter start requires the play phase")
     branch = await _current_branch(client, args.campaign_id)
+    args.operation_scope = _encounter_operation_scope(
+        args,
+        branch_id=str(branch["id"]),
+        party_ids=party_ids,
+        hostile_ids=hostile_ids,
+        additional_hostile_ids=additional_hostile_ids,
+        reinforcement_hostile_ids=reinforcement_hostile_ids,
+    )
     ally_ids = _selected_prepared_actor_ids(
         args.ally_report,
         getattr(args, "ally_actor_id", []),
@@ -2439,10 +2524,11 @@ async def _start(
                 "expected_revision": actor["revision"],
                 "idempotency_key": (
                     "encounter-source-precombat-cast-"
-                    + _token(
-                        f"{args.run_id}:{cast['sequence']}:{cast['actor_id']}:"
-                        f"{cast['spell_id']}",
-                        length=24,
+                    + _operation_token(
+                        args,
+                        cast["sequence"],
+                        cast["actor_id"],
+                        cast["spell_id"],
                     )
                 ),
             },
@@ -2565,51 +2651,49 @@ async def _start(
             ]
             for hostile_id in (selected_hidden_ids or initial_hostile_ids)
         }
-    started = await client.domain(
-        "combat_start",
-        {
-            "campaign_id": args.campaign_id,
-            "participant_ids": [*party_ids, *initial_hostile_ids],
-            "participant_config": _participant_config(
-                pc_ids,
-                initial_hostile_ids,
-                ally_ids=ally_ids,
-                surprise_by_actor=surprise,
-                hostiles_hidden=(
-                    args.hostiles_hidden
-                    or (not args.no_surprise and not selected_hidden_ids)
-                ),
-                hidden_actor_ids=selected_hidden_ids,
-                visible_to_actor_ids_by_hostile=visible_to_actor_ids_by_hostile,
-                source_conditions_by_actor=source_conditions_by_actor,
-                source_traits_by_actor=source_traits_by_actor,
+    start_request = {
+        "campaign_id": args.campaign_id,
+        "participant_ids": [*party_ids, *initial_hostile_ids],
+        "participant_config": _participant_config(
+            pc_ids,
+            initial_hostile_ids,
+            ally_ids=ally_ids,
+            surprise_by_actor=surprise,
+            hostiles_hidden=(
+                args.hostiles_hidden
+                or (not args.no_surprise and not selected_hidden_ids)
             ),
-            "participant_manifest": _participant_manifest(
-                hostile_ids,
-                label=args.hostile_label,
-                source_excerpt=str(args.source_excerpt or ""),
-                additional_hostile_ids=additional_hostile_ids,
-                additional_label=args.additional_hostile_label,
-                additional_source_excerpt=str(
-                    args.additional_hostile_source_excerpt or ""
-                ),
-                reinforcement_hostile_ids=reinforcement_hostile_ids,
-                reinforcement_label=args.reinforcement_hostile_label,
-                reinforcement_source_excerpt=str(
-                    args.reinforcement_hostile_source_excerpt or ""
-                ),
+            hidden_actor_ids=selected_hidden_ids,
+            visible_to_actor_ids_by_hostile=visible_to_actor_ids_by_hostile,
+            source_conditions_by_actor=source_conditions_by_actor,
+            source_traits_by_actor=source_traits_by_actor,
+        ),
+        "participant_manifest": _participant_manifest(
+            hostile_ids,
+            label=args.hostile_label,
+            source_excerpt=str(args.source_excerpt or ""),
+            additional_hostile_ids=additional_hostile_ids,
+            additional_label=args.additional_hostile_label,
+            additional_source_excerpt=str(
+                args.additional_hostile_source_excerpt or ""
             ),
-            "name": args.encounter_name,
-            "scene_id": args.scene_id,
-            "battle_map": {"location_key": args.location_key},
-            "ruleset": "2014",
-            "branch_id": branch["id"],
-            "expected_revision": expected_revision,
-            "idempotency_key": (
-                f"encounter-start-{_token(f'{args.run_id}:{args.scene_id}', length=24)}"
+            reinforcement_hostile_ids=reinforcement_hostile_ids,
+            reinforcement_label=args.reinforcement_hostile_label,
+            reinforcement_source_excerpt=str(
+                args.reinforcement_hostile_source_excerpt or ""
             ),
-        },
+        ),
+        "name": args.encounter_name,
+        "scene_id": args.scene_id,
+        "battle_map": {"location_key": args.location_key},
+        "ruleset": "2014",
+        "branch_id": branch["id"],
+        "expected_revision": expected_revision,
+    }
+    start_request["idempotency_key"] = _encounter_start_operation_token(
+        start_request
     )
+    started = await client.domain("combat_start", start_request)
     opened_combat = await client.open(args.campaign_id)
     await client.load(
         "combat.observe",
@@ -2633,7 +2717,7 @@ async def _start(
                     "expected_revision": campaign["revision"],
                     "idempotency_key": (
                         "encounter-queue-reinforcement-"
-                        + _token(f"{args.run_id}:{actor_id}", length=24)
+                        + _operation_token(args, actor_id)
                     ),
                 },
             )
@@ -3543,9 +3627,10 @@ async def _end_turn(
             "expected_revision": campaign["revision"],
             "idempotency_key": (
                 "encounter-end-turn-"
-                + _token(
-                    f"{args.run_id}:{sequence}:{campaign['revision']}",
-                    length=24,
+                + _operation_token(
+                    args,
+                    sequence,
+                    campaign["revision"],
                 )
             ),
         },
@@ -3697,6 +3782,13 @@ async def _auto_run(
         "combat_query",
         {"campaign_id": args.campaign_id, "view": "status"},
     )
+    args.operation_scope = _encounter_operation_scope(
+        args,
+        branch_id=str(branch["id"]),
+        combat_id=str(initial_combat["id"]),
+        party_ids=party_ids,
+        hostile_ids=hostile_ids,
+    )
     initial_actors = await _characters(
         client,
         args.campaign_id,
@@ -3759,7 +3851,8 @@ async def _auto_run(
                 "branch_id": branch["id"],
                 "expected_revision": campaign["revision"],
                 "idempotency_key": (
-                    f"encounter-reveal-surprised-{_token(args.run_id, length=24)}"
+                    "encounter-reveal-surprised-"
+                    f"{_operation_token(args)}"
                 ),
             },
         )
@@ -3783,8 +3876,8 @@ async def _auto_run(
                 "branch_id": branch["id"],
                 "expected_revision": campaign["revision"],
                 "idempotency_key": (
-                    f"encounter-source-start-flee-"
-                    f"{_token(f'{args.run_id}:{args.flee_on_start_actor_id}', length=24)}"
+                    "encounter-source-start-flee-"
+                    f"{_operation_token(args, args.flee_on_start_actor_id)}"
                 ),
             },
         )
@@ -3936,10 +4029,7 @@ async def _auto_run(
                     "expected_revision": campaign["revision"],
                     "idempotency_key": (
                         "encounter-source-stabilize-"
-                        + _token(
-                            f"{args.run_id}:{stabilization_target_id}",
-                            length=24,
-                        )
+                        + _operation_token(args, stabilization_target_id)
                     ),
                 },
             )
@@ -3990,8 +4080,8 @@ async def _auto_run(
                     "branch_id": branch["id"],
                     "expected_revision": campaign["revision"],
                     "idempotency_key": (
-                        f"encounter-source-flee-"
-                        f"{_token(f'{args.run_id}:{actor_id}', length=24)}"
+                        "encounter-source-flee-"
+                        f"{_operation_token(args, actor_id)}"
                     ),
                 },
             )
@@ -4086,9 +4176,10 @@ async def _auto_run(
                     "expected_revision": campaign["revision"],
                     "idempotency_key": (
                         "encounter-death-save-"
-                        + _token(
-                            f"{args.run_id}:{sequence}:{campaign['revision']}",
-                            length=24,
+                        + _operation_token(
+                            args,
+                            sequence,
+                            campaign["revision"],
                         )
                     ),
                 },
@@ -4137,8 +4228,8 @@ async def _auto_run(
                     "branch_id": branch["id"],
                     "expected_revision": campaign["revision"],
                     "idempotency_key": (
-                        f"encounter-stand-"
-                        f"{_token(f'{args.run_id}:{sequence}:{actor_id}', length=24)}"
+                        "encounter-stand-"
+                        f"{_operation_token(args, sequence, actor_id)}"
                     ),
                 },
             )
@@ -4207,10 +4298,11 @@ async def _auto_run(
                         "expected_revision": campaign["revision"],
                         "idempotency_key": (
                             "encounter-source-contest-activity-"
-                            + _token(
-                                f"{args.run_id}:{sequence}:{actor_id}:"
-                                f"{contest_activity['activity_id']}",
-                                length=24,
+                            + _operation_token(
+                                args,
+                                sequence,
+                                actor_id,
+                                contest_activity["activity_id"],
                             )
                         ),
                     },
@@ -4397,10 +4489,11 @@ async def _auto_run(
                         "expected_revision": campaign["revision"],
                         "idempotency_key": (
                             "encounter-source-save-activity-"
-                            + _token(
-                                f"{args.run_id}:{sequence}:{actor_id}:"
-                                f"{save_activity['activity_id']}",
-                                length=24,
+                            + _operation_token(
+                                args,
+                                sequence,
+                                actor_id,
+                                save_activity["activity_id"],
                             )
                         ),
                     },
@@ -4504,10 +4597,11 @@ async def _auto_run(
                     "expected_revision": campaign["revision"],
                     "idempotency_key": (
                         "encounter-random-activity-"
-                        + _token(
-                            f"{args.run_id}:{sequence}:{actor_id}:"
-                            f"{random_activity['activity_id']}",
-                            length=24,
+                        + _operation_token(
+                            args,
+                            sequence,
+                            actor_id,
+                            random_activity["activity_id"],
                         )
                     ),
                 },
@@ -4599,10 +4693,7 @@ async def _auto_run(
                         "expected_revision": campaign["revision"],
                         "idempotency_key": (
                             "encounter-stabilize-move-"
-                            + _token(
-                                f"{args.run_id}:{sequence}:{actor_id}",
-                                length=24,
-                            )
+                            + _operation_token(args, sequence, actor_id)
                         ),
                     },
                 )
@@ -4634,10 +4725,11 @@ async def _auto_run(
                     "expected_revision": campaign["revision"],
                     "idempotency_key": (
                         "encounter-stabilize-"
-                        + _token(
-                            f"{args.run_id}:{sequence}:{actor_id}:"
-                            f"{stabilization_target_id}",
-                            length=24,
+                        + _operation_token(
+                            args,
+                            sequence,
+                            actor_id,
+                            stabilization_target_id,
                         )
                     ),
                 },
@@ -4692,10 +4784,11 @@ async def _auto_run(
                     "expected_revision": campaign["revision"],
                     "idempotency_key": (
                         "encounter-effect-escape-"
-                        + _token(
-                            f"{args.run_id}:{sequence}:{actor_id}:"
-                            f"{escape_effect['id']}",
-                            length=24,
+                        + _operation_token(
+                            args,
+                            sequence,
+                            actor_id,
+                            escape_effect["id"],
                         )
                     ),
                 },
@@ -4772,10 +4865,12 @@ async def _auto_run(
                             "expected_revision": campaign["revision"],
                             "idempotency_key": (
                                 "encounter-source-finisher-action-"
-                                + _token(
-                                    f"{args.run_id}:{stage}:{round_number}:"
-                                    f"{actor_id}:{finisher_target_id}",
-                                    length=24,
+                                + _operation_token(
+                                    args,
+                                    stage,
+                                    round_number,
+                                    actor_id,
+                                    finisher_target_id,
                                 )
                             ),
                         },
@@ -4806,10 +4901,11 @@ async def _auto_run(
                                 "expected_revision": campaign["revision"],
                                 "idempotency_key": (
                                     "encounter-source-finisher-fire-"
-                                    + _token(
-                                        f"{args.run_id}:{round_number}:"
-                                        f"{actor_id}:{finisher_target_id}",
-                                        length=24,
+                                    + _operation_token(
+                                        args,
+                                        round_number,
+                                        actor_id,
+                                        finisher_target_id,
                                     )
                                 ),
                             },
@@ -4861,10 +4957,11 @@ async def _auto_run(
                 "expected_revision": campaign["revision"],
                 "idempotency_key": (
                     "encounter-source-opening-cast-"
-                    + _token(
-                        f"{args.run_id}:{opening_cast['sequence']}:"
-                        f"{actor_id}:{opening_cast['spell_id']}",
-                        length=24,
+                    + _operation_token(
+                        args,
+                        opening_cast["sequence"],
+                        actor_id,
+                        opening_cast["spell_id"],
                     )
                 ),
             }
@@ -4968,8 +5065,8 @@ async def _auto_run(
                 "branch_id": branch["id"],
                 "expected_revision": campaign["revision"],
                 "idempotency_key": (
-                    f"encounter-spell-"
-                    f"{_token(f'{args.run_id}:{sequence}:{spell_id}', length=24)}"
+                    "encounter-spell-"
+                    f"{_operation_token(args, sequence, spell_id)}"
                 ),
             }
             if spell_id == MAGIC_MISSILE_ID:
@@ -4999,8 +5096,8 @@ async def _auto_run(
                         "branch_id": branch["id"],
                         "expected_revision": campaign["revision"],
                         "idempotency_key": (
-                            f"encounter-guiding-bolt-"
-                            f"{_token(f'{args.run_id}:{sequence}', length=24)}"
+                            "encounter-guiding-bolt-"
+                            f"{_operation_token(args, sequence)}"
                         ),
                     },
                 )
@@ -5024,10 +5121,12 @@ async def _auto_run(
                             "expected_revision": campaign["revision"],
                             "idempotency_key": (
                                 "encounter-guiding-bolt-on-hit-"
-                                + _token(
-                                    f"{args.run_id}:{sequence}:"
-                                    f"{settled['result']['pending_on_hit_ruling_id']}",
-                                    length=24,
+                                + _operation_token(
+                                    args,
+                                    sequence,
+                                    settled["result"][
+                                        "pending_on_hit_ruling_id"
+                                    ],
                                 )
                             ),
                         },
@@ -5072,8 +5171,8 @@ async def _auto_run(
                         "branch_id": branch["id"],
                         "expected_revision": campaign["revision"],
                         "idempotency_key": (
-                            f"encounter-unseen-dodge-"
-                            f"{_token(f'{args.run_id}:{sequence}', length=24)}"
+                            "encounter-unseen-dodge-"
+                            f"{_operation_token(args, sequence)}"
                         ),
                     },
                 )
@@ -5156,7 +5255,8 @@ async def _auto_run(
                         "branch_id": branch["id"],
                         "expected_revision": campaign["revision"],
                         "idempotency_key": (
-                            f"encounter-move-{_token(f'{args.run_id}:{sequence}', length=24)}"
+                            "encounter-move-"
+                            f"{_operation_token(args, sequence)}"
                         ),
                     },
                 )
@@ -5197,9 +5297,10 @@ async def _auto_run(
                     "expected_revision": campaign["revision"],
                     "idempotency_key": (
                         "encounter-attack-"
-                        + _token(
-                            f"{args.run_id}:{sequence}:{campaign['revision']}",
-                            length=24,
+                        + _operation_token(
+                            args,
+                            sequence,
+                            campaign["revision"],
                         )
                     ),
                 },
@@ -5240,10 +5341,7 @@ async def _auto_run(
                         "expected_revision": campaign["revision"],
                         "idempotency_key": (
                             "encounter-on-hit-ruling-"
-                            + _token(
-                                f"{args.run_id}:{sequence}:{choice_id}",
-                                length=24,
-                            )
+                            + _operation_token(args, sequence, choice_id)
                         ),
                     },
                 )
@@ -5288,7 +5386,8 @@ async def _auto_run(
             "branch_id": branch["id"],
             "expected_revision": campaign["revision"],
             "idempotency_key": (
-                f"encounter-end-{_token(f'{args.run_id}:{outcome_status}', length=24)}"
+                "encounter-end-"
+                f"{_operation_token(args, outcome_status)}"
             ),
         },
     )

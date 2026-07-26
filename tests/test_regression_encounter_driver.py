@@ -17,10 +17,13 @@ from scripts.regression_encounter import (
     _choose_party_spell,
     _defense_selection,
     _encounter_actor_groups,
+    _encounter_operation_scope,
+    _encounter_start_operation_token,
     _has_action_budget,
     _has_blocking_pending,
     _has_multiattack_followup,
     _observable_target_ids,
+    _operation_token,
     _participant_config,
     _participant_manifest,
     _party_ids,
@@ -65,6 +68,96 @@ from scripts.regression_encounter import (
     _validate_hostile_attacks,
     _wound_priority,
 )
+
+
+def test_encounter_operation_scope_separates_consecutive_encounters() -> None:
+    start_args = SimpleNamespace(
+        action="start",
+        campaign_id="campaign-1",
+        checkpoint_label="First group defeated",
+        encounter_name="Raider group",
+        home="home",
+        location_key="keep-route",
+        no_surprise=True,
+        operation_scope="",
+        output="start.json",
+        run_id="campaign-run",
+        scene_id="scene-1",
+        source_excerpt="A group consists of 1d6 kobolds and 1d4 cultists.",
+    )
+    auto_args = SimpleNamespace(
+        **{
+            **vars(start_args),
+            "action": "auto-run",
+            "output": "complete.json",
+        }
+    )
+
+    first = _encounter_operation_scope(
+        start_args,
+        branch_id="branch-1",
+        party_ids=["pc-1", "pc-2"],
+        hostile_ids=["kobold-1", "cultist-1"],
+    )
+    retried = _encounter_operation_scope(
+        auto_args,
+        branch_id="branch-1",
+        party_ids=["pc-1", "pc-2"],
+        hostile_ids=["kobold-1", "cultist-1"],
+    )
+    second_group = _encounter_operation_scope(
+        start_args,
+        branch_id="branch-1",
+        party_ids=["pc-1", "pc-2"],
+        hostile_ids=["kobold-2", "cultist-2"],
+    )
+    isolated_branch = _encounter_operation_scope(
+        start_args,
+        branch_id="branch-2",
+        party_ids=["pc-1", "pc-2"],
+        hostile_ids=["kobold-1", "cultist-1"],
+    )
+
+    assert first == retried
+    assert first != second_group
+    assert first != isolated_branch
+    start_args.operation_scope = first
+    auto_args.operation_scope = second_group
+    assert _operation_token(start_args, 1, "attack") != _operation_token(
+        auto_args,
+        1,
+        "attack",
+    )
+
+
+def test_encounter_start_token_binds_the_complete_public_request() -> None:
+    request = {
+        "campaign_id": "campaign-1",
+        "participant_ids": ["pc-1", "kobold-1"],
+        "participant_config": [
+            {"actor_id": "pc-1", "position": {"x": 1, "y": 1}},
+            {"actor_id": "kobold-1", "position": {"x": 8, "y": 1}},
+        ],
+        "participant_manifest": {"groups": [{"actor_ids": ["kobold-1"]}]},
+        "name": "First group",
+        "scene_id": "scene-1",
+        "battle_map": {"location_key": "keep-route"},
+        "ruleset": "2014",
+        "branch_id": "branch-1",
+        "expected_revision": 12,
+    }
+
+    token = _encounter_start_operation_token(request)
+
+    assert token == _encounter_start_operation_token(
+        dict(reversed(list(request.items())))
+    )
+    assert token != _encounter_start_operation_token(
+        {**request, "participant_ids": ["pc-1", "kobold-2"]}
+    )
+    assert token != _encounter_start_operation_token(
+        {**request, "expected_revision": 13}
+    )
 
 
 def test_status_uses_play_character_exposure_before_combat() -> None:
