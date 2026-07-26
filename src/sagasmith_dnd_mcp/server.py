@@ -287,6 +287,61 @@ _SOURCE_EVIDENCE_TRANSLATION = str.maketrans(
     }
 )
 
+AGENT_RULING_KINDS = (
+    "agent_dm_adjudication",
+    "source_or_scene_fact",
+    "descriptive_activity",
+    "generic_spell_effect",
+    "ready_release_effect",
+    "environmental_consequence",
+    "module_specific_procedure",
+)
+EXTERNAL_RULING_INPUT_KINDS = (
+    "player_owned_choice",
+    "owner_approval",
+    "permission_escalation",
+    "missing_or_conflicting_source_review",
+)
+AGENT_RULING_TRANSACTION_RULES = (
+    "inspect_existing_payment_before_settlement",
+    "do_not_pay_twice",
+    "use_public_tools_only",
+    "preserve_source_revision_and_random_receipts",
+    "use_combat_choice_only_for_an_owned_window",
+)
+
+
+def _agent_ruling_policy() -> dict[str, Any]:
+    """Return the machine-readable boundary shared by capabilities and calls."""
+
+    return {
+        "default_dm_resolver": "agent",
+        "agent_adjudicates": list(AGENT_RULING_KINDS),
+        "requires_external_input": list(EXTERNAL_RULING_INPUT_KINDS),
+        "transaction_rules": list(AGENT_RULING_TRANSACTION_RULES),
+    }
+
+
+def _agent_ruling_resolution(result: Any) -> dict[str, Any] | None:
+    """Annotate a live pending ruling without pretending that it is settled."""
+
+    if not isinstance(result, dict) or result.get("status") != "pending_ruling":
+        return None
+    ruling_kind = str(result.get("ruling_kind") or "agent_dm_adjudication")
+    if ruling_kind in EXTERNAL_RULING_INPUT_KINDS:
+        return {
+            "default_resolver": "external_input",
+            "ruling_kind": ruling_kind,
+            "policy_ref": "server_capabilities.ruling_policy",
+        }
+    return {
+        "default_resolver": "agent",
+        "ruling_kind": ruling_kind,
+        "policy_ref": "server_capabilities.ruling_policy",
+        "requires_external_input_only_for": list(EXTERNAL_RULING_INPUT_KINDS),
+    }
+
+
 SUPPORTED_FEATURE_SELECTION_KINDS = frozenset(
     {
         "",
@@ -3173,7 +3228,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     def server_capabilities() -> dict[str, Any]:
         """Describe the MCP contract and the automatic-vs-ruling combat boundary."""
         return {
-            "contract_version": "2026-07-session-exposure-v3",
+            "contract_version": "2026-07-session-exposure-v4",
             "transport": "stdio",
             "state_owner": "sagasmith-dnd-mcp",
             "features": {
@@ -3244,30 +3299,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "shared_continuity_budget": True,
                 "continuity_diagnostics": True,
             },
-            "ruling_policy": {
-                "default_dm_resolver": "agent",
-                "agent_adjudicates": [
-                    "source_or_scene_fact",
-                    "descriptive_activity",
-                    "generic_spell_effect",
-                    "ready_release_effect",
-                    "environmental_consequence",
-                    "module_specific_procedure",
-                ],
-                "requires_external_input": [
-                    "player_owned_choice",
-                    "owner_approval",
-                    "permission_escalation",
-                    "missing_or_conflicting_source_review",
-                ],
-                "transaction_rules": [
-                    "inspect_existing_payment_before_settlement",
-                    "do_not_pay_twice",
-                    "use_public_tools_only",
-                    "preserve_source_revision_and_random_receipts",
-                    "use_combat_choice_only_for_an_owned_window",
-                ],
-            },
+            "ruling_policy": _agent_ruling_policy(),
             "rulebook_import": {
                 "stages": [
                     "rule_import(discover)",
@@ -19799,6 +19831,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if application_state != "selection_ready":
             return {
                 "status": "pending_ruling",
+                "ruling_kind": "missing_or_conflicting_source_review",
                 "reason": (
                     "catalog artifact is source-linked but not selection-ready; "
                     "complete reviewer validation before applying it to an actor"
@@ -19919,7 +19952,19 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     source_class=selection.get("source_class"),
                 )
             except CombatEngineError as error:
-                return {"status": "pending_ruling", "reason": str(error)}
+                reason = str(error)
+                if reason in {
+                    "spell selection requires a recorded class",
+                    "multiclass spell selection requires source_class",
+                }:
+                    return {"status": "pending_choice", "reason": reason}
+                if reason == "spell artifact has no structured class-list eligibility":
+                    return {
+                        "status": "pending_ruling",
+                        "ruling_kind": "missing_or_conflicting_source_review",
+                        "reason": reason,
+                    }
+                raise ValueError(reason) from error
             level = int(card.get("level", 0) or 0)
             preparation_mode = str(
                 sheet.get("spellcasting", {}).get("preparation", {}).get("mode") or "known"
@@ -19997,14 +20042,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             classes = list(sheet["progression"]["classes"])
             if not classes:
                 return {
-                    "status": "pending_ruling",
+                    "status": "pending_choice",
                     "reason": "choose a base class before selecting a subclass",
                 }
             declared_class = str(card.get("class_name") or "").strip()
             target_class = str(selection.get("target_class_name") or declared_class).strip()
             if not target_class:
                 return {
-                    "status": "pending_ruling",
+                    "status": "pending_choice",
                     "reason": "subclass artifact needs class_name or target_class_name",
                 }
             if declared_class and target_class.casefold() != declared_class.casefold():
@@ -20047,6 +20092,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 if spell_match is None:
                     return {
                         "status": "pending_ruling",
+                        "ruling_kind": "missing_or_conflicting_source_review",
                         "reason": (
                             f"subclass spell is not available in the active catalog: {spell_name}"
                         ),
@@ -20091,7 +20137,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             custom_skills_raw = selection.get("skills")
             if bool(custom_name) != (custom_skills_raw is not None):
                 return {
-                    "status": "pending_ruling",
+                    "status": "pending_choice",
                     "reason": (
                         "custom background requires both custom_name and exactly two skill choices"
                     ),
@@ -20107,7 +20153,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 not item for item in selected_languages
             ):
                 return {
-                    "status": "pending_ruling",
+                    "status": "pending_choice",
                     "reason": f"background requires exactly {language_count} language choices",
                 }
             if len({item.casefold() for item in selected_languages}) != len(selected_languages):
@@ -20122,7 +20168,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 selected_skills = [str(item).strip().casefold() for item in custom_skills_raw]
                 if len(selected_skills) != 2 or any(not item for item in selected_skills):
                     return {
-                        "status": "pending_ruling",
+                        "status": "pending_choice",
                         "reason": "custom background requires exactly two skill choices",
                     }
                 if len(set(selected_skills)) != 2:
@@ -20141,7 +20187,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 ]
                 if duplicate_skills:
                     return {
-                        "status": "pending_ruling",
+                        "status": "pending_choice",
                         "reason": (
                             "custom background skill choices must replace proficiencies "
                             "already granted by another source: " + ", ".join(duplicate_skills)
@@ -20202,6 +20248,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             if grants.get("unresolved"):
                 return {
                     "status": "pending_ruling",
+                    "ruling_kind": "missing_or_conflicting_source_review",
                     "reason": "species has unresolved structured grants",
                     "missing": list(grants.get("unresolved") or []),
                 }
@@ -25220,6 +25267,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "result": domain_result,
                 "exposure": exposure_status,
             }
+            ruling_resolution = _agent_ruling_resolution(domain_result)
+            if ruling_resolution is not None:
+                envelope["ruling_resolution"] = ruling_resolution
             if random_receipt is not None:
                 envelope["random_stream_receipt"] = random_receipt
             return CallToolResult(
@@ -25233,6 +25283,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 structuredContent=envelope,
             )
         response = {"tool_id": tool_id, "result": result, "exposure": exposure_status}
+        ruling_resolution = _agent_ruling_resolution(result)
+        if ruling_resolution is not None:
+            response["ruling_resolution"] = ruling_resolution
         if random_receipt is not None:
             response["random_stream_receipt"] = random_receipt
         return response

@@ -355,9 +355,11 @@ def test_server_capabilities_publish_the_rulebook_import_contract(tmp_path: Path
         assert capabilities["features"]["validated_module_runtime_manifest"] is True
         assert capabilities["features"]["shared_continuity_budget"] is True
         assert capabilities["features"]["continuity_diagnostics"] is True
+        assert capabilities["contract_version"] == "2026-07-session-exposure-v4"
         assert capabilities["ruling_policy"] == {
             "default_dm_resolver": "agent",
             "agent_adjudicates": [
+                "agent_dm_adjudication",
                 "source_or_scene_fact",
                 "descriptive_activity",
                 "generic_spell_effect",

@@ -16,8 +16,92 @@ from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 
 from sagasmith_dnd_mcp.config import McpConfig
 from sagasmith_dnd_mcp.exposure import ExposureError, ExposureRegistry
-from sagasmith_dnd_mcp.server import create_server
+from sagasmith_dnd_mcp.server import _agent_ruling_resolution, create_server
 from sagasmith_dnd_mcp.tool_profiles import CORE_TOOLS, GROUP_BY_ID
+
+
+def test_pending_ruling_envelope_defaults_to_agent_reasoning() -> None:
+    assert _agent_ruling_resolution({"status": "committed"}) is None
+    assert _agent_ruling_resolution({"status": "pending_choice"}) is None
+    assert _agent_ruling_resolution({"status": "pending_ruling"}) == {
+        "default_resolver": "agent",
+        "ruling_kind": "agent_dm_adjudication",
+        "policy_ref": "server_capabilities.ruling_policy",
+        "requires_external_input_only_for": [
+            "player_owned_choice",
+            "owner_approval",
+            "permission_escalation",
+            "missing_or_conflicting_source_review",
+        ],
+    }
+    assert _agent_ruling_resolution(
+        {
+            "status": "pending_ruling",
+            "ruling_kind": "missing_or_conflicting_source_review",
+        }
+    ) == {
+        "default_resolver": "external_input",
+        "ruling_kind": "missing_or_conflicting_source_review",
+        "policy_ref": "server_capabilities.ruling_policy",
+    }
+
+
+def test_exposure_call_marks_live_dm_ruling_for_agent(
+    tmp_path: Path, monkeypatch
+) -> None:
+    config = McpConfig(
+        home=tmp_path / "home",
+        database_url=None,
+        chroma_url=None,
+        chroma_path_override=None,
+        dnd_skills_dir=tmp_path / "dnd",
+        modulegen_skills_dir=tmp_path / "modulegen",
+        auto_seed_rules=False,
+    )
+
+    async def exercise() -> None:
+        server = create_server(config)
+
+        async def domain(name: str, arguments: dict) -> dict:
+            _, result = await server.call_tool(name, arguments)
+            return result.get("result", result)
+
+        campaign = await domain(
+            "campaign_create",
+            {"name": "Agent ruling envelope", "idempotency_key": "campaign"},
+        )
+        opened = await domain(
+            "exposure_open",
+            {"campaign_id": campaign["id"], "principal_id": "system:local"},
+        )
+        await domain(
+            "exposure_load",
+            {"exposure_id": opened["exposure_id"], "group_id": "lobby.rules"},
+        )
+        seed_status = server._tool_manager.get_tool("rule_seed_status")
+        monkeypatch.setattr(
+            seed_status,
+            "fn",
+            lambda: {
+                "status": "pending_ruling",
+                "reason": "exact source effect needs adjudication",
+            },
+        )
+        called = await server.call_tool(
+            "exposure_call",
+            {
+                "exposure_id": opened["exposure_id"],
+                "tool_id": "rule_seed_status",
+                "arguments": {},
+            },
+        )
+        assert isinstance(called, list)
+        envelope = json.loads(called[0].text)
+        assert envelope["result"]["status"] == "pending_ruling"
+        assert envelope["ruling_resolution"]["default_resolver"] == "agent"
+        assert envelope["ruling_resolution"]["ruling_kind"] == "agent_dm_adjudication"
+
+    asyncio.run(exercise())
 
 
 def _write_exposure_module_pdf(path: Path) -> None:

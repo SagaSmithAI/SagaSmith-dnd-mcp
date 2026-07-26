@@ -121,6 +121,20 @@ def test_core_srd_content_catalog_is_structured_and_selectable(tmp_path: Path) -
                 "idempotency_key": "catalog-multiclass",
             },
         )
+        spell_source_choice = await call(
+            server,
+            "character_content_apply",
+            {
+                "character_id": multiclass["id"],
+                "artifact_id": fireball["id"],
+                "expected_revision": multiclass["revision"],
+                "idempotency_key": "catalog-multiclass-spell-source",
+            },
+        )
+        assert spell_source_choice["status"] == "pending_choice"
+        assert spell_source_choice["reason"] == (
+            "multiclass spell selection requires source_class"
+        )
         selected = await call(
             server,
             "character_content_apply",
@@ -369,7 +383,7 @@ def test_core_srd_content_catalog_is_structured_and_selectable(tmp_path: Path) -
                 "idempotency_key": "catalog-acolyte-pending",
             },
         )
-        assert pending["status"] == "pending_ruling"
+        assert pending["status"] == "pending_choice"
         with pytest.raises(Exception, match="language choices must be distinct"):
             await call(
                 server,
