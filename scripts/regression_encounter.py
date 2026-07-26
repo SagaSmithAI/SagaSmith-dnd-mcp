@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import heapq
 import json
 import os
 import re
@@ -228,6 +229,27 @@ def _arguments() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--source-attack-environment-json",
+        action="append",
+        type=json.loads,
+        default=[],
+        help=(
+            "DM-reviewed attack environment with actor_id, direct_sunlight, "
+            "and the exact source_excerpt for a structured Sunlight Sensitivity "
+            "trait; repeat for each affected participant"
+        ),
+    )
+    parser.add_argument(
+        "--source-avoidance-report",
+        action="append",
+        type=Path,
+        default=[],
+        help=(
+            "Public record-event report proving actor knowledge of marked "
+            "hazard cells that voluntary movement must route around"
+        ),
+    )
+    parser.add_argument(
         "--source-on-hit-ruling-json",
         action="append",
         type=json.loads,
@@ -270,6 +292,26 @@ def _arguments() -> argparse.Namespace:
             "Source-bound random saving-throw activity with actor_id, activity_id, "
             "and an exact source_excerpt; the driver invokes the public activity "
             "settlement instead of substituting a weapon attack"
+        ),
+    )
+    parser.add_argument(
+        "--source-save-activity-json",
+        action="append",
+        type=json.loads,
+        default=[],
+        help=(
+            "Source-bound deterministic saving-throw activity with actor_id, "
+            "activity_id, target_has_brain, and an exact source_excerpt"
+        ),
+    )
+    parser.add_argument(
+        "--source-contest-activity-json",
+        action="append",
+        type=json.loads,
+        default=[],
+        help=(
+            "Source-bound ability-contest activity with actor_id, activity_id, "
+            "target_is_humanoid, and an exact source_excerpt"
         ),
     )
     parser.add_argument(
@@ -739,8 +781,12 @@ def _surprise_from_check_report(
         or not isinstance(check.get("success"), bool)
     ):
         raise ValueError("surprise check report does not match this encounter")
-    surprise = {actor_id: False for actor_id in party_ids}
-    surprise.update({actor_id: bool(check["success"]) for actor_id in hostile_ids})
+    noticed_threat = bool(check["success"])
+    surprise = {
+        actor_id: not noticed_threat
+        for actor_id in party_ids
+    }
+    surprise.update({actor_id: False for actor_id in hostile_ids})
     return surprise, {
         "mode": "source_cited_party_scout",
         "report_path": str(path.expanduser().resolve()),
@@ -1254,6 +1300,156 @@ def _source_opening_weapons(
     return normalized
 
 
+def _source_attack_environments(
+    values: list[dict[str, Any]],
+    *,
+    participant_ids: list[str],
+    actors: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, dict[str, Any]]:
+    normalized: dict[str, dict[str, Any]] = {}
+    for index, raw in enumerate(values):
+        if not isinstance(raw, dict):
+            raise ValueError(
+                f"source attack environment {index} must be an object"
+            )
+        unknown = set(raw) - {
+            "actor_id",
+            "direct_sunlight",
+            "source_excerpt",
+        }
+        if unknown:
+            raise ValueError(
+                f"source attack environment {index} has unsupported fields: "
+                f"{', '.join(sorted(unknown))}"
+            )
+        actor_id = str(raw.get("actor_id") or "").strip()
+        source_excerpt = " ".join(
+            str(raw.get("source_excerpt") or "").split()
+        )
+        if (
+            actor_id not in participant_ids
+            or actor_id in normalized
+            or not isinstance(raw.get("direct_sunlight"), bool)
+            or not source_excerpt
+        ):
+            raise ValueError(
+                f"source attack environment {index} requires one unique "
+                "participant, a direct_sunlight DM fact, and an exact excerpt"
+            )
+        if actors is not None:
+            actor = actors.get(actor_id)
+            feature = next(
+                (
+                    item
+                    for item in (
+                        dict(dict(actor or {}).get("sheet") or {})
+                        .get("content", {})
+                        .get("features", [])
+                    )
+                    if str(
+                        dict(
+                            dict(item.get("choices") or {}).get(
+                                "source_trait"
+                            )
+                            or {}
+                        ).get("kind")
+                        or ""
+                    )
+                    == "sunlight_sensitivity"
+                ),
+                None,
+            )
+            description = " ".join(
+                str(dict(feature or {}).get("description") or "").split()
+            )
+            if feature is None or source_excerpt not in description:
+                raise ValueError(
+                    f"source attack environment {index} must match the "
+                    "structured Sunlight Sensitivity on its actor card"
+                )
+        normalized[actor_id] = {
+            "actor_id": actor_id,
+            "direct_sunlight": bool(raw["direct_sunlight"]),
+            "source_excerpt": source_excerpt,
+        }
+    return normalized
+
+
+def _source_avoidances(
+    paths: list[Path],
+    *,
+    campaign_id: str,
+    scene_id: str,
+    participant_ids: list[str],
+) -> tuple[dict[str, set[str]], list[dict[str, Any]]]:
+    participant_set = set(participant_ids)
+    avoided_by_actor: dict[str, set[str]] = {}
+    evidence: list[dict[str, Any]] = []
+    cell_pattern = re.compile(r"(?<!\d)(\d+),(\d+)(?!\d)")
+    for index, path in enumerate(paths):
+        report = _read_report(path)
+        continuity = dict(
+            dict(report.get("result") or {}).get("continuity") or {}
+        )
+        event = dict(continuity.get("event") or {})
+        payload = dict(event.get("payload") or {})
+        knowledge = list(continuity.get("actor_knowledge") or [])
+        summary = str(event.get("summary") or "")
+        source_excerpt = str(payload.get("source_excerpt") or "").strip()
+        cells = {
+            f"{int(x)},{int(y)}"
+            for x, y in cell_pattern.findall(summary)
+        }
+        if (
+            report.get("campaign_id") != campaign_id
+            or report.get("passed") is not True
+            or event.get("event_type")
+            not in {"trap_detected", "trap_locations_shared"}
+            or str(payload.get("scene_id") or "") != scene_id
+            or not str(event.get("id") or "")
+            or not source_excerpt
+            or not cells
+        ):
+            raise ValueError(
+                f"source avoidance report {index} must be a passed public "
+                "trap knowledge event for this campaign and scene with marked cells"
+            )
+        actor_ids: list[str] = []
+        for item in knowledge:
+            actor_id = str(dict(item).get("actor_id") or "")
+            proposition = str(dict(item).get("proposition") or "")
+            proposition_cells = {
+                f"{int(x)},{int(y)}"
+                for x, y in cell_pattern.findall(proposition)
+            }
+            if (
+                actor_id not in participant_set
+                or not cells <= proposition_cells
+                or "avoid" not in proposition.casefold()
+            ):
+                raise ValueError(
+                    f"source avoidance report {index} contains knowledge that "
+                    "does not prove a participant knows and avoids every marked cell"
+                )
+            avoided_by_actor.setdefault(actor_id, set()).update(cells)
+            actor_ids.append(actor_id)
+        if not actor_ids or len(actor_ids) != len(set(actor_ids)):
+            raise ValueError(
+                f"source avoidance report {index} must contain unique actor knowledge"
+            )
+        evidence.append(
+            {
+                "report_path": str(path.expanduser().resolve()),
+                "event_id": str(event["id"]),
+                "actor_ids": actor_ids,
+                "avoided_cells": sorted(cells),
+                "source_excerpt": source_excerpt,
+                "source_ref": deepcopy(payload.get("source_ref")),
+            }
+        )
+    return avoided_by_actor, evidence
+
+
 def _source_on_hit_rulings(
     values: list[dict[str, Any]],
     *,
@@ -1611,6 +1807,169 @@ def _source_random_activities(
     return normalized
 
 
+def _source_save_activities(
+    values: list[dict[str, Any]],
+    *,
+    participant_ids: list[str],
+    actors: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, dict[str, Any]]:
+    normalized: dict[str, dict[str, Any]] = {}
+    for index, raw in enumerate(values):
+        if not isinstance(raw, dict):
+            raise ValueError(f"source save activity {index} must be an object")
+        unknown = set(raw) - {
+            "actor_id",
+            "activity_id",
+            "target_has_brain",
+            "source_excerpt",
+        }
+        if unknown:
+            raise ValueError(
+                f"source save activity {index} has unsupported fields: "
+                f"{', '.join(sorted(unknown))}"
+            )
+        actor_id = str(raw.get("actor_id") or "").strip()
+        activity_id = str(raw.get("activity_id") or "").strip()
+        source_excerpt = " ".join(
+            str(raw.get("source_excerpt") or "").split()
+        )
+        if (
+            actor_id not in participant_ids
+            or actor_id in normalized
+            or not activity_id
+            or raw.get("target_has_brain") is not True
+            or not source_excerpt
+        ):
+            raise ValueError(
+                f"source save activity {index} requires one unique participant, "
+                "an activity_id, a true target_has_brain ruling, and an exact excerpt"
+            )
+        if actors is not None:
+            actor = actors.get(actor_id)
+            activity = next(
+                (
+                    item
+                    for item in (
+                        dict(dict(actor or {}).get("sheet") or {})
+                        .get("content", {})
+                        .get("activities", [])
+                    )
+                    if str(item.get("id") or "") == activity_id
+                ),
+                None,
+            )
+            spec = dict(
+                dict(activity or {}).get("choices", {}).get(
+                    "source_save_effect"
+                )
+                or {}
+            )
+            description = " ".join(
+                str(dict(activity or {}).get("description") or "").split()
+            )
+            if (
+                activity is None
+                or not spec
+                or spec.get("target_requirement") != "has_brain"
+                or source_excerpt not in description
+            ):
+                raise ValueError(
+                    f"source save activity {index} must match its structured "
+                    "actor card and contain the exact excerpt"
+                )
+        normalized[actor_id] = {
+            "actor_id": actor_id,
+            "activity_id": activity_id,
+            "target_has_brain": True,
+            "source_excerpt": source_excerpt,
+        }
+    return normalized
+
+
+def _source_contest_activities(
+    values: list[dict[str, Any]],
+    *,
+    participant_ids: list[str],
+    actors: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, dict[str, Any]]:
+    normalized: dict[str, dict[str, Any]] = {}
+    for index, raw in enumerate(values):
+        if not isinstance(raw, dict):
+            raise ValueError(
+                f"source contest activity {index} must be an object"
+            )
+        unknown = set(raw) - {
+            "actor_id",
+            "activity_id",
+            "target_is_humanoid",
+            "source_excerpt",
+        }
+        if unknown:
+            raise ValueError(
+                f"source contest activity {index} has unsupported fields: "
+                f"{', '.join(sorted(unknown))}"
+            )
+        actor_id = str(raw.get("actor_id") or "").strip()
+        activity_id = str(raw.get("activity_id") or "").strip()
+        source_excerpt = " ".join(
+            str(raw.get("source_excerpt") or "").split()
+        )
+        if (
+            actor_id not in participant_ids
+            or actor_id in normalized
+            or not activity_id
+            or raw.get("target_is_humanoid") is not True
+            or not source_excerpt
+        ):
+            raise ValueError(
+                f"source contest activity {index} requires one unique "
+                "participant, an activity_id, a true target_is_humanoid ruling, "
+                "and an exact excerpt"
+            )
+        if actors is not None:
+            actor = actors.get(actor_id)
+            activity = next(
+                (
+                    item
+                    for item in (
+                        dict(dict(actor or {}).get("sheet") or {})
+                        .get("content", {})
+                        .get("activities", [])
+                    )
+                    if str(item.get("id") or "") == activity_id
+                ),
+                None,
+            )
+            spec = dict(
+                dict(activity or {}).get("choices", {}).get(
+                    "source_contest_effect"
+                )
+                or {}
+            )
+            description = " ".join(
+                str(dict(activity or {}).get("description") or "").split()
+            )
+            if (
+                activity is None
+                or spec.get("kind")
+                != "intellect_devourer_body_thief_2014"
+                or spec.get("target_requirements")
+                != ["incapacitated", "humanoid"]
+                or source_excerpt not in description
+            ):
+                raise ValueError(
+                    f"source contest activity {index} must match its structured "
+                    "actor card and contain the exact excerpt"
+                )
+        normalized[actor_id] = {
+            "actor_id": actor_id,
+            "activity_id": activity_id,
+            "target_is_humanoid": True,
+            "source_excerpt": source_excerpt,
+        }
+    return normalized
+
+
 async def _campaign(client: ExposureClient, campaign_id: str) -> dict[str, Any]:
     return _facade_value(
         await client.core(
@@ -1857,10 +2216,17 @@ def _preferred_multiattack_option_id(
         item
         for item in dict(actor.get("derived") or {}).get("multiattack_options", [])
         if isinstance(item, dict) and str(item.get("id") or "")
-        and sum(
-            int(attack.get("count", 0) or 0)
-            for attack in item.get("attacks", [])
-            if isinstance(attack, dict)
+        and (
+            sum(
+                int(attack.get("count", 0) or 0)
+                for attack in item.get("attacks", [])
+                if isinstance(attack, dict)
+            )
+            + sum(
+                int(activity.get("count", 0) or 0)
+                for activity in item.get("activities", [])
+                if isinstance(activity, dict)
+            )
         )
         >= 2
     ]
@@ -1990,6 +2356,27 @@ async def _start(
         args.source_random_activity_json,
         participant_ids=[*party_ids, *all_hostile_ids],
         actors=actors,
+    )
+    save_activities = _source_save_activities(
+        args.source_save_activity_json,
+        participant_ids=[*party_ids, *all_hostile_ids],
+        actors=actors,
+    )
+    contest_activities = _source_contest_activities(
+        args.source_contest_activity_json,
+        participant_ids=[*party_ids, *all_hostile_ids],
+        actors=actors,
+    )
+    attack_environments = _source_attack_environments(
+        args.source_attack_environment_json,
+        participant_ids=[*party_ids, *all_hostile_ids],
+        actors=actors,
+    )
+    _, source_avoidance_evidence = _source_avoidances(
+        args.source_avoidance_report,
+        campaign_id=args.campaign_id,
+        scene_id=args.scene_id,
+        participant_ids=[*party_ids, *all_hostile_ids],
     )
     for actor_id in set(all_hostile_ids) | {
         ruling_actor_id for ruling_actor_id, _ in on_hit_rulings
@@ -2134,6 +2521,12 @@ async def _start(
             hostile_ids=initial_hostile_ids,
         )
         expected_revision = campaign["revision"]
+        if selected_hidden_ids:
+            scout_success = bool(dict(surprise_basis.get("check") or {}).get("success"))
+            visible_to_actor_ids_by_hostile = {
+                hostile_id: list(party_ids) if scout_success else []
+                for hostile_id in selected_hidden_ids
+            }
     elif args.source_surprised_actor_id:
         surprise, surprise_basis = _source_declared_surprise(
             party_ids=party_ids,
@@ -2271,6 +2664,10 @@ async def _start(
         "source_delayed_actions": list(delayed_actions.values()),
         "source_passive_allies": list(passive_allies.values()),
         "source_random_activities": list(random_activities.values()),
+        "source_save_activities": list(save_activities.values()),
+        "source_contest_activities": list(contest_activities.values()),
+        "source_attack_environments": list(attack_environments.values()),
+        "source_avoidances": source_avoidance_evidence,
         "source_opening_casts": _source_opening_casts(
             args.source_opening_cast_json,
             participant_ids=[*party_ids, *all_hostile_ids],
@@ -2396,7 +2793,7 @@ def _observable_target_ids(
     observable = []
     for target_id in target_ids:
         target = combatants.get(target_id)
-        if target is None:
+        if target is None or target.get("inside_host"):
             continue
         visible_to = target.get("visible_to_actor_ids")
         if not target.get("hidden") or (
@@ -2404,6 +2801,121 @@ def _observable_target_ids(
         ):
             observable.append(target_id)
     return observable
+
+
+def _body_thief_sides(
+    combat: dict[str, Any],
+    *,
+    party_ids: list[str],
+    hostile_ids: list[str],
+) -> dict[str, Any]:
+    """Map a Body Thief host to its controller without erasing either actor."""
+
+    combatants = {
+        str(item.get("actor_id") or ""): item
+        for item in combat.get("combatants", [])
+        if isinstance(item, dict)
+    }
+    controlled_hosts = {
+        actor_id: str(item.get("controlled_by_actor_id") or "")
+        for actor_id, item in combatants.items()
+        if actor_id in party_ids
+        and str(item.get("controlled_by_actor_id") or "") in hostile_ids
+        and item.get("body_thief_host")
+    }
+    inside_sources = {
+        actor_id
+        for actor_id, item in combatants.items()
+        if actor_id in hostile_ids and item.get("inside_host")
+    }
+    effective_party_ids = [
+        actor_id for actor_id in party_ids if actor_id not in controlled_hosts
+    ]
+    attackable_hostile_ids = [
+        actor_id for actor_id in hostile_ids if actor_id not in inside_sources
+    ] + list(controlled_hosts)
+    hostile_turn_actor_ids = set(attackable_hostile_ids)
+    return {
+        "controlled_hosts": controlled_hosts,
+        "inside_sources": inside_sources,
+        "effective_party_ids": effective_party_ids,
+        "attackable_hostile_ids": attackable_hostile_ids,
+        "hostile_turn_actor_ids": hostile_turn_actor_ids,
+    }
+
+
+def _body_thief_target_ids(
+    combat: dict[str, Any],
+    *,
+    actors: dict[str, dict[str, Any]],
+    source_actor_id: str,
+    party_ids: list[str],
+    range_ft: int,
+) -> list[str]:
+    """Return living incapacitated targets, including creatures at 0 HP."""
+
+    combatants = {
+        str(item.get("actor_id") or ""): item
+        for item in combat.get("combatants", [])
+        if isinstance(item, dict)
+    }
+    source = combatants.get(source_actor_id)
+    if source is None:
+        return []
+    source_position = dict(source.get("position") or {"x": 0, "y": 0})
+    eligible = [
+        target_id
+        for target_id in party_ids
+        if target_id in actors
+        and target_id in combatants
+        and "dead" not in _conditions(actors[target_id])
+        and _conditions(actors[target_id])
+        & {
+            "incapacitated",
+            "paralyzed",
+            "petrified",
+            "stunned",
+            "unconscious",
+        }
+        and _distance(
+            source_position,
+            dict(
+                combatants[target_id].get("position")
+                or {"x": 0, "y": 0}
+            ),
+        )
+        * 5
+        <= range_ft
+    ]
+    eligible.sort(
+        key=lambda target_id: _distance(
+            source_position,
+            dict(
+                combatants[target_id].get("position")
+                or {"x": 0, "y": 0}
+            ),
+        )
+    )
+    return eligible
+
+
+def _has_action_budget(combat: dict[str, Any], actor_id: str) -> bool:
+    combatant = next(
+        (
+            item
+            for item in combat.get("combatants", [])
+            if isinstance(item, dict)
+            and str(item.get("actor_id") or "") == actor_id
+        ),
+        None,
+    )
+    if combatant is None:
+        return False
+    budget = dict(combatant.get("turn_budget") or {})
+    return (
+        int(budget.get("main_action", 0) or 0) > 0
+        or int(budget.get("extra_action", 0) or 0) > 0
+    )
 
 
 def _wound_priority(actor: dict[str, Any]) -> tuple[bool, float]:
@@ -2417,7 +2929,9 @@ def _choose_destination(
     combat: dict[str, Any],
     actor_id: str,
     target_id: str,
-) -> tuple[dict[str, int], int] | None:
+    *,
+    avoided_cells: set[str] | None = None,
+) -> tuple[dict[str, int], int, list[dict[str, int]]] | None:
     combatants = list(combat.get("combatants") or [])
     acting = next(item for item in combatants if item.get("actor_id") == actor_id)
     target = next(item for item in combatants if item.get("actor_id") == target_id)
@@ -2425,34 +2939,192 @@ def _choose_destination(
     goal = dict(target.get("position") or {})
     if set(origin) != {"x", "y"} or set(goal) != {"x", "y"}:
         return None
+    conditions = {
+        str(item).casefold() for item in acting.get("conditions", [])
+    }
+    if conditions & {
+        "dead",
+        "unconscious",
+        "stunned",
+        "paralyzed",
+        "petrified",
+        "restrained",
+        "grappled",
+        "prone",
+    } or bool(acting.get("surprised")):
+        return None
     budget_cells = int(dict(acting.get("turn_budget") or {}).get("movement", 0) or 0) // 5
+    if budget_cells <= 0:
+        return None
+
+    def _source_details(
+        source_id: str,
+    ) -> tuple[bool, dict[str, Any] | None] | None:
+        source = next(
+            (
+                item
+                for item in combatants
+                if str(item.get("actor_id") or "") == source_id
+            ),
+            None,
+        )
+        if source is None:
+            return None
+        visible_to = source.get("visible_to_actor_ids")
+        if isinstance(visible_to, list):
+            visible = actor_id in {str(item) for item in visible_to}
+        else:
+            source_conditions = {
+                str(item).casefold() for item in source.get("conditions", [])
+            }
+            visible = not source.get("hidden", False) and "invisible" not in source_conditions
+        position = dict(source.get("position") or {})
+        return visible, position if set(position) == {"x", "y"} else None
+
+    fear_source_positions: list[dict[str, Any]] = []
+    if "frightened" in conditions:
+        raw_fear_sources = dict(acting.get("condition_sources") or {}).get(
+            "frightened"
+        )
+        if not isinstance(raw_fear_sources, list) or not raw_fear_sources:
+            return None
+        for source_id in raw_fear_sources:
+            source_details = _source_details(str(source_id))
+            if source_details is None:
+                return None
+            visible, source_position = source_details
+            if visible and source_position is None:
+                return None
+            if visible:
+                fear_source_positions.append(source_position)
+
+    turn_source_position = None
+    if "turned" in conditions:
+        turn_source_id = str(dict(acting.get("turned") or {}).get("source_actor_id") or "")
+        if not turn_source_id:
+            return None
+        turn_source_details = _source_details(turn_source_id)
+        if turn_source_details is None or turn_source_details[1] is None:
+            return None
+        turn_source_position = turn_source_details[1]
+
     occupied = {
         (
             int(dict(item.get("position") or {}).get("x", -1)),
             int(dict(item.get("position") or {}).get("y", -1)),
         )
         for item in combatants
-        if item.get("actor_id") != actor_id and isinstance(item.get("position"), dict)
+        if item.get("actor_id") != actor_id
+        and "dead"
+        not in {str(value).casefold() for value in item.get("conditions", [])}
+        and isinstance(item.get("position"), dict)
     }
-    bounds = dict(dict(combat.get("battle_map") or {}).get("bounds") or {})
-    candidates: list[tuple[int, int, int]] = []
-    for x in range(int(goal["x"]) - 1, int(goal["x"]) + 2):
-        for y in range(int(goal["y"]) - 1, int(goal["y"]) + 2):
-            destination = {"x": x, "y": y}
-            if (
-                (x, y) in occupied
-                or (x == int(goal["x"]) and y == int(goal["y"]))
-                or not 0 <= x < int(bounds.get("width_cells", 0) or 0)
-                or not 0 <= y < int(bounds.get("height_cells", 0) or 0)
-            ):
-                continue
-            steps = _distance(origin, destination)
-            if 0 < steps <= budget_cells:
-                candidates.append((steps, x, y))
+    battle_map = dict(combat.get("battle_map") or {})
+    bounds = dict(battle_map.get("bounds") or {})
+    width = int(bounds.get("width_cells", 0) or 0)
+    height = int(bounds.get("height_cells", 0) or 0)
+    if width <= 0 or height <= 0:
+        return None
+    blocked_cells = {
+        *set(battle_map.get("blocked_cells") or []),
+        *set(avoided_cells or set()),
+    }
+    difficult_cells = set(battle_map.get("difficult_cells") or [])
+    origin_cell = (int(origin["x"]), int(origin["y"]))
+    goal_cell = (int(goal["x"]), int(goal["y"]))
+    budget_ft = budget_cells * 5
+    costs: dict[tuple[int, int], int] = {origin_cell: 0}
+    steps_by_cell: dict[tuple[int, int], int] = {origin_cell: 0}
+    previous: dict[tuple[int, int], tuple[int, int]] = {}
+    queue: list[tuple[int, int, int, int]] = [
+        (0, 0, origin_cell[0], origin_cell[1])
+    ]
+    while queue:
+        cost, steps, x, y = heapq.heappop(queue)
+        current_cell = (x, y)
+        if cost != costs.get(current_cell) or steps != steps_by_cell.get(
+            current_cell
+        ):
+            continue
+        for delta_x in (-1, 0, 1):
+            for delta_y in (-1, 0, 1):
+                if delta_x == 0 and delta_y == 0:
+                    continue
+                neighbor = (x + delta_x, y + delta_y)
+                if (
+                    not 0 <= neighbor[0] < width
+                    or not 0 <= neighbor[1] < height
+                    or neighbor in occupied
+                    or neighbor == goal_cell
+                    or f"{neighbor[0]},{neighbor[1]}" in blocked_cells
+                ):
+                    continue
+                current_position = {"x": x, "y": y}
+                neighbor_position = {
+                    "x": neighbor[0],
+                    "y": neighbor[1],
+                }
+                if any(
+                    _distance(neighbor_position, source_position)
+                    < _distance(current_position, source_position)
+                    for source_position in fear_source_positions
+                ):
+                    continue
+                next_steps = steps + 1
+                next_cost = cost + (
+                    10
+                    if f"{neighbor[0]},{neighbor[1]}" in difficult_cells
+                    else 5
+                )
+                if next_cost > budget_ft:
+                    continue
+                previous_best = (
+                    costs.get(neighbor, budget_ft + 1),
+                    steps_by_cell.get(neighbor, budget_cells + 1),
+                )
+                if (next_cost, next_steps) >= previous_best:
+                    continue
+                costs[neighbor] = next_cost
+                steps_by_cell[neighbor] = next_steps
+                previous[neighbor] = current_cell
+                heapq.heappush(
+                    queue,
+                    (next_cost, next_steps, neighbor[0], neighbor[1]),
+                )
+    origin_target_distance = _distance(origin, goal)
+    candidates: list[tuple[int, int, int, int, int]] = []
+    for (x, y), cost in costs.items():
+        if (x, y) == origin_cell:
+            continue
+        destination = {"x": x, "y": y}
+        target_distance = _distance(destination, goal)
+        if target_distance >= origin_target_distance:
+            continue
+        if turn_source_position is not None and _distance(
+            destination, turn_source_position
+        ) <= _distance(origin, turn_source_position):
+            continue
+        candidates.append(
+            (
+                target_distance,
+                cost,
+                steps_by_cell[(x, y)],
+                x,
+                y,
+            )
+        )
     if not candidates:
         return None
-    steps, x, y = min(candidates)
-    return {"x": x, "y": y}, steps * 5
+    _, _, steps, x, y = min(candidates)
+    selected = (x, y)
+    reverse_path = [selected]
+    while reverse_path[-1] != origin_cell:
+        reverse_path.append(previous[reverse_path[-1]])
+    route = [
+        {"x": point[0], "y": point[1]}
+        for point in reversed(reverse_path[:-1])
+    ]
+    return {"x": x, "y": y}, steps * 5, route
 
 
 def _current_actor_id(combat: dict[str, Any]) -> str:
@@ -2820,6 +3492,7 @@ async def _preflight_attack(
     *,
     preferred_weapon_id: str = "",
     multiattack_option_id: str = "",
+    action_context: dict[str, Any] | None = None,
 ) -> tuple[str, dict[str, Any], dict[str, Any]] | None:
     weapons = list(
         dict(dict(actor.get("derived") or {}).get("inventory") or {}).get(
@@ -2833,6 +3506,8 @@ async def _preflight_attack(
                 "weapon_id": weapon.get("item_id"),
                 "attack_mode": weapon.get("attack_type") or "melee",
             }
+            if action_context:
+                action["context"] = dict(action_context)
             if multiattack_option_id:
                 action["multiattack_option_id"] = multiattack_option_id
             try:
@@ -3032,6 +3707,27 @@ async def _auto_run(
         participant_ids=[*party_ids, *hostile_ids],
         actors=initial_actors,
     )
+    save_activities = _source_save_activities(
+        args.source_save_activity_json,
+        participant_ids=[*party_ids, *hostile_ids],
+        actors=initial_actors,
+    )
+    contest_activities = _source_contest_activities(
+        args.source_contest_activity_json,
+        participant_ids=[*party_ids, *hostile_ids],
+        actors=initial_actors,
+    )
+    attack_environments = _source_attack_environments(
+        args.source_attack_environment_json,
+        participant_ids=[*party_ids, *hostile_ids],
+        actors=initial_actors,
+    )
+    avoided_cells_by_actor, source_avoidance_evidence = _source_avoidances(
+        args.source_avoidance_report,
+        campaign_id=args.campaign_id,
+        scene_id=args.scene_id,
+        participant_ids=[*party_ids, *hostile_ids],
+    )
     revealed_surprised = [
         str(item["actor_id"])
         for item in initial_combat.get("combatants", [])
@@ -3121,6 +3817,20 @@ async def _auto_run(
             for item in combat.get("combatants", [])
             if isinstance(item, dict)
         }
+        body_thief_sides = _body_thief_sides(
+            combat,
+            party_ids=party_ids,
+            hostile_ids=hostile_ids,
+        )
+        effective_party_ids = list(
+            body_thief_sides["effective_party_ids"]
+        )
+        attackable_hostile_ids = list(
+            body_thief_sides["attackable_hostile_ids"]
+        )
+        hostile_turn_actor_ids = set(
+            body_thief_sides["hostile_turn_actor_ids"]
+        )
         defeated_hostiles = [
             actor_id
             for actor_id in hostile_ids
@@ -3136,11 +3846,14 @@ async def _auto_run(
         ]
         unresolved_party = [
             actor_id
-            for actor_id in party_ids
+            for actor_id in effective_party_ids
             if _hit_points(actors[actor_id]) == 0
             and not _conditions(actors[actor_id]) & {"dead", "stable"}
         ]
-        party_down = all(_hit_points(actors[actor_id]) <= 0 for actor_id in party_ids)
+        party_down = all(
+            _hit_points(actors[actor_id]) <= 0
+            for actor_id in effective_party_ids
+        )
         outcome = (
             _source_surrender_outcome(
                 actor_hit_points=_hit_points(actors[args.surrender_actor_id]),
@@ -3353,10 +4066,15 @@ async def _auto_run(
                 }
             )
             continue
-        if _hit_points(actor) == 0 and actor_id in party_ids and not actor_conditions & {
+        if (
+            _hit_points(actor) == 0
+            and actor_id in effective_party_ids
+            and not actor_conditions
+            & {
             "dead",
             "stable",
-        }:
+            }
+        ):
             campaign = await _campaign(client, args.campaign_id)
             saved = await client.domain(
                 "combat_check",
@@ -3387,6 +4105,27 @@ async def _auto_run(
             },
         )
         available_actions = set(available.get("actions") or [])
+        if actor_id in body_thief_sides["inside_sources"]:
+            ended_turn = await _end_turn(
+                client,
+                args,
+                str(branch["id"]),
+                actor_id,
+                sequence,
+            )
+            turns.append(
+                {
+                    "sequence": sequence,
+                    "kind": "body_thief_source_inside_host",
+                    "actor_id": actor_id,
+                    "host_actor_id": dict(
+                        combatants_by_actor[actor_id].get("inside_host")
+                        or {}
+                    ).get("host_actor_id"),
+                    "result": ended_turn,
+                }
+            )
+            continue
         if _should_stand(actor, available_actions):
             campaign = await _campaign(client, args.campaign_id)
             stood = await client.domain(
@@ -3412,16 +4151,298 @@ async def _auto_run(
                 }
             )
             continue
+        contest_activity = contest_activities.get(actor_id)
+        if (
+            contest_activity is not None
+            and _hit_points(actor) > 0
+            and actor_id not in body_thief_sides["inside_sources"]
+            and _has_action_budget(combat, actor_id)
+        ):
+            combatants = {
+                str(item["actor_id"]): item
+                for item in combat["combatants"]
+            }
+            activity_card = next(
+                item
+                for item in dict(actor.get("sheet") or {})
+                .get("content", {})
+                .get("activities", [])
+                if str(item.get("id") or "")
+                == contest_activity["activity_id"]
+            )
+            contest_range_ft = int(
+                dict(activity_card.get("choices") or {})
+                .get("source_contest_effect", {})
+                .get("range_ft", 0)
+                or 0
+            )
+            eligible_targets = _body_thief_target_ids(
+                combat,
+                actors=actors,
+                source_actor_id=actor_id,
+                party_ids=effective_party_ids,
+                range_ft=contest_range_ft,
+            )
+            eligible_targets = _prioritize_targets(
+                actor_id,
+                eligible_targets,
+                target_priorities,
+            )
+            if eligible_targets:
+                target_id = eligible_targets[0]
+                campaign = await _campaign(client, args.campaign_id)
+                settled_activity = await client.domain(
+                    "combat_use_activity",
+                    {
+                        "campaign_id": args.campaign_id,
+                        "actor_id": actor_id,
+                        "activity_id": contest_activity["activity_id"],
+                        "declaration": {
+                            "target_id": target_id,
+                            "target_is_humanoid": contest_activity[
+                                "target_is_humanoid"
+                            ],
+                        },
+                        "branch_id": branch["id"],
+                        "expected_revision": campaign["revision"],
+                        "idempotency_key": (
+                            "encounter-source-contest-activity-"
+                            + _token(
+                                f"{args.run_id}:{sequence}:{actor_id}:"
+                                f"{contest_activity['activity_id']}",
+                                length=24,
+                            )
+                        ),
+                    },
+                )
+                if settled_activity.get("status") != "committed":
+                    raise RuntimeError(
+                        "source ability-contest activity did not commit "
+                        "through structured settlement"
+                    )
+                core_effect = dict(
+                    dict(settled_activity.get("result") or {}).get(
+                        "core_effect"
+                    )
+                    or {}
+                )
+                if core_effect.get("success") and (
+                    core_effect.get("knowledge_transfer")
+                    != "all_target_knowledge"
+                    or int(
+                        core_effect.get("knowledge_transfer_count", -1)
+                    )
+                    < 0
+                ):
+                    raise RuntimeError(
+                        "Body Thief did not attest its complete ActorKnowledge "
+                        "transfer"
+                    )
+                turn_entry = {
+                    "sequence": sequence,
+                    "kind": "source_contest_activity",
+                    "actor_id": actor_id,
+                    "activity_id": contest_activity["activity_id"],
+                    "target_id": target_id,
+                    "source_excerpt": contest_activity[
+                        "source_excerpt"
+                    ],
+                    "result": settled_activity,
+                }
+                if _has_blocking_pending(
+                    dict(settled_activity.get("combat") or {})
+                ):
+                    turns.append(turn_entry)
+                    continue
+                turn_entry["end_turn"] = await _end_turn(
+                    client,
+                    args,
+                    str(branch["id"]),
+                    actor_id,
+                    sequence,
+                )
+                turns.append(turn_entry)
+                continue
+        save_activity = save_activities.get(actor_id)
+        if save_activity is not None and _hit_points(actor) > 0:
+            combatant = next(
+                item
+                for item in combat.get("combatants", [])
+                if str(item.get("actor_id") or "") == actor_id
+            )
+            active_multiattack = bool(
+                dict(combatant.get("turn_flags") or {}).get("multiattack")
+            )
+            mixed_options = [
+                option
+                for option in dict(actor.get("derived") or {}).get(
+                    "multiattack_options", []
+                )
+                if any(
+                    str(item.get("activity_id") or "")
+                    == save_activity["activity_id"]
+                    for item in option.get("activities", [])
+                    if isinstance(item, dict)
+                )
+            ]
+            if active_multiattack or not mixed_options:
+                opponents = (
+                    [
+                        hostile_id
+                        for hostile_id in attackable_hostile_ids
+                        if hostile_id not in fled_hostile_ids
+                    ]
+                    if actor_id in effective_party_ids
+                    else effective_party_ids
+                )
+                living_targets = [
+                    target_id
+                    for target_id in opponents
+                    if _hit_points(actors[target_id]) > 0
+                    and int(
+                        dict(actors[target_id].get("derived") or {})
+                        .get("ability_scores", {})
+                        .get("intelligence", 10)
+                    )
+                    > 0
+                ]
+                living_targets = _observable_target_ids(
+                    combat,
+                    observer_id=actor_id,
+                    target_ids=living_targets,
+                )
+                combatants = {
+                    str(item["actor_id"]): item
+                    for item in combat["combatants"]
+                }
+                activity_card = next(
+                    item
+                    for item in dict(actor.get("sheet") or {})
+                    .get("content", {})
+                    .get("activities", [])
+                    if str(item.get("id") or "")
+                    == save_activity["activity_id"]
+                )
+                save_range_ft = int(
+                    dict(activity_card.get("choices") or {})
+                    .get("source_save_effect", {})
+                    .get("range_ft", 0)
+                    or 0
+                )
+                living_targets = [
+                    target_id
+                    for target_id in living_targets
+                    if _distance(
+                        dict(
+                            combatants[actor_id].get("position")
+                            or {"x": 0, "y": 0}
+                        ),
+                        dict(
+                            combatants[target_id].get("position")
+                            or {"x": 0, "y": 0}
+                        ),
+                    )
+                    * 5
+                    <= save_range_ft
+                ]
+                living_targets.sort(
+                    key=lambda target_id: _distance(
+                        dict(
+                            combatants[actor_id].get("position")
+                            or {"x": 0, "y": 0}
+                        ),
+                        dict(
+                            combatants[target_id].get("position")
+                            or {"x": 0, "y": 0}
+                        ),
+                    )
+                )
+                living_targets = _prioritize_targets(
+                    actor_id,
+                    living_targets,
+                    target_priorities,
+                )
+                if not living_targets:
+                    ended_turn = await _end_turn(
+                        client,
+                        args,
+                        str(branch["id"]),
+                        actor_id,
+                        sequence,
+                    )
+                    turns.append(
+                        {
+                            "sequence": sequence,
+                            "kind": "source_save_activity_no_target",
+                            "actor_id": actor_id,
+                            "source_excerpt": save_activity["source_excerpt"],
+                            "result": ended_turn,
+                        }
+                    )
+                    continue
+                campaign = await _campaign(client, args.campaign_id)
+                settled_activity = await client.domain(
+                    "combat_use_activity",
+                    {
+                        "campaign_id": args.campaign_id,
+                        "actor_id": actor_id,
+                        "activity_id": save_activity["activity_id"],
+                        "declaration": {
+                            "target_id": living_targets[0],
+                            "target_has_brain": save_activity[
+                                "target_has_brain"
+                            ],
+                        },
+                        "branch_id": branch["id"],
+                        "expected_revision": campaign["revision"],
+                        "idempotency_key": (
+                            "encounter-source-save-activity-"
+                            + _token(
+                                f"{args.run_id}:{sequence}:{actor_id}:"
+                                f"{save_activity['activity_id']}",
+                                length=24,
+                            )
+                        ),
+                    },
+                )
+                if settled_activity.get("status") != "committed":
+                    raise RuntimeError(
+                        "source saving-throw activity did not commit through "
+                        "structured settlement"
+                    )
+                turn_entry = {
+                    "sequence": sequence,
+                    "kind": "source_save_activity",
+                    "actor_id": actor_id,
+                    "activity_id": save_activity["activity_id"],
+                    "target_id": living_targets[0],
+                    "source_excerpt": save_activity["source_excerpt"],
+                    "result": settled_activity,
+                }
+                if _has_blocking_pending(
+                    dict(settled_activity.get("combat") or {})
+                ):
+                    turns.append(turn_entry)
+                    continue
+                turn_entry["end_turn"] = await _end_turn(
+                    client,
+                    args,
+                    str(branch["id"]),
+                    actor_id,
+                    sequence,
+                )
+                turns.append(turn_entry)
+                continue
         random_activity = random_activities.get(actor_id)
         if random_activity is not None and _hit_points(actor) > 0:
             opponents = (
                 [
                     hostile_id
-                    for hostile_id in hostile_ids
+                    for hostile_id in attackable_hostile_ids
                     if hostile_id not in fled_hostile_ids
                 ]
-                if actor_id in party_ids
-                else party_ids
+                if actor_id in effective_party_ids
+                else effective_party_ids
             )
             living_targets = [
                 target_id
@@ -3521,7 +4542,7 @@ async def _auto_run(
             continue
         stabilization_target_id = _postcombat_stabilization_target(
             actor_id=actor_id,
-            party_ids=party_ids,
+            party_ids=effective_party_ids,
             actors=actors,
             defeated_hostiles=len(defeated_hostiles),
             fled_hostiles=len(fled_hostile_ids),
@@ -3549,6 +4570,9 @@ async def _auto_run(
                     combat,
                     actor_id,
                     stabilization_target_id,
+                    avoided_cells=avoided_cells_by_actor.get(
+                        actor_id, set()
+                    ),
                 )
                 if destination is None:
                     await _end_turn(
@@ -3569,6 +4593,7 @@ async def _auto_run(
                         "payload": {
                             "distance": destination[1],
                             "destination": destination[0],
+                            "path": destination[2],
                         },
                         "branch_id": branch["id"],
                         "expected_revision": campaign["revision"],
@@ -3588,6 +4613,10 @@ async def _auto_run(
                             "kind": "stabilize_move",
                             "actor_id": actor_id,
                             "target_id": stabilization_target_id,
+                            "planned_path": destination[2],
+                            "avoided_cells": sorted(
+                                avoided_cells_by_actor.get(actor_id, set())
+                            ),
                             "result": moved,
                         }
                     )
@@ -3885,17 +4914,17 @@ async def _auto_run(
         opponents = (
             [
                 hostile_id
-                for hostile_id in hostile_ids
+                for hostile_id in attackable_hostile_ids
                 if hostile_id not in fled_hostile_ids
             ]
-            if actor_id in party_ids
-            else party_ids
+            if actor_id in effective_party_ids
+            else effective_party_ids
         )
         living_targets = [
             target_id for target_id in opponents if _hit_points(actors[target_id]) > 0
         ]
         combatants = {str(item["actor_id"]): item for item in combat["combatants"]}
-        if actor_id in party_ids:
+        if actor_id in effective_party_ids:
             living_targets = _observable_target_ids(
                 combat,
                 observer_id=actor_id,
@@ -3903,7 +4932,11 @@ async def _auto_run(
             )
         living_targets.sort(
             key=lambda item: (
-                *(_wound_priority(actors[item]) if actor_id in party_ids else (False, 0.0)),
+                *(
+                    _wound_priority(actors[item])
+                    if actor_id in effective_party_ids
+                    else (False, 0.0)
+                ),
                 _distance(
                     dict(combatants[actor_id].get("position") or {"x": 0, "y": 0}),
                     dict(combatants[item].get("position") or {"x": 0, "y": 0}),
@@ -3917,7 +4950,7 @@ async def _auto_run(
         )
         spell_choice = _choose_party_spell(
             actor_id,
-            party_ids=party_ids,
+            party_ids=effective_party_ids,
             actors=actors,
             living_targets=living_targets,
             leveled_spell_available=not bool(
@@ -4027,7 +5060,7 @@ async def _auto_run(
                 continue
             await _end_turn(client, args, str(branch["id"]), actor_id, sequence)
             continue
-        if actor_id in party_ids and not living_targets:
+        if actor_id in effective_party_ids and not living_targets:
             if "dodge" in available_actions:
                 campaign = await _campaign(client, args.campaign_id)
                 dodged = await client.domain(
@@ -4061,10 +5094,15 @@ async def _auto_run(
             and actor_id not in completed_opening_weapon_actor_ids
         ):
             preferred_weapon_id = source_opening_weapon["weapon_id"]
-        elif actor_id in hostile_ids:
+        elif actor_id in hostile_turn_actor_ids:
+            tactical_source_id = str(
+                body_thief_sides["controlled_hosts"].get(
+                    actor_id, actor_id
+                )
+            )
             preferred_weapon_id = _preferred_hostile_weapon_id(
                 actor,
-                hostile_index=hostile_ids.index(actor_id),
+                hostile_index=hostile_ids.index(tactical_source_id),
             )
         active_multiattack = bool(
             dict(combatants[actor_id].get("turn_flags") or {}).get("multiattack")
@@ -4077,6 +5115,15 @@ async def _auto_run(
             if not active_multiattack
             else ""
         )
+        attack_context = (
+            {
+                "direct_sunlight": attack_environments[actor_id][
+                    "direct_sunlight"
+                ]
+            }
+            if actor_id in attack_environments
+            else None
+        )
         plan = await _preflight_attack(
             client,
             args,
@@ -4084,9 +5131,15 @@ async def _auto_run(
             living_targets,
             preferred_weapon_id=preferred_weapon_id,
             multiattack_option_id=multiattack_option_id,
+            action_context=attack_context,
         )
         if plan is None and living_targets:
-            destination = _choose_destination(combat, actor_id, living_targets[0])
+            destination = _choose_destination(
+                combat,
+                actor_id,
+                living_targets[0],
+                avoided_cells=avoided_cells_by_actor.get(actor_id, set()),
+            )
             if destination is not None:
                 campaign = await _campaign(client, args.campaign_id)
                 moved = await client.domain(
@@ -4098,6 +5151,7 @@ async def _auto_run(
                         "payload": {
                             "distance": destination[1],
                             "destination": destination[0],
+                            "path": destination[2],
                         },
                         "branch_id": branch["id"],
                         "expected_revision": campaign["revision"],
@@ -4111,6 +5165,10 @@ async def _auto_run(
                         "sequence": sequence,
                         "kind": "move",
                         "actor_id": actor_id,
+                        "planned_path": destination[2],
+                        "avoided_cells": sorted(
+                            avoided_cells_by_actor.get(actor_id, set())
+                        ),
                         "result": moved,
                     }
                 )
@@ -4123,6 +5181,7 @@ async def _auto_run(
                     living_targets,
                     preferred_weapon_id=preferred_weapon_id,
                     multiattack_option_id=multiattack_option_id,
+                    action_context=attack_context,
                 )
         if plan is not None:
             target_id, action, preflight = plan
@@ -4271,6 +5330,10 @@ async def _auto_run(
         "source_delayed_actions": list(delayed_actions.values()),
         "source_passive_allies": list(passive_allies.values()),
         "source_random_activities": list(random_activities.values()),
+        "source_save_activities": list(save_activities.values()),
+        "source_contest_activities": list(contest_activities.values()),
+        "source_attack_environments": list(attack_environments.values()),
+        "source_avoidances": source_avoidance_evidence,
         "source_zero_hp_finisher": source_zero_hp_finisher,
         "source_zero_hp_stabilization": source_zero_hp_stabilization,
         "source_target_priorities": list(

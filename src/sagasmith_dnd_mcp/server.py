@@ -21,6 +21,7 @@ from sagasmith_core import (
     DOCUMENT_NORMALIZER_VERSION,
     AccessService,
     ActorKnowledgeService,
+    ActorKnowledgeTransfer,
     BranchService,
     CampaignService,
     CharacterService,
@@ -69,6 +70,7 @@ from sagasmith_dnd.character_schema import (
     remove_effect,
     remove_inventory_item,
     resolve_memory,
+    set_exhaustion_level,
     set_resource_value,
     set_spell_prepared,
     update_inventory_item,
@@ -105,6 +107,7 @@ from sagasmith_dnd.combat_engine import (
     force_move_directly_away,
     pay_activity_activation,
     pay_attack_action,
+    pay_multiattack_activity,
     preflight_attack,
     preflight_spell_attack,
     queue_combatant,
@@ -118,6 +121,8 @@ from sagasmith_dnd.combat_engine import (
     resolve_readied_action_window,
     resolve_readied_spell_window,
     resolve_second_wind_to_sheet,
+    resolve_source_contest_effect,
+    resolve_source_save_effect,
     resolve_turn_undead_to_sheets,
     roll_attack_action,
     settle_core_activity_effect,
@@ -142,7 +147,7 @@ from sagasmith_dnd.core_content import PACK_ID as CORE_CONTENT_PACK_ID
 from sagasmith_dnd.core_content import PACK_VERSION as CORE_CONTENT_PACK_VERSION
 from sagasmith_dnd.core_content import build_srd2014_content
 from sagasmith_dnd.core_rule_pack import get_core_rule_pack
-from sagasmith_dnd.engine import resolve_check, roll
+from sagasmith_dnd.engine import resolve_attack, resolve_check, roll
 from sagasmith_dnd.lifecycle import (
     advance_effect_durations,
     advance_elapsed_effect_durations,
@@ -151,6 +156,7 @@ from sagasmith_dnd.lifecycle import (
     advance_world_effect_durations,
     allows_trance_rest,
     apply_rest,
+    expire_combat_bound_effects,
     initialize_source_state,
     knock_prone_outside_combat,
     record_rest_completion,
@@ -227,6 +233,8 @@ from sagasmith_dnd.statblocks import (
     effective_statblock_rating,
     gazer_eye_ray_spec,
     parse_2014_statblock,
+    source_contest_effect_spec,
+    source_save_effect_spec,
 )
 from sagasmith_dnd.system import DND5E
 from sqlalchemy.exc import NoResultFound
@@ -1610,6 +1618,132 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     ) -> None:
         for combatant in encounter.get("combatants", []):
             if combatant.get("actor_id") == actor_id:
+                body_thief = dict(combatant.get("body_thief_host") or {})
+                hp = int(
+                    dict(dict(sheet.get("combat") or {}).get("hp") or {}).get(
+                        "value", 0
+                    )
+                    or 0
+                )
+                if body_thief and hp <= 0:
+                    source_actor_id = str(
+                        body_thief.get("source_actor_id") or ""
+                    )
+                    source_combatant = next(
+                        (
+                            item
+                            for item in encounter.get("combatants", [])
+                            if str(item.get("actor_id") or "")
+                            == source_actor_id
+                        ),
+                        None,
+                    )
+                    if source_combatant is None:
+                        raise CombatEngineError(
+                            "Body Thief source combatant is missing"
+                        )
+                    origin = dict(combatant.get("position") or {})
+                    battle_map = dict(encounter.get("battle_map") or {})
+                    width = int(battle_map.get("width", 0) or 0)
+                    height = int(battle_map.get("height", 0) or 0)
+                    blocked = {
+                        (int(item["x"]), int(item["y"]))
+                        for item in battle_map.get("blocked_cells", [])
+                        if isinstance(item, dict)
+                        and set(item) >= {"x", "y"}
+                    }
+                    occupied = {
+                        (
+                            int(dict(item.get("position") or {})["x"]),
+                            int(dict(item.get("position") or {})["y"]),
+                        )
+                        for item in encounter.get("combatants", [])
+                        if str(item.get("actor_id") or "")
+                        not in {source_actor_id, actor_id}
+                        and set(dict(item.get("position") or {})) == {"x", "y"}
+                        and "dead"
+                        not in {
+                            str(value).casefold()
+                            for value in item.get("conditions", [])
+                        }
+                    }
+                    candidates = sorted(
+                        (
+                            {"x": int(origin["x"]) + dx, "y": int(origin["y"]) + dy}
+                            for dx, dy in (
+                                (-1, -1),
+                                (-1, 0),
+                                (-1, 1),
+                                (0, -1),
+                                (0, 1),
+                                (1, -1),
+                                (1, 0),
+                                (1, 1),
+                            )
+                            if set(origin) == {"x", "y"}
+                        ),
+                        key=lambda item: (item["y"], item["x"]),
+                    )
+                    destination = next(
+                        (
+                            item
+                            for item in candidates
+                            if (not width or 0 <= item["x"] < width)
+                            and (not height or 0 <= item["y"] < height)
+                            and (item["x"], item["y"]) not in blocked
+                            and (item["x"], item["y"]) not in occupied
+                        ),
+                        None,
+                    )
+                    if destination is None:
+                        raise NeedsRulingError(
+                            "Body Thief must leave a zero-HP host but has no "
+                            "recorded unoccupied adjacent space",
+                            missing=("body_thief_ejection_space",),
+                        )
+                    source_combatant["position"] = destination
+                    source_combatant.pop("inside_host", None)
+                    source_combatant["hidden"] = False
+                    source_combatant.pop("visible_to_actor_ids", None)
+                    combatant["disposition"] = body_thief[
+                        "original_disposition"
+                    ]
+                    combatant["death_saves"] = bool(
+                        body_thief.get("original_death_saves", False)
+                    )
+                    combatant["zero_hp_recovery"] = bool(
+                        body_thief.get("original_zero_hp_recovery", False)
+                    )
+                    combatant.pop("controlled_by_actor_id", None)
+                    combatant.pop("body_thief_host", None)
+                    for effect in sheet.get("effects", []):
+                        if (
+                            effect.get("active")
+                            and str(effect.get("id") or "")
+                            == str(body_thief.get("effect_instance_id") or "")
+                        ):
+                            effect["active"] = False
+                            effect["ended_reason"] = "host_zero_hit_points"
+                    sheet["conditions"] = sorted(
+                        {
+                            *(
+                                str(item).casefold()
+                                for item in sheet.get("conditions", [])
+                            ),
+                            "dead",
+                        }
+                        - {"unconscious", "stable", "stunned", "incapacitated"}
+                    )
+                    encounter["log"] = [
+                        *list(encounter.get("log") or []),
+                        {
+                            "type": "body_thief_ejected",
+                            "source_actor_id": source_actor_id,
+                            "host_actor_id": actor_id,
+                            "reason": "host_zero_hit_points",
+                            "destination": destination,
+                        },
+                    ][-100:]
                 combatant["conditions"] = list(sheet.get("conditions") or [])
                 combatant["condition_sources"] = timed_condition_sources(sheet)
                 combatant["speed_multiplier"] = source_speed_multiplier(sheet)
@@ -4649,6 +4783,42 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             source_ref=source_ref,
             source_excerpt=source_excerpt,
         )
+        resolved_close_transition: dict[str, Any] | None = None
+        if close_transition is not None:
+            if not isinstance(close_transition, dict):
+                raise ValueError("chase close_transition must be an object")
+            allowed = {
+                "distance_ft",
+                "status",
+                "summary",
+                "source_ref",
+                "source_excerpt",
+            }
+            unknown = sorted(set(close_transition) - allowed)
+            if unknown:
+                raise ValueError(
+                    "unsupported chase close_transition fields: "
+                    + ", ".join(unknown)
+                )
+            transition_evidence = reviewed_chase_source(
+                campaign_id,
+                scene_id=scene_id,
+                source_ref=close_transition.get("source_ref"),
+                source_excerpt=str(close_transition.get("source_excerpt") or ""),
+            )
+            transition_summary = _normalize_source_evidence_text(
+                str(close_transition.get("summary") or "")
+            )
+            if transition_summary != transition_evidence["source_excerpt"]:
+                raise ValueError(
+                    "chase close_transition summary must equal its exact source_excerpt"
+                )
+            resolved_close_transition = {
+                "distance_ft": close_transition.get("distance_ft"),
+                "status": close_transition.get("status"),
+                "summary": transition_summary,
+                "source_ref": transition_evidence,
+            }
         config_by_actor: dict[str, dict[str, Any]] = {}
         for raw in participant_config or []:
             if not isinstance(raw, dict) or not raw.get("actor_id"):
@@ -4670,7 +4840,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "source_ref": evidence,
             "name": name,
             "participant_config": participant_config or [],
-            "close_transition": close_transition,
+            "close_transition": resolved_close_transition,
             "branch_id": resolved_branch_id,
         }
         scope = f"chase-start:{campaign_id}:{resolved_branch_id}:{principal_id}"
@@ -4709,9 +4879,20 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             ruleset=str(campaign.settings.get("edition") or "2014"),
             scene_id=scene_id,
             name=name,
-            close_transition=close_transition,
+            close_transition=(
+                {
+                    key: resolved_close_transition[key]
+                    for key in ("distance_ft", "status", "summary")
+                }
+                if resolved_close_transition
+                else None
+            ),
         )
         chase["source_ref"] = evidence
+        if resolved_close_transition:
+            chase["close_transition"]["source_ref"] = resolved_close_transition[
+                "source_ref"
+            ]
         next_state = deepcopy(campaign.state)
         next_state["chase"] = chase
         receipts = core_receipts(
@@ -9899,8 +10080,17 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             branch_id=resolved_branch_id,
         )
         random_save_spec = gazer_eye_ray_spec(current.sheet, activity_id)
+        source_contest_spec = source_contest_effect_spec(
+            current.sheet, activity_id
+        )
+        source_save_spec = source_save_effect_spec(current.sheet, activity_id)
         random_target_records: dict[str, Any] = {}
         random_targets: list[dict[str, Any]] = []
+        source_save_target_record = None
+        source_save_target: dict[str, Any] | None = None
+        source_contest_target_record = None
+        source_contest_target: dict[str, Any] | None = None
+        source_contest_knowledge_count = 0
         if random_save_spec is not None:
             if not is_dm(campaign_id, principal_id):
                 raise PermissionError(
@@ -10008,6 +10198,203 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 )
                 random_target_records[target_id] = target
                 random_targets.append(combat_actor_snapshot(target_id))
+        if source_save_spec is not None:
+            if not is_dm(campaign_id, principal_id):
+                raise PermissionError(
+                    "source saving-throw activity settlement requires the DM"
+                )
+            declared = dict(declaration or {})
+            if set(declared) != {"target_id", "target_has_brain"}:
+                raise CombatEngineError(
+                    "source saving-throw activity declaration requires target_id "
+                    "and target_has_brain"
+                )
+            target_id = str(declared.get("target_id") or "").strip()
+            if (
+                not target_id
+                or target_id == actor_id
+                or declared.get("target_has_brain") is not True
+            ):
+                raise CombatEngineError(
+                    "source saving-throw activity requires one other target "
+                    "confirmed to have a brain"
+                )
+            source_combatant = next(
+                (
+                    item
+                    for item in encounter.get("combatants", [])
+                    if str(item.get("actor_id") or "") == actor_id
+                ),
+                None,
+            )
+            target_combatant = next(
+                (
+                    item
+                    for item in encounter.get("combatants", [])
+                    if str(item.get("actor_id") or "") == target_id
+                ),
+                None,
+            )
+            source_position = dict((source_combatant or {}).get("position") or {})
+            target_position = dict((target_combatant or {}).get("position") or {})
+            if set(source_position) != {"x", "y"} or set(target_position) != {
+                "x",
+                "y",
+            }:
+                raise NeedsRulingError(
+                    "source saving-throw activity requires battle-map positions",
+                    missing=("source_save_effect_positions",),
+                )
+            target_conditions = {
+                str(item).casefold()
+                for item in (target_combatant or {}).get("conditions", [])
+            }
+            visible_to = (target_combatant or {}).get("visible_to_actor_ids")
+            if (
+                target_combatant is None
+                or target_conditions & {"dead", "unconscious"}
+                or bool(target_combatant.get("hidden", False))
+                or "invisible" in target_conditions
+                or (
+                    isinstance(visible_to, list)
+                    and actor_id not in {str(item) for item in visible_to}
+                )
+            ):
+                raise CombatEngineError(
+                    "source saving-throw target must be living, conscious, and visible"
+                )
+            distance = (
+                max(
+                    abs(int(source_position["x"]) - int(target_position["x"])),
+                    abs(int(source_position["y"]) - int(target_position["y"])),
+                )
+                * 5
+            )
+            if distance > int(source_save_spec.get("range_ft", 0) or 0):
+                raise CombatEngineError(
+                    "source saving-throw target is outside the recorded range"
+                )
+            source_save_target_record = require_campaign_actor(campaign_id, target_id)
+            access.require_actor(
+                campaign_id,
+                target_id,
+                principal_id,
+                control=True,
+            )
+            source_save_target = combat_actor_snapshot(target_id)
+        if source_contest_spec is not None:
+            if not is_dm(campaign_id, principal_id):
+                raise PermissionError(
+                    "source ability-contest activity settlement requires the DM"
+                )
+            declared = dict(declaration or {})
+            if set(declared) != {"target_id", "target_is_humanoid"}:
+                raise CombatEngineError(
+                    "source ability-contest activity declaration requires "
+                    "target_id and target_is_humanoid"
+                )
+            target_id = str(declared.get("target_id") or "").strip()
+            if (
+                not target_id
+                or target_id == actor_id
+                or declared.get("target_is_humanoid") is not True
+            ):
+                raise CombatEngineError(
+                    "Body Thief requires one other target confirmed to be humanoid"
+                )
+            source_combatant = next(
+                (
+                    item
+                    for item in encounter.get("combatants", [])
+                    if str(item.get("actor_id") or "") == actor_id
+                ),
+                None,
+            )
+            target_combatant = next(
+                (
+                    item
+                    for item in encounter.get("combatants", [])
+                    if str(item.get("actor_id") or "") == target_id
+                ),
+                None,
+            )
+            if source_combatant is None or target_combatant is None:
+                raise CombatEngineError(
+                    "Body Thief source and target must be combatants"
+                )
+            if source_combatant.get("inside_host"):
+                raise CombatEngineError(
+                    "intellect devourer is already inside a host"
+                )
+            source_position = dict(source_combatant.get("position") or {})
+            target_position = dict(target_combatant.get("position") or {})
+            if set(source_position) != {"x", "y"} or set(target_position) != {
+                "x",
+                "y",
+            }:
+                raise NeedsRulingError(
+                    "Body Thief requires battle-map positions",
+                    missing=("source_contest_effect_positions",),
+                )
+            target_conditions = {
+                str(item).casefold()
+                for item in target_combatant.get("conditions", [])
+            }
+            incapacitated = bool(
+                target_conditions
+                & {
+                    "incapacitated",
+                    "paralyzed",
+                    "petrified",
+                    "stunned",
+                    "unconscious",
+                }
+            )
+            if (
+                not incapacitated
+                or "dead" in target_conditions
+                or target_combatant.get("body_thief_host")
+            ):
+                raise CombatEngineError(
+                    "Body Thief target must be a living incapacitated humanoid "
+                    "that is not already a host"
+                )
+            distance = (
+                max(
+                    abs(
+                        int(source_position["x"])
+                        - int(target_position["x"])
+                    ),
+                    abs(
+                        int(source_position["y"])
+                        - int(target_position["y"])
+                    ),
+                )
+                * 5
+            )
+            if distance > int(
+                source_contest_spec.get("range_ft", 0) or 0
+            ):
+                raise CombatEngineError(
+                    "Body Thief target is outside the recorded range"
+                )
+            source_contest_target_record = require_campaign_actor(
+                campaign_id, target_id
+            )
+            access.require_actor(
+                campaign_id,
+                target_id,
+                principal_id,
+                control=True,
+            )
+            source_contest_target = combat_actor_snapshot(target_id)
+            source_contest_knowledge_count = len(
+                knowledge.list(
+                    campaign_id,
+                    actor_id=target_id,
+                    branch_id=resolved_branch_id,
+                )
+            )
         turn_undead = (
             activity_id == "dnd5e.content.srd2014.feature.cleric-channel-divinity"
             and str(dict(declaration or {}).get("option") or "")
@@ -10182,11 +10569,41 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             and not is_dm(campaign_id, principal_id)
         ):
             raise CombatEngineError("special activity triggers require a DM resolution")
-        next_encounter = pay_activity_activation(
-            encounter,
-            actor_id_value=actor_id,
-            activation_type=activation_type,
+        actor_combatant = next(
+            item
+            for item in encounter.get("combatants", [])
+            if str(item.get("actor_id") or "") == actor_id
         )
+        active_multiattack = dict(
+            dict(actor_combatant.get("turn_flags") or {}).get("multiattack")
+            or {}
+        )
+        remaining_multiattack = list(active_multiattack.get("remaining") or [])
+        source_save_is_followup = bool(
+            source_save_spec is not None
+            and any(
+                str(item.get("activity_id") or "") == activity_id
+                and int(item.get("count", 0) or 0) > 0
+                for item in remaining_multiattack
+                if isinstance(item, dict)
+            )
+        )
+        if source_save_is_followup:
+            next_encounter, activity_activation_payment = pay_multiattack_activity(
+                encounter,
+                actor_id,
+                activity_id=activity_id,
+            )
+        else:
+            next_encounter = pay_activity_activation(
+                encounter,
+                actor_id_value=actor_id,
+                activation_type=activation_type,
+            )
+            activity_activation_payment = {
+                "kind": "activity",
+                "activation_type": activation_type,
+            }
         next_encounter, core_effect = settle_core_activity_effect(
             next_encounter,
             actor_id_value=actor_id,
@@ -10265,6 +10682,155 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "targets": settled_random["targets"],
                 "requires_ruling": False,
             }
+        if source_save_spec is not None:
+            assert source_save_target_record is not None
+            assert source_save_target is not None
+            source_actor = combat_actor_snapshot(actor_id)
+            source_actor["sheet"] = applied["sheet"]
+            source_actor["derived"] = derive_character_sheet(applied["sheet"])
+            target_id = str(source_save_target["id"])
+            target_combatant = next(
+                item
+                for item in next_encounter.get("combatants", [])
+                if str(item.get("actor_id") or "") == target_id
+            )
+            settled_source = resolve_source_save_effect(
+                source_actor,
+                source_save_target,
+                spec=source_save_spec,
+                death_saves=bool(
+                    target_combatant.get("death_saves", False)
+                    or target_combatant.get("zero_hp_recovery", False)
+                ),
+                rules=rule_context,
+            )
+            target_sheet = validate_character_sheet(settled_source["sheet"])
+            sync_combatant_conditions(next_encounter, target_id, target_sheet)
+            concentration = dict(
+                dict(settled_source["result"].get("damage") or {}).get(
+                    "concentration"
+                )
+                or {}
+            )
+            add_concentration_window(
+                next_encounter,
+                target_id,
+                concentration or None,
+                next_revision=campaign.revision + 1,
+            )
+            additional_updates.append(
+                CharacterStateUpdate(
+                    character_id=target_id,
+                    sheet=target_sheet,
+                    notes=validate_character_notes(
+                        source_save_target_record.notes
+                    ),
+                    expected_revision=source_save_target_record.revision,
+                )
+            )
+            core_effect = {
+                **settled_source["result"],
+                "kind": "source_save_effect",
+                "activation_payment": activity_activation_payment,
+                "requires_ruling": False,
+            }
+        actor_knowledge_transfers: list[ActorKnowledgeTransfer] = []
+        if source_contest_spec is not None:
+            assert source_contest_target_record is not None
+            assert source_contest_target is not None
+            source_actor = combat_actor_snapshot(actor_id)
+            source_actor["sheet"] = applied["sheet"]
+            source_actor["derived"] = derive_character_sheet(
+                applied["sheet"]
+            )
+            target_id = str(source_contest_target["id"])
+            settled_contest = resolve_source_contest_effect(
+                source_actor,
+                source_contest_target,
+                spec=source_contest_spec,
+                rules=rule_context,
+            )
+            target_sheet = validate_character_sheet(
+                settled_contest["sheet"]
+            )
+            if settled_contest["result"]["success"]:
+                source_combatant = next(
+                    item
+                    for item in next_encounter.get("combatants", [])
+                    if str(item.get("actor_id") or "") == actor_id
+                )
+                target_combatant = next(
+                    item
+                    for item in next_encounter.get("combatants", [])
+                    if str(item.get("actor_id") or "") == target_id
+                )
+                effect_instance_id = str(
+                    settled_contest["result"]["effect_instance_id"]
+                )
+                target_combatant["body_thief_host"] = {
+                    "source_actor_id": actor_id,
+                    "effect_instance_id": effect_instance_id,
+                    "original_disposition": str(
+                        target_combatant.get("disposition") or "neutral"
+                    ),
+                    "original_death_saves": bool(
+                        target_combatant.get("death_saves", False)
+                    ),
+                    "original_zero_hp_recovery": bool(
+                        target_combatant.get("zero_hp_recovery", False)
+                    ),
+                }
+                target_combatant["controlled_by_actor_id"] = actor_id
+                target_combatant["disposition"] = str(
+                    source_combatant.get("disposition") or "hostile"
+                )
+                target_combatant["death_saves"] = False
+                target_combatant["zero_hp_recovery"] = False
+                source_combatant["position"] = deepcopy(
+                    target_combatant["position"]
+                )
+                source_combatant["inside_host"] = {
+                    "host_actor_id": target_id,
+                    "effect_instance_id": effect_instance_id,
+                    "total_cover": True,
+                }
+                source_combatant["hidden"] = True
+                source_combatant["visible_to_actor_ids"] = []
+                sync_combatant_conditions(
+                    next_encounter, target_id, target_sheet
+                )
+                actor_knowledge_transfers.append(
+                    ActorKnowledgeTransfer(
+                        source_actor_id=target_id,
+                        destination_actor_id=actor_id,
+                        knowledge_key_prefix=(
+                            f"body-thief.{target_id}"
+                        ),
+                    )
+                )
+                additional_updates.append(
+                    CharacterStateUpdate(
+                        character_id=target_id,
+                        sheet=target_sheet,
+                        notes=validate_character_notes(
+                            source_contest_target_record.notes
+                        ),
+                        expected_revision=(
+                            source_contest_target_record.revision
+                        ),
+                    )
+                )
+            core_effect = {
+                **settled_contest["result"],
+                "kind": "source_contest_effect",
+                "activation_payment": activity_activation_payment,
+                "knowledge_transfer_count": (
+                    source_contest_knowledge_count
+                    if settled_contest["result"]["success"]
+                    else 0
+                ),
+                "requires_ruling": False,
+            }
         if turn_undead:
             source_actor = combat_actor_snapshot(actor_id)
             source_actor["sheet"] = applied["sheet"]
@@ -10319,6 +10885,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "second_wind": "dnd5e.core.activity.second_wind",
                 "turn_undead": "dnd5e.core.activity.turn_undead",
                 "random_save_effects": "dnd5e.core.activity.random_save_effects",
+                "source_save_effect": "dnd5e.core.activity.source_save_effect",
+                "source_contest_effect": (
+                    "dnd5e.core.activity.source_contest_effect"
+                ),
             }[str(core_effect["kind"])]
             applied["rule_receipts"] = [
                 *list(applied.get("rule_receipts") or []),
@@ -10359,6 +10929,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 ),
                 *additional_updates,
             ],
+            actor_knowledge_transfers=actor_knowledge_transfers,
             expected_campaign_revision=campaign.revision,
             operation="combat.activity.use",
             actor=principal_id,
@@ -10476,6 +11047,290 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         }
         return remember_idempotent(
             scope, idempotency_key, payload, response, campaign_id=campaign_id
+        )
+
+    @mcp.tool()
+    def character_source_object_attack(
+        character_id: str,
+        object_state: dict[str, Any],
+        weapon_id: str,
+        source_ref: dict[str, Any],
+        reason: str,
+        advantage: bool = False,
+        disadvantage: bool = False,
+        principal_id: str = "system:local",
+        expected_revision: int | None = None,
+        expected_campaign_revision: int | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Attack a source-defined destructible scene object outside combat."""
+        current = characters.get(character_id)
+        require_character_control(current, principal_id)
+        require_outside_active_combat(current, "source object attacks")
+        require_write_contract(expected_revision, idempotency_key)
+        if expected_campaign_revision is None:
+            raise ValueError("expected_campaign_revision is required")
+        campaign_id = str(current.campaign_id or "")
+        campaign = campaigns.get(campaign_id)
+        resolved_branch_id = require_current_branch(campaign_id, None)
+        normalized_reason = str(reason).strip()
+        if not normalized_reason:
+            raise ValueError("source object attack requires a reason")
+        requested = deepcopy(dict(object_state or {}))
+        unknown = set(requested) - {
+            "id",
+            "name",
+            "scene_id",
+            "armor_class",
+            "hit_points",
+            "damage_immunities",
+        }
+        if unknown:
+            raise ValueError(f"unsupported source object fields: {sorted(unknown)}")
+        object_id = str(requested.get("id") or "").strip()
+        object_name = str(requested.get("name") or "").strip()
+        scene_id = str(requested.get("scene_id") or "").strip()
+        armor_class = requested.get("armor_class")
+        hit_point_maximum = requested.get("hit_points")
+        immunities = sorted(
+            {
+                str(item).strip().casefold()
+                for item in requested.get("damage_immunities") or []
+                if str(item).strip()
+            }
+        )
+        if not object_id or not object_name or not scene_id:
+            raise ValueError("source object requires id, name, and scene_id")
+        if (
+            isinstance(armor_class, bool)
+            or not isinstance(armor_class, int)
+            or not 1 <= armor_class <= 30
+        ):
+            raise ValueError("source object armor_class must be an integer from 1 to 30")
+        if (
+            isinstance(hit_point_maximum, bool)
+            or not isinstance(hit_point_maximum, int)
+            or hit_point_maximum < 1
+        ):
+            raise ValueError("source object hit_points must be a positive integer")
+        exact_source = deepcopy(dict(source_ref or {}))
+        required_source_fields = {
+            "module_id",
+            "scene_id",
+            "chunk_id",
+            "page_start",
+            "page_end",
+            "heading_path",
+            "content_sha256",
+        }
+        if set(exact_source) != required_source_fields or not all(
+            exact_source.get(field)
+            for field in ("module_id", "scene_id", "chunk_id", "content_sha256")
+        ):
+            raise ValueError("source object attack requires one complete exact source_ref")
+        if str(exact_source["scene_id"]) != scene_id:
+            raise ValueError("source object scene_id must match source_ref.scene_id")
+        payload = {
+            "character_id": character_id,
+            "object_state": requested,
+            "weapon_id": weapon_id,
+            "source_ref": exact_source,
+            "reason": normalized_reason,
+            "advantage": bool(advantage),
+            "disadvantage": bool(disadvantage),
+            "branch_id": resolved_branch_id,
+        }
+        scope = (
+            f"source-object-attack:{campaign_id}:{resolved_branch_id}:{principal_id}"
+        )
+        replay = replay_idempotent(scope, idempotency_key, payload)
+        if replay is not None:
+            return replay
+        if current.revision != expected_revision:
+            raise ValueError(
+                "character revision conflict: "
+                f"expected {expected_revision}, found {current.revision}"
+            )
+        if campaign.revision != expected_campaign_revision:
+            raise ValueError(
+                "campaign revision conflict: "
+                f"expected {expected_campaign_revision}, found {campaign.revision}"
+            )
+
+        attacker = combat_actor_snapshot(character_id)
+        conditions = {
+            str(item).strip().casefold()
+            for item in dict(attacker.get("sheet") or {}).get("conditions", [])
+        }
+        if conditions & {"dead", "incapacitated", "paralyzed", "stunned", "unconscious"}:
+            raise CombatEngineError("an incapacitated or dead character cannot attack an object")
+        attack = next(
+            (
+                item
+                for item in dict(attacker.get("derived") or {})
+                .get("inventory", {})
+                .get("weapon_attacks", [])
+                if str(item.get("item_id") or "") == str(weapon_id)
+            ),
+            None,
+        )
+        if attack is None:
+            raise LookupError("weapon_id is not an equipped source object attack")
+        if not str(attack.get("damage_expression") or ""):
+            raise CombatEngineError("selected weapon has no damage expression")
+
+        scene_objects = deepcopy(dict(campaign.state.get("scene_objects") or {}))
+        scene_state = deepcopy(dict(scene_objects.get(scene_id) or {}))
+        existing = deepcopy(dict(scene_state.get(object_id) or {}))
+        immutable = {
+            "id": object_id,
+            "name": object_name,
+            "scene_id": scene_id,
+            "armor_class": armor_class,
+            "hit_point_maximum": hit_point_maximum,
+            "damage_immunities": immunities,
+            "source_ref": exact_source,
+        }
+        if existing:
+            if any(existing.get(key) != value for key, value in immutable.items()):
+                raise ValueError(
+                    "source object id already exists with different source-defined data"
+                )
+            if existing.get("destroyed"):
+                raise CombatEngineError("source object is already destroyed")
+            hit_points_before = int(existing["hit_points"])
+        else:
+            hit_points_before = hit_point_maximum
+
+        exhaustion = int(
+            dict(attacker["sheet"].get("combat") or {}).get("exhaustion", 0) or 0
+        )
+        attack_bonus = int(attack["attack_bonus"])
+        attack_disadvantage = bool(disadvantage)
+        if str(attacker["sheet"].get("edition") or "2014") == "2014":
+            attack_disadvantage = attack_disadvantage or exhaustion >= 3
+        else:
+            attack_bonus -= 2 * exhaustion
+        attack_roll = resolve_attack(
+            armor_class=armor_class,
+            attack_bonus=attack_bonus,
+            advantage=bool(advantage),
+            disadvantage=attack_disadvantage,
+        )
+        object_sheet = default_character_sheet()
+        object_sheet["edition"] = str(attacker["sheet"].get("edition") or "2014")
+        object_sheet["combat"]["hp"] = {
+            "value": hit_points_before,
+            "max": hit_point_maximum,
+            "temp": 0,
+        }
+        object_sheet["combat"]["ac"]["override"] = armor_class
+        object_sheet["traits"]["immunities"] = immunities
+        target = {
+            "id": f"scene-object:{scene_id}:{object_id}",
+            "name": object_name,
+            "sheet": validate_character_sheet(object_sheet),
+            "derived": derive_character_sheet(object_sheet),
+        }
+        plan = {
+            "damage_expression": str(attack["damage_expression"]),
+            "damage_type": str(attack.get("damage_type") or ""),
+            "additional_damage": [],
+            "ruleset": object_sheet["edition"],
+            "target_uses_death_saves": False,
+            "knock_out": False,
+            "melee": str(attack.get("attack_type") or "") == "melee",
+        }
+        updated_attacker, updated_target, settled = resolve_attack_damage(
+            attacker,
+            target,
+            plan=plan,
+            attack=attack_roll,
+            rules=effective_rule_context(
+                campaign_id,
+                facts={
+                    "actor_id": character_id,
+                    "target_kind": "source_object",
+                    "target_id": object_id,
+                    "scene_id": scene_id,
+                },
+                branch_id=resolved_branch_id,
+            ),
+        )
+        next_attacker_sheet = deepcopy(updated_attacker["sheet"])
+        ammunition = None
+        if attack.get("ammunition_item_id"):
+            next_attacker_sheet, ammunition = consume_weapon_ammunition(
+                next_attacker_sheet,
+                str(weapon_id),
+            )
+        hit_points_after = int(updated_target["sheet"]["combat"]["hp"]["value"])
+        object_after = {
+            **immutable,
+            "hit_points": hit_points_after,
+            "destroyed": hit_points_after <= 0,
+            "last_attack": {
+                "character_id": character_id,
+                "weapon_id": str(weapon_id),
+                "reason": normalized_reason,
+                "attack": deepcopy(attack_roll),
+                "damage": deepcopy(settled.get("damage")),
+            },
+        }
+        scene_state[object_id] = object_after
+        scene_objects[scene_id] = scene_state
+        next_campaign_state = deepcopy(dict(campaign.state or {}))
+        next_campaign_state["scene_objects"] = scene_objects
+        next_campaign_state["resolution_log"] = [
+            *list(next_campaign_state.get("resolution_log") or []),
+            {
+                "type": "source_object_attack",
+                "actor_id": character_id,
+                "object_id": object_id,
+                "scene_id": scene_id,
+                "attack": deepcopy(attack_roll),
+                "damage": deepcopy(settled.get("damage")),
+                "hit_points_before": hit_points_before,
+                "hit_points_after": hit_points_after,
+            },
+        ][-100:]
+        character_updates = []
+        if next_attacker_sheet != current.sheet:
+            character_updates.append(
+                CharacterStateUpdate(
+                    character_id=character_id,
+                    sheet=validate_character_sheet(next_attacker_sheet),
+                    notes=validate_character_notes(current.notes),
+                    expected_revision=current.revision,
+                )
+            )
+        revisions_result = StateMutationService(storage.database).replace(
+            campaign_id,
+            campaign_state=validate_party_state(next_campaign_state),
+            character_updates=character_updates,
+            expected_campaign_revision=campaign.revision,
+            operation="character.source_object.attack",
+            actor=principal_id,
+            branch_id=resolved_branch_id,
+            idempotency_key=idempotency_key,
+            rule_receipts=list(settled.get("rule_receipts") or []),
+        )
+        response = {
+            "status": "committed",
+            "character": character_view(characters.get(character_id)),
+            "object": object_after,
+            "attack": attack_roll,
+            "damage": settled.get("damage"),
+            "ammunition": ammunition,
+            "campaign_revision": mutation_revision(campaign_id),
+            "revisions": [asdict(item) for item in revisions_result or []],
+        }
+        return remember_idempotent(
+            scope,
+            idempotency_key,
+            payload,
+            response,
+            campaign_id=campaign_id,
         )
 
     @mcp.tool()
@@ -12204,7 +13059,32 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         current = characters.get(character_id)
         require_character_control(current, principal_id)
         require_outside_active_combat(current, "inventory changes")
-        if "attunement" in patch:
+        normalized_patch = deepcopy(patch)
+        patched_mechanics = normalized_patch.get("mechanics")
+        if (
+            isinstance(patched_mechanics, dict)
+            and dict(patched_mechanics).get("spellcasting") is not None
+        ):
+            if current.campaign_id is None:
+                raise ValueError(
+                    "magic item spell hydration requires a campaign-bound character"
+                )
+            current_item = next(
+                (
+                    item
+                    for item in current.sheet.get("inventory", {}).get("items", [])
+                    if str(item.get("id") or "") == item_id
+                ),
+                None,
+            )
+            if current_item is None:
+                raise LookupError(item_id)
+            hydrated = hydrate_magic_item_spell_artifacts(
+                current.campaign_id,
+                {**deepcopy(current_item), **normalized_patch, "id": item_id},
+            )
+            normalized_patch["mechanics"] = deepcopy(hydrated["mechanics"])
+        if "attunement" in normalized_patch:
             campaign = campaigns.get(current.campaign_id) if current.campaign_id else None
             phase = (
                 str(dict(campaign.state or {}).get("game_phase") or PROFILE_LOBBY)
@@ -12222,19 +13102,19 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             if (
                 phase != PROFILE_LOBBY
                 and current_item is not None
-                and patch["attunement"] != current_item.get("attunement")
+                and normalized_patch["attunement"] != current_item.get("attunement")
             ):
                 raise CombatEngineError(
                     "attunement cannot be patched during Play; use a short rest"
                 )
         return update_sheet(
             character_id,
-            update_inventory_item(current.sheet, item_id, patch),
+            update_inventory_item(current.sheet, item_id, normalized_patch),
             operation="character.inventory.update",
             principal_id=principal_id,
             expected_revision=expected_revision,
             idempotency_key=idempotency_key,
-            payload={"item_id": item_id, "patch": patch},
+            payload={"item_id": item_id, "patch": normalized_patch},
         )
 
     @mcp.tool()
@@ -14076,6 +14956,28 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             payload={"resource": resource, "value": value},
         )
 
+    @mcp.tool()
+    def character_exhaustion_set(
+        character_id: str,
+        value: int,
+        principal_id: str = "system:local",
+        expected_revision: int | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Set a character's validated exhaustion level outside combat."""
+        current = characters.get(character_id)
+        require_character_control(current, principal_id)
+        require_outside_active_combat(current, "exhaustion changes")
+        return update_sheet(
+            character_id,
+            set_exhaustion_level(current.sheet, value),
+            operation="character.exhaustion.set",
+            principal_id=principal_id,
+            expected_revision=expected_revision,
+            idempotency_key=idempotency_key,
+            payload={"value": value},
+        )
+
     def character_apply_damage(
         character_id: str,
         parts: list[dict[str, Any]],
@@ -15654,7 +16556,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             for effect in sheet.get("effects", []):
                 if str(effect.get("id")) in holding_ids:
                     effect["active"] = False
-            advanced = advance_effect_durations(sheet, period="encounter")
+            advanced = expire_combat_bound_effects(sheet)
             expired_effects.update(advanced["expired"])
             character_updates.append(
                 CharacterStateUpdate(
@@ -16754,15 +17656,17 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         campaign_id: str,
         query: str,
         top_k: int = 8,
+        module_ids: list[str] | None = None,
         principal_id: str = "system:local",
     ) -> list[dict[str, Any]]:
-        """Search imported adventure content using SQLite FTS and optional Chroma vectors."""
+        """Search adventure content, optionally scoped to exact active module revisions."""
         membership = access.require_campaign(campaign_id, principal_id)
         embedder, vectors = storage.dense_components()
         hits = modules.search(
             campaign_id=campaign_id,
             query=query,
             top_k=top_k,
+            module_ids=module_ids,
             embedder=embedder,
             vector_store=vectors,
         )
@@ -21955,6 +22859,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "effect_add",
             "effect_remove",
             "resource_set",
+            "exhaustion_set",
             "damage",
             "heal",
             "rest",
@@ -21993,6 +22898,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             result = character_resource_set(
                 character_id,
                 required(data, "resource"),
+                required(data, "value"),
+                principal_id,
+                expected_revision,
+                idempotency_key,
+            )
+        elif action == "exhaustion_set":
+            result = character_exhaustion_set(
+                character_id,
                 required(data, "value"),
                 principal_id,
                 expected_revision,
@@ -22110,7 +23023,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     @mcp.tool()
     def character_action(
         character_id: str,
-        action: Literal["cast_spell", "use_activity"],
+        action: Literal["cast_spell", "use_activity", "attack_source_object"],
         payload: dict[str, Any],
         principal_id: str = "system:local",
         expected_revision: int | None = None,
@@ -22131,13 +23044,27 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 expected_revision=expected_revision,
                 idempotency_key=idempotency_key,
             )
-        else:
+        elif action == "use_activity":
             result = character_use_activity(
                 character_id,
                 required(data, "activity_id"),
                 data.get("declaration"),
                 principal_id,
                 expected_revision,
+                idempotency_key,
+            )
+        else:
+            result = character_source_object_attack(
+                character_id,
+                required(data, "object"),
+                required(data, "weapon_id"),
+                required(data, "source_ref"),
+                required(data, "reason"),
+                data.get("advantage", False),
+                data.get("disadvantage", False),
+                principal_id,
+                expected_revision,
+                required(data, "expected_campaign_revision"),
                 idempotency_key,
             )
         return facade_result(action, result)
@@ -22379,6 +23306,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             sheet = validate_character_sheet(actor.sheet)
             progression = dict(sheet["progression"])
             hp = dict(sheet["combat"]["hp"])
+            effective_hp = dict(derive_character_sheet(sheet)["hit_points"])
             conditions = {str(item) for item in sheet.get("conditions") or []}
             status = "dead" if "dead" in conditions else str(member["status"])
             if status == "dead" and "dead" not in conditions:
@@ -22402,12 +23330,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "level": int(progression["level"]),
                 "xp": int(progression["xp"]),
                 "hit_points": {
-                    "current": int(hp["value"]),
-                    "maximum": int(hp["max"]),
+                    "current": int(effective_hp["value"]),
+                    "maximum": int(effective_hp["max"]),
                     "temporary": int(hp["temp"]),
                     "conditions": sorted(conditions),
                 },
                 "resources": resources,
+                "wallet": deepcopy(dict(sheet["inventory"]["wallet"])),
                 "equipment": sorted(str(item["id"]) for item in sheet["inventory"]["items"]),
                 "knowledge_scope_actor_id": actor.id,
             }
@@ -23661,9 +24590,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         "character_inventory_transfer",
         "character_effect_add",
         "character_effect_remove",
+        "character_exhaustion_set",
         "character_rest",
         "character_cast_spell",
         "character_use_activity",
+        "character_source_object_attack",
         "character_resource_set",
         "character_spell_prepare_list",
         "character_memory_add",

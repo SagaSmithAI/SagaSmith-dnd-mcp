@@ -34,6 +34,14 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--close-transition-json", type=json.loads)
     parser.add_argument("--max-turns", type=int, default=100)
     parser.add_argument("--checkpoint-label", required=True)
+    parser.add_argument(
+        "--defer-checkpoint",
+        action="store_true",
+        help=(
+            "Commit the chase without creating its terminal snapshot so the caller "
+            "can batch the source outcome and scene transition into one checkpoint."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -75,6 +83,26 @@ def _party_ids(path: Path) -> list[str]:
     if len(actor_ids) != len(set(actor_ids)):
         raise ValueError("party report actor ids must be unique")
     return actor_ids
+
+
+async def _finalize_chase_checkpoint(
+    client: ExposureClient,
+    *,
+    campaign_id: str,
+    run_id: str,
+    label: str,
+    chase_id: str,
+    defer_checkpoint: bool,
+) -> dict[str, Any] | None:
+    if defer_checkpoint:
+        return None
+    return await _checkpoint(
+        client,
+        campaign_id=campaign_id,
+        run_id=run_id,
+        label=label,
+        checkpoint_id=f"chase:{chase_id}",
+    )
 
 
 async def _campaign(client: ExposureClient, campaign_id: str) -> dict[str, Any]:
@@ -224,12 +252,13 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                 raise RuntimeError("chase exceeded max-turns without a source outcome")
             if not chase.get("outcome"):
                 raise RuntimeError("chase ended without an outcome")
-            checkpoint = await _checkpoint(
+            checkpoint = await _finalize_chase_checkpoint(
                 client,
                 campaign_id=args.campaign_id,
                 run_id=args.run_id,
                 label=args.checkpoint_label,
-                checkpoint_id=f"chase:{chase['id']}",
+                chase_id=str(chase["id"]),
+                defer_checkpoint=args.defer_checkpoint,
             )
             final_actors = await _actors(client, args.campaign_id, participant_ids)
             return {

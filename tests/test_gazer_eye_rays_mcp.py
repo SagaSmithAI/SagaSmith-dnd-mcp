@@ -287,4 +287,41 @@ def test_eye_rays_commit_random_saves_and_expire_at_source_turn_start(
             not item["active"] for item in target_expired["sheet"]["effects"]
         )
 
+        reapplied = await _raw(
+            server,
+            "combat_use_activity",
+            {
+                "campaign_id": campaign["id"],
+                "actor_id": gazer["id"],
+                "activity_id": "eye-rays-action",
+                "declaration": {"target_ids": [target["id"]]},
+                "expected_revision": source_turn["campaign_revision"],
+                "idempotency_key": "eye-rays-before-combat-end",
+            },
+        )
+        assert reapplied["status"] == "committed"
+        ended = await _raw(
+            server,
+            "combat_end",
+            {
+                "campaign_id": campaign["id"],
+                "outcome": {
+                    "status": "interrupted",
+                    "summary": "The encounter ends before the gazer's next turn.",
+                },
+                "expected_revision": reapplied["campaign_revision"],
+                "idempotency_key": "end-before-source-turn",
+            },
+        )
+        assert len(ended["effects_expired"]) == 2
+        target_after_end = await _call(
+            server, "character_get", {"character_id": target["id"]}
+        )
+        assert target_after_end["sheet"]["conditions"] == []
+        ended_effects = target_after_end["sheet"]["effects"][-2:]
+        assert all(
+            not effect["active"] and effect["ended_reason"] == "combat_ended"
+            for effect in ended_effects
+        )
+
     asyncio.run(exercise())

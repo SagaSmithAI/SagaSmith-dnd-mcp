@@ -35,12 +35,20 @@ DEFERRED_CHECKPOINT_ACTIONS = frozenset(
         "initialize-source-state",
         "stand-up",
         "use-activity",
+        "cast-source-spell",
+        "cast-healing-spell",
         "record-event",
         "record-outcome",
         "register-replacement",
         "prepare-narrative-npc",
         "provision-source-item",
+        "pool-coins",
         "transfer-source-item",
+        "claim-party-item",
+        "apply-source-effect",
+        "remove-source-effect",
+        "set-source-exhaustion",
+        "attack-source-object",
         "acquire-loot",
         "spend-coins",
         "spend-item",
@@ -69,6 +77,8 @@ def _arguments() -> argparse.Namespace:
             "apply-damage",
             "stand-up",
             "use-activity",
+            "cast-source-spell",
+            "cast-healing-spell",
             "branch-from-snapshot",
             "initialize-clock",
             "advance-time",
@@ -76,7 +86,13 @@ def _arguments() -> argparse.Namespace:
             "long-rest",
             "recover-stable",
             "provision-source-item",
+            "pool-coins",
             "transfer-source-item",
+            "claim-party-item",
+            "apply-source-effect",
+            "remove-source-effect",
+            "set-source-exhaustion",
+            "attack-source-object",
             "acquire-loot",
             "spend-coins",
             "spend-item",
@@ -146,6 +162,14 @@ def _arguments() -> argparse.Namespace:
             "the action occurs"
         ),
     )
+    parser.add_argument(
+        "--occurrence-scene-id",
+        default="",
+        help=(
+            "Current scene where a transition begins when its cited source text "
+            "is indexed under a different scene"
+        ),
+    )
     parser.add_argument("--location-key", default="")
     parser.add_argument("--source-excerpt", default="")
     parser.add_argument(
@@ -204,6 +228,13 @@ def _arguments() -> argparse.Namespace:
     )
     parser.add_argument("--activity-declaration-json", type=json.loads)
     parser.add_argument("--activity-reason", default="")
+    parser.add_argument("--spell-actor-id", default="")
+    parser.add_argument("--spell-id", default="")
+    parser.add_argument("--spell-source-item-id", default="")
+    parser.add_argument("--spell-target-id", default="")
+    parser.add_argument("--spell-cast-level", type=int)
+    parser.add_argument("--spell-component-ruling-json", type=json.loads)
+    parser.add_argument("--spell-reason", default="")
     parser.add_argument("--snapshot-slot", type=int)
     parser.add_argument("--branch-name", default="")
     parser.add_argument(
@@ -225,9 +256,22 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--item-equip-slot", default="")
     parser.add_argument("--item-reason", default="")
     parser.add_argument("--transfer-character-id", default="")
+    parser.add_argument("--transfer-recipient-character-id", default="")
     parser.add_argument("--transfer-item-id", default="")
     parser.add_argument("--transfer-item-quantity", type=int)
     parser.add_argument("--transfer-reason", default="")
+    parser.add_argument("--pool-actor-id", default="")
+    parser.add_argument("--pool-denomination", default="")
+    parser.add_argument("--pool-amount", type=int)
+    parser.add_argument("--pool-reason", default="")
+    parser.add_argument("--effect-character-id", default="")
+    parser.add_argument("--effect-id", default="")
+    parser.add_argument("--effect-json", type=json.loads)
+    parser.add_argument("--effect-reason", default="")
+    parser.add_argument("--exhaustion-level", type=int)
+    parser.add_argument("--object-json", type=json.loads)
+    parser.add_argument("--object-weapon-id", default="")
+    parser.add_argument("--object-reason", default="")
     parser.add_argument("--loot-acquisition-id", default="")
     parser.add_argument("--loot-coins-json", type=json.loads, default={})
     parser.add_argument("--loot-item-json", action="append", type=json.loads, default=[])
@@ -364,21 +408,6 @@ async def _query_source(
         raise ValueError("query-source requires --source-query")
     if top_k < 1 or top_k > 50:
         raise ValueError("--source-top-k must be between 1 and 50")
-    search_result = await client.domain(
-        "module_search",
-        {
-            "campaign_id": campaign_id,
-            "query": normalized_query,
-            "top_k": top_k,
-        },
-    )
-    hits = (
-        search_result.get("result")
-        if isinstance(search_result, dict) and isinstance(search_result.get("result"), list)
-        else search_result
-    )
-    if not isinstance(hits, list) or any(not isinstance(hit, dict) for hit in hits):
-        raise RuntimeError("module_search returned an invalid result collection")
     manifest_result = await client.domain(
         "playthrough_manifest",
         {"campaign_id": campaign_id, "action": "get"},
@@ -389,22 +418,34 @@ async def _query_source(
         )
         or ""
     )
+    search_arguments: dict[str, Any] = {
+        "campaign_id": campaign_id,
+        "query": normalized_query,
+        "top_k": top_k,
+    }
     if preferred_module_id:
-        hits = [
-            hit
-            for _, hit in sorted(
-                enumerate(hits),
-                key=lambda item: (
-                    str(
-                        item[1].get("source_id")
-                        or dict(item[1].get("metadata") or {}).get("module_id")
-                        or ""
-                    )
-                    != preferred_module_id,
-                    item[0],
-                ),
-            )
-        ]
+        search_arguments["module_ids"] = [preferred_module_id]
+    search_result = await client.domain(
+        "module_search",
+        search_arguments,
+    )
+    hits = (
+        search_result.get("result")
+        if isinstance(search_result, dict) and isinstance(search_result.get("result"), list)
+        else search_result
+    )
+    if not isinstance(hits, list) or any(not isinstance(hit, dict) for hit in hits):
+        raise RuntimeError("module_search returned an invalid result collection")
+    if preferred_module_id and any(
+        str(
+            hit.get("source_id")
+            or dict(hit.get("metadata") or {}).get("module_id")
+            or preferred_module_id
+        )
+        != preferred_module_id
+        for hit in hits
+    ):
+        raise RuntimeError("module_search returned a hit outside the current manifest module")
     expanded = []
     if expand:
         for hit in hits:
@@ -602,8 +643,144 @@ def _extend_manifest_for_module_revision(
     return value
 
 
+def _remap_replacement_level_endings(
+    manifest: dict[str, Any],
+    *,
+    predecessor_actor_id: str,
+    replacement_actor_id: str,
+) -> None:
+    """Keep party-level endings bound to the active party slot.
+
+    This deliberately remaps only level checks. Other actor-value endings can
+    describe the predecessor's own fate and must remain bound to that actor.
+    """
+
+    for condition in list(dict(manifest.get("ending") or {}).get("conditions") or []):
+        for check in list(dict(condition).get("all_of") or []):
+            if (
+                str(dict(check).get("kind") or "") == "actor_value"
+                and str(dict(check).get("path") or "") == "sheet.progression.level"
+                and str(dict(check).get("actor_id") or "") == predecessor_actor_id
+            ):
+                check["actor_id"] = replacement_actor_id
+
+
+async def _remap_ending_sources_for_module_revision(
+    client: ExposureClient,
+    manifest: dict[str, Any],
+    *,
+    campaign_id: str,
+    new_module_id: str,
+    source_asset_sha256: str,
+) -> dict[str, Any]:
+    """Resolve ending citations against the newly ingested module revision."""
+
+    value = deepcopy(manifest)
+    module_ids = {str(item) for item in list(value.get("module_ids") or [])}
+    for condition in list(dict(value.get("ending") or {}).get("conditions") or []):
+        source_ref = dict(dict(condition).get("source_ref") or {})
+        if (
+            str(source_ref.get("asset_sha256") or "").casefold()
+            != source_asset_sha256.casefold()
+            or str(source_ref.get("module_id") or "") == new_module_id
+            or str(source_ref.get("module_id") or "") not in module_ids
+        ):
+            continue
+        excerpt = str(source_ref.get("excerpt") or "").strip()
+        content_sha256 = str(source_ref.get("chunk_content_sha256") or "").casefold()
+        if not excerpt or not content_sha256:
+            raise ValueError(
+                "module refresh cannot remap an ending citation without its excerpt "
+                "and chunk content hash"
+            )
+        search_result = await client.domain(
+            "module_search",
+            {
+                "campaign_id": campaign_id,
+                "query": excerpt,
+                "top_k": 50,
+                "module_ids": [new_module_id],
+            },
+        )
+        hits = (
+            search_result.get("result")
+            if isinstance(search_result, dict)
+            and isinstance(search_result.get("result"), list)
+            else search_result
+        )
+        if not isinstance(hits, list):
+            raise RuntimeError("module_search returned an invalid result collection")
+        matches: list[dict[str, Any]] = []
+        for hit in hits:
+            if not isinstance(hit, dict):
+                continue
+            chunk_id = str(hit.get("chunk_id") or hit.get("id") or "")
+            if not chunk_id:
+                continue
+            expanded = await client.domain("module_expand", {"chunk_id": chunk_id})
+            exact_ref = dict(dict(expanded).get("source_ref") or {})
+            if (
+                str(exact_ref.get("module_id") or "") == new_module_id
+                and str(exact_ref.get("content_sha256") or "").casefold()
+                == content_sha256
+                and _normalized_source_text(excerpt)
+                in _normalized_source_text(dict(expanded).get("content"))
+            ):
+                matches.append(exact_ref)
+        if len(matches) != 1:
+            raise ValueError(
+                "module refresh must resolve each ending citation to exactly one "
+                "content-hash-matched chunk in the new revision"
+            )
+        exact_ref = matches[0]
+        previous_scene_id = str(source_ref.get("scene_id") or "")
+        replacement_scene_id = str(exact_ref["scene_id"])
+        condition["source_ref"] = {
+            **source_ref,
+            "page_start": int(exact_ref["page_start"]),
+            "page_end": int(exact_ref["page_end"]),
+            "heading_path": list(exact_ref["heading_path"]),
+            "chunk_content_sha256": str(exact_ref["content_sha256"]).casefold(),
+            "module_id": new_module_id,
+            "scene_id": replacement_scene_id,
+            "chunk_id": str(exact_ref["chunk_id"]),
+        }
+        for check in list(dict(condition).get("all_of") or []):
+            if (
+                str(dict(check).get("kind") or "") == "manifest_value"
+                and str(dict(check).get("path") or "") == "current.scene_id"
+                and str(dict(check).get("value") or "") == previous_scene_id
+            ):
+                check["value"] = replacement_scene_id
+    for replacement in list(dict(value.get("party") or {}).get("replacements") or []):
+        _remap_replacement_level_endings(
+            value,
+            predecessor_actor_id=str(
+                dict(replacement).get("predecessor_actor_id") or ""
+            ),
+            replacement_actor_id=str(
+                dict(replacement).get("replacement_actor_id") or ""
+            ),
+        )
+    return value
+
+
 def _module_refresh_manifest_action(old_module_id: str, new_module_id: str) -> str:
     return "replace" if new_module_id == old_module_id else "extend_modules"
+
+
+def _module_refresh_manifest_identity(
+    *,
+    old_module_id: str,
+    new_module_id: str,
+    refresh_identity: str,
+    manifest: dict[str, Any],
+) -> str:
+    request_hash = _idempotency_request_hash(manifest)[:24]
+    return (
+        f"refresh-module-manifest:{old_module_id}:{new_module_id}:"
+        f"{refresh_identity}:{request_hash}"
+    )
 
 
 def _normalized_source_text(value: Any) -> str:
@@ -687,6 +864,14 @@ def _idempotency_request_hash(payload: dict[str, Any]) -> str:
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def _module_refresh_identity(
     *,
     old_module_id: str,
@@ -694,16 +879,13 @@ def _module_refresh_identity(
     source_path: Path,
     title: str,
     parser_revision: str,
+    source_sha256: str = "",
 ) -> str:
-    digest = hashlib.sha256()
-    with source_path.open("rb") as source:
-        for chunk in iter(lambda: source.read(1024 * 1024), b""):
-            digest.update(chunk)
     serialized = json.dumps(
         {
             "old_module_id": old_module_id,
             "source_key": source_key,
-            "source_sha256": digest.hexdigest(),
+            "source_sha256": source_sha256 or _file_sha256(source_path),
             "title": title,
             "parser_revision": parser_revision,
         },
@@ -1034,6 +1216,7 @@ def _party_member(actor: dict[str, Any], selection: dict[str, Any]) -> dict[str,
     sheet = dict(actor["sheet"])
     progression = dict(sheet["progression"])
     hp = dict(sheet["combat"]["hp"])
+    effective_hp = dict(dict(actor.get("derived") or {}).get("hit_points") or {})
     return {
         "actor_id": actor_id,
         "name": str(actor["name"]),
@@ -1043,11 +1226,12 @@ def _party_member(actor: dict[str, Any], selection: dict[str, Any]) -> dict[str,
         "level": int(progression["level"]),
         "xp": int(progression["xp"]),
         "hit_points": {
-            "current": int(hp["value"]),
-            "maximum": int(hp["max"]),
+            "current": int(effective_hp.get("value", hp["value"])),
+            "maximum": int(effective_hp.get("max", hp["max"])),
             "temporary": int(hp["temp"]),
         },
         "resources": deepcopy(dict(sheet.get("resources") or {})),
+        "wallet": deepcopy(dict(sheet["inventory"]["wallet"])),
         "equipment": sorted(str(item["id"]) for item in sheet["inventory"]["items"]),
         "knowledge_scope_actor_id": actor_id,
     }
@@ -1297,6 +1481,11 @@ async def _register_replacement(
             "handoff_event_id": f"pending:{_token(run_id + replacement_id)}",
         }
     )
+    _remap_replacement_level_endings(
+        prospective,
+        predecessor_actor_id=predecessor_id,
+        replacement_actor_id=replacement_id,
+    )
     validate_playthrough_manifest(prospective)
 
     campaign = await _campaign(client, campaign_id)
@@ -1421,14 +1610,21 @@ async def _advance_scene(
     run_id: str,
     occurrence_id: str,
     scene_id: str,
+    source_scene_id: str,
+    source_excerpt: str,
+    source_ref: dict[str, Any] | None,
     objective: str,
     mark_visited: bool,
     reachable_scene_ids: list[str],
     excluded_scenes: list[dict[str, Any]],
+    occurrence_scene_id: str = "",
 ) -> dict[str, Any]:
     scene_identity = _occurrence_identity(occurrence_id, "advance-scene")
-    if not scene_id:
-        raise ValueError("advance-scene requires --scene-id")
+    if not all((scene_id, source_scene_id, source_excerpt)):
+        raise ValueError(
+            "advance-scene requires --scene-id, --source-scene-id, "
+            "--source-excerpt, and --source-ref-json"
+        )
     scene = await client.domain(
         "module_query",
         {
@@ -1441,6 +1637,74 @@ async def _advance_scene(
         raise RuntimeError("scene is redacted or does not belong to this campaign")
     current = await _manifest_get(client, campaign_id)
     manifest = deepcopy(current["manifest"])
+    transition_from_scene_id = occurrence_scene_id.strip() or source_scene_id
+    occurrence_scene = await client.domain(
+        "module_query",
+        {
+            "campaign_id": campaign_id,
+            "view": "scene",
+            "payload": {"scene_id": transition_from_scene_id},
+        },
+    )
+    if (
+        occurrence_scene.get("redacted")
+        or str(occurrence_scene.get("scene_id") or "") != transition_from_scene_id
+    ):
+        raise RuntimeError("transition occurrence scene is redacted or invalid")
+    source_scene = await client.domain(
+        "module_query",
+        {
+            "campaign_id": campaign_id,
+            "view": "scene",
+            "payload": {"scene_id": source_scene_id},
+        },
+    )
+    exact_ref = _validate_source_ref(
+        source_scene,
+        source_ref,
+        excerpt=source_excerpt,
+    )
+    current_scene_id = str(dict(manifest.get("current") or {}).get("scene_id") or "")
+    transitions = deepcopy(
+        dict(
+            dict(manifest.get("world_state") or {}).get("scene_transitions")
+            or {}
+        )
+    )
+    transition_record = {
+        "from_scene_id": transition_from_scene_id,
+        "to_scene_id": scene_id,
+        "source_excerpt": source_excerpt,
+        "source_ref": exact_ref,
+    }
+    existing_transition = transitions.get(scene_identity)
+    exact_retry = (
+        existing_transition == transition_record
+        and current_scene_id == scene_id
+    )
+    initial_scene_selection = (
+        not current_scene_id
+        and transition_from_scene_id == scene_id
+        and not transitions
+    )
+    if (
+        current_scene_id != transition_from_scene_id
+        and not exact_retry
+        and not initial_scene_selection
+    ):
+        raise ValueError(
+            "advance-scene occurrence scene must be the manifest current scene "
+            "or the exact initial scene"
+        )
+    if existing_transition is not None and existing_transition != transition_record:
+        raise ValueError(
+            "advance-scene occurrence id already exists with different transition evidence"
+        )
+    transitions[scene_identity] = transition_record
+    manifest["world_state"] = {
+        **deepcopy(dict(manifest.get("world_state") or {})),
+        "scene_transitions": transitions,
+    }
     module_id = str(scene["module_id"])
     if module_id not in manifest["module_ids"]:
         raise RuntimeError("scene module is not declared by the playthrough manifest")
@@ -2395,6 +2659,43 @@ async def _record_outcome(
         )
         if actor.get("campaign_id") != campaign_id:
             raise ValueError("every tracked outcome NPC must belong to the campaign")
+
+    current_fact_rows = _facade_value(
+        await client.domain(
+            "memory_query",
+            {
+                "campaign_id": campaign_id,
+                "view": "list",
+                "payload": {"include_inactive": False},
+            },
+        )
+    )
+    if not isinstance(current_fact_rows, list) or any(
+        not isinstance(item, dict) for item in current_fact_rows
+    ):
+        raise RuntimeError("memory_query returned an invalid fact collection")
+    current_facts = {
+        str(item.get("fact_key") or ""): item
+        for item in current_fact_rows
+        if str(item.get("fact_key") or "")
+    }
+    for fact in normalized_facts:
+        if str(fact.get("action", "upsert")) != "upsert":
+            continue
+        current_fact = current_facts.get(str(fact["fact_key"]))
+        if current_fact is None:
+            continue
+        current_revision_id = str(current_fact.get("revision_id") or "")
+        if not current_revision_id:
+            raise RuntimeError("memory_query returned an existing fact without revision_id")
+        supplied_revision_id = str(fact.get("expected_revision_id") or "")
+        if supplied_revision_id and supplied_revision_id != current_revision_id:
+            raise ValueError(
+                "fact expected_revision_id is stale: "
+                f"{fact['fact_key']} expected {supplied_revision_id}, "
+                f"current {current_revision_id}"
+            )
+        fact["expected_revision_id"] = current_revision_id
 
     progress_rows = await client.domain(
         "module_query",
@@ -3651,6 +3952,477 @@ async def _use_activity(
     }
 
 
+async def _cast_source_spell(
+    client: ExposureClient,
+    *,
+    campaign_id: str,
+    run_id: str,
+    occurrence_id: str,
+    scene_id: str,
+    source_scene_id: str,
+    location_key: str,
+    source_excerpt: str,
+    source_ref: dict[str, Any] | None,
+    actor_id: str,
+    spell_id: str,
+    source_item_id: str,
+    cast_level: int | None,
+    component_ruling: dict[str, Any] | None,
+    reason: str,
+    knowledge_actor_ids: list[str],
+    defer_checkpoint: bool = False,
+) -> dict[str, Any]:
+    cast_identity = _occurrence_identity(occurrence_id, "cast-source-spell")
+    normalized_actor_id = actor_id.strip()
+    normalized_spell_id = spell_id.strip()
+    normalized_item_id = source_item_id.strip()
+    normalized_reason = reason.strip()
+    if not all(
+        (
+            scene_id,
+            source_scene_id,
+            location_key,
+            source_excerpt.strip(),
+            normalized_actor_id,
+            normalized_spell_id,
+            normalized_item_id,
+            normalized_reason,
+        )
+    ):
+        raise ValueError(
+            "cast-source-spell requires occurrence and source scenes, location, "
+            "excerpt, actor, spell, source item, and reason"
+        )
+    if cast_level is not None and cast_level < 0:
+        raise ValueError("spell cast level must be non-negative")
+    occurrence_scene = await client.domain(
+        "module_query",
+        {
+            "campaign_id": campaign_id,
+            "view": "scene",
+            "payload": {"scene_id": scene_id},
+        },
+    )
+    cited_scene = await client.domain(
+        "module_query",
+        {
+            "campaign_id": campaign_id,
+            "view": "scene",
+            "payload": {"scene_id": source_scene_id},
+        },
+    )
+    exact_ref = _validate_source_ref(
+        cited_scene,
+        source_ref,
+        excerpt=source_excerpt,
+    )
+    if location_key not in {
+        str(item.get("key") or "") for item in _scene_locations(occurrence_scene)
+    }:
+        raise ValueError("cast-source-spell location is not present in the occurrence scene")
+    actor = await client.domain(
+        "character_query",
+        {"view": "get", "payload": {"character_id": normalized_actor_id}},
+    )
+    if actor.get("campaign_id") != campaign_id:
+        raise ValueError("cast-source-spell actor does not belong to the campaign")
+    source_item = next(
+        (
+            dict(item)
+            for item in actor["sheet"]["inventory"]["items"]
+            if str(item.get("id") or "") == normalized_item_id
+        ),
+        None,
+    )
+    if source_item is None:
+        raise ValueError("cast-source-spell actor does not carry the source item")
+    before_charges = int(dict(source_item.get("charges") or {}).get("value", 0) or 0)
+    payload: dict[str, Any] = {
+        "spell_id": normalized_spell_id,
+        "source_item_id": normalized_item_id,
+    }
+    if cast_level is not None:
+        payload["cast_level"] = cast_level
+    if component_ruling is not None:
+        payload["component_ruling"] = deepcopy(component_ruling)
+    acted = await client.domain(
+        "character_action",
+        {
+            "character_id": normalized_actor_id,
+            "action": "cast_spell",
+            "payload": payload,
+            "expected_revision": actor["revision"],
+            "idempotency_key": _mutation_key(
+                run_id,
+                "source-spell-cast",
+                cast_identity,
+            ),
+        },
+    )
+    if acted.get("status") not in {"committed", "pending_ruling"}:
+        raise RuntimeError(
+            f"source spell cast did not consume its canonical resources: {acted.get('status')}"
+        )
+    payment = dict(dict(acted.get("result") or {}).get("payment") or {})
+    if (
+        payment.get("economy") != "item_charges"
+        or str(payment.get("item_id") or "") != normalized_item_id
+        or isinstance(payment.get("cost"), bool)
+        or not isinstance(payment.get("cost"), int)
+        or int(payment["cost"]) <= 0
+    ):
+        raise RuntimeError("source spell cast returned invalid item-charge payment")
+    character_after = dict(acted.get("character") or {})
+    item_after = next(
+        (
+            dict(item)
+            for item in dict(character_after.get("sheet") or {})
+            .get("inventory", {})
+            .get("items", [])
+            if str(item.get("id") or "") == normalized_item_id
+        ),
+        None,
+    )
+    if item_after is None:
+        raise RuntimeError("source spell cast removed the source item unexpectedly")
+    after_charges = int(dict(item_after.get("charges") or {}).get("value", 0) or 0)
+    cast_recovered = after_charges == before_charges
+    if not cast_recovered and after_charges != before_charges - int(payment["cost"]):
+        raise RuntimeError("source spell cast charge balance does not match its payment")
+
+    branches = await client.domain(
+        "branch_query",
+        {"campaign_id": campaign_id, "view": "list"},
+    )
+    branch = next((item for item in branches if item.get("is_current")), None)
+    if branch is None:
+        raise RuntimeError("campaign has no current branch")
+    recipients = list(dict.fromkeys([normalized_actor_id, *knowledge_actor_ids]))
+    campaign = await _campaign(client, campaign_id)
+    continuity_payload = {
+        "event": {
+            "summary": normalized_reason,
+            "event_type": "magic_item_spell_cast",
+            "audience_scope": "party",
+            "payload": {
+                "scene_id": scene_id,
+                "source_scene_id": source_scene_id,
+                "location_key": location_key,
+                "occurrence_id": cast_identity,
+                "actor_id": normalized_actor_id,
+                "spell_id": normalized_spell_id,
+                "source_item_id": normalized_item_id,
+                "payment": payment,
+                "resolution_status": acted["status"],
+                "source_excerpt": source_excerpt,
+                "source_ref": exact_ref,
+            },
+        },
+        "actor_knowledge": [
+            {
+                "actor_id": recipient,
+                "knowledge_key": (
+                    f"playthrough.{_token(run_id)}.{_token(scene_id)}."
+                    f"source_spell.{_token(cast_identity)}"
+                ),
+                "proposition": normalized_reason,
+                "disclosure_scope": "owner",
+            }
+            for recipient in recipients
+        ],
+        "branch_id": str(branch["id"]),
+    }
+    if not defer_checkpoint:
+        continuity_payload["snapshot"] = {
+            "label": (
+                f"Full playthrough source spell: {actor['name']} cast "
+                f"{normalized_spell_id}"
+            )
+        }
+    committed = await client.domain(
+        "continuity_commit",
+        {
+            "campaign_id": campaign_id,
+            "payload": continuity_payload,
+            "expected_revision": campaign["revision"],
+            "idempotency_key": _mutation_key(
+                run_id,
+                "source-spell-continuity",
+                cast_identity,
+            ),
+        },
+    )
+    synced = await _manifest_mutation(
+        client,
+        campaign_id=campaign_id,
+        action="sync",
+        run_id=run_id,
+        identity=f"source-spell-sync:{cast_identity}",
+    )
+    return {
+        "scene": {
+            "scene_id": scene_id,
+            "source_scene_id": source_scene_id,
+            "location_key": location_key,
+            "source_ref": exact_ref,
+        },
+        "actor": {"id": normalized_actor_id, "name": actor["name"]},
+        "occurrence_id": cast_identity,
+        "spell_id": normalized_spell_id,
+        "source_item_id": normalized_item_id,
+        "cast": acted,
+        "cast_recovered": cast_recovered,
+        "charges": {"before": before_charges, "after": after_charges},
+        "knowledge_actor_ids": recipients,
+        "continuity": committed,
+        "sync": synced,
+    }
+
+
+async def _cast_healing_spell(
+    client: ExposureClient,
+    *,
+    campaign_id: str,
+    run_id: str,
+    occurrence_id: str,
+    scene_id: str,
+    source_excerpt: str,
+    source_ref: dict[str, Any] | None,
+    location_key: str,
+    actor_id: str,
+    target_id: str,
+    spell_id: str,
+    cast_level: int | None,
+    component_ruling: dict[str, Any] | None,
+    reason: str,
+    knowledge_actor_ids: list[str],
+    defer_checkpoint: bool = False,
+) -> dict[str, Any]:
+    cast_identity = _occurrence_identity(occurrence_id, "cast-healing-spell")
+    normalized_actor_id = actor_id.strip()
+    normalized_target_id = target_id.strip()
+    normalized_spell_id = spell_id.strip()
+    normalized_reason = reason.strip()
+    if not all(
+        (
+            scene_id,
+            location_key,
+            source_excerpt.strip(),
+            normalized_actor_id,
+            normalized_target_id,
+            normalized_spell_id,
+            normalized_reason,
+        )
+    ):
+        raise ValueError(
+            "cast-healing-spell requires scene, location, source, caster, target, "
+            "spell, and reason"
+        )
+    scene = await client.domain(
+        "module_query",
+        {
+            "campaign_id": campaign_id,
+            "view": "scene",
+            "payload": {"scene_id": scene_id},
+        },
+    )
+    exact_ref = _validate_source_ref(scene, source_ref, excerpt=source_excerpt)
+    if location_key not in {str(item.get("key") or "") for item in _scene_locations(scene)}:
+        raise ValueError("cast-healing-spell location is not present in the scene atlas")
+    actor = await client.domain(
+        "character_query",
+        {"view": "get", "payload": {"character_id": normalized_actor_id}},
+    )
+    target = await client.domain(
+        "character_query",
+        {"view": "get", "payload": {"character_id": normalized_target_id}},
+    )
+    if actor.get("campaign_id") != campaign_id or target.get("campaign_id") != campaign_id:
+        raise ValueError("cast-healing-spell actors must belong to the campaign")
+    spell = next(
+        (
+            dict(item)
+            for item in dict(actor.get("sheet") or {}).get("content", {}).get("spells", [])
+            if str(item.get("id") or "") == normalized_spell_id
+        ),
+        None,
+    )
+    resolution = dict((spell or {}).get("resolution") or {})
+    healing = dict(resolution.get("healing") or {})
+    if resolution.get("kind") != "healing" or not healing:
+        raise ValueError("cast-healing-spell requires a structured healing spell card")
+    spell_level = int((spell or {}).get("level", 0) or 0)
+    paid_level = spell_level if cast_level is None else cast_level
+    if paid_level < max(1, spell_level):
+        raise ValueError("cast-healing-spell cast level is below the spell level")
+    slot_base_level = int(healing.get("slot_base_level", spell_level) or spell_level)
+    base_dice = str(healing.get("base_dice") or "").strip()
+    per_slot_dice = str(healing.get("per_slot_dice") or "").strip()
+    if not base_dice:
+        raise ValueError("cast-healing-spell healing card has no base dice")
+    expression_parts = [base_dice]
+    expression_parts.extend(
+        per_slot_dice
+        for _ in range(max(0, paid_level - slot_base_level))
+        if per_slot_dice
+    )
+    if healing.get("add_spellcasting_modifier"):
+        ability = str(dict(actor["sheet"].get("spellcasting") or {}).get("ability") or "")
+        score = int(dict(actor["sheet"].get("abilities") or {}).get(ability, {}).get("score", 10))
+        modifier = (score - 10) // 2
+        if modifier:
+            expression_parts.append(str(modifier))
+    healing_expression = " + ".join(expression_parts)
+
+    cast_payload: dict[str, Any] = {
+        "spell_id": normalized_spell_id,
+        "cast_level": paid_level,
+    }
+    if component_ruling is not None:
+        cast_payload["component_ruling"] = deepcopy(component_ruling)
+    cast = await client.domain(
+        "character_action",
+        {
+            "character_id": normalized_actor_id,
+            "action": "cast_spell",
+            "payload": cast_payload,
+            "expected_revision": actor["revision"],
+            "idempotency_key": _mutation_key(
+                run_id,
+                "healing-spell-cast",
+                cast_identity,
+            ),
+        },
+    )
+    if cast.get("status") not in {"committed", "pending_ruling"}:
+        raise RuntimeError("healing spell did not consume its canonical resource")
+    branches = await client.domain(
+        "branch_query",
+        {"campaign_id": campaign_id, "view": "list"},
+    )
+    branch = next((item for item in branches if item.get("is_current")), None)
+    if branch is None:
+        raise RuntimeError("campaign has no current branch")
+    campaign = await _campaign(client, campaign_id)
+    rolled = await client.domain(
+        "dnd_dice_roll",
+        {
+            "campaign_id": campaign_id,
+            "expression": healing_expression,
+            "branch_id": str(branch["id"]),
+            "expected_campaign_revision": campaign["revision"],
+            "idempotency_key": _mutation_key(
+                run_id,
+                "healing-spell-roll",
+                cast_identity,
+            ),
+        },
+    )
+    roll_result = _dice_result(rolled)
+    target_after_roll = await client.domain(
+        "character_query",
+        {"view": "get", "payload": {"character_id": normalized_target_id}},
+    )
+    healed = await client.domain(
+        "character_state_change",
+        {
+            "character_id": normalized_target_id,
+            "action": "heal",
+            "payload": {
+                "amount": int(roll_result["total"]),
+                "source_actor_id": normalized_actor_id,
+                "spell_id": normalized_spell_id,
+                "spell_level": paid_level,
+            },
+            "expected_revision": target_after_roll["revision"],
+            "idempotency_key": _mutation_key(
+                run_id,
+                "healing-spell-apply",
+                cast_identity,
+            ),
+        },
+    )
+    recipients = list(
+        dict.fromkeys(
+            [normalized_actor_id, normalized_target_id, *knowledge_actor_ids]
+        )
+    )
+    campaign = await _campaign(client, campaign_id)
+    continuity_payload = {
+        "event": {
+            "summary": normalized_reason,
+            "event_type": "healing_spell_cast",
+            "audience_scope": "party",
+            "payload": {
+                "scene_id": scene_id,
+                "location_key": location_key,
+                "occurrence_id": cast_identity,
+                "actor_id": normalized_actor_id,
+                "target_id": normalized_target_id,
+                "spell_id": normalized_spell_id,
+                "cast_level": paid_level,
+                "healing_expression": healing_expression,
+                "healing_roll": roll_result,
+                "source_excerpt": source_excerpt,
+                "source_ref": exact_ref,
+            },
+        },
+        "actor_knowledge": [
+            {
+                "actor_id": recipient,
+                "knowledge_key": (
+                    f"playthrough.{_token(run_id)}.healing_spell.{_token(cast_identity)}"
+                ),
+                "proposition": normalized_reason,
+                "disclosure_scope": "owner",
+            }
+            for recipient in recipients
+        ],
+        "branch_id": str(branch["id"]),
+    }
+    if not defer_checkpoint:
+        continuity_payload["snapshot"] = {
+            "label": f"Full playthrough healing spell: {normalized_spell_id}"
+        }
+    committed = await client.domain(
+        "continuity_commit",
+        {
+            "campaign_id": campaign_id,
+            "payload": continuity_payload,
+            "expected_revision": campaign["revision"],
+            "idempotency_key": _mutation_key(
+                run_id,
+                "healing-spell-continuity",
+                cast_identity,
+            ),
+        },
+    )
+    synced = await _manifest_mutation(
+        client,
+        campaign_id=campaign_id,
+        action="sync",
+        run_id=run_id,
+        identity=f"healing-spell-sync:{cast_identity}",
+    )
+    return {
+        "scene_id": scene_id,
+        "location_key": location_key,
+        "source_ref": exact_ref,
+        "occurrence_id": cast_identity,
+        "actor_id": normalized_actor_id,
+        "target_id": normalized_target_id,
+        "spell_id": normalized_spell_id,
+        "cast_level": paid_level,
+        "cast": cast,
+        "healing_expression": healing_expression,
+        "roll": roll_result,
+        "healing": healed,
+        "knowledge_actor_ids": recipients,
+        "continuity": committed,
+        "sync": synced,
+    }
+
+
 async def _long_rest(
     client: ExposureClient,
     *,
@@ -4402,6 +5174,7 @@ async def _provision_source_item(
         None,
     )
     recovered_add = existing is not None
+    recovered_update = False
     if existing is None:
         added = _facade_value(
             await client.domain(
@@ -4426,6 +5199,47 @@ async def _provision_source_item(
             for entry in actor["sheet"]["inventory"]["items"]
             if str(entry.get("id") or "") == item_id
         )
+    else:
+        patch: dict[str, Any] = {}
+        for key, requested_value in requested_item.items():
+            if key == "id":
+                continue
+            try:
+                _assert_source_item_shape(
+                    existing.get(key),
+                    requested_value,
+                    field=f"item.{key}",
+                )
+            except RuntimeError:
+                patch[key] = deepcopy(requested_value)
+        if patch:
+            updated = _facade_value(
+                await client.domain(
+                    "inventory_change",
+                    {
+                        "owner": "character",
+                        "action": "update",
+                        "owner_id": normalized_actor_id,
+                        "payload": {"item_id": item_id, "patch": patch},
+                        "expected_revision": actor["revision"],
+                        "idempotency_key": _mutation_key(
+                            run_id,
+                            "source-item-enrich",
+                            (
+                                f"{normalized_actor_id}:{item_id}:"
+                                f"{_token(json.dumps(requested_item, sort_keys=True))}"
+                            ),
+                        ),
+                    },
+                )
+            )
+            actor = dict(updated.get("character") or updated)
+            existing = next(
+                dict(entry)
+                for entry in actor["sheet"]["inventory"]["items"]
+                if str(entry.get("id") or "") == item_id
+            )
+            recovered_update = True
     _assert_source_item_shape(existing, requested_item)
 
     normalized_slot = equip_slot.strip()
@@ -4486,6 +5300,7 @@ async def _provision_source_item(
         "source_excerpt": normalized_excerpt,
         "reason": normalized_reason,
         "add_recovered": recovered_add,
+        "update_recovered": recovered_update,
         "equip_recovered": recovered_equip,
         "checkpoint": checkpoint,
     }
@@ -4507,9 +5322,11 @@ async def _transfer_source_item_to_party(
     reason: str,
     checkpoint_label: str,
     defer_checkpoint: bool = False,
+    recipient_character_id: str = "",
 ) -> dict[str, Any]:
     transfer_identity = _occurrence_identity(occurrence_id, "transfer-source-item")
     normalized_character_id = character_id.strip()
+    normalized_recipient_id = recipient_character_id.strip()
     normalized_item_id = item_id.strip()
     normalized_reason = reason.strip()
     if not all(
@@ -4527,6 +5344,8 @@ async def _transfer_source_item_to_party(
         )
     if quantity is not None and quantity <= 0:
         raise ValueError("transfer-source-item quantity must be positive")
+    if normalized_recipient_id == normalized_character_id:
+        raise ValueError("source and recipient characters must differ")
 
     scene = await client.domain(
         "module_query",
@@ -4568,36 +5387,67 @@ async def _transfer_source_item_to_party(
         ),
         None,
     )
-    party_item = next(
+    recipient = (
+        dict(
+            _facade_value(
+                await client.domain(
+                    "character_query",
+                    {"view": "get", "payload": {"character_id": normalized_recipient_id}},
+                )
+            )
+        )
+        if normalized_recipient_id
+        else None
+    )
+    if recipient is not None and recipient.get("campaign_id") != campaign_id:
+        raise ValueError("source item recipient must belong to the campaign")
+    recipient_items = (
+        recipient["sheet"]["inventory"]["items"]
+        if recipient is not None
+        else party["inventory"]["items"]
+    )
+    recipient_item = next(
         (
             dict(item)
-            for item in party["inventory"]["items"]
+            for item in recipient_items
             if str(item.get("id") or "") == normalized_item_id
         ),
         None,
     )
-    recovered = actor_item is None and party_item is not None
+    recovered = actor_item is None and recipient_item is not None
     if actor_item is None and not recovered:
         raise ValueError("source character does not carry the requested item")
-    if actor_item is not None and party_item is not None:
-        raise RuntimeError("source item id already exists in both inventories")
+    if actor_item is not None and recipient_item is not None:
+        raise RuntimeError("source item id already exists in both source and recipient inventories")
 
     if recovered:
         transferred: dict[str, Any] = {
-            "party": party,
-            "character": actor,
-            "item": party_item,
+            "source": actor,
+            "recipient": recipient or party,
+            "item": recipient_item,
             "status": "recovered",
         }
     else:
         campaign = await _campaign(client, campaign_id)
-        payload: dict[str, Any] = {
-            "campaign_id": campaign_id,
-            "character_id": normalized_character_id,
-            "item_id": normalized_item_id,
-            "expected_campaign_revision": campaign["revision"],
-            "expected_character_revision": actor["revision"],
-        }
+        if recipient is not None:
+            mode = "character_to_character"
+            payload: dict[str, Any] = {
+                "source_character_id": normalized_character_id,
+                "target_character_id": normalized_recipient_id,
+                "item_id": normalized_item_id,
+                "expected_campaign_revision": campaign["revision"],
+                "expected_source_revision": actor["revision"],
+                "expected_target_revision": recipient["revision"],
+            }
+        else:
+            mode = "character_to_party"
+            payload = {
+                "campaign_id": campaign_id,
+                "character_id": normalized_character_id,
+                "item_id": normalized_item_id,
+                "expected_campaign_revision": campaign["revision"],
+                "expected_character_revision": actor["revision"],
+            }
         if quantity is not None:
             payload["quantity"] = quantity
         transferred = dict(
@@ -4605,7 +5455,7 @@ async def _transfer_source_item_to_party(
                 await client.domain(
                     "inventory_transfer",
                     {
-                        "mode": "character_to_party",
+                        "mode": mode,
                         "payload": payload,
                         "idempotency_key": _mutation_key(
                             run_id,
@@ -4637,6 +5487,7 @@ async def _transfer_source_item_to_party(
     )
     return {
         "character_id": normalized_character_id,
+        "recipient_character_id": normalized_recipient_id or None,
         "item_id": normalized_item_id,
         "quantity": quantity,
         "occurrence_id": transfer_identity,
@@ -4644,6 +5495,962 @@ async def _transfer_source_item_to_party(
         "source_ref": exact_ref,
         "transfer": transferred,
         "recovered": recovered,
+        "checkpoint": checkpoint,
+    }
+
+
+async def _claim_party_item_for_character(
+    client: ExposureClient,
+    *,
+    campaign_id: str,
+    run_id: str,
+    occurrence_id: str,
+    scene_id: str,
+    location_key: str,
+    source_excerpt: str,
+    source_ref: dict[str, Any] | None,
+    character_id: str,
+    item_id: str,
+    quantity: int | None,
+    reason: str,
+    checkpoint_label: str,
+    defer_checkpoint: bool = False,
+) -> dict[str, Any]:
+    claim_identity = _occurrence_identity(occurrence_id, "claim-party-item")
+    normalized_character_id = character_id.strip()
+    normalized_item_id = item_id.strip()
+    normalized_reason = reason.strip()
+    if not all(
+        (
+            scene_id,
+            location_key,
+            source_excerpt.strip(),
+            normalized_character_id,
+            normalized_item_id,
+            normalized_reason,
+        )
+    ):
+        raise ValueError(
+            "claim-party-item requires scene, location, excerpt, character, item, and reason"
+        )
+    if quantity is not None and quantity <= 0:
+        raise ValueError("claim-party-item quantity must be positive")
+
+    scene = await client.domain(
+        "module_query",
+        {
+            "campaign_id": campaign_id,
+            "view": "scene",
+            "payload": {"scene_id": scene_id},
+        },
+    )
+    exact_ref = _validate_source_ref(scene, source_ref, excerpt=source_excerpt)
+    if location_key not in {str(item.get("key") or "") for item in _scene_locations(scene)}:
+        raise ValueError("claim-party-item location is not present in the scene atlas")
+
+    actor = dict(
+        _facade_value(
+            await client.domain(
+                "character_query",
+                {"view": "get", "payload": {"character_id": normalized_character_id}},
+            )
+        )
+    )
+    party = dict(
+        _facade_value(
+            await client.core(
+                "campaign_query",
+                {
+                    "view": "party",
+                    "payload": {"campaign_id": campaign_id},
+                    "principal_id": PRINCIPAL_ID,
+                },
+            )
+        )
+    )
+    actor_item = next(
+        (
+            dict(item)
+            for item in actor["sheet"]["inventory"]["items"]
+            if str(item.get("id") or "") == normalized_item_id
+        ),
+        None,
+    )
+    party_item = next(
+        (
+            dict(item)
+            for item in party["inventory"]["items"]
+            if str(item.get("id") or "") == normalized_item_id
+        ),
+        None,
+    )
+    recovered = party_item is None and actor_item is not None
+    if party_item is None and not recovered:
+        raise ValueError("party inventory does not carry the requested item")
+    if actor_item is not None and party_item is not None:
+        raise RuntimeError("claimed item id already exists in both inventories")
+
+    if recovered:
+        transferred: dict[str, Any] = {
+            "party": party,
+            "character": actor,
+            "item": actor_item,
+            "status": "recovered",
+        }
+    else:
+        campaign = await _campaign(client, campaign_id)
+        payload: dict[str, Any] = {
+            "campaign_id": campaign_id,
+            "character_id": normalized_character_id,
+            "item_id": normalized_item_id,
+            "expected_campaign_revision": campaign["revision"],
+            "expected_character_revision": actor["revision"],
+        }
+        if quantity is not None:
+            payload["quantity"] = quantity
+        transferred = dict(
+            _facade_value(
+                await client.domain(
+                    "inventory_transfer",
+                    {
+                        "mode": "party_to_character",
+                        "payload": payload,
+                        "idempotency_key": _mutation_key(
+                            run_id,
+                            "party-item-claim",
+                            claim_identity,
+                        ),
+                    },
+                )
+            )
+        )
+        if str(dict(transferred.get("item") or {}).get("id") or "") != normalized_item_id:
+            raise RuntimeError("party item claim returned a different item")
+
+    checkpoint = (
+        None
+        if defer_checkpoint
+        else await _checkpoint(
+            client,
+            campaign_id=campaign_id,
+            run_id=run_id,
+            label=(
+                checkpoint_label.strip()
+                or f"Full playthrough party item claimed: {normalized_item_id}"
+            ),
+            checkpoint_id=f"party-item-claim:{claim_identity}",
+        )
+    )
+    return {
+        "character_id": normalized_character_id,
+        "item_id": normalized_item_id,
+        "quantity": quantity,
+        "occurrence_id": claim_identity,
+        "reason": normalized_reason,
+        "source_ref": exact_ref,
+        "transfer": transferred,
+        "recovered": recovered,
+        "checkpoint": checkpoint,
+    }
+
+
+async def _pool_character_currency(
+    client: ExposureClient,
+    *,
+    campaign_id: str,
+    run_id: str,
+    occurrence_id: str,
+    scene_id: str,
+    source_scene_id: str,
+    location_key: str,
+    source_excerpt: str,
+    source_ref: dict[str, Any] | None,
+    actor_id: str,
+    denomination: str,
+    amount: int | None,
+    reason: str,
+    defer_checkpoint: bool = False,
+) -> dict[str, Any]:
+    pool_identity = _occurrence_identity(occurrence_id, "pool-coins")
+    normalized_actor_id = actor_id.strip()
+    normalized_denomination = denomination.strip().lower()
+    normalized_reason = reason.strip()
+    cited_scene_id = source_scene_id.strip() or scene_id
+    if not all(
+        (
+            scene_id,
+            location_key,
+            source_excerpt.strip(),
+            normalized_actor_id,
+            normalized_denomination,
+            normalized_reason,
+        )
+    ):
+        raise ValueError(
+            "pool-coins requires scene, location, excerpt, actor, denomination, and reason"
+        )
+    if normalized_denomination not in {"cp", "sp", "ep", "gp", "pp"}:
+        raise ValueError("pool-coins denomination must be cp, sp, ep, gp, or pp")
+    if isinstance(amount, bool) or not isinstance(amount, int) or amount <= 0:
+        raise ValueError("pool-coins amount must be a positive integer")
+
+    occurrence_scene = await client.domain(
+        "module_query",
+        {
+            "campaign_id": campaign_id,
+            "view": "scene",
+            "payload": {"scene_id": scene_id},
+        },
+    )
+    source_scene = (
+        occurrence_scene
+        if cited_scene_id == scene_id
+        else await client.domain(
+            "module_query",
+            {
+                "campaign_id": campaign_id,
+                "view": "scene",
+                "payload": {"scene_id": cited_scene_id},
+            },
+        )
+    )
+    exact_ref = _validate_source_ref(source_scene, source_ref, excerpt=source_excerpt)
+    if location_key not in {
+        str(item.get("key") or "") for item in _scene_locations(occurrence_scene)
+    }:
+        raise ValueError("pool-coins location is not present in the occurrence scene atlas")
+
+    progress_rows = await client.domain(
+        "module_query",
+        {"campaign_id": campaign_id, "view": "progress"},
+    )
+    progress_before = next(
+        (
+            item
+            for item in progress_rows
+            if str(item.get("scene_id") or "") == scene_id
+            and str(item.get("scope_id") or "") == "party"
+        ),
+        None,
+    )
+    state_before = deepcopy(dict((progress_before or {}).get("state") or {}))
+    pools_before = deepcopy(
+        dict(state_before.get("full_playthrough_currency_pools") or {})
+    )
+    identity_token = _token(pool_identity)
+    pool_details = {
+        "occurrence_id": pool_identity,
+        "actor_id": normalized_actor_id,
+        "denomination": normalized_denomination,
+        "amount": amount,
+        "reason": normalized_reason,
+        "source_ref": exact_ref,
+    }
+    existing_pool = pools_before.get(identity_token)
+    if existing_pool is not None:
+        if not isinstance(existing_pool, dict) or any(
+            existing_pool.get(key) != value for key, value in pool_details.items()
+        ):
+            raise ValueError("pool-coins occurrence id already exists with different details")
+        if str(existing_pool.get("status") or "") == "completed":
+            return {
+                "scene": {
+                    "scene_id": scene_id,
+                    "source_scene_id": cited_scene_id,
+                    "location_key": location_key,
+                    "source_ref": exact_ref,
+                },
+                "occurrence_id": pool_identity,
+                "actor_id": normalized_actor_id,
+                "denomination": normalized_denomination,
+                "amount": amount,
+                "reason": normalized_reason,
+                "transfer": None,
+                "progress": progress_before,
+                "continuity": None,
+                "sync": None,
+                "recovered": True,
+            }
+        if (
+            str(existing_pool.get("status") or "") != "planned"
+            or not isinstance(existing_pool.get("expected_campaign_revision"), int)
+            or not isinstance(existing_pool.get("expected_character_revision"), int)
+        ):
+            raise RuntimeError("pool-coins progress contains an invalid planned transfer")
+
+    actor = dict(
+        _facade_value(
+            await client.domain(
+                "character_query",
+                {"view": "get", "payload": {"character_id": normalized_actor_id}},
+            )
+        )
+    )
+    if str(actor.get("campaign_id") or "") != campaign_id:
+        raise ValueError("pool-coins actor must belong to the campaign")
+    campaign = await _campaign(client, campaign_id)
+    idempotency_key = _mutation_key(run_id, "currency-pool", pool_identity)
+
+    if existing_pool is None:
+        planned_pool = {
+            **pool_details,
+            "status": "planned",
+            "expected_campaign_revision": int(campaign["revision"]) + 1,
+            "expected_character_revision": int(actor["revision"]),
+        }
+        planned_state = deepcopy(state_before)
+        planned_pools = deepcopy(pools_before)
+        planned_pools[identity_token] = planned_pool
+        planned_state["full_playthrough_currency_pools"] = planned_pools
+        progress_planned = await client.domain(
+            "module_set_progress",
+            {
+                "campaign_id": campaign_id,
+                "scene_id": scene_id,
+                "status": str((progress_before or {}).get("status") or "active"),
+                "progress": _scene_progress_percent(progress_before),
+                "state": planned_state,
+                "current_location_key": location_key,
+                "expected_state_version": int(
+                    (progress_before or {}).get("state_version", 0) or 0
+                ),
+                "idempotency_key": _mutation_key(
+                    run_id, "currency-pool-progress-plan", pool_identity
+                ),
+            },
+        )
+    else:
+        planned_pool = deepcopy(existing_pool)
+        progress_planned = progress_before
+
+    transferred = dict(
+        _facade_value(
+            await client.domain(
+                "wallet_change",
+                {
+                    "owner": "party",
+                    "action": "transfer_from_character",
+                    "owner_id": campaign_id,
+                    "denomination": normalized_denomination,
+                    "amount": amount,
+                    "payload": {
+                        "character_id": normalized_actor_id,
+                        "expected_campaign_revision": planned_pool[
+                            "expected_campaign_revision"
+                        ],
+                        "expected_character_revision": planned_pool[
+                            "expected_character_revision"
+                        ],
+                    },
+                    "idempotency_key": idempotency_key,
+                },
+            )
+        )
+    )
+
+    completed_state = deepcopy(dict((progress_planned or {}).get("state") or {}))
+    completed_pools = deepcopy(
+        dict(completed_state.get("full_playthrough_currency_pools") or {})
+    )
+    completed_pools[identity_token] = {**planned_pool, "status": "completed"}
+    completed_state["full_playthrough_currency_pools"] = completed_pools
+    progress = await client.domain(
+        "module_set_progress",
+        {
+            "campaign_id": campaign_id,
+            "scene_id": scene_id,
+            "status": str((progress_planned or {}).get("status") or "active"),
+            "progress": _scene_progress_percent(progress_planned),
+            "state": completed_state,
+            "current_location_key": location_key,
+            "expected_state_version": int(
+                (progress_planned or {}).get("state_version", 0) or 0
+            ),
+            "idempotency_key": _mutation_key(
+                run_id, "currency-pool-progress-complete", pool_identity
+            ),
+        },
+    )
+    branches = await client.domain(
+        "branch_query",
+        {"campaign_id": campaign_id, "view": "list"},
+    )
+    branch = next((item for item in branches if item.get("is_current")), None)
+    if branch is None:
+        raise RuntimeError("campaign has no current branch")
+    campaign = await _campaign(client, campaign_id)
+    continuity_payload: dict[str, Any] = {
+        "event": {
+            "summary": normalized_reason,
+            "event_type": "currency_pooled",
+            "audience_scope": "party",
+            "payload": {
+                "scene_id": scene_id,
+                "source_scene_id": cited_scene_id,
+                "location_key": location_key,
+                "occurrence_id": pool_identity,
+                "actor_id": normalized_actor_id,
+                "denomination": normalized_denomination,
+                "amount": amount,
+                "source_excerpt": source_excerpt.strip(),
+                "source_ref": exact_ref,
+            },
+        },
+        "actor_knowledge": [
+            {
+                "actor_id": normalized_actor_id,
+                "knowledge_key": (
+                    f"playthrough.{_token(run_id)}.currency_pool.{identity_token}"
+                ),
+                "proposition": normalized_reason,
+                "disclosure_scope": "owner",
+            }
+        ],
+        "branch_id": str(branch["id"]),
+    }
+    if not defer_checkpoint:
+        continuity_payload["snapshot"] = {
+            "label": f"Full playthrough currency pooled: {normalized_reason}"
+        }
+    committed = await client.domain(
+        "continuity_commit",
+        {
+            "campaign_id": campaign_id,
+            "payload": continuity_payload,
+            "expected_revision": campaign["revision"],
+            "idempotency_key": _mutation_key(
+                run_id, "currency-pool-continuity", pool_identity
+            ),
+        },
+    )
+    synced = await _manifest_mutation(
+        client,
+        campaign_id=campaign_id,
+        action="sync",
+        run_id=run_id,
+        identity=f"currency-pool-sync:{pool_identity}",
+    )
+    return {
+        "scene": {
+            "scene_id": scene_id,
+            "source_scene_id": cited_scene_id,
+            "location_key": location_key,
+            "source_ref": exact_ref,
+        },
+        "occurrence_id": pool_identity,
+        "actor_id": normalized_actor_id,
+        "denomination": normalized_denomination,
+        "amount": amount,
+        "reason": normalized_reason,
+        "transfer": transferred,
+        "progress": progress,
+        "continuity": committed,
+        "sync": synced,
+        "recovered": existing_pool is not None,
+    }
+
+
+async def _apply_source_effect(
+    client: ExposureClient,
+    *,
+    campaign_id: str,
+    run_id: str,
+    occurrence_id: str,
+    scene_id: str,
+    location_key: str,
+    source_excerpt: str,
+    source_ref: dict[str, Any] | None,
+    character_id: str,
+    effect: dict[str, Any] | None,
+    reason: str,
+    checkpoint_label: str,
+    defer_checkpoint: bool = False,
+) -> dict[str, Any]:
+    application_identity = _occurrence_identity(occurrence_id, "apply-source-effect")
+    normalized_character_id = character_id.strip()
+    normalized_reason = reason.strip()
+    requested_effect = deepcopy(effect) if isinstance(effect, dict) else {}
+    effect_id = str(requested_effect.get("id") or "").strip()
+    if not all(
+        (
+            scene_id,
+            location_key,
+            source_excerpt.strip(),
+            normalized_character_id,
+            effect_id,
+            normalized_reason,
+        )
+    ):
+        raise ValueError(
+            "apply-source-effect requires scene, location, excerpt, character, "
+            "an effect with id, and reason"
+        )
+
+    scene = await client.domain(
+        "module_query",
+        {
+            "campaign_id": campaign_id,
+            "view": "scene",
+            "payload": {"scene_id": scene_id},
+        },
+    )
+    exact_ref = _validate_source_ref(scene, source_ref, excerpt=source_excerpt)
+    if location_key not in {str(item.get("key") or "") for item in _scene_locations(scene)}:
+        raise ValueError("apply-source-effect location is not present in the scene atlas")
+    expected_source = f"module-chunk:{exact_ref['chunk_id']}"
+    if str(requested_effect.get("source") or "") != expected_source:
+        raise ValueError(
+            "source effect source must be module-chunk:<source_ref.chunk_id>"
+        )
+
+    actor = dict(
+        _facade_value(
+            await client.domain(
+                "character_query",
+                {"view": "get", "payload": {"character_id": normalized_character_id}},
+            )
+        )
+    )
+    if str(actor.get("campaign_id") or "") != campaign_id:
+        raise ValueError("apply-source-effect actor does not belong to the campaign")
+    existing = next(
+        (
+            dict(item)
+            for item in dict(actor.get("sheet") or {}).get("effects", [])
+            if str(item.get("id") or "") == effect_id
+        ),
+        None,
+    )
+    recovered = existing is not None
+    if recovered:
+        if any(
+            existing.get(field) != requested_effect.get(field)
+            for field in ("id", "name", "kind", "source", "duration", "changes")
+        ):
+            raise ValueError(
+                "apply-source-effect id already exists with different effect data"
+            )
+        applied: dict[str, Any] = {
+            "character": actor,
+            "effect_id": effect_id,
+            "status": "recovered",
+        }
+    else:
+        applied = dict(
+            _facade_value(
+                await client.domain(
+                    "character_state_change",
+                    {
+                        "character_id": normalized_character_id,
+                        "action": "effect_add",
+                        "payload": {"effect": requested_effect},
+                        "expected_revision": actor["revision"],
+                        "idempotency_key": _mutation_key(
+                            run_id,
+                            "source-effect-add",
+                            application_identity,
+                        ),
+                    },
+                )
+            )
+        )
+        actor_after = dict(applied.get("character") or applied)
+        added = next(
+            (
+                dict(item)
+                for item in dict(actor_after.get("sheet") or {}).get("effects", [])
+                if str(item.get("id") or "") == effect_id
+            ),
+            None,
+        )
+        if added is None:
+            raise RuntimeError("source effect application did not add the requested effect")
+        existing = added
+
+    checkpoint = (
+        None
+        if defer_checkpoint
+        else await _checkpoint(
+            client,
+            campaign_id=campaign_id,
+            run_id=run_id,
+            label=(
+                checkpoint_label.strip()
+                or f"Full playthrough source effect applied: {effect_id}"
+            ),
+            checkpoint_id=f"source-effect-add:{application_identity}",
+        )
+    )
+    return {
+        "character_id": normalized_character_id,
+        "effect_id": effect_id,
+        "occurrence_id": application_identity,
+        "reason": normalized_reason,
+        "source_ref": exact_ref,
+        "effect": existing,
+        "application": applied,
+        "recovered": recovered,
+        "checkpoint": checkpoint,
+    }
+
+
+async def _remove_source_effect(
+    client: ExposureClient,
+    *,
+    campaign_id: str,
+    run_id: str,
+    occurrence_id: str,
+    scene_id: str,
+    location_key: str,
+    source_excerpt: str,
+    source_ref: dict[str, Any] | None,
+    character_id: str,
+    effect_id: str,
+    reason: str,
+    checkpoint_label: str,
+    defer_checkpoint: bool = False,
+) -> dict[str, Any]:
+    removal_identity = _occurrence_identity(occurrence_id, "remove-source-effect")
+    normalized_character_id = character_id.strip()
+    normalized_effect_id = effect_id.strip()
+    normalized_reason = reason.strip()
+    if not all(
+        (
+            scene_id,
+            location_key,
+            source_excerpt.strip(),
+            normalized_character_id,
+            normalized_effect_id,
+            normalized_reason,
+        )
+    ):
+        raise ValueError(
+            "remove-source-effect requires scene, location, excerpt, character, "
+            "effect, and reason"
+        )
+
+    scene = await client.domain(
+        "module_query",
+        {
+            "campaign_id": campaign_id,
+            "view": "scene",
+            "payload": {"scene_id": scene_id},
+        },
+    )
+    exact_ref = _validate_source_ref(scene, source_ref, excerpt=source_excerpt)
+    if location_key not in {str(item.get("key") or "") for item in _scene_locations(scene)}:
+        raise ValueError("remove-source-effect location is not present in the scene atlas")
+
+    actor = dict(
+        _facade_value(
+            await client.domain(
+                "character_query",
+                {"view": "get", "payload": {"character_id": normalized_character_id}},
+            )
+        )
+    )
+    if str(actor.get("campaign_id") or "") != campaign_id:
+        raise ValueError("remove-source-effect actor does not belong to the campaign")
+    effect = next(
+        (
+            dict(item)
+            for item in dict(actor.get("sheet") or {}).get("effects", [])
+            if str(item.get("id") or "") == normalized_effect_id
+        ),
+        None,
+    )
+    recovered = effect is None
+    if recovered:
+        removed: dict[str, Any] = {
+            "character": actor,
+            "status": "recovered",
+        }
+    else:
+        removed = dict(
+            _facade_value(
+                await client.domain(
+                    "character_state_change",
+                    {
+                        "character_id": normalized_character_id,
+                        "action": "effect_remove",
+                        "payload": {"effect_id": normalized_effect_id},
+                        "expected_revision": actor["revision"],
+                        "idempotency_key": _mutation_key(
+                            run_id,
+                            "source-effect-remove",
+                            removal_identity,
+                        ),
+                    },
+                )
+            )
+        )
+        removed_character = dict(removed.get("character") or removed)
+        remaining_ids = {
+            str(item.get("id") or "")
+            for item in dict(removed_character.get("sheet") or {}).get("effects", [])
+        }
+        if normalized_effect_id in remaining_ids:
+            raise RuntimeError("source effect removal did not remove the requested effect")
+
+    checkpoint = (
+        None
+        if defer_checkpoint
+        else await _checkpoint(
+            client,
+            campaign_id=campaign_id,
+            run_id=run_id,
+            label=(
+                checkpoint_label.strip()
+                or f"Full playthrough source effect removed: {normalized_effect_id}"
+            ),
+            checkpoint_id=f"source-effect-remove:{removal_identity}",
+        )
+    )
+    return {
+        "character_id": normalized_character_id,
+        "effect_id": normalized_effect_id,
+        "occurrence_id": removal_identity,
+        "reason": normalized_reason,
+        "source_ref": exact_ref,
+        "effect": effect,
+        "removal": removed,
+        "recovered": recovered,
+        "checkpoint": checkpoint,
+    }
+
+
+async def _set_source_exhaustion(
+    client: ExposureClient,
+    *,
+    campaign_id: str,
+    run_id: str,
+    occurrence_id: str,
+    scene_id: str,
+    location_key: str,
+    source_excerpt: str,
+    source_ref: dict[str, Any] | None,
+    character_id: str,
+    level: int | None,
+    reason: str,
+    checkpoint_label: str,
+    defer_checkpoint: bool = False,
+) -> dict[str, Any]:
+    exhaustion_identity = _occurrence_identity(occurrence_id, "set-source-exhaustion")
+    normalized_character_id = character_id.strip()
+    normalized_reason = reason.strip()
+    if not all(
+        (
+            scene_id,
+            location_key,
+            source_excerpt.strip(),
+            normalized_character_id,
+            normalized_reason,
+        )
+    ):
+        raise ValueError(
+            "set-source-exhaustion requires scene, location, excerpt, character, "
+            "level, and reason"
+        )
+    if level is None or not 0 <= level <= 6:
+        raise ValueError("set-source-exhaustion level must be between 0 and 6")
+
+    scene = await client.domain(
+        "module_query",
+        {
+            "campaign_id": campaign_id,
+            "view": "scene",
+            "payload": {"scene_id": scene_id},
+        },
+    )
+    exact_ref = _validate_source_ref(scene, source_ref, excerpt=source_excerpt)
+    if location_key not in {str(item.get("key") or "") for item in _scene_locations(scene)}:
+        raise ValueError("set-source-exhaustion location is not present in the scene atlas")
+    actor = dict(
+        _facade_value(
+            await client.domain(
+                "character_query",
+                {"view": "get", "payload": {"character_id": normalized_character_id}},
+            )
+        )
+    )
+    if str(actor.get("campaign_id") or "") != campaign_id:
+        raise ValueError("set-source-exhaustion actor does not belong to the campaign")
+    before = int(dict(actor["sheet"].get("combat") or {}).get("exhaustion", 0) or 0)
+    recovered = before == level
+    if recovered:
+        changed: dict[str, Any] = {
+            "character": actor,
+            "status": "recovered",
+        }
+    else:
+        changed = dict(
+            _facade_value(
+                await client.domain(
+                    "character_state_change",
+                    {
+                        "character_id": normalized_character_id,
+                        "action": "exhaustion_set",
+                        "payload": {"value": level},
+                        "expected_revision": actor["revision"],
+                        "idempotency_key": _mutation_key(
+                            run_id,
+                            "source-exhaustion-set",
+                            exhaustion_identity,
+                        ),
+                    },
+                )
+            )
+        )
+        actor_after = dict(changed.get("character") or changed)
+        after = int(
+            dict(actor_after["sheet"].get("combat") or {}).get("exhaustion", 0) or 0
+        )
+        if after != level:
+            raise RuntimeError("source exhaustion update did not set the requested level")
+
+    checkpoint = (
+        None
+        if defer_checkpoint
+        else await _checkpoint(
+            client,
+            campaign_id=campaign_id,
+            run_id=run_id,
+            label=(
+                checkpoint_label.strip()
+                or f"Full playthrough source exhaustion: {normalized_character_id}={level}"
+            ),
+            checkpoint_id=f"source-exhaustion:{exhaustion_identity}",
+        )
+    )
+    return {
+        "character_id": normalized_character_id,
+        "occurrence_id": exhaustion_identity,
+        "before": before,
+        "after": level,
+        "reason": normalized_reason,
+        "source_ref": exact_ref,
+        "change": changed,
+        "recovered": recovered,
+        "checkpoint": checkpoint,
+    }
+
+
+async def _attack_source_object(
+    client: ExposureClient,
+    *,
+    campaign_id: str,
+    run_id: str,
+    occurrence_id: str,
+    scene_id: str,
+    location_key: str,
+    source_excerpt: str,
+    source_ref: dict[str, Any] | None,
+    character_id: str,
+    object_state: dict[str, Any] | None,
+    weapon_id: str,
+    reason: str,
+    advantage: bool,
+    disadvantage: bool,
+    checkpoint_label: str,
+    defer_checkpoint: bool = False,
+) -> dict[str, Any]:
+    attack_identity = _occurrence_identity(occurrence_id, "attack-source-object")
+    normalized_character_id = character_id.strip()
+    normalized_weapon_id = weapon_id.strip()
+    normalized_reason = reason.strip()
+    requested_object = deepcopy(object_state) if isinstance(object_state, dict) else {}
+    if not all(
+        (
+            scene_id,
+            location_key,
+            source_excerpt.strip(),
+            normalized_character_id,
+            normalized_weapon_id,
+            str(requested_object.get("id") or "").strip(),
+            normalized_reason,
+        )
+    ):
+        raise ValueError(
+            "attack-source-object requires scene, location, excerpt, character, "
+            "object, weapon, and reason"
+        )
+    scene = await client.domain(
+        "module_query",
+        {
+            "campaign_id": campaign_id,
+            "view": "scene",
+            "payload": {"scene_id": scene_id},
+        },
+    )
+    exact_ref = _validate_source_ref(scene, source_ref, excerpt=source_excerpt)
+    if location_key not in {str(item.get("key") or "") for item in _scene_locations(scene)}:
+        raise ValueError("attack-source-object location is not present in the scene atlas")
+    if str(requested_object.get("scene_id") or "") != scene_id:
+        raise ValueError("attack-source-object object scene_id must match the cited scene")
+    actor = dict(
+        _facade_value(
+            await client.domain(
+                "character_query",
+                {"view": "get", "payload": {"character_id": normalized_character_id}},
+            )
+        )
+    )
+    if str(actor.get("campaign_id") or "") != campaign_id:
+        raise ValueError("attack-source-object actor does not belong to the campaign")
+    campaign = await _campaign(client, campaign_id)
+    attacked = dict(
+        _facade_value(
+            await client.domain(
+                "character_action",
+                {
+                    "character_id": normalized_character_id,
+                    "action": "attack_source_object",
+                    "payload": {
+                        "object": requested_object,
+                        "weapon_id": normalized_weapon_id,
+                        "source_ref": exact_ref,
+                        "reason": normalized_reason,
+                        "advantage": advantage,
+                        "disadvantage": disadvantage,
+                        "expected_campaign_revision": campaign["revision"],
+                    },
+                    "expected_revision": actor["revision"],
+                    "idempotency_key": _mutation_key(
+                        run_id,
+                        "source-object-attack",
+                        attack_identity,
+                    ),
+                },
+            )
+        )
+    )
+    if attacked.get("status") != "committed":
+        raise RuntimeError("source object attack did not commit")
+    settled_object = dict(attacked.get("object") or {})
+    if str(settled_object.get("id") or "") != str(requested_object["id"]):
+        raise RuntimeError("source object attack returned the wrong object")
+    checkpoint = (
+        None
+        if defer_checkpoint
+        else await _checkpoint(
+            client,
+            campaign_id=campaign_id,
+            run_id=run_id,
+            label=(
+                checkpoint_label.strip()
+                or f"Full playthrough source object attack: {requested_object['id']}"
+            ),
+            checkpoint_id=f"source-object-attack:{attack_identity}",
+        )
+    )
+    return {
+        "character_id": normalized_character_id,
+        "weapon_id": normalized_weapon_id,
+        "occurrence_id": attack_identity,
+        "reason": normalized_reason,
+        "source_ref": exact_ref,
+        "attack": attacked,
+        "object": settled_object,
         "checkpoint": checkpoint,
     }
 
@@ -5557,6 +7364,8 @@ async def _start_play(
     run_id: str,
     initial_phase: str,
     scene_id: str,
+    source_excerpt: str,
+    source_ref: dict[str, Any] | None,
     objective: str,
     reachable_scene_ids: list[str],
 ) -> dict[str, Any]:
@@ -5609,9 +7418,12 @@ async def _start_play(
         client,
         campaign_id=campaign_id,
         run_id=run_id,
-        occurrence_id=f"start-play:{scene_id}",
-        scene_id=scene_id,
-        objective=objective,
+            occurrence_id=f"start-play:{scene_id}",
+            scene_id=scene_id,
+            source_scene_id=scene_id,
+            source_excerpt=source_excerpt,
+            source_ref=source_ref,
+            objective=objective,
         mark_visited=True,
         reachable_scene_ids=reachable_scene_ids,
         excluded_scenes=[],
@@ -6600,25 +8412,33 @@ async def _refresh_module(
     active_modules = dict(
         dict(dict(campaign.get("state") or {}).get("module_imports") or {}).get("active") or {}
     )
-    if not source_key:
-        source_key = next(
-            (
-                key
-                for key, item in active_modules.items()
-                if str(dict(item or {}).get("module_id") or "") == old_module_id
-            ),
-            "",
+    current_source_key = next(
+        (
+            key
+            for key, item in active_modules.items()
+            if str(dict(item or {}).get("module_id") or "") == old_module_id
+        ),
+        "",
+    )
+    if source_key and current_source_key and source_key != current_source_key:
+        raise ValueError(
+            "refresh-module source key must remain stable across parser revisions: "
+            f"current {current_source_key}, requested {source_key}"
         )
+    if not source_key:
+        source_key = current_source_key
     if not source_key:
         raise ValueError("refresh-module could not identify the logical module source key")
     resolved_source_path = source_path.expanduser().resolve()
     resolved_title = title.strip() or resolved_source_path.stem
+    source_asset_sha256 = _file_sha256(resolved_source_path)
     refresh_identity = _module_refresh_identity(
         old_module_id=old_module_id,
         source_key=source_key,
         source_path=resolved_source_path,
         title=resolved_title,
         parser_revision=f"{DndModuleProfile.name}:{DndModuleProfile.version}",
+        source_sha256=source_asset_sha256,
     )
     branches = await client.domain(
         "branch_query",
@@ -6718,6 +8538,13 @@ async def _refresh_module(
         old_index=old_index,
         new_index=new_index,
     )
+    refreshed_manifest = await _remap_ending_sources_for_module_revision(
+        client,
+        refreshed_manifest,
+        campaign_id=campaign_id,
+        new_module_id=new_module_id,
+        source_asset_sha256=source_asset_sha256,
+    )
     campaign = await _campaign(client, campaign_id)
     activated = await client.domain(
         "module_import",
@@ -6736,9 +8563,11 @@ async def _refresh_module(
         campaign_id=campaign_id,
         action=_module_refresh_manifest_action(old_module_id, new_module_id),
         run_id=run_id,
-        identity=(
-            f"refresh-module-manifest:{old_module_id}:{new_module_id}:"
-            f"{refresh_identity}"
+        identity=_module_refresh_manifest_identity(
+            old_module_id=old_module_id,
+            new_module_id=new_module_id,
+            refresh_identity=refresh_identity,
+            manifest=refreshed_manifest,
         ),
         payload={"manifest": refreshed_manifest},
     )
@@ -6869,7 +8698,14 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError(
             f"--defer-checkpoint is unsupported for {args.action}; supported: {supported}"
         )
-    if args.action in {"advance-scene", "checkpoint", "sync", "transfer-source-item"}:
+    if args.action in {
+        "advance-scene",
+        "checkpoint",
+        "sync",
+        "transfer-source-item",
+        "claim-party-item",
+        "remove-source-effect",
+    }:
         _occurrence_identity(args.occurrence_id, args.action)
     server = _server_parameters(args)
     report: dict[str, Any] = {
@@ -6972,6 +8808,8 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     run_id=args.run_id,
                     initial_phase=phase,
                     scene_id=str(args.scene_id or ""),
+                    source_excerpt=args.source_excerpt,
+                    source_ref=args.source_ref_json,
                     objective=args.objective,
                     reachable_scene_ids=args.reachable_scene_id,
                 )
@@ -7028,10 +8866,14 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     run_id=args.run_id,
                     occurrence_id=args.occurrence_id,
                     scene_id=str(args.scene_id or ""),
+                    source_scene_id=args.source_scene_id,
+                    source_excerpt=args.source_excerpt,
+                    source_ref=args.source_ref_json,
                     objective=args.objective,
                     mark_visited=args.mark_visited,
                     reachable_scene_ids=args.reachable_scene_id,
                     excluded_scenes=args.excluded_scene_json,
+                    occurrence_scene_id=args.occurrence_scene_id,
                 )
             elif args.action == "branch-from-snapshot":
                 report["result"] = await _branch_from_snapshot(
@@ -7259,6 +9101,51 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     knowledge_actor_ids=args.knowledge_actor_id,
                     defer_checkpoint=args.defer_checkpoint,
                 )
+            elif args.action == "cast-source-spell":
+                if phase != "play":
+                    raise RuntimeError("cast-source-spell requires the play phase")
+                await client.load("play.characters")
+                report["result"] = await _cast_source_spell(
+                    client,
+                    campaign_id=args.campaign_id,
+                    run_id=args.run_id,
+                    occurrence_id=args.occurrence_id,
+                    scene_id=str(args.scene_id or ""),
+                    source_scene_id=args.source_scene_id,
+                    location_key=args.location_key,
+                    source_excerpt=args.source_excerpt,
+                    source_ref=args.source_ref_json,
+                    actor_id=args.spell_actor_id,
+                    spell_id=args.spell_id,
+                    source_item_id=args.spell_source_item_id,
+                    cast_level=args.spell_cast_level,
+                    component_ruling=args.spell_component_ruling_json,
+                    reason=args.spell_reason,
+                    knowledge_actor_ids=args.knowledge_actor_id,
+                    defer_checkpoint=args.defer_checkpoint,
+                )
+            elif args.action == "cast-healing-spell":
+                if phase != "play":
+                    raise RuntimeError("cast-healing-spell requires the play phase")
+                await client.load("play.characters", "play.resolution")
+                report["result"] = await _cast_healing_spell(
+                    client,
+                    campaign_id=args.campaign_id,
+                    run_id=args.run_id,
+                    occurrence_id=args.occurrence_id,
+                    scene_id=str(args.scene_id or ""),
+                    source_excerpt=args.source_excerpt,
+                    source_ref=args.source_ref_json,
+                    location_key=args.location_key,
+                    actor_id=args.spell_actor_id,
+                    target_id=args.spell_target_id,
+                    spell_id=args.spell_id,
+                    cast_level=args.spell_cast_level,
+                    component_ruling=args.spell_component_ruling_json,
+                    reason=args.spell_reason,
+                    knowledge_actor_ids=args.knowledge_actor_id,
+                    defer_checkpoint=args.defer_checkpoint,
+                )
             elif args.action == "long-rest":
                 if phase != "play":
                     raise RuntimeError("long-rest requires the play phase")
@@ -7321,6 +9208,126 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     item_id=args.transfer_item_id,
                     quantity=args.transfer_item_quantity,
                     reason=args.transfer_reason,
+                    checkpoint_label=args.checkpoint_label,
+                    defer_checkpoint=args.defer_checkpoint,
+                    recipient_character_id=args.transfer_recipient_character_id,
+                )
+            elif args.action == "claim-party-item":
+                if phase != "play":
+                    raise RuntimeError("claim-party-item requires the play phase")
+                await client.load("play.characters")
+                report["result"] = await _claim_party_item_for_character(
+                    client,
+                    campaign_id=args.campaign_id,
+                    run_id=args.run_id,
+                    occurrence_id=args.occurrence_id,
+                    scene_id=str(args.scene_id or ""),
+                    location_key=args.location_key,
+                    source_excerpt=args.source_excerpt,
+                    source_ref=args.source_ref_json,
+                    character_id=args.transfer_character_id,
+                    item_id=args.transfer_item_id,
+                    quantity=args.transfer_item_quantity,
+                    reason=args.transfer_reason,
+                    checkpoint_label=args.checkpoint_label,
+                    defer_checkpoint=args.defer_checkpoint,
+                )
+            elif args.action == "pool-coins":
+                if phase != "play":
+                    raise RuntimeError("pool-coins requires the play phase")
+                await client.load("play.characters")
+                report["result"] = await _pool_character_currency(
+                    client,
+                    campaign_id=args.campaign_id,
+                    run_id=args.run_id,
+                    occurrence_id=args.occurrence_id,
+                    scene_id=str(args.scene_id or ""),
+                    source_scene_id=args.source_scene_id,
+                    location_key=args.location_key,
+                    source_excerpt=args.source_excerpt,
+                    source_ref=args.source_ref_json,
+                    actor_id=args.pool_actor_id,
+                    denomination=args.pool_denomination,
+                    amount=args.pool_amount,
+                    reason=args.pool_reason,
+                    defer_checkpoint=args.defer_checkpoint,
+                )
+            elif args.action == "apply-source-effect":
+                if phase != "play":
+                    raise RuntimeError("apply-source-effect requires the play phase")
+                await client.load("play.characters")
+                report["result"] = await _apply_source_effect(
+                    client,
+                    campaign_id=args.campaign_id,
+                    run_id=args.run_id,
+                    occurrence_id=args.occurrence_id,
+                    scene_id=str(args.scene_id or ""),
+                    location_key=args.location_key,
+                    source_excerpt=args.source_excerpt,
+                    source_ref=args.source_ref_json,
+                    character_id=args.effect_character_id,
+                    effect=args.effect_json,
+                    reason=args.effect_reason,
+                    checkpoint_label=args.checkpoint_label,
+                    defer_checkpoint=args.defer_checkpoint,
+                )
+            elif args.action == "remove-source-effect":
+                if phase != "play":
+                    raise RuntimeError("remove-source-effect requires the play phase")
+                await client.load("play.characters")
+                report["result"] = await _remove_source_effect(
+                    client,
+                    campaign_id=args.campaign_id,
+                    run_id=args.run_id,
+                    occurrence_id=args.occurrence_id,
+                    scene_id=str(args.scene_id or ""),
+                    location_key=args.location_key,
+                    source_excerpt=args.source_excerpt,
+                    source_ref=args.source_ref_json,
+                    character_id=args.effect_character_id,
+                    effect_id=args.effect_id,
+                    reason=args.effect_reason,
+                    checkpoint_label=args.checkpoint_label,
+                    defer_checkpoint=args.defer_checkpoint,
+                )
+            elif args.action == "set-source-exhaustion":
+                if phase != "play":
+                    raise RuntimeError("set-source-exhaustion requires the play phase")
+                await client.load("play.characters")
+                report["result"] = await _set_source_exhaustion(
+                    client,
+                    campaign_id=args.campaign_id,
+                    run_id=args.run_id,
+                    occurrence_id=args.occurrence_id,
+                    scene_id=str(args.scene_id or ""),
+                    location_key=args.location_key,
+                    source_excerpt=args.source_excerpt,
+                    source_ref=args.source_ref_json,
+                    character_id=args.effect_character_id,
+                    level=args.exhaustion_level,
+                    reason=args.effect_reason,
+                    checkpoint_label=args.checkpoint_label,
+                    defer_checkpoint=args.defer_checkpoint,
+                )
+            elif args.action == "attack-source-object":
+                if phase != "play":
+                    raise RuntimeError("attack-source-object requires the play phase")
+                await client.load("play.characters")
+                report["result"] = await _attack_source_object(
+                    client,
+                    campaign_id=args.campaign_id,
+                    run_id=args.run_id,
+                    occurrence_id=args.occurrence_id,
+                    scene_id=str(args.scene_id or ""),
+                    location_key=args.location_key,
+                    source_excerpt=args.source_excerpt,
+                    source_ref=args.source_ref_json,
+                    character_id=args.check_actor_id,
+                    object_state=args.object_json,
+                    weapon_id=args.object_weapon_id,
+                    reason=args.object_reason,
+                    advantage=args.check_advantage,
+                    disadvantage=args.check_disadvantage,
                     checkpoint_label=args.checkpoint_label,
                     defer_checkpoint=args.defer_checkpoint,
                 )

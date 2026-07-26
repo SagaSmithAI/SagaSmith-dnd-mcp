@@ -112,7 +112,8 @@ def _arguments() -> argparse.Namespace:
         type=Path,
         help=(
             "Replace legacy opaque starting-equipment packs and repair audited "
-            "item weights for the actors in an existing public party report"
+            "item weights and spell class lists for actors in an existing public "
+            "party or single-profile replacement report"
         ),
     )
     return parser.parse_args()
@@ -1266,6 +1267,7 @@ def _configure_base_sheet(
         ability = str(spellcasting["ability"])
         modifier = (int(sheet["abilities"][ability]["score"]) - 10) // 2
         sheet["spellcasting"]["ability"] = ability
+        sheet["spellcasting"]["class_lists"] = [class_name.casefold()]
         sheet["spellcasting"]["spell_slots"] = {
             "1": {
                 "label": "Level 1 spell slots",
@@ -1392,6 +1394,36 @@ async def _repair_existing_party_equipment(
             str(item.get("id") or "") in pack_item_ids for item in inventory
         )
         actor_changes: list[dict[str, Any]] = []
+        if profile.get("spellcasting"):
+            expected_class_lists = [str(profile["class"]).casefold()]
+            current_class_lists = list(
+                dict(actor["sheet"].get("spellcasting") or {}).get("class_lists") or []
+            )
+            if current_class_lists != expected_class_lists:
+                repaired_sheet = deepcopy(actor["sheet"])
+                repaired_sheet["spellcasting"]["class_lists"] = expected_class_lists
+                actor = dict(
+                    _facade_value(
+                        await client.domain(
+                            "character_sheet_replace",
+                            {
+                                "character_id": actor_id,
+                                "sheet": repaired_sheet,
+                                "expected_revision": actor["revision"],
+                                "idempotency_key": (
+                                    f"full-party-spell-class-list-v1-"
+                                    f"{_token(actor_id)}-{_token(str(profile['class']))}"
+                                ),
+                            },
+                        )
+                    )
+                )
+                actor_changes.append(
+                    {
+                        "action": "repair_spell_class_lists",
+                        "class_lists": expected_class_lists,
+                    }
+                )
         if legacy_pack is not None:
             removed = await client.domain(
                 "inventory_change",
@@ -1879,12 +1911,6 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
         actor_name=args.actor_name,
         campaign_line_id=args.party,
     )
-    if args.repair_existing_party_report is not None and (
-        args.profile_name or args.actor_name
-    ):
-        raise ValueError(
-            "existing party equipment repair requires the complete audited party"
-        )
     async with stdio_client(_server_parameters(args)) as (read, write):
         async with ClientSession(read, write) as session:
             await session.initialize()

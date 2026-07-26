@@ -58,16 +58,15 @@ def test_public_chase_uses_exact_module_source_and_no_combat_map(
     import_root = tmp_path / "modules"
     import_root.mkdir()
     source_excerpt = (
-        "A kenku has the Stone of Golorr and is 60 feet away at the start of the chase."
+        "A kenku has the Stone of Golorr and is 60 feet away at the start of the "
+        "chase, and when the characters are close, the kenku ducks into an old tower."
     )
     source = import_root / "chase.md"
     source.write_text(
         "# Chapter Four\n\n"
         "## Street Chase\n\n"
         "Use the chase rules and the Urban Chase Complications table. "
-        f"{source_excerpt}\n\n"
-        "### Next Encounter\n\n"
-        "When the characters are close, the kenku ducks into an old tower.\n",
+        f"{source_excerpt}\n",
         encoding="utf-8",
     )
     original_advance = server_module.advance_chase_turn
@@ -142,6 +141,10 @@ def test_public_chase_uses_exact_module_source_and_no_combat_map(
             "module_expand",
             {"chunk_id": hits[0]["id"]},
         )
+        transition_excerpt = (
+            "when the characters are close, the kenku ducks into an old tower."
+        )
+        transition_expanded = expanded
         source_ref = {
             "module_id": expanded["module"]["id"],
             "scene_id": expanded["scene"]["id"],
@@ -151,6 +154,17 @@ def test_public_chase_uses_exact_module_source_and_no_combat_map(
             "heading_path": expanded["heading_path"],
             "content_sha256": hashlib.sha256(
                 expanded["content"].encode("utf-8")
+            ).hexdigest(),
+        }
+        transition_source_ref = {
+            "module_id": transition_expanded["module"]["id"],
+            "scene_id": transition_expanded["scene"]["id"],
+            "chunk_id": transition_expanded["chunk_id"],
+            "page_start": transition_expanded["page_start"],
+            "page_end": transition_expanded["page_end"],
+            "heading_path": transition_expanded["heading_path"],
+            "content_sha256": hashlib.sha256(
+                transition_expanded["content"].encode("utf-8")
             ).hexdigest(),
         }
 
@@ -192,6 +206,27 @@ def test_public_chase_uses_exact_module_source_and_no_combat_map(
                 "idempotency_key": "play",
             },
         )
+        with pytest.raises(Exception, match="source_ref"):
+            await _call(
+                server,
+                "chase_start",
+                {
+                    "campaign_id": campaign["id"],
+                    "participant_ids": [pursuer["id"], quarry["id"]],
+                    "quarry_ids": [quarry["id"]],
+                    "initial_distance_ft": 60,
+                    "scene_id": expanded["scene"]["id"],
+                    "source_ref": source_ref,
+                    "source_excerpt": source_excerpt,
+                    "close_transition": {
+                        "distance_ft": 0,
+                        "status": "destination_reached",
+                        "summary": transition_excerpt,
+                    },
+                    "expected_revision": phase["campaign_revision"],
+                    "idempotency_key": "chase-start-without-transition-evidence",
+                },
+            )
         started = await _call(
             server,
             "chase_start",
@@ -210,7 +245,9 @@ def test_public_chase_uses_exact_module_source_and_no_combat_map(
                 "close_transition": {
                     "distance_ft": 0,
                     "status": "destination_reached",
-                    "summary": "The kenku ducks into the old tower.",
+                    "summary": transition_excerpt,
+                    "source_ref": transition_source_ref,
+                    "source_excerpt": transition_excerpt,
                 },
                 "expected_revision": phase["campaign_revision"],
                 "idempotency_key": "chase-start",
@@ -220,6 +257,10 @@ def test_public_chase_uses_exact_module_source_and_no_combat_map(
         assert started["chase"]["mode"] == "theater_of_the_mind"
         assert "battle_map" not in started["chase"]
         assert started["chase"]["source_ref"]["chunk_id"] == expanded["chunk_id"]
+        assert (
+            started["chase"]["close_transition"]["source_ref"]["chunk_id"]
+            == transition_expanded["chunk_id"]
+        )
         assert all(
             receipt["mechanic_id"].startswith("dnd5e.core.chase.")
             or receipt["mechanic_id"] == "dnd5e.core.check.jack_of_all_trades"

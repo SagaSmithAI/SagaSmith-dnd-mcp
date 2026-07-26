@@ -15,18 +15,24 @@ from sagasmith_dnd.playthrough import (
 )
 
 import scripts.regression_playthrough as regression_playthrough
+from scripts.regression_modules import PRINCIPAL_ID
 from scripts.regression_playthrough import (
     _acquire_source_loot,
     _advance_level,
     _advance_scene,
     _advance_time,
     _apply_source_damage,
+    _apply_source_effect,
+    _attack_source_object,
     _award_experience,
     _branch_from_snapshot,
     _campaign_phase,
+    _cast_healing_spell,
+    _cast_source_spell,
     _check_identity,
     _check_knowledge_key,
     _checkpoint,
+    _claim_party_item_for_character,
     _committed_check_result,
     _configure_advancement,
     _configure_ending_conditions,
@@ -39,11 +45,13 @@ from scripts.regression_playthrough import (
     _matching_check_progress,
     _module_refresh_identity,
     _module_refresh_manifest_action,
+    _module_refresh_manifest_identity,
     _mutation_key,
     _occurrence_identity,
     _party_member,
     _party_selections,
     _phase_groups,
+    _pool_character_currency,
     _preflight_level_completion,
     _prepare_narrative_npc,
     _provision_source_item,
@@ -56,10 +64,13 @@ from scripts.regression_playthrough import (
     _refresh_module,
     _register_replacement,
     _relock_core,
+    _remap_ending_sources_for_module_revision,
+    _remove_source_effect,
     _resolve_check,
     _restore_phase_after_failed_refresh,
     _roll_source_table,
     _scene_progress_percent,
+    _set_source_exhaustion,
     _short_rest,
     _source_groups,
     _spend_source_currency,
@@ -225,6 +236,17 @@ def test_configure_ending_uses_public_manifest_replace_and_rejects_redefinition(
 
 
 def test_advance_scene_identity_supports_exact_retry_and_later_revisit() -> None:
+    source_excerpt = 'Proceed to "Town."'
+    source_ref = {
+        "module_id": "module-1",
+        "scene_id": "scene-old",
+        "chunk_id": "chunk-transition",
+        "page_start": 1,
+        "page_end": 1,
+        "heading_path": ["Chapter", "Next"],
+        "content_sha256": "a" * 64,
+    }
+
     class Client:
         def __init__(self) -> None:
             self.revision = 1
@@ -253,7 +275,26 @@ def test_advance_scene_identity_supports_exact_retry_and_later_revisit() -> None
 
         async def domain(self, tool_id: str, arguments: dict):
             if tool_id == "module_query":
-                assert arguments["payload"]["scene_id"] == "scene-town"
+                requested_scene_id = arguments["payload"]["scene_id"]
+                if requested_scene_id == "scene-old":
+                    return {
+                        "module_id": "module-1",
+                        "chapter_id": "chapter-1",
+                        "chapter": "Chapter",
+                        "scene_id": "scene-old",
+                        "title": "Road",
+                        "content": source_excerpt,
+                    }
+                if requested_scene_id == "scene-citation":
+                    return {
+                        "module_id": "module-1",
+                        "chapter_id": "chapter-1",
+                        "chapter": "Chapter",
+                        "scene_id": "scene-citation",
+                        "title": "Sibling source",
+                        "content": "The survivors carry the Stone to Town.",
+                    }
+                assert requested_scene_id == "scene-town"
                 return {
                     "module_id": "module-1",
                     "chapter_id": "chapter-1",
@@ -283,6 +324,9 @@ def test_advance_scene_identity_supports_exact_retry_and_later_revisit() -> None
             run_id="run-1",
             occurrence_id=occurrence_id,
             scene_id="scene-town",
+            source_scene_id="scene-old",
+            source_excerpt=source_excerpt,
+            source_ref=source_ref,
             objective="Return the rescued family.",
             mark_visited=True,
             reachable_scene_ids=[],
@@ -300,9 +344,57 @@ def test_advance_scene_identity_supports_exact_retry_and_later_revisit() -> None
     )
 
     client.manifest["world_state"]["visit_marker"] = 2
+    client.manifest["current"]["scene_id"] = "scene-old"
     asyncio.run(advance(client, "town-visit-2"))
     revisit_key = client.replace_calls[2]["idempotency_key"]
     assert revisit_key != first_key
+    assert client.manifest["world_state"]["scene_transitions"] == {
+        "town-visit-1": {
+            "from_scene_id": "scene-old",
+            "to_scene_id": "scene-town",
+            "source_excerpt": source_excerpt,
+            "source_ref": source_ref,
+        },
+        "town-visit-2": {
+            "from_scene_id": "scene-old",
+            "to_scene_id": "scene-town",
+            "source_excerpt": source_excerpt,
+            "source_ref": source_ref,
+        },
+    }
+
+    citation_ref = {
+        **source_ref,
+        "scene_id": "scene-citation",
+        "chunk_id": "chunk-sibling-transition",
+        "content_sha256": "b" * 64,
+    }
+    client.manifest["current"]["scene_id"] = "scene-old"
+    asyncio.run(
+        _advance_scene(
+            client,
+            campaign_id="campaign-1",
+            run_id="run-1",
+            occurrence_id="town-visit-sibling-source",
+            scene_id="scene-town",
+            source_scene_id="scene-citation",
+            source_excerpt="The survivors carry the Stone to Town.",
+            source_ref=citation_ref,
+            objective="Follow the Stone.",
+            mark_visited=True,
+            reachable_scene_ids=[],
+            excluded_scenes=[],
+            occurrence_scene_id="scene-old",
+        )
+    )
+    assert client.manifest["world_state"]["scene_transitions"][
+        "town-visit-sibling-source"
+    ] == {
+        "from_scene_id": "scene-old",
+        "to_scene_id": "scene-town",
+        "source_excerpt": "The survivors carry the Stone to Town.",
+        "source_ref": citation_ref,
+    }
 
 
 def test_core_relock_driver_requires_current_checkpoint_and_public_profile() -> None:
@@ -1054,6 +1146,147 @@ def test_source_item_driver_validates_provenance_hydrates_and_equips(
         assert result["checkpoint"]["verification"]["valid"] is True
 
 
+def test_source_item_driver_enriches_an_existing_item_through_public_update(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_ref = {
+        "module_id": "module-1",
+        "scene_id": "reference-scene",
+        "chunk_id": "stone-chunk",
+        "page_start": 193,
+        "page_end": 193,
+        "heading_path": ["Appendix A", "Stone of Golorr"],
+        "content_sha256": "b" * 64,
+    }
+    requested = {
+        "id": "stone-of-golorr",
+        "name": "Stone of Golorr",
+        "kind": "magic_item",
+        "source_key": "module-chunk:stone-chunk",
+        "attunement": "attuned",
+        "charges": {
+            "label": "Legend Lore charges",
+            "value": 3,
+            "max": 3,
+            "recovers_on": "dawn",
+            "source_key": "module-chunk:stone-chunk",
+        },
+        "mechanics": {
+            "rarity": "artifact",
+            "requires_attunement": True,
+            "spellcasting": {
+                "requires_attunement": True,
+                "requires_class_spell_list": False,
+                "components_required": False,
+                "spells": [
+                    {
+                        "artifact_id": "dnd5e.content.srd2014.spell.legend-lore",
+                        "charge_cost": 1,
+                        "casting_time": "10 minutes",
+                    }
+                ],
+            },
+        },
+    }
+
+    class Client:
+        def __init__(self) -> None:
+            sheet = default_character_sheet()
+            sheet["inventory"]["items"].append(
+                {
+                    "id": "stone-of-golorr",
+                    "name": "Stone of Golorr",
+                    "kind": "magic_item",
+                    "quantity": 1,
+                    "weight_oz": 0,
+                    "price_cp": 0,
+                    "description": "",
+                    "source_key": "module-chunk:stone-chunk",
+                    "container_id": None,
+                    "equipped": False,
+                    "equipped_slot": None,
+                    "identified": False,
+                    "attunement": "attuned",
+                    "condition": "normal",
+                    "uses": {
+                        "label": "",
+                        "value": 0,
+                        "max": 0,
+                        "recovers_on": "none",
+                        "source_key": "",
+                        "slot_level": 0,
+                    },
+                    "charges": deepcopy(requested["charges"]),
+                    "mechanics": {
+                        "rarity": "artifact",
+                        "requires_attunement": True,
+                    },
+                }
+            )
+            self.actor = {
+                "id": "pip",
+                "name": "Pip",
+                "campaign_id": "campaign-1",
+                "revision": 9,
+                "sheet": sheet,
+                "derived": {"armor_class": 15},
+            }
+            self.inventory_arguments: dict | None = None
+
+        async def domain(self, tool_id: str, arguments: dict):
+            if tool_id == "module_query":
+                return {
+                    "module_id": "module-1",
+                    "scene_id": "reference-scene",
+                    "content": "Wondrous item, artifact (requires attunement)",
+                }
+            if tool_id == "character_query":
+                return deepcopy(self.actor)
+            if tool_id == "inventory_change":
+                self.inventory_arguments = deepcopy(arguments)
+                assert arguments["action"] == "update"
+                patch = deepcopy(arguments["payload"]["patch"])
+                patch["mechanics"]["spellcasting"]["spells"][0]["card"] = {
+                    "id": "dnd5e.content.srd2014.spell.legend-lore",
+                    "pack_id": "dnd5e.content.srd2014",
+                }
+                self.actor["sheet"]["inventory"]["items"][0].update(patch)
+                self.actor["revision"] += 1
+                return {"character": deepcopy(self.actor)}
+            raise AssertionError((tool_id, arguments))
+
+    async def checkpoint(*_args, **_kwargs):
+        raise AssertionError("deferred source enrichment must not checkpoint")
+
+    monkeypatch.setattr(regression_playthrough, "_checkpoint", checkpoint)
+    client = Client()
+    result = asyncio.run(
+        _provision_source_item(
+            client,
+            campaign_id="campaign-1",
+            run_id="run-1",
+            actor_id="pip",
+            source_scene_id="reference-scene",
+            source_excerpt="requires attunement",
+            source_ref=source_ref,
+            item=requested,
+            equip_slot="",
+            reason="Bind the source-defined Legend Lore use.",
+            checkpoint_label="",
+            defer_checkpoint=True,
+        )
+    )
+
+    assert client.inventory_arguments is not None
+    assert client.inventory_arguments["action"] == "update"
+    assert result["add_recovered"] is True
+    assert result["update_recovered"] is True
+    assert (
+        result["item"]["mechanics"]["spellcasting"]["spells"][0]["card"]["id"]
+        == "dnd5e.content.srd2014.spell.legend-lore"
+    )
+
+
 @pytest.mark.parametrize("defer_checkpoint", [False, True])
 def test_source_item_transfer_driver_uses_atomic_character_to_party_public_tool(
     defer_checkpoint: bool,
@@ -1163,6 +1396,981 @@ def test_source_item_transfer_driver_uses_atomic_character_to_party_public_tool(
         assert result["checkpoint"] is None
     else:
         assert result["checkpoint"]["verification"]["valid"] is True
+
+
+def test_source_item_transfer_driver_uses_atomic_character_to_character_public_tool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_ref = {
+        "module_id": "module-1",
+        "scene_id": "scene-1",
+        "chunk_id": "ambush-chunk",
+        "page_start": 63,
+        "page_end": 63,
+        "heading_path": ["Encounter 1: Alley"],
+        "content_sha256": "b" * 64,
+    }
+    stone = {
+        "id": "stone-of-golorr",
+        "name": "Stone of Golorr",
+        "kind": "magic_item",
+        "quantity": 1,
+    }
+
+    class Client:
+        def __init__(self) -> None:
+            source_sheet = default_character_sheet()
+            source_sheet["inventory"]["items"].append(deepcopy(stone))
+            self.source = {
+                "id": "pip",
+                "campaign_id": "campaign-1",
+                "revision": 7,
+                "sheet": source_sheet,
+            }
+            self.target = {
+                "id": "morga",
+                "campaign_id": "campaign-1",
+                "revision": 3,
+                "sheet": default_character_sheet(),
+            }
+            self.transfer_arguments: dict | None = None
+
+        async def core(self, tool_id: str, arguments: dict):
+            assert tool_id == "campaign_query"
+            return {"result": {"id": "campaign-1", "revision": 24}}
+
+        async def domain(self, tool_id: str, arguments: dict):
+            if tool_id == "module_query":
+                return {
+                    "module_id": "module-1",
+                    "scene_id": "scene-1",
+                    "content": "If these creatures obtain the stone, they bring it to Xanathar.",
+                    "spatial": {"locations": [{"key": "alley", "title": "Alley"}]},
+                }
+            if tool_id == "character_query":
+                actor_id = arguments["payload"]["character_id"]
+                return deepcopy(self.source if actor_id == "pip" else self.target)
+            if tool_id == "inventory_transfer":
+                self.transfer_arguments = deepcopy(arguments)
+                moved = self.source["sheet"]["inventory"]["items"].pop()
+                self.target["sheet"]["inventory"]["items"].append(deepcopy(moved))
+                return {
+                    "source": deepcopy(self.source),
+                    "target": deepcopy(self.target),
+                    "item": deepcopy(moved),
+                }
+            raise AssertionError((tool_id, arguments))
+
+    async def checkpoint(*_args, **_kwargs):
+        return {"snapshot": {"slot": 51}, "verification": {"valid": True}}
+
+    monkeypatch.setattr(regression_playthrough, "_checkpoint", checkpoint)
+    client = Client()
+    result = asyncio.run(
+        _transfer_source_item_to_party(
+            client,
+            campaign_id="campaign-1",
+            run_id="run-1",
+            occurrence_id="morga-takes-stone",
+            scene_id="scene-1",
+            location_key="alley",
+            source_excerpt="If these creatures obtain the stone, they bring it to Xanathar.",
+            source_ref=source_ref,
+            character_id="pip",
+            recipient_character_id="morga",
+            item_id="stone-of-golorr",
+            quantity=1,
+            reason="Morga takes the Stone from the defeated party.",
+            checkpoint_label="Morga takes the Stone",
+        )
+    )
+
+    assert client.transfer_arguments is not None
+    assert client.transfer_arguments["mode"] == "character_to_character"
+    assert client.transfer_arguments["payload"] == {
+        "source_character_id": "pip",
+        "target_character_id": "morga",
+        "item_id": "stone-of-golorr",
+        "expected_campaign_revision": 24,
+        "expected_source_revision": 7,
+        "expected_target_revision": 3,
+        "quantity": 1,
+    }
+    assert result["recipient_character_id"] == "morga"
+    assert result["transfer"]["item"]["id"] == "stone-of-golorr"
+
+
+@pytest.mark.parametrize("defer_checkpoint", [False, True])
+def test_party_item_claim_driver_uses_atomic_party_to_character_public_tool(
+    defer_checkpoint: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_ref = {
+        "module_id": "module-1",
+        "scene_id": "scene-1",
+        "chunk_id": "gazer-chunk",
+        "page_start": 79,
+        "page_end": 79,
+        "heading_path": ["Old Tower", "Gazer Attack"],
+        "content_sha256": "a" * 64,
+    }
+    stone = {
+        "id": "stone-of-golorr",
+        "name": "Stone of Golorr",
+        "kind": "magic_item",
+        "quantity": 1,
+    }
+
+    class Client:
+        def __init__(self) -> None:
+            sheet = default_character_sheet()
+            self.actor = {
+                "id": "pip",
+                "name": "Pip",
+                "campaign_id": "campaign-1",
+                "revision": 7,
+                "sheet": sheet,
+                "derived": {"armor_class": 15},
+            }
+            self.party = {"inventory": {"items": [deepcopy(stone)]}}
+            self.transfer_arguments: dict | None = None
+
+        async def core(self, tool_id: str, arguments: dict):
+            assert tool_id == "campaign_query"
+            if arguments["view"] == "party":
+                return {"result": deepcopy(self.party)}
+            return {"result": {"id": "campaign-1", "revision": 21}}
+
+        async def domain(self, tool_id: str, arguments: dict):
+            if tool_id == "module_query":
+                return {
+                    "module_id": "module-1",
+                    "scene_id": "scene-1",
+                    "content": "They use telekinetic rays to steal it.",
+                    "spatial": {
+                        "locations": [{"key": "upper-level", "title": "Upper Level"}]
+                    },
+                }
+            if tool_id == "character_query":
+                return deepcopy(self.actor)
+            if tool_id == "inventory_transfer":
+                self.transfer_arguments = deepcopy(arguments)
+                moved = self.party["inventory"]["items"].pop()
+                self.actor["sheet"]["inventory"]["items"].append(deepcopy(moved))
+                self.actor["revision"] += 1
+                return {
+                    "party": deepcopy(self.party),
+                    "character": deepcopy(self.actor),
+                    "item": moved,
+                }
+            raise AssertionError((tool_id, arguments))
+
+    checkpoint_calls = 0
+
+    async def checkpoint(*_args, **_kwargs):
+        nonlocal checkpoint_calls
+        checkpoint_calls += 1
+        return {"snapshot": {"slot": 14}, "verification": {"valid": True}}
+
+    monkeypatch.setattr(regression_playthrough, "_checkpoint", checkpoint)
+    client = Client()
+    result = asyncio.run(
+        _claim_party_item_for_character(
+            client,
+            campaign_id="campaign-1",
+            run_id="run-1",
+            occurrence_id="stone-bearer-1",
+            scene_id="scene-1",
+            location_key="upper-level",
+            source_excerpt="They use telekinetic rays to steal it.",
+            source_ref=source_ref,
+            character_id="pip",
+            item_id="stone-of-golorr",
+            quantity=None,
+            reason="The party entrusts the recovered Stone to Pip.",
+            checkpoint_label="Pip carries the Stone",
+            defer_checkpoint=defer_checkpoint,
+        )
+    )
+
+    assert client.transfer_arguments is not None
+    assert client.transfer_arguments["mode"] == "party_to_character"
+    assert client.transfer_arguments["payload"]["expected_campaign_revision"] == 21
+    assert client.transfer_arguments["payload"]["expected_character_revision"] == 7
+    assert client.transfer_arguments["idempotency_key"] == _mutation_key(
+        "run-1",
+        "party-item-claim",
+        _occurrence_identity("stone-bearer-1", "claim-party-item"),
+    )
+    assert result["transfer"]["item"]["id"] == "stone-of-golorr"
+    assert checkpoint_calls == (0 if defer_checkpoint else 1)
+    if defer_checkpoint:
+        assert result["checkpoint"] is None
+    else:
+        assert result["checkpoint"]["verification"]["valid"] is True
+
+
+@pytest.mark.parametrize("defer_checkpoint", [False, True])
+def test_source_effect_application_uses_public_character_transition(
+    defer_checkpoint: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_ref = {
+        "module_id": "module-1",
+        "scene_id": "scene-1",
+        "chunk_id": "fresco-chunk",
+        "page_start": 96,
+        "page_end": 96,
+        "heading_path": ["Vault", "Enthralling Fresco"],
+        "content_sha256": "a" * 64,
+    }
+    effect = {
+        "id": "fresco-charm",
+        "name": "Enthralling Fresco",
+        "kind": "timed_conditions",
+        "source": "module-chunk:fresco-chunk",
+        "duration": {"period": "hour", "remaining": 24},
+        "changes": [{"path": "conditions", "mode": "add", "value": "charmed"}],
+    }
+
+    class Client:
+        def __init__(self) -> None:
+            self.actor = {
+                "id": "thalia",
+                "name": "Thalia",
+                "campaign_id": "campaign-1",
+                "revision": 9,
+                "sheet": default_character_sheet(),
+                "derived": {"armor_class": 18},
+            }
+            self.change_arguments: dict | None = None
+
+        async def domain(self, tool_id: str, arguments: dict):
+            if tool_id == "module_query":
+                return {
+                    "module_id": "module-1",
+                    "scene_id": "scene-1",
+                    "content": "A failed save charms the creature for 24 hours.",
+                    "spatial": {
+                        "locations": [{"key": "fresco", "title": "Fresco"}]
+                    },
+                }
+            if tool_id == "character_query":
+                return deepcopy(self.actor)
+            if tool_id == "character_state_change":
+                self.change_arguments = deepcopy(arguments)
+                self.actor["sheet"]["effects"] = [
+                    {
+                        **deepcopy(effect),
+                        "active": True,
+                        "concentration": False,
+                        "source_spell_id": "",
+                        "description": "",
+                    }
+                ]
+                self.actor["revision"] += 1
+                return {
+                    "character": deepcopy(self.actor),
+                    "effect_id": "fresco-charm",
+                }
+            raise AssertionError((tool_id, arguments))
+
+    checkpoint_calls = 0
+
+    async def checkpoint(*_args, **_kwargs):
+        nonlocal checkpoint_calls
+        checkpoint_calls += 1
+        return {"snapshot": {"slot": 15}, "verification": {"valid": True}}
+
+    monkeypatch.setattr(regression_playthrough, "_checkpoint", checkpoint)
+    client = Client()
+    result = asyncio.run(
+        _apply_source_effect(
+            client,
+            campaign_id="campaign-1",
+            run_id="run-1",
+            occurrence_id="fresco-charm-thalia",
+            scene_id="scene-1",
+            location_key="fresco",
+            source_excerpt="A failed save charms the creature for 24 hours.",
+            source_ref=source_ref,
+            character_id="thalia",
+            effect=effect,
+            reason="Thalia failed the source-defined Wisdom save.",
+            checkpoint_label="Fresco charm applied",
+            defer_checkpoint=defer_checkpoint,
+        )
+    )
+
+    assert client.change_arguments == {
+        "character_id": "thalia",
+        "action": "effect_add",
+        "payload": {"effect": effect},
+        "expected_revision": 9,
+        "idempotency_key": _mutation_key(
+            "run-1",
+            "source-effect-add",
+            _occurrence_identity("fresco-charm-thalia", "apply-source-effect"),
+        ),
+    }
+    assert result["effect"]["id"] == "fresco-charm"
+    assert checkpoint_calls == (0 if defer_checkpoint else 1)
+
+
+@pytest.mark.parametrize("defer_checkpoint", [False, True])
+def test_source_effect_removal_uses_public_character_transition(
+    defer_checkpoint: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_ref = {
+        "module_id": "module-1",
+        "scene_id": "scene-1",
+        "chunk_id": "gazer-chunk",
+        "page_start": 79,
+        "page_end": 79,
+        "heading_path": ["Old Tower", "Gazer Attack"],
+        "content_sha256": "a" * 64,
+    }
+
+    class Client:
+        def __init__(self) -> None:
+            sheet = default_character_sheet()
+            sheet["conditions"] = ["frightened"]
+            sheet["effects"] = [
+                {
+                    "id": "fear-ray-effect",
+                    "name": "Fear Ray",
+                    "kind": "timed_conditions",
+                    "source": "gazer",
+                    "active": True,
+                    "duration": {"period": "source_turn_start", "remaining": 1},
+                    "changes": [
+                        {
+                            "path": "conditions",
+                            "mode": "add",
+                            "value": "frightened",
+                        }
+                    ],
+                }
+            ]
+            self.actor = {
+                "id": "pip",
+                "name": "Pip",
+                "campaign_id": "campaign-1",
+                "revision": 9,
+                "sheet": sheet,
+                "derived": {"armor_class": 15},
+            }
+            self.change_arguments: dict | None = None
+
+        async def domain(self, tool_id: str, arguments: dict):
+            if tool_id == "module_query":
+                return {
+                    "module_id": "module-1",
+                    "scene_id": "scene-1",
+                    "content": "The target is frightened until the next turn.",
+                    "spatial": {
+                        "locations": [{"key": "upper-level", "title": "Upper Level"}]
+                    },
+                }
+            if tool_id == "character_query":
+                return deepcopy(self.actor)
+            if tool_id == "character_state_change":
+                self.change_arguments = deepcopy(arguments)
+                self.actor["sheet"]["effects"] = []
+                self.actor["sheet"]["conditions"] = []
+                self.actor["revision"] += 1
+                return {"character": deepcopy(self.actor)}
+            raise AssertionError((tool_id, arguments))
+
+    checkpoint_calls = 0
+
+    async def checkpoint(*_args, **_kwargs):
+        nonlocal checkpoint_calls
+        checkpoint_calls += 1
+        return {"snapshot": {"slot": 15}, "verification": {"valid": True}}
+
+    monkeypatch.setattr(regression_playthrough, "_checkpoint", checkpoint)
+    client = Client()
+    result = asyncio.run(
+        _remove_source_effect(
+            client,
+            campaign_id="campaign-1",
+            run_id="run-1",
+            occurrence_id="fear-cleanup-1",
+            scene_id="scene-1",
+            location_key="upper-level",
+            source_excerpt="The target is frightened until the next turn.",
+            source_ref=source_ref,
+            character_id="pip",
+            effect_id="fear-ray-effect",
+            reason="Combat ended before the source's next turn.",
+            checkpoint_label="Fear Ray ended",
+            defer_checkpoint=defer_checkpoint,
+        )
+    )
+
+    assert client.change_arguments == {
+        "character_id": "pip",
+        "action": "effect_remove",
+        "payload": {"effect_id": "fear-ray-effect"},
+        "expected_revision": 9,
+        "idempotency_key": _mutation_key(
+            "run-1",
+            "source-effect-remove",
+            _occurrence_identity("fear-cleanup-1", "remove-source-effect"),
+        ),
+    }
+    assert result["effect"]["id"] == "fear-ray-effect"
+    assert checkpoint_calls == (0 if defer_checkpoint else 1)
+
+
+def test_source_exhaustion_uses_public_character_transition() -> None:
+    source_ref = {
+        "module_id": "module-1",
+        "scene_id": "scene-1",
+        "chunk_id": "fresco-chunk",
+        "page_start": 96,
+        "page_end": 96,
+        "heading_path": ["Vault", "Enthralling Fresco"],
+        "content_sha256": "a" * 64,
+    }
+
+    class Client:
+        def __init__(self) -> None:
+            sheet = default_character_sheet()
+            self.actor = {
+                "id": "maris",
+                "name": "Maris",
+                "campaign_id": "campaign-1",
+                "revision": 11,
+                "sheet": sheet,
+                "derived": {"armor_class": 13},
+            }
+            self.change_arguments: dict | None = None
+
+        async def domain(self, tool_id: str, arguments: dict):
+            if tool_id == "module_query":
+                return {
+                    "module_id": "module-1",
+                    "scene_id": "scene-1",
+                    "content": "After 24 hours, the creature gains one level of exhaustion.",
+                    "spatial": {
+                        "locations": [{"key": "fresco", "title": "Fresco"}]
+                    },
+                }
+            if tool_id == "character_query":
+                return deepcopy(self.actor)
+            if tool_id == "character_state_change":
+                self.change_arguments = deepcopy(arguments)
+                self.actor["sheet"]["combat"]["exhaustion"] = 1
+                self.actor["revision"] += 1
+                return {"character": deepcopy(self.actor)}
+            raise AssertionError((tool_id, arguments))
+
+    client = Client()
+    result = asyncio.run(
+        _set_source_exhaustion(
+            client,
+            campaign_id="campaign-1",
+            run_id="run-1",
+            occurrence_id="fresco-exhaustion-maris-day-1",
+            scene_id="scene-1",
+            location_key="fresco",
+            source_excerpt="After 24 hours, the creature gains one level of exhaustion.",
+            source_ref=source_ref,
+            character_id="maris",
+            level=1,
+            reason="Maris remained charmed for 24 hours.",
+            checkpoint_label="",
+            defer_checkpoint=True,
+        )
+    )
+
+    assert client.change_arguments == {
+        "character_id": "maris",
+        "action": "exhaustion_set",
+        "payload": {"value": 1},
+        "expected_revision": 11,
+        "idempotency_key": _mutation_key(
+            "run-1",
+            "source-exhaustion-set",
+            "fresco-exhaustion-maris-day-1",
+        ),
+    }
+    assert result["before"] == 0
+    assert result["after"] == 1
+
+
+def test_source_object_attack_uses_public_character_action() -> None:
+    source_ref = {
+        "module_id": "module-1",
+        "scene_id": "scene-1",
+        "chunk_id": "fresco-chunk",
+        "page_start": 96,
+        "page_end": 96,
+        "heading_path": ["Vault", "Enthralling Fresco"],
+        "content_sha256": "a" * 64,
+    }
+    source_object = {
+        "id": "fresco-section",
+        "name": "Enthralling Fresco Section",
+        "scene_id": "scene-1",
+        "armor_class": 17,
+        "hit_points": 25,
+        "damage_immunities": ["poison", "psychic"],
+    }
+
+    class Client:
+        def __init__(self) -> None:
+            self.action_arguments: dict | None = None
+
+        async def core(self, tool_id: str, arguments: dict):
+            assert tool_id == "campaign_query"
+            assert arguments == {
+                "view": "get",
+                "payload": {"campaign_id": "campaign-1"},
+                "principal_id": PRINCIPAL_ID,
+            }
+            return {"id": "campaign-1", "revision": 12}
+
+        async def domain(self, tool_id: str, arguments: dict):
+            if tool_id == "module_query":
+                return {
+                    "module_id": "module-1",
+                    "scene_id": "scene-1",
+                    "content": "Each section has AC 17 and 25 hit points.",
+                    "spatial": {
+                        "locations": [{"key": "fresco", "title": "Fresco"}]
+                    },
+                }
+            if tool_id == "character_query":
+                return {
+                    "id": "breaker",
+                    "campaign_id": "campaign-1",
+                    "revision": 7,
+                    "sheet": default_character_sheet(),
+                }
+            if tool_id == "character_action":
+                self.action_arguments = deepcopy(arguments)
+                return {
+                    "status": "committed",
+                    "object": {
+                        **deepcopy(source_object),
+                        "hit_point_maximum": 25,
+                        "hit_points": 19,
+                        "destroyed": False,
+                        "source_ref": deepcopy(source_ref),
+                    },
+                }
+            raise AssertionError((tool_id, arguments))
+
+    client = Client()
+    result = asyncio.run(
+        _attack_source_object(
+            client,
+            campaign_id="campaign-1",
+            run_id="run-1",
+            occurrence_id="fresco-attack-1",
+            scene_id="scene-1",
+            location_key="fresco",
+            source_excerpt="Each section has AC 17 and 25 hit points.",
+            source_ref=source_ref,
+            character_id="breaker",
+            object_state=source_object,
+            weapon_id="mace",
+            reason="The fresco is within melee reach.",
+            advantage=False,
+            disadvantage=False,
+            checkpoint_label="",
+            defer_checkpoint=True,
+        )
+    )
+
+    assert client.action_arguments == {
+        "character_id": "breaker",
+        "action": "attack_source_object",
+        "payload": {
+            "object": source_object,
+            "weapon_id": "mace",
+            "source_ref": source_ref,
+            "reason": "The fresco is within melee reach.",
+            "advantage": False,
+            "disadvantage": False,
+            "expected_campaign_revision": 12,
+        },
+        "expected_revision": 7,
+        "idempotency_key": _mutation_key(
+            "run-1",
+            "source-object-attack",
+            _occurrence_identity("fresco-attack-1", "attack-source-object"),
+        ),
+    }
+    assert result["object"]["hit_points"] == 19
+
+
+def test_healing_spell_driver_pays_rolls_and_applies_public_healing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_ref = {
+        "module_id": "module-1",
+        "scene_id": "scene-1",
+        "chunk_id": "bridge-chunk",
+        "page_start": 95,
+        "page_end": 96,
+        "heading_path": ["Vault", "Bridge"],
+        "content_sha256": "a" * 64,
+    }
+    caster_sheet = default_character_sheet()
+    caster_sheet["abilities"]["wisdom"]["score"] = 18
+    caster_sheet["spellcasting"]["ability"] = "wisdom"
+    caster_sheet["content"]["spells"] = [
+        {
+            "id": "healing-word",
+            "name": "Healing Word",
+            "level": 1,
+            "resolution": {
+                "kind": "healing",
+                "targeting": {
+                    "mode": "creature",
+                    "requires_sight": True,
+                    "max_targets": 1,
+                    "excluded_creature_types": ["construct", "undead"],
+                    "area": None,
+                },
+                "attack": None,
+                "save": None,
+                "healing": {
+                    "base_dice": "1d4",
+                    "per_slot_dice": "1d4",
+                    "slot_base_level": 1,
+                    "cantrip_dice": {},
+                    "add_spellcasting_modifier": True,
+                },
+            },
+        }
+    ]
+    target_sheet = default_character_sheet()
+    target_sheet["combat"]["hp"] = {"value": 0, "max": 20, "temp": 0}
+    target_sheet["conditions"] = ["prone", "unconscious"]
+
+    class Client:
+        def __init__(self) -> None:
+            self.cast_arguments: dict | None = None
+            self.roll_arguments: dict | None = None
+            self.heal_arguments: dict | None = None
+
+        async def core(self, tool_id: str, arguments: dict):
+            assert tool_id == "campaign_query"
+            return {"id": "campaign-1", "revision": 12, "state": {}}
+
+        async def domain(self, tool_id: str, arguments: dict):
+            if tool_id == "module_query":
+                return {
+                    "module_id": "module-1",
+                    "scene_id": "scene-1",
+                    "content": "A failed save causes a 60-foot fall.",
+                    "spatial": {
+                        "locations": [{"key": "bridge", "title": "Bridge"}]
+                    },
+                }
+            if tool_id == "character_query":
+                actor_id = arguments["payload"]["character_id"]
+                if actor_id == "cleric":
+                    return {
+                        "id": "cleric",
+                        "name": "Cleric",
+                        "campaign_id": "campaign-1",
+                        "revision": 7,
+                        "sheet": deepcopy(caster_sheet),
+                    }
+                return {
+                    "id": "fallen",
+                    "name": "Fallen",
+                    "campaign_id": "campaign-1",
+                    "revision": 4,
+                    "sheet": deepcopy(target_sheet),
+                }
+            if tool_id == "character_action":
+                self.cast_arguments = deepcopy(arguments)
+                return {"status": "pending_ruling", "result": {"payment": {"cost": 1}}}
+            if tool_id == "branch_query":
+                return [{"id": "branch-1", "is_current": True}]
+            if tool_id == "dnd_dice_roll":
+                self.roll_arguments = deepcopy(arguments)
+                return {
+                    "total": 7,
+                    "rolls": [3],
+                    "expression": "1d4 + 4",
+                    "detail": "1d4[3] +4",
+                }
+            if tool_id == "character_state_change":
+                self.heal_arguments = deepcopy(arguments)
+                healed_sheet = deepcopy(target_sheet)
+                healed_sheet["combat"]["hp"]["value"] = 7
+                healed_sheet["conditions"] = ["prone"]
+                return {
+                    "character": {
+                        "id": "fallen",
+                        "revision": 5,
+                        "sheet": healed_sheet,
+                    }
+                }
+            if tool_id == "continuity_commit":
+                return {"event": {"id": "event-1"}}
+            raise AssertionError((tool_id, arguments))
+
+    async def manifest_mutation(*_args, **_kwargs):
+        return {"manifest": {"status": "in_progress"}}
+
+    monkeypatch.setattr(regression_playthrough, "_manifest_mutation", manifest_mutation)
+    client = Client()
+    result = asyncio.run(
+        _cast_healing_spell(
+            client,
+            campaign_id="campaign-1",
+            run_id="run-1",
+            occurrence_id="heal-fallen",
+            scene_id="scene-1",
+            source_excerpt="A failed save causes a 60-foot fall.",
+            source_ref=source_ref,
+            location_key="bridge",
+            actor_id="cleric",
+            target_id="fallen",
+            spell_id="healing-word",
+            cast_level=1,
+            component_ruling=None,
+            reason="The cleric restored the fallen ally.",
+            knowledge_actor_ids=[],
+            defer_checkpoint=True,
+        )
+    )
+
+    assert client.cast_arguments["action"] == "cast_spell"
+    assert client.cast_arguments["payload"] == {
+        "spell_id": "healing-word",
+        "cast_level": 1,
+    }
+    assert client.roll_arguments["expression"] == "1d4 + 4"
+    assert client.heal_arguments["payload"] == {
+        "amount": 7,
+        "source_actor_id": "cleric",
+        "spell_id": "healing-word",
+        "spell_level": 1,
+    }
+    assert result["roll"]["total"] == 7
+
+
+def test_currency_pool_driver_uses_public_atomic_party_transfer() -> None:
+    source_ref = {
+        "module_id": "module-1",
+        "scene_id": "source-scene-1",
+        "chunk_id": "chunk-1",
+        "page_start": 95,
+        "page_end": 95,
+        "heading_path": ["Vault Keys", "Sunlight"],
+        "content_sha256": "a" * 64,
+    }
+
+    class Client:
+        def __init__(self) -> None:
+            self.campaign_revision = 9
+            self.character_revision = 4
+            self.wallet_calls: list[dict] = []
+            self.progress_arguments: dict = {}
+            self.continuity_payload: dict = {}
+
+        async def load(self, *groups: str) -> None:
+            assert groups
+
+        async def core(self, tool_id: str, arguments: dict):
+            assert tool_id == "campaign_query"
+            return {
+                "result": {
+                    "id": "campaign-1",
+                    "revision": self.campaign_revision,
+                    "state": {"game_phase": "play"},
+                }
+            }
+
+        async def domain(self, tool_id: str, arguments: dict):
+            if tool_id == "module_query":
+                if arguments["view"] == "progress":
+                    return []
+                scene_id = arguments["payload"]["scene_id"]
+                if scene_id == "source-scene-1":
+                    return {
+                        "module_id": "module-1",
+                        "scene_id": scene_id,
+                        "content": "Twenty steel mirrors cost 5 gp each.",
+                    }
+                assert scene_id == "scene-1"
+                return {
+                    "module_id": "module-1",
+                    "scene_id": scene_id,
+                    "spatial": {
+                        "locations": [{"key": "market", "title": "Market"}]
+                    },
+                }
+            if tool_id == "character_query":
+                return {
+                    "id": "actor-1",
+                    "campaign_id": "campaign-1",
+                    "revision": self.character_revision,
+                }
+            if tool_id == "wallet_change":
+                self.wallet_calls.append(deepcopy(arguments))
+                expected = arguments["payload"]
+                assert expected == {
+                    "character_id": "actor-1",
+                    "expected_campaign_revision": 10,
+                    "expected_character_revision": 4,
+                }
+                self.campaign_revision += 1
+                self.character_revision += 1
+                return {
+                    "result": {
+                        "party": {"inventory": {"wallet": {"gp": 25}}},
+                        "character": {
+                            "id": "actor-1",
+                            "sheet": {"inventory": {"wallet": {"gp": 5}}},
+                        },
+                    }
+                }
+            if tool_id == "module_set_progress":
+                self.progress_arguments = deepcopy(arguments)
+                self.campaign_revision += 1
+                return {
+                    "scene_id": "scene-1",
+                    "scope_id": "party",
+                    "status": "active",
+                    "progress": 0,
+                    "state_version": (
+                        int(arguments.get("expected_state_version", 0)) + 1
+                    ),
+                    "state": deepcopy(arguments["state"]),
+                }
+            if tool_id == "branch_query":
+                return [{"id": "branch-1", "is_current": True}]
+            if tool_id == "continuity_commit":
+                self.continuity_payload = deepcopy(arguments["payload"])
+                self.campaign_revision += 1
+                return {"event": {"id": "event-1"}}
+            if tool_id == "playthrough_manifest":
+                assert arguments["action"] == "sync"
+                return {
+                    "manifest": {"status": "in_progress"},
+                    "campaign_revision": self.campaign_revision,
+                }
+            raise AssertionError((tool_id, arguments))
+
+    client = Client()
+    result = asyncio.run(
+        _pool_character_currency(
+            client,
+            campaign_id="campaign-1",
+            run_id="run-1",
+            occurrence_id="pool-1",
+            scene_id="scene-1",
+            source_scene_id="source-scene-1",
+            location_key="market",
+            source_excerpt="Twenty steel mirrors cost 5 gp each.",
+            source_ref=source_ref,
+            actor_id="actor-1",
+            denomination="gp",
+            amount=10,
+            reason="The actor pools 10 gp for the source-defined mirrors.",
+            defer_checkpoint=True,
+        )
+    )
+
+    assert len(client.wallet_calls) == 1
+    assert client.wallet_calls[-1]["owner"] == "party"
+    assert client.wallet_calls[-1]["action"] == "transfer_from_character"
+    pool_state = client.progress_arguments["state"]["full_playthrough_currency_pools"]
+    assert next(iter(pool_state.values()))["amount"] == 10
+    assert "snapshot" not in client.continuity_payload
+    assert result["recovered"] is False
+
+
+def test_currency_pool_driver_recovers_completed_progress_without_double_transfer() -> None:
+    source_ref = {
+        "module_id": "module-1",
+        "scene_id": "source-scene-1",
+        "chunk_id": "chunk-1",
+        "page_start": 95,
+        "page_end": 95,
+        "heading_path": ["Vault Keys", "Sunlight"],
+        "content_sha256": "a" * 64,
+    }
+    identity = _occurrence_identity("pool-1", "pool-coins")
+    existing = {
+        "occurrence_id": identity,
+        "actor_id": "actor-1",
+        "denomination": "gp",
+        "amount": 10,
+        "reason": "The actor pools 10 gp.",
+        "source_ref": source_ref,
+        "status": "completed",
+        "expected_campaign_revision": 8,
+        "expected_character_revision": 3,
+    }
+
+    class Client:
+        async def domain(self, tool_id: str, arguments: dict):
+            if tool_id == "module_query":
+                if arguments["view"] == "progress":
+                    return [
+                        {
+                            "scene_id": "scene-1",
+                            "scope_id": "party",
+                            "status": "active",
+                            "progress": 0,
+                            "state_version": 1,
+                            "state": {
+                                "full_playthrough_currency_pools": {
+                                    regression_playthrough._token(identity): existing
+                                }
+                            },
+                        }
+                    ]
+                scene_id = arguments["payload"]["scene_id"]
+                if scene_id == "source-scene-1":
+                    return {
+                        "module_id": "module-1",
+                        "scene_id": scene_id,
+                        "content": "Twenty steel mirrors cost 5 gp each.",
+                    }
+                return {
+                    "module_id": "module-1",
+                    "scene_id": scene_id,
+                    "spatial": {
+                        "locations": [{"key": "market", "title": "Market"}]
+                    },
+                }
+            raise AssertionError((tool_id, arguments))
+
+    result = asyncio.run(
+        _pool_character_currency(
+            Client(),
+            campaign_id="campaign-1",
+            run_id="run-1",
+            occurrence_id="pool-1",
+            scene_id="scene-1",
+            source_scene_id="source-scene-1",
+            location_key="market",
+            source_excerpt="Twenty steel mirrors cost 5 gp each.",
+            source_ref=source_ref,
+            actor_id="actor-1",
+            denomination="gp",
+            amount=10,
+            reason="The actor pools 10 gp.",
+            defer_checkpoint=True,
+        )
+    )
+
+    assert result["recovered"] is True
+    assert result["transfer"] is None
 
 
 @pytest.mark.parametrize("defer_checkpoint", [False, True])
@@ -1395,30 +2603,30 @@ def test_query_source_searches_and_expands_only_public_mcp_results() -> None:
     assert result["expanded_chunks"][0]["source_ref"]["content_sha256"] == "a" * 64
     assert client.calls == [
         (
+            "playthrough_manifest",
+            {"campaign_id": "campaign-1", "action": "get"},
+        ),
+        (
             "module_search",
             {
                 "campaign_id": "campaign-1",
                 "query": "captured defeated characters",
                 "top_k": 4,
+                "module_ids": ["module-1"],
             },
-        ),
-        (
-            "playthrough_manifest",
-            {"campaign_id": "campaign-1", "action": "get"},
         ),
         ("module_expand", {"chunk_id": "chunk-1"}),
     ]
 
 
-def test_query_source_prefers_the_current_manifest_module_revision() -> None:
+def test_query_source_scopes_search_to_the_current_manifest_module_revision() -> None:
     class Client:
         async def domain(self, tool_id: str, arguments: dict):
             if tool_id == "module_search":
+                assert arguments["module_ids"] == ["new-module"]
                 return {
                     "result": [
-                        {"id": "old-chunk", "source_id": "old-module", "score": 1.0},
                         {"id": "new-chunk", "source_id": "new-module", "score": 1.0},
-                        {"id": "other-chunk", "source_id": "other-module", "score": 0.5},
                     ]
                 }
             if tool_id == "playthrough_manifest":
@@ -1442,16 +2650,8 @@ def test_query_source_prefers_the_current_manifest_module_revision() -> None:
         )
     )
 
-    assert [item["id"] for item in result["hits"]] == [
-        "new-chunk",
-        "old-chunk",
-        "other-chunk",
-    ]
-    assert [item["chunk_id"] for item in result["expanded_chunks"]] == [
-        "new-chunk",
-        "old-chunk",
-        "other-chunk",
-    ]
+    assert [item["id"] for item in result["hits"]] == ["new-chunk"]
+    assert [item["chunk_id"] for item in result["expanded_chunks"]] == ["new-chunk"]
 
 
 def test_index_source_uses_exact_public_mcp_module_query() -> None:
@@ -1853,6 +3053,99 @@ def test_module_revision_extension_remaps_current_and_traversed_scenes() -> None
     assert manifest["module_ids"] == ["module-v1"]
 
 
+def test_module_revision_remaps_exact_ending_source_and_scene_check() -> None:
+    source_ref = _manifest_source_ref()
+    source_ref.update(
+        {
+            "asset_sha256": "f" * 64,
+            "module_id": "module-v1",
+            "scene_id": "ending-v1",
+            "chunk_id": "chunk-v1",
+            "chunk_content_sha256": "e" * 64,
+            "excerpt": "The characters should be 5th level.",
+        }
+    )
+    manifest = new_playthrough_manifest(
+        run_id="run-1",
+        campaign_line_id="line-1",
+        module_ids=["module-v1", "module-v2"],
+        recommended_party_minimum=1,
+        recommended_party_maximum=1,
+        selected_party_size=1,
+        source_refs=[],
+    )
+    manifest["ending"]["conditions"] = [
+        {
+            "id": "ending",
+            "label": "Reach the conclusion",
+            "source_ref": source_ref,
+            "all_of": [
+                {
+                    "kind": "manifest_value",
+                    "path": "current.scene_id",
+                    "actor_id": "",
+                    "fact_key": "",
+                    "operator": "equals",
+                    "value": "ending-v1",
+                },
+                {
+                    "kind": "actor_value",
+                    "path": "sheet.progression.level",
+                    "actor_id": "predecessor",
+                    "fact_key": "",
+                    "operator": "at_least",
+                    "value": 5,
+                }
+            ],
+        }
+    ]
+    manifest["party"]["replacements"] = [
+        {
+            "predecessor_actor_id": "predecessor",
+            "replacement_actor_id": "replacement",
+            "handoff_event_id": "event-1",
+        }
+    ]
+
+    class Client:
+        async def domain(self, tool_id: str, arguments: dict):
+            if tool_id == "module_search":
+                assert arguments["module_ids"] == ["module-v2"]
+                return [{"id": "chunk-v2"}]
+            if tool_id == "module_expand":
+                assert arguments == {"chunk_id": "chunk-v2"}
+                return {
+                    "content": "The characters should be 5th level.",
+                    "source_ref": {
+                        "module_id": "module-v2",
+                        "scene_id": "ending-v2",
+                        "chunk_id": "chunk-v2",
+                        "page_start": 99,
+                        "page_end": 99,
+                        "heading_path": ["Conclusion"],
+                        "content_sha256": "e" * 64,
+                    },
+                }
+            raise AssertionError((tool_id, arguments))
+
+    updated = asyncio.run(
+        _remap_ending_sources_for_module_revision(
+            Client(),
+            manifest,
+            campaign_id="campaign-1",
+            new_module_id="module-v2",
+            source_asset_sha256="f" * 64,
+        )
+    )
+
+    condition = updated["ending"]["conditions"][0]
+    assert condition["source_ref"]["module_id"] == "module-v2"
+    assert condition["source_ref"]["scene_id"] == "ending-v2"
+    assert condition["source_ref"]["chunk_id"] == "chunk-v2"
+    assert condition["all_of"][0]["value"] == "ending-v2"
+    assert condition["all_of"][1]["actor_id"] == "replacement"
+
+
 def test_module_refresh_validates_ingested_scene_mapping_before_activation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1968,6 +3261,56 @@ def test_module_refresh_validates_ingested_scene_mapping_before_activation(
     assert events.index("index:module-v2") < events.index("activate")
 
 
+def test_module_refresh_rejects_changing_the_logical_source_key(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "module.md"
+    source.write_text("# Chapter\n## Cave\nBody.\n", encoding="utf-8")
+
+    class Client:
+        async def load(self, *group_ids: str) -> None:
+            assert group_ids == ("lobby.modules",)
+
+        async def domain(self, tool_id: str, arguments: dict):
+            assert tool_id == "module_query"
+            return [{"scene_id": "scene-v1", "stable_key": "chapter-cave"}]
+
+    async def manifest_get(client, campaign_id: str):
+        return {
+            "manifest": {
+                "current": {"module_id": "module-v1"},
+            }
+        }
+
+    async def campaign_get(client, campaign_id: str):
+        return {
+            "revision": 4,
+            "state": {
+                "module_imports": {
+                    "active": {"stable-module-key": {"module_id": "module-v1"}}
+                }
+            },
+        }
+
+    monkeypatch.setattr(regression_playthrough, "_manifest_get", manifest_get)
+    monkeypatch.setattr(regression_playthrough, "_campaign", campaign_get)
+
+    with pytest.raises(ValueError, match="source key must remain stable"):
+        asyncio.run(
+            _refresh_module(
+                Client(),
+                campaign_id="campaign-1",
+                run_id="run-1",
+                initial_phase="lobby",
+                source_path=source,
+                source_key="versioned-key-v2",
+                title="Module",
+                return_phase="lobby",
+            )
+        )
+
+
 def test_in_place_module_refresh_does_not_duplicate_manifest_module_id() -> None:
     manifest = {
         "module_ids": ["module-v1"],
@@ -2013,6 +3356,30 @@ def test_in_place_module_refresh_does_not_duplicate_manifest_module_id() -> None
     )
 
 
+def test_module_refresh_manifest_identity_tracks_the_exact_manifest_payload() -> None:
+    first = _module_refresh_manifest_identity(
+        old_module_id="module-v1",
+        new_module_id="module-v2",
+        refresh_identity="refresh",
+        manifest={"current": {"scene_id": "scene-1"}},
+    )
+    retry = _module_refresh_manifest_identity(
+        old_module_id="module-v1",
+        new_module_id="module-v2",
+        refresh_identity="refresh",
+        manifest={"current": {"scene_id": "scene-1"}},
+    )
+    changed = _module_refresh_manifest_identity(
+        old_module_id="module-v1",
+        new_module_id="module-v2",
+        refresh_identity="refresh",
+        manifest={"current": {"scene_id": "scene-2"}},
+    )
+
+    assert retry == first
+    assert changed != first
+
+
 def test_scene_progress_percent_accepts_query_and_mutation_shapes() -> None:
     assert _scene_progress_percent({"percent": 65}) == 65
     assert _scene_progress_percent({"progress": 70}) == 70
@@ -2027,6 +3394,14 @@ def test_party_projection_keeps_knowledge_bound_to_the_new_actor() -> None:
         "id": "replacement-actor",
         "name": "Replacement",
         "sheet": sheet,
+        "derived": {
+            "hit_points": {
+                "value": 5,
+                "max": 5,
+                "temp": 2,
+                "base_max": 10,
+            }
+        },
     }
 
     member = _party_member(
@@ -2040,7 +3415,9 @@ def test_party_projection_keeps_knowledge_bound_to_the_new_actor() -> None:
     assert member["actor_id"] == "replacement-actor"
     assert member["knowledge_scope_actor_id"] == "replacement-actor"
     assert member["xp"] == 300
-    assert member["hit_points"]["current"] == 7
+    assert member["hit_points"]["current"] == 5
+    assert member["hit_points"]["maximum"] == 5
+    assert member["wallet"] == sheet["inventory"]["wallet"]
 
 
 @pytest.mark.parametrize("defer_checkpoint", [False, True])
@@ -2099,6 +3476,31 @@ def test_replacement_join_preserves_predecessor_and_only_hands_off_explicit_know
             predecessor,
             {"source": "generated", "source_asset_path": "", "status": "dead"},
         )
+    ]
+    manifest["ending"]["conditions"] = [
+        {
+            "id": "party-level-ending",
+            "label": "Active party reaches level 5",
+            "source_ref": _manifest_source_ref(),
+            "all_of": [
+                {
+                    "kind": "actor_value",
+                    "path": "sheet.progression.level",
+                    "actor_id": "predecessor",
+                    "fact_key": "",
+                    "operator": "at_least",
+                    "value": 5,
+                },
+                {
+                    "kind": "actor_value",
+                    "path": "sheet.combat.hp.value",
+                    "actor_id": "predecessor",
+                    "fact_key": "",
+                    "operator": "equals",
+                    "value": 0,
+                },
+            ],
+        }
     ]
 
     class Client:
@@ -2230,6 +3632,9 @@ def test_replacement_join_preserves_predecessor_and_only_hands_off_explicit_know
             "handoff_event_id": "event-join",
         }
     ]
+    ending_checks = client.manifest["ending"]["conditions"][0]["all_of"]
+    assert ending_checks[0]["actor_id"] == "replacement"
+    assert ending_checks[1]["actor_id"] == "predecessor"
     if defer_checkpoint:
         assert result["checkpoint"] is None
         assert client.head_snapshot_id == ""
@@ -3946,6 +5351,158 @@ def test_play_activity_records_structured_effect_and_random_receipt(
     ) in Client.keys
 
 
+@pytest.mark.parametrize("defer_checkpoint", [False, True])
+def test_source_spell_driver_consumes_item_charge_and_preserves_dm_boundary(
+    defer_checkpoint: bool,
+) -> None:
+    source_ref = {
+        "module_id": "module-1",
+        "scene_id": "stone-reference",
+        "chunk_id": "stone-chunk",
+        "page_start": 193,
+        "page_end": 193,
+        "heading_path": ["Appendix A", "Stone of Golorr"],
+        "content_sha256": "c" * 64,
+    }
+
+    class Client:
+        revision = 12
+
+        def actor(self, charges: int) -> dict:
+            sheet = default_character_sheet()
+            sheet["inventory"]["items"].append(
+                {
+                    "id": "stone-of-golorr",
+                    "name": "Stone of Golorr",
+                    "kind": "magic_item",
+                    "quantity": 1,
+                    "weight_oz": 0,
+                    "price_cp": 0,
+                    "description": "",
+                    "source_key": "module-chunk:stone-chunk",
+                    "container_id": None,
+                    "equipped": False,
+                    "equipped_slot": None,
+                    "identified": False,
+                    "attunement": "attuned",
+                    "condition": "normal",
+                    "uses": {},
+                    "charges": {
+                        "label": "Legend Lore charges",
+                        "value": charges,
+                        "max": 3,
+                        "recovers_on": "dawn",
+                        "source_key": "module-chunk:stone-chunk",
+                    },
+                    "mechanics": {},
+                }
+            )
+            return {
+                "id": "pip",
+                "name": "Pip",
+                "campaign_id": "campaign-1",
+                "revision": 7 if charges == 3 else 8,
+                "sheet": sheet,
+            }
+
+        async def core(self, tool_id: str, arguments: dict):
+            assert tool_id == "campaign_query"
+            return {
+                "result": {
+                    "id": "campaign-1",
+                    "revision": self.revision,
+                    "state": {"game_phase": "play"},
+                }
+            }
+
+        async def domain(self, tool_id: str, arguments: dict):
+            if tool_id == "module_query":
+                scene_id = arguments["payload"]["scene_id"]
+                if scene_id == "occurrence-scene":
+                    return {
+                        "module_id": "module-1",
+                        "scene_id": scene_id,
+                        "content": "The party studies the Stone.",
+                        "locations": [{"key": "safe-room"}],
+                    }
+                return {
+                    "module_id": "module-1",
+                    "scene_id": "stone-reference",
+                    "content": (
+                        "While holding the stone, you can expend 1 of its charges "
+                        "to cast the legend lore spell."
+                    ),
+                }
+            if tool_id == "character_query":
+                return self.actor(3)
+            if tool_id == "character_action":
+                assert arguments["action"] == "cast_spell"
+                assert arguments["payload"] == {
+                    "spell_id": "dnd5e.content.srd2014.spell.legend-lore",
+                    "source_item_id": "stone-of-golorr",
+                }
+                self.revision += 1
+                return {
+                    "status": "pending_ruling",
+                    "result": {
+                        "payment": {
+                            "economy": "item_charges",
+                            "item_id": "stone-of-golorr",
+                            "cost": 1,
+                            "level": 5,
+                            "ritual": False,
+                        }
+                    },
+                    "character": self.actor(2),
+                }
+            if tool_id == "branch_query":
+                return [{"id": "branch-1", "is_current": True}]
+            if tool_id == "continuity_commit":
+                event = arguments["payload"]["event"]
+                assert event["event_type"] == "magic_item_spell_cast"
+                assert event["payload"]["resolution_status"] == "pending_ruling"
+                assert ("snapshot" in arguments["payload"]) is not defer_checkpoint
+                self.revision += 1
+                return {
+                    "event": {"id": "event-1"},
+                    **({} if defer_checkpoint else {"snapshot": {"slot": 8}}),
+                }
+            if tool_id == "playthrough_manifest":
+                return {
+                    "manifest": {"status": "in_progress"},
+                    "campaign_revision": self.revision,
+                }
+            raise AssertionError((tool_id, arguments))
+
+    result = asyncio.run(
+        _cast_source_spell(
+            Client(),
+            campaign_id="campaign-1",
+            run_id="run-1",
+            occurrence_id="stone-legend-lore-1",
+            scene_id="occurrence-scene",
+            source_scene_id="stone-reference",
+            location_key="safe-room",
+            source_excerpt="expend 1 of its charges to cast the legend lore spell",
+            source_ref=source_ref,
+            actor_id="pip",
+            spell_id="dnd5e.content.srd2014.spell.legend-lore",
+            source_item_id="stone-of-golorr",
+            cast_level=None,
+            component_ruling=None,
+            reason="Pip expended one Stone charge; the information awaits DM settlement.",
+            knowledge_actor_ids=[],
+            defer_checkpoint=defer_checkpoint,
+        )
+    )
+
+    assert result["cast"]["status"] == "pending_ruling"
+    assert result["charges"] == {"before": 3, "after": 2}
+    assert result["cast_recovered"] is False
+    assert result["knowledge_actor_ids"] == ["pip"]
+    assert ("snapshot" in result["continuity"]) is not defer_checkpoint
+
+
 def test_dm_event_keeps_enemy_knowledge_out_of_party_event_stream() -> None:
     source_ref = {
         "module_id": "module-1",
@@ -4734,6 +6291,17 @@ def test_record_outcome_commits_facts_then_syncs_manifest_and_checkpoint(
                     "campaign_id": "campaign-1",
                     "name": actor_id,
                 }
+            if tool_id == "memory_query":
+                assert arguments["view"] == "list"
+                assert arguments["payload"] == {"include_inactive": False}
+                return {
+                    "result": [
+                        {
+                            "fact_key": "quest:hostage:status",
+                            "revision_id": "fact-revision-7",
+                        }
+                    ]
+                }
             if tool_id == "module_set_progress":
                 outcomes = arguments["state"]["full_playthrough_outcomes"]
                 assert set(outcomes) == {"prior", "hostage-released"}
@@ -4754,6 +6322,9 @@ def test_record_outcome_commits_facts_then_syncs_manifest_and_checkpoint(
                     "witnessed"
                 }
                 assert self.continuity_payload["facts"][0]["fact_key"] == ("quest:hostage:status")
+                assert self.continuity_payload["facts"][0]["expected_revision_id"] == (
+                    "fact-revision-7"
+                )
                 self.revision += 1
                 return {
                     "event": {"id": "event-1"},
@@ -4989,6 +6560,8 @@ def test_record_outcome_resumes_after_matching_progress_was_already_saved() -> N
                         },
                     }
                 ]
+            if tool_id == "memory_query":
+                return {"result": []}
             if tool_id == "module_set_progress":
                 self.progress_writes += 1
                 raise AssertionError("matching progress must be resumed without rewriting")
@@ -5026,6 +6599,17 @@ def test_record_outcome_resumes_after_matching_progress_was_already_saved() -> N
 
 
 def test_start_play_uses_public_quality_gate_phase_and_scene_tools() -> None:
+    source_excerpt = "The adventure begins here."
+    source_ref = {
+        "module_id": "module-1",
+        "scene_id": "scene-1",
+        "chunk_id": "chunk-opening",
+        "page_start": 1,
+        "page_end": 1,
+        "heading_path": ["Chapter 1", "Opening"],
+        "content_sha256": "b" * 64,
+    }
+
     class Client:
         def __init__(self) -> None:
             self.calls: list[tuple[str, dict]] = []
@@ -5070,9 +6654,10 @@ def test_start_play_uses_public_quality_gate_phase_and_scene_tools() -> None:
                     "module_id": "module-1",
                     "scene_id": "scene-1",
                     "chapter_id": "chapter-1",
-                    "chapter": "Chapter 1",
-                    "title": "Opening",
-                }
+                        "chapter": "Chapter 1",
+                        "title": "Opening",
+                        "content": source_excerpt,
+                    }
             raise AssertionError((tool_id, arguments))
 
     client = Client()
@@ -5081,9 +6666,11 @@ def test_start_play_uses_public_quality_gate_phase_and_scene_tools() -> None:
             client,
             campaign_id="campaign-1",
             run_id="run-1",
-            initial_phase="lobby",
-            scene_id="scene-1",
-            objective="Survive the ambush",
+                initial_phase="lobby",
+                scene_id="scene-1",
+                source_excerpt=source_excerpt,
+                source_ref=source_ref,
+                objective="Survive the ambush",
             reachable_scene_ids=["scene-2"],
         )
     )

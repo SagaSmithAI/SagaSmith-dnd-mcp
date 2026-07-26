@@ -10,11 +10,14 @@ from scripts.regression_encounter import (
     GUIDING_BOLT_ON_HIT,
     HEALING_WORD_ID,
     MAGIC_MISSILE_ID,
+    _body_thief_sides,
+    _body_thief_target_ids,
     _characters,
     _choose_destination,
     _choose_party_spell,
     _defense_selection,
     _encounter_actor_groups,
+    _has_action_budget,
     _has_blocking_pending,
     _has_multiattack_followup,
     _observable_target_ids,
@@ -32,6 +35,9 @@ from scripts.regression_encounter import (
     _roll_total,
     _selected_prepared_actor_ids,
     _should_stand,
+    _source_attack_environments,
+    _source_avoidances,
+    _source_contest_activities,
     _source_declared_conditions,
     _source_declared_surprise,
     _source_delayed_actions,
@@ -44,6 +50,7 @@ from scripts.regression_encounter import (
     _source_passive_allies,
     _source_precombat_casts,
     _source_random_activities,
+    _source_save_activities,
     _source_surrender_outcome,
     _source_target_priorities,
     _source_traits,
@@ -326,6 +333,235 @@ def test_source_random_activity_requires_exact_actor_card_evidence() -> None:
             [{**values[0], "actor_id": "not-present"}],
             participant_ids=["gazer", "pc"],
         )
+
+
+def test_source_save_activity_requires_structured_card_and_brain_ruling() -> None:
+    excerpt = (
+        "The target must succeed on a DC 12 Intelligence saving throw "
+        "against this magic"
+    )
+    values = [
+        {
+            "actor_id": "devourer",
+            "activity_id": "devour-intellect-action",
+            "target_has_brain": True,
+            "source_excerpt": excerpt,
+        }
+    ]
+    actors = {
+        "devourer": {
+            "sheet": {
+                "content": {
+                    "activities": [
+                        {
+                            "id": "devour-intellect-action",
+                            "description": excerpt,
+                            "choices": {
+                                "source_save_effect": {
+                                    "target_requirement": "has_brain"
+                                }
+                            },
+                        }
+                    ]
+                }
+            }
+        }
+    }
+
+    assert _source_save_activities(
+        values,
+        participant_ids=["devourer", "pc"],
+        actors=actors,
+    ) == {"devourer": values[0]}
+    with pytest.raises(ValueError, match="true target_has_brain"):
+        _source_save_activities(
+            [{**values[0], "target_has_brain": False}],
+            participant_ids=["devourer", "pc"],
+            actors=actors,
+        )
+    with pytest.raises(ValueError, match="structured actor card"):
+        _source_save_activities(
+            values,
+            participant_ids=["devourer", "pc"],
+            actors={
+                "devourer": {
+                    "sheet": {
+                        "content": {
+                            "activities": [
+                                {
+                                    "id": "devour-intellect-action",
+                                    "description": excerpt,
+                                    "choices": {},
+                                }
+                            ]
+                        }
+                    }
+                }
+            },
+        )
+
+
+def test_source_contest_activity_requires_body_thief_card_and_humanoid_ruling() -> None:
+    excerpt = (
+        "The intellect devourer initiates an Intelligence contest with an "
+        "incapacitated humanoid within 5 feet of it."
+    )
+    values = [
+        {
+            "actor_id": "devourer",
+            "activity_id": "body-thief-action",
+            "target_is_humanoid": True,
+            "source_excerpt": excerpt,
+        }
+    ]
+    actors = {
+        "devourer": {
+            "sheet": {
+                "content": {
+                    "activities": [
+                        {
+                            "id": "body-thief-action",
+                            "description": excerpt,
+                            "choices": {
+                                "source_contest_effect": {
+                                    "kind": (
+                                        "intellect_devourer_body_thief_2014"
+                                    ),
+                                    "target_requirements": [
+                                        "incapacitated",
+                                        "humanoid",
+                                    ],
+                                }
+                            },
+                        }
+                    ]
+                }
+            }
+        }
+    }
+
+    assert _source_contest_activities(
+        values,
+        participant_ids=["devourer", "pc"],
+        actors=actors,
+    ) == {"devourer": values[0]}
+    with pytest.raises(ValueError, match="true target_is_humanoid"):
+        _source_contest_activities(
+            [{**values[0], "target_is_humanoid": False}],
+            participant_ids=["devourer", "pc"],
+            actors=actors,
+        )
+    with pytest.raises(ValueError, match="structured actor card"):
+        _source_contest_activities(
+            values,
+            participant_ids=["devourer", "pc"],
+            actors={
+                "devourer": {
+                    "sheet": {
+                        "content": {
+                            "activities": [
+                                {
+                                    "id": "body-thief-action",
+                                    "description": excerpt,
+                                    "choices": {},
+                                }
+                            ]
+                        }
+                    }
+                }
+            },
+        )
+
+
+def test_body_thief_sides_substitutes_host_without_erasing_actors() -> None:
+    combat = {
+        "combatants": [
+            {
+                "actor_id": "devourer",
+                "inside_host": {
+                    "host_actor_id": "pc-1",
+                    "total_cover": True,
+                },
+            },
+            {
+                "actor_id": "pc-1",
+                "controlled_by_actor_id": "devourer",
+                "body_thief_host": {"source_actor_id": "devourer"},
+            },
+            {"actor_id": "pc-2"},
+            {"actor_id": "kobold"},
+        ]
+    }
+
+    sides = _body_thief_sides(
+        combat,
+        party_ids=["pc-1", "pc-2"],
+        hostile_ids=["devourer", "kobold"],
+    )
+
+    assert sides["controlled_hosts"] == {"pc-1": "devourer"}
+    assert sides["inside_sources"] == {"devourer"}
+    assert sides["effective_party_ids"] == ["pc-2"]
+    assert sides["attackable_hostile_ids"] == ["kobold", "pc-1"]
+    assert sides["hostile_turn_actor_ids"] == {"kobold", "pc-1"}
+
+
+def test_body_thief_targets_living_zero_hp_incapacitated_creature() -> None:
+    combat = {
+        "combatants": [
+            {"actor_id": "devourer", "position": {"x": 3, "y": 2}},
+            {"actor_id": "downed", "position": {"x": 2, "y": 2}},
+            {"actor_id": "dead", "position": {"x": 3, "y": 3}},
+            {"actor_id": "far", "position": {"x": 5, "y": 2}},
+        ]
+    }
+    actors = {
+        "downed": {
+            "sheet": {
+                "combat": {"hp": {"value": 0, "max": 10}},
+                "conditions": ["unconscious", "stable"],
+            }
+        },
+        "dead": {
+            "sheet": {
+                "combat": {"hp": {"value": 0, "max": 10}},
+                "conditions": ["dead", "unconscious"],
+            }
+        },
+        "far": {
+            "sheet": {
+                "combat": {"hp": {"value": 5, "max": 10}},
+                "conditions": ["stunned"],
+            }
+        },
+    }
+
+    assert _body_thief_target_ids(
+        combat,
+        actors=actors,
+        source_actor_id="devourer",
+        party_ids=["downed", "dead", "far"],
+        range_ft=5,
+    ) == ["downed"]
+
+
+def test_body_thief_requires_unspent_action_budget() -> None:
+    combat = {
+        "combatants": [
+            {
+                "actor_id": "devourer",
+                "turn_budget": {
+                    "main_action": 0,
+                    "extra_action": 0,
+                    "attack_budget": 1,
+                },
+            }
+        ]
+    }
+
+    assert not _has_action_budget(combat, "devourer")
+    combat["combatants"][0]["turn_budget"]["extra_action"] = 1
+    assert _has_action_budget(combat, "devourer")
 
 
 def test_encounter_actor_groups_keep_allies_out_of_registered_party_and_reject_overlap(
@@ -1007,6 +1243,116 @@ def test_source_opening_item_casts_preserve_authored_order_and_evidence() -> Non
     assert all(item["source_item_id"] == "staff-of-defense" for item in casts)
 
 
+def test_source_attack_environment_requires_the_structured_actor_trait() -> None:
+    excerpt = (
+        "While in sunlight, the kobold has disadvantage on attack rolls, "
+        "as well as on Wisdom (Perception) checks that rely on sight."
+    )
+    actors = {
+        "kobold": {
+            "sheet": {
+                "content": {
+                    "features": [
+                        {
+                            "name": "Sunlight Sensitivity",
+                            "description": excerpt,
+                            "choices": {
+                                "source_trait": {
+                                    "kind": "sunlight_sensitivity",
+                                }
+                            },
+                        }
+                    ]
+                }
+            }
+        }
+    }
+
+    environments = _source_attack_environments(
+        [
+            {
+                "actor_id": "kobold",
+                "direct_sunlight": False,
+                "source_excerpt": excerpt,
+            }
+        ],
+        participant_ids=["kobold"],
+        actors=actors,
+    )
+    assert environments["kobold"] == {
+        "actor_id": "kobold",
+        "direct_sunlight": False,
+        "source_excerpt": excerpt,
+    }
+
+    with pytest.raises(ValueError, match="must match"):
+        _source_attack_environments(
+            [
+                {
+                    "actor_id": "other",
+                    "direct_sunlight": True,
+                    "source_excerpt": excerpt,
+                }
+            ],
+            participant_ids=["other"],
+            actors={"other": {"sheet": {"content": {"features": []}}}},
+        )
+
+
+def test_source_avoidance_requires_public_actor_knowledge(
+    tmp_path,
+) -> None:
+    report_path = tmp_path / "trap-event.json"
+    report_path.write_text(
+        json.dumps(
+            {
+                "passed": True,
+                "campaign_id": "campaign-1",
+                "result": {
+                    "continuity": {
+                        "event": {
+                            "id": "event-1",
+                            "event_type": "trap_detected",
+                            "summary": (
+                                "The marked traps are at cells 3,3; 5,3; "
+                                "6,3; 8,3; and 10,3."
+                            ),
+                            "payload": {
+                                "scene_id": "scene-1",
+                                "source_excerpt": "Five hidden bear traps.",
+                                "source_ref": {"chunk_id": "chunk-1"},
+                            },
+                        },
+                        "actor_knowledge": [
+                            {
+                                "actor_id": "pc-1",
+                                "proposition": (
+                                    "The actor knows and avoids cells 3,3; 5,3; "
+                                    "6,3; 8,3; and 10,3."
+                                ),
+                            }
+                        ],
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    avoided, evidence = _source_avoidances(
+        [report_path],
+        campaign_id="campaign-1",
+        scene_id="scene-1",
+        participant_ids=["pc-1"],
+    )
+
+    assert avoided == {
+        "pc-1": {"3,3", "5,3", "6,3", "8,3", "10,3"}
+    }
+    assert evidence[0]["event_id"] == "event-1"
+    assert evidence[0]["source_ref"] == {"chunk_id": "chunk-1"}
+
+
 def test_source_authored_precombat_and_attack_tactics_are_structured() -> None:
     precombat = _source_precombat_casts(
         [
@@ -1568,7 +1914,7 @@ def test_no_surprise_layout_marks_neither_side_surprised() -> None:
     assert all(item.get("hidden") is False for item in config if item["actor_id"] in hostile_ids)
 
 
-def test_source_cited_scout_check_surprises_only_hostiles(tmp_path) -> None:
+def test_source_cited_scout_check_prevents_party_surprise(tmp_path) -> None:
     path = tmp_path / "check.json"
     path.write_text(
         json.dumps(
@@ -1598,10 +1944,46 @@ def test_source_cited_scout_check_surprises_only_hostiles(tmp_path) -> None:
     assert surprise == {
         "pc-1": False,
         "pc-2": False,
-        "goblin-1": True,
-        "goblin-2": True,
+        "goblin-1": False,
+        "goblin-2": False,
     }
     assert basis["mode"] == "source_cited_party_scout"
+
+
+def test_failed_source_cited_scout_check_surprises_only_party(tmp_path) -> None:
+    path = tmp_path / "check.json"
+    path.write_text(
+        json.dumps(
+            {
+                "action": "resolve-check",
+                "campaign_id": "campaign-1",
+                "passed": True,
+                "result": {
+                    "scene": {"scene_id": "scene-1", "location_key": "blind"},
+                    "actor": {"id": "pc-1", "name": "Scout"},
+                    "check": {"success": False, "natural": 4, "total": 9},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    surprise, basis = _surprise_from_check_report(
+        path,
+        campaign_id="campaign-1",
+        scene_id="scene-1",
+        location_key="blind",
+        party_ids=["pc-1", "pc-2"],
+        hostile_ids=["goblin-1", "goblin-2"],
+    )
+
+    assert surprise == {
+        "pc-1": True,
+        "pc-2": True,
+        "goblin-1": False,
+        "goblin-2": False,
+    }
+    assert basis["check"]["success"] is False
 
 
 def test_hostile_stealth_uses_every_actor_total_and_ties_are_detected() -> None:
@@ -1665,6 +2047,109 @@ def test_movement_destination_stops_next_to_target_without_sharing_space() -> No
         abs(destination[0]["y"] - 2),
     ) == 1
     assert destination[1] <= 30
+
+
+def test_movement_destination_never_approaches_a_visible_fear_source() -> None:
+    combat = {
+        "battle_map": {
+            "bounds": {"width_cells": 12, "height_cells": 12},
+            "blocked_cells": [],
+            "difficult_cells": [],
+        },
+        "combatants": [
+            {
+                "actor_id": "frightened-pc",
+                "position": {"x": 1, "y": 3},
+                "conditions": ["frightened"],
+                "condition_sources": {"frightened": ["gazer"]},
+                "turn_budget": {"movement": 25},
+            },
+            {
+                "actor_id": "gazer",
+                "position": {"x": 7, "y": 2},
+                "conditions": [],
+                "hidden": False,
+                "turn_budget": {"movement": 30},
+            },
+        ],
+    }
+
+    assert _choose_destination(combat, "frightened-pc", "gazer") is None
+
+
+def test_movement_destination_excludes_blocked_cells_but_not_dead_occupants() -> None:
+    combat = {
+        "battle_map": {
+            "bounds": {"width_cells": 12, "height_cells": 12},
+            "blocked_cells": ["6,2"],
+            "difficult_cells": [],
+        },
+        "combatants": [
+            {
+                "actor_id": "pc",
+                "position": {"x": 1, "y": 1},
+                "conditions": [],
+                "turn_budget": {"movement": 30},
+            },
+            {
+                "actor_id": "goblin",
+                "position": {"x": 7, "y": 2},
+                "conditions": [],
+                "turn_budget": {"movement": 30},
+            },
+            {
+                "actor_id": "dead-guard",
+                "position": {"x": 6, "y": 1},
+                "conditions": ["dead", "prone"],
+                "turn_budget": {"movement": 0},
+            },
+        ],
+    }
+
+    destination = _choose_destination(combat, "pc", "goblin")
+
+    assert destination is not None
+    assert destination[0] == {"x": 6, "y": 1}
+    assert destination[1] == 25
+    assert destination[2][-1] == destination[0]
+
+
+def test_movement_path_routes_around_source_known_hazard_cells() -> None:
+    combat = {
+        "battle_map": {
+            "bounds": {"width_cells": 12, "height_cells": 12},
+            "blocked_cells": [],
+            "difficult_cells": [],
+        },
+        "combatants": [
+            {
+                "actor_id": "devourer",
+                "position": {"x": 8, "y": 6},
+                "conditions": [],
+                "turn_budget": {"movement": 30},
+            },
+            {
+                "actor_id": "pc",
+                "position": {"x": 1, "y": 0},
+                "conditions": [],
+                "turn_budget": {"movement": 30},
+            },
+        ],
+    }
+
+    destination = _choose_destination(
+        combat,
+        "devourer",
+        "pc",
+        avoided_cells={"5,3"},
+    )
+
+    assert destination is not None
+    assert destination[1] <= 30
+    assert "5,3" not in {
+        f"{cell['x']},{cell['y']}" for cell in destination[2]
+    }
+    assert destination[2][-1] == destination[0]
 
 
 def test_roll_total_accepts_public_facade_and_raw_shapes() -> None:
@@ -1766,9 +2251,15 @@ def test_hostile_multiattack_selection_follows_the_preferred_weapon() -> None:
         {
             "id": "mixed-special-action",
             "attacks": [{"weapon_id": "claws", "attack_mode": "melee", "count": 1}],
+            "activities": [
+                {"activity_id": "devour-intellect-action", "count": 1}
+            ],
         }
     ]
-    assert _preferred_multiattack_option_id(actor, preferred_weapon_id="claws") == ""
+    assert (
+        _preferred_multiattack_option_id(actor, preferred_weapon_id="claws")
+        == "mixed-special-action"
+    )
 
 
 def test_conscious_party_member_stabilizes_after_all_hostiles_are_resolved() -> None:
