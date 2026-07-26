@@ -228,6 +228,17 @@ def _arguments() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--source-attack-environment-json",
+        action="append",
+        type=json.loads,
+        default=[],
+        help=(
+            "DM-reviewed attack environment with actor_id, direct_sunlight, "
+            "and the exact source_excerpt for a structured Sunlight Sensitivity "
+            "trait; repeat for each affected participant"
+        ),
+    )
+    parser.add_argument(
         "--source-on-hit-ruling-json",
         action="append",
         type=json.loads,
@@ -270,6 +281,16 @@ def _arguments() -> argparse.Namespace:
             "Source-bound random saving-throw activity with actor_id, activity_id, "
             "and an exact source_excerpt; the driver invokes the public activity "
             "settlement instead of substituting a weapon attack"
+        ),
+    )
+    parser.add_argument(
+        "--source-save-activity-json",
+        action="append",
+        type=json.loads,
+        default=[],
+        help=(
+            "Source-bound deterministic saving-throw activity with actor_id, "
+            "activity_id, target_has_brain, and an exact source_excerpt"
         ),
     )
     parser.add_argument(
@@ -739,8 +760,12 @@ def _surprise_from_check_report(
         or not isinstance(check.get("success"), bool)
     ):
         raise ValueError("surprise check report does not match this encounter")
-    surprise = {actor_id: False for actor_id in party_ids}
-    surprise.update({actor_id: bool(check["success"]) for actor_id in hostile_ids})
+    noticed_threat = bool(check["success"])
+    surprise = {
+        actor_id: not noticed_threat
+        for actor_id in party_ids
+    }
+    surprise.update({actor_id: False for actor_id in hostile_ids})
     return surprise, {
         "mode": "source_cited_party_scout",
         "report_path": str(path.expanduser().resolve()),
@@ -1254,6 +1279,81 @@ def _source_opening_weapons(
     return normalized
 
 
+def _source_attack_environments(
+    values: list[dict[str, Any]],
+    *,
+    participant_ids: list[str],
+    actors: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, dict[str, Any]]:
+    normalized: dict[str, dict[str, Any]] = {}
+    for index, raw in enumerate(values):
+        if not isinstance(raw, dict):
+            raise ValueError(
+                f"source attack environment {index} must be an object"
+            )
+        unknown = set(raw) - {
+            "actor_id",
+            "direct_sunlight",
+            "source_excerpt",
+        }
+        if unknown:
+            raise ValueError(
+                f"source attack environment {index} has unsupported fields: "
+                f"{', '.join(sorted(unknown))}"
+            )
+        actor_id = str(raw.get("actor_id") or "").strip()
+        source_excerpt = " ".join(
+            str(raw.get("source_excerpt") or "").split()
+        )
+        if (
+            actor_id not in participant_ids
+            or actor_id in normalized
+            or not isinstance(raw.get("direct_sunlight"), bool)
+            or not source_excerpt
+        ):
+            raise ValueError(
+                f"source attack environment {index} requires one unique "
+                "participant, a direct_sunlight DM fact, and an exact excerpt"
+            )
+        if actors is not None:
+            actor = actors.get(actor_id)
+            feature = next(
+                (
+                    item
+                    for item in (
+                        dict(dict(actor or {}).get("sheet") or {})
+                        .get("content", {})
+                        .get("features", [])
+                    )
+                    if str(
+                        dict(
+                            dict(item.get("choices") or {}).get(
+                                "source_trait"
+                            )
+                            or {}
+                        ).get("kind")
+                        or ""
+                    )
+                    == "sunlight_sensitivity"
+                ),
+                None,
+            )
+            description = " ".join(
+                str(dict(feature or {}).get("description") or "").split()
+            )
+            if feature is None or source_excerpt not in description:
+                raise ValueError(
+                    f"source attack environment {index} must match the "
+                    "structured Sunlight Sensitivity on its actor card"
+                )
+        normalized[actor_id] = {
+            "actor_id": actor_id,
+            "direct_sunlight": bool(raw["direct_sunlight"]),
+            "source_excerpt": source_excerpt,
+        }
+    return normalized
+
+
 def _source_on_hit_rulings(
     values: list[dict[str, Any]],
     *,
@@ -1611,6 +1711,85 @@ def _source_random_activities(
     return normalized
 
 
+def _source_save_activities(
+    values: list[dict[str, Any]],
+    *,
+    participant_ids: list[str],
+    actors: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, dict[str, Any]]:
+    normalized: dict[str, dict[str, Any]] = {}
+    for index, raw in enumerate(values):
+        if not isinstance(raw, dict):
+            raise ValueError(f"source save activity {index} must be an object")
+        unknown = set(raw) - {
+            "actor_id",
+            "activity_id",
+            "target_has_brain",
+            "source_excerpt",
+        }
+        if unknown:
+            raise ValueError(
+                f"source save activity {index} has unsupported fields: "
+                f"{', '.join(sorted(unknown))}"
+            )
+        actor_id = str(raw.get("actor_id") or "").strip()
+        activity_id = str(raw.get("activity_id") or "").strip()
+        source_excerpt = " ".join(
+            str(raw.get("source_excerpt") or "").split()
+        )
+        if (
+            actor_id not in participant_ids
+            or actor_id in normalized
+            or not activity_id
+            or raw.get("target_has_brain") is not True
+            or not source_excerpt
+        ):
+            raise ValueError(
+                f"source save activity {index} requires one unique participant, "
+                "an activity_id, a true target_has_brain ruling, and an exact excerpt"
+            )
+        if actors is not None:
+            actor = actors.get(actor_id)
+            activity = next(
+                (
+                    item
+                    for item in (
+                        dict(dict(actor or {}).get("sheet") or {})
+                        .get("content", {})
+                        .get("activities", [])
+                    )
+                    if str(item.get("id") or "") == activity_id
+                ),
+                None,
+            )
+            spec = dict(
+                dict(activity or {}).get("choices", {}).get(
+                    "source_save_effect"
+                )
+                or {}
+            )
+            description = " ".join(
+                str(dict(activity or {}).get("description") or "").split()
+            )
+            if (
+                activity is None
+                or not spec
+                or spec.get("target_requirement") != "has_brain"
+                or source_excerpt not in description
+            ):
+                raise ValueError(
+                    f"source save activity {index} must match its structured "
+                    "actor card and contain the exact excerpt"
+                )
+        normalized[actor_id] = {
+            "actor_id": actor_id,
+            "activity_id": activity_id,
+            "target_has_brain": True,
+            "source_excerpt": source_excerpt,
+        }
+    return normalized
+
+
 async def _campaign(client: ExposureClient, campaign_id: str) -> dict[str, Any]:
     return _facade_value(
         await client.core(
@@ -1857,10 +2036,17 @@ def _preferred_multiattack_option_id(
         item
         for item in dict(actor.get("derived") or {}).get("multiattack_options", [])
         if isinstance(item, dict) and str(item.get("id") or "")
-        and sum(
-            int(attack.get("count", 0) or 0)
-            for attack in item.get("attacks", [])
-            if isinstance(attack, dict)
+        and (
+            sum(
+                int(attack.get("count", 0) or 0)
+                for attack in item.get("attacks", [])
+                if isinstance(attack, dict)
+            )
+            + sum(
+                int(activity.get("count", 0) or 0)
+                for activity in item.get("activities", [])
+                if isinstance(activity, dict)
+            )
         )
         >= 2
     ]
@@ -1988,6 +2174,16 @@ async def _start(
     )
     random_activities = _source_random_activities(
         args.source_random_activity_json,
+        participant_ids=[*party_ids, *all_hostile_ids],
+        actors=actors,
+    )
+    save_activities = _source_save_activities(
+        args.source_save_activity_json,
+        participant_ids=[*party_ids, *all_hostile_ids],
+        actors=actors,
+    )
+    attack_environments = _source_attack_environments(
+        args.source_attack_environment_json,
         participant_ids=[*party_ids, *all_hostile_ids],
         actors=actors,
     )
@@ -2134,6 +2330,12 @@ async def _start(
             hostile_ids=initial_hostile_ids,
         )
         expected_revision = campaign["revision"]
+        if selected_hidden_ids:
+            scout_success = bool(dict(surprise_basis.get("check") or {}).get("success"))
+            visible_to_actor_ids_by_hostile = {
+                hostile_id: list(party_ids) if scout_success else []
+                for hostile_id in selected_hidden_ids
+            }
     elif args.source_surprised_actor_id:
         surprise, surprise_basis = _source_declared_surprise(
             party_ids=party_ids,
@@ -2271,6 +2473,8 @@ async def _start(
         "source_delayed_actions": list(delayed_actions.values()),
         "source_passive_allies": list(passive_allies.values()),
         "source_random_activities": list(random_activities.values()),
+        "source_save_activities": list(save_activities.values()),
+        "source_attack_environments": list(attack_environments.values()),
         "source_opening_casts": _source_opening_casts(
             args.source_opening_cast_json,
             participant_ids=[*party_ids, *all_hostile_ids],
@@ -2908,6 +3112,7 @@ async def _preflight_attack(
     *,
     preferred_weapon_id: str = "",
     multiattack_option_id: str = "",
+    action_context: dict[str, Any] | None = None,
 ) -> tuple[str, dict[str, Any], dict[str, Any]] | None:
     weapons = list(
         dict(dict(actor.get("derived") or {}).get("inventory") or {}).get(
@@ -2921,6 +3126,8 @@ async def _preflight_attack(
                 "weapon_id": weapon.get("item_id"),
                 "attack_mode": weapon.get("attack_type") or "melee",
             }
+            if action_context:
+                action["context"] = dict(action_context)
             if multiattack_option_id:
                 action["multiattack_option_id"] = multiattack_option_id
             try:
@@ -3117,6 +3324,16 @@ async def _auto_run(
     )
     random_activities = _source_random_activities(
         args.source_random_activity_json,
+        participant_ids=[*party_ids, *hostile_ids],
+        actors=initial_actors,
+    )
+    save_activities = _source_save_activities(
+        args.source_save_activity_json,
+        participant_ids=[*party_ids, *hostile_ids],
+        actors=initial_actors,
+    )
+    attack_environments = _source_attack_environments(
+        args.source_attack_environment_json,
         participant_ids=[*party_ids, *hostile_ids],
         actors=initial_actors,
     )
@@ -3500,6 +3717,176 @@ async def _auto_run(
                 }
             )
             continue
+        save_activity = save_activities.get(actor_id)
+        if save_activity is not None and _hit_points(actor) > 0:
+            combatant = next(
+                item
+                for item in combat.get("combatants", [])
+                if str(item.get("actor_id") or "") == actor_id
+            )
+            active_multiattack = bool(
+                dict(combatant.get("turn_flags") or {}).get("multiattack")
+            )
+            mixed_options = [
+                option
+                for option in dict(actor.get("derived") or {}).get(
+                    "multiattack_options", []
+                )
+                if any(
+                    str(item.get("activity_id") or "")
+                    == save_activity["activity_id"]
+                    for item in option.get("activities", [])
+                    if isinstance(item, dict)
+                )
+            ]
+            if active_multiattack or not mixed_options:
+                opponents = (
+                    [
+                        hostile_id
+                        for hostile_id in hostile_ids
+                        if hostile_id not in fled_hostile_ids
+                    ]
+                    if actor_id in party_ids
+                    else party_ids
+                )
+                living_targets = [
+                    target_id
+                    for target_id in opponents
+                    if _hit_points(actors[target_id]) > 0
+                    and int(
+                        dict(actors[target_id].get("derived") or {})
+                        .get("ability_scores", {})
+                        .get("intelligence", 10)
+                    )
+                    > 0
+                ]
+                living_targets = _observable_target_ids(
+                    combat,
+                    observer_id=actor_id,
+                    target_ids=living_targets,
+                )
+                combatants = {
+                    str(item["actor_id"]): item
+                    for item in combat["combatants"]
+                }
+                activity_card = next(
+                    item
+                    for item in dict(actor.get("sheet") or {})
+                    .get("content", {})
+                    .get("activities", [])
+                    if str(item.get("id") or "")
+                    == save_activity["activity_id"]
+                )
+                save_range_ft = int(
+                    dict(activity_card.get("choices") or {})
+                    .get("source_save_effect", {})
+                    .get("range_ft", 0)
+                    or 0
+                )
+                living_targets = [
+                    target_id
+                    for target_id in living_targets
+                    if _distance(
+                        dict(
+                            combatants[actor_id].get("position")
+                            or {"x": 0, "y": 0}
+                        ),
+                        dict(
+                            combatants[target_id].get("position")
+                            or {"x": 0, "y": 0}
+                        ),
+                    )
+                    * 5
+                    <= save_range_ft
+                ]
+                living_targets.sort(
+                    key=lambda target_id: _distance(
+                        dict(
+                            combatants[actor_id].get("position")
+                            or {"x": 0, "y": 0}
+                        ),
+                        dict(
+                            combatants[target_id].get("position")
+                            or {"x": 0, "y": 0}
+                        ),
+                    )
+                )
+                living_targets = _prioritize_targets(
+                    actor_id,
+                    living_targets,
+                    target_priorities,
+                )
+                if not living_targets:
+                    ended_turn = await _end_turn(
+                        client,
+                        args,
+                        str(branch["id"]),
+                        actor_id,
+                        sequence,
+                    )
+                    turns.append(
+                        {
+                            "sequence": sequence,
+                            "kind": "source_save_activity_no_target",
+                            "actor_id": actor_id,
+                            "source_excerpt": save_activity["source_excerpt"],
+                            "result": ended_turn,
+                        }
+                    )
+                    continue
+                campaign = await _campaign(client, args.campaign_id)
+                settled_activity = await client.domain(
+                    "combat_use_activity",
+                    {
+                        "campaign_id": args.campaign_id,
+                        "actor_id": actor_id,
+                        "activity_id": save_activity["activity_id"],
+                        "declaration": {
+                            "target_id": living_targets[0],
+                            "target_has_brain": save_activity[
+                                "target_has_brain"
+                            ],
+                        },
+                        "branch_id": branch["id"],
+                        "expected_revision": campaign["revision"],
+                        "idempotency_key": (
+                            "encounter-source-save-activity-"
+                            + _token(
+                                f"{args.run_id}:{sequence}:{actor_id}:"
+                                f"{save_activity['activity_id']}",
+                                length=24,
+                            )
+                        ),
+                    },
+                )
+                if settled_activity.get("status") != "committed":
+                    raise RuntimeError(
+                        "source saving-throw activity did not commit through "
+                        "structured settlement"
+                    )
+                turn_entry = {
+                    "sequence": sequence,
+                    "kind": "source_save_activity",
+                    "actor_id": actor_id,
+                    "activity_id": save_activity["activity_id"],
+                    "target_id": living_targets[0],
+                    "source_excerpt": save_activity["source_excerpt"],
+                    "result": settled_activity,
+                }
+                if _has_blocking_pending(
+                    dict(settled_activity.get("combat") or {})
+                ):
+                    turns.append(turn_entry)
+                    continue
+                turn_entry["end_turn"] = await _end_turn(
+                    client,
+                    args,
+                    str(branch["id"]),
+                    actor_id,
+                    sequence,
+                )
+                turns.append(turn_entry)
+                continue
         random_activity = random_activities.get(actor_id)
         if random_activity is not None and _hit_points(actor) > 0:
             opponents = (
@@ -4165,6 +4552,15 @@ async def _auto_run(
             if not active_multiattack
             else ""
         )
+        attack_context = (
+            {
+                "direct_sunlight": attack_environments[actor_id][
+                    "direct_sunlight"
+                ]
+            }
+            if actor_id in attack_environments
+            else None
+        )
         plan = await _preflight_attack(
             client,
             args,
@@ -4172,6 +4568,7 @@ async def _auto_run(
             living_targets,
             preferred_weapon_id=preferred_weapon_id,
             multiattack_option_id=multiattack_option_id,
+            action_context=attack_context,
         )
         if plan is None and living_targets:
             destination = _choose_destination(combat, actor_id, living_targets[0])
@@ -4211,6 +4608,7 @@ async def _auto_run(
                     living_targets,
                     preferred_weapon_id=preferred_weapon_id,
                     multiattack_option_id=multiattack_option_id,
+                    action_context=attack_context,
                 )
         if plan is not None:
             target_id, action, preflight = plan
@@ -4359,6 +4757,8 @@ async def _auto_run(
         "source_delayed_actions": list(delayed_actions.values()),
         "source_passive_allies": list(passive_allies.values()),
         "source_random_activities": list(random_activities.values()),
+        "source_save_activities": list(save_activities.values()),
+        "source_attack_environments": list(attack_environments.values()),
         "source_zero_hp_finisher": source_zero_hp_finisher,
         "source_zero_hp_stabilization": source_zero_hp_stabilization,
         "source_target_priorities": list(

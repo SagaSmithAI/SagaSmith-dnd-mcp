@@ -32,6 +32,7 @@ from scripts.regression_encounter import (
     _roll_total,
     _selected_prepared_actor_ids,
     _should_stand,
+    _source_attack_environments,
     _source_declared_conditions,
     _source_declared_surprise,
     _source_delayed_actions,
@@ -44,6 +45,7 @@ from scripts.regression_encounter import (
     _source_passive_allies,
     _source_precombat_casts,
     _source_random_activities,
+    _source_save_activities,
     _source_surrender_outcome,
     _source_target_priorities,
     _source_traits,
@@ -328,6 +330,70 @@ def test_source_random_activity_requires_exact_actor_card_evidence() -> None:
         )
 
 
+def test_source_save_activity_requires_structured_card_and_brain_ruling() -> None:
+    excerpt = (
+        "The target must succeed on a DC 12 Intelligence saving throw "
+        "against this magic"
+    )
+    values = [
+        {
+            "actor_id": "devourer",
+            "activity_id": "devour-intellect-action",
+            "target_has_brain": True,
+            "source_excerpt": excerpt,
+        }
+    ]
+    actors = {
+        "devourer": {
+            "sheet": {
+                "content": {
+                    "activities": [
+                        {
+                            "id": "devour-intellect-action",
+                            "description": excerpt,
+                            "choices": {
+                                "source_save_effect": {
+                                    "target_requirement": "has_brain"
+                                }
+                            },
+                        }
+                    ]
+                }
+            }
+        }
+    }
+
+    assert _source_save_activities(
+        values,
+        participant_ids=["devourer", "pc"],
+        actors=actors,
+    ) == {"devourer": values[0]}
+    with pytest.raises(ValueError, match="true target_has_brain"):
+        _source_save_activities(
+            [{**values[0], "target_has_brain": False}],
+            participant_ids=["devourer", "pc"],
+            actors=actors,
+        )
+    with pytest.raises(ValueError, match="structured actor card"):
+        _source_save_activities(
+            values,
+            participant_ids=["devourer", "pc"],
+            actors={
+                "devourer": {
+                    "sheet": {
+                        "content": {
+                            "activities": [
+                                {
+                                    "id": "devour-intellect-action",
+                                    "description": excerpt,
+                                    "choices": {},
+                                }
+                            ]
+                        }
+                    }
+                }
+            },
+        )
 def test_encounter_actor_groups_keep_allies_out_of_registered_party_and_reject_overlap(
     tmp_path,
 ) -> None:
@@ -1007,6 +1073,62 @@ def test_source_opening_item_casts_preserve_authored_order_and_evidence() -> Non
     assert all(item["source_item_id"] == "staff-of-defense" for item in casts)
 
 
+def test_source_attack_environment_requires_the_structured_actor_trait() -> None:
+    excerpt = (
+        "While in sunlight, the kobold has disadvantage on attack rolls, "
+        "as well as on Wisdom (Perception) checks that rely on sight."
+    )
+    actors = {
+        "kobold": {
+            "sheet": {
+                "content": {
+                    "features": [
+                        {
+                            "name": "Sunlight Sensitivity",
+                            "description": excerpt,
+                            "choices": {
+                                "source_trait": {
+                                    "kind": "sunlight_sensitivity",
+                                }
+                            },
+                        }
+                    ]
+                }
+            }
+        }
+    }
+
+    environments = _source_attack_environments(
+        [
+            {
+                "actor_id": "kobold",
+                "direct_sunlight": False,
+                "source_excerpt": excerpt,
+            }
+        ],
+        participant_ids=["kobold"],
+        actors=actors,
+    )
+    assert environments["kobold"] == {
+        "actor_id": "kobold",
+        "direct_sunlight": False,
+        "source_excerpt": excerpt,
+    }
+
+    with pytest.raises(ValueError, match="must match"):
+        _source_attack_environments(
+            [
+                {
+                    "actor_id": "other",
+                    "direct_sunlight": True,
+                    "source_excerpt": excerpt,
+                }
+            ],
+            participant_ids=["other"],
+            actors={"other": {"sheet": {"content": {"features": []}}}},
+        )
+
+
 def test_source_authored_precombat_and_attack_tactics_are_structured() -> None:
     precombat = _source_precombat_casts(
         [
@@ -1568,7 +1690,7 @@ def test_no_surprise_layout_marks_neither_side_surprised() -> None:
     assert all(item.get("hidden") is False for item in config if item["actor_id"] in hostile_ids)
 
 
-def test_source_cited_scout_check_surprises_only_hostiles(tmp_path) -> None:
+def test_source_cited_scout_check_prevents_party_surprise(tmp_path) -> None:
     path = tmp_path / "check.json"
     path.write_text(
         json.dumps(
@@ -1598,10 +1720,46 @@ def test_source_cited_scout_check_surprises_only_hostiles(tmp_path) -> None:
     assert surprise == {
         "pc-1": False,
         "pc-2": False,
-        "goblin-1": True,
-        "goblin-2": True,
+        "goblin-1": False,
+        "goblin-2": False,
     }
     assert basis["mode"] == "source_cited_party_scout"
+
+
+def test_failed_source_cited_scout_check_surprises_only_party(tmp_path) -> None:
+    path = tmp_path / "check.json"
+    path.write_text(
+        json.dumps(
+            {
+                "action": "resolve-check",
+                "campaign_id": "campaign-1",
+                "passed": True,
+                "result": {
+                    "scene": {"scene_id": "scene-1", "location_key": "blind"},
+                    "actor": {"id": "pc-1", "name": "Scout"},
+                    "check": {"success": False, "natural": 4, "total": 9},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    surprise, basis = _surprise_from_check_report(
+        path,
+        campaign_id="campaign-1",
+        scene_id="scene-1",
+        location_key="blind",
+        party_ids=["pc-1", "pc-2"],
+        hostile_ids=["goblin-1", "goblin-2"],
+    )
+
+    assert surprise == {
+        "pc-1": True,
+        "pc-2": True,
+        "goblin-1": False,
+        "goblin-2": False,
+    }
+    assert basis["check"]["success"] is False
 
 
 def test_hostile_stealth_uses_every_actor_total_and_ties_are_detected() -> None:
@@ -1828,9 +1986,15 @@ def test_hostile_multiattack_selection_follows_the_preferred_weapon() -> None:
         {
             "id": "mixed-special-action",
             "attacks": [{"weapon_id": "claws", "attack_mode": "melee", "count": 1}],
+            "activities": [
+                {"activity_id": "devour-intellect-action", "count": 1}
+            ],
         }
     ]
-    assert _preferred_multiattack_option_id(actor, preferred_weapon_id="claws") == ""
+    assert (
+        _preferred_multiattack_option_id(actor, preferred_weapon_id="claws")
+        == "mixed-special-action"
+    )
 
 
 def test_conscious_party_member_stabilizes_after_all_hostiles_are_resolved() -> None:

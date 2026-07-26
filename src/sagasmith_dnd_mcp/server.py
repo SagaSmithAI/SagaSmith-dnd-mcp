@@ -105,6 +105,7 @@ from sagasmith_dnd.combat_engine import (
     force_move_directly_away,
     pay_activity_activation,
     pay_attack_action,
+    pay_multiattack_activity,
     preflight_attack,
     preflight_spell_attack,
     queue_combatant,
@@ -118,6 +119,7 @@ from sagasmith_dnd.combat_engine import (
     resolve_readied_action_window,
     resolve_readied_spell_window,
     resolve_second_wind_to_sheet,
+    resolve_source_save_effect,
     resolve_turn_undead_to_sheets,
     roll_attack_action,
     settle_core_activity_effect,
@@ -228,6 +230,7 @@ from sagasmith_dnd.statblocks import (
     effective_statblock_rating,
     gazer_eye_ray_spec,
     parse_2014_statblock,
+    source_save_effect_spec,
 )
 from sagasmith_dnd.system import DND5E
 from sqlalchemy.exc import NoResultFound
@@ -9947,8 +9950,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             branch_id=resolved_branch_id,
         )
         random_save_spec = gazer_eye_ray_spec(current.sheet, activity_id)
+        source_save_spec = source_save_effect_spec(current.sheet, activity_id)
         random_target_records: dict[str, Any] = {}
         random_targets: list[dict[str, Any]] = []
+        source_save_target_record = None
+        source_save_target: dict[str, Any] | None = None
         if random_save_spec is not None:
             if not is_dm(campaign_id, principal_id):
                 raise PermissionError(
@@ -10056,6 +10062,90 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 )
                 random_target_records[target_id] = target
                 random_targets.append(combat_actor_snapshot(target_id))
+        if source_save_spec is not None:
+            if not is_dm(campaign_id, principal_id):
+                raise PermissionError(
+                    "source saving-throw activity settlement requires the DM"
+                )
+            declared = dict(declaration or {})
+            if set(declared) != {"target_id", "target_has_brain"}:
+                raise CombatEngineError(
+                    "source saving-throw activity declaration requires target_id "
+                    "and target_has_brain"
+                )
+            target_id = str(declared.get("target_id") or "").strip()
+            if (
+                not target_id
+                or target_id == actor_id
+                or declared.get("target_has_brain") is not True
+            ):
+                raise CombatEngineError(
+                    "source saving-throw activity requires one other target "
+                    "confirmed to have a brain"
+                )
+            source_combatant = next(
+                (
+                    item
+                    for item in encounter.get("combatants", [])
+                    if str(item.get("actor_id") or "") == actor_id
+                ),
+                None,
+            )
+            target_combatant = next(
+                (
+                    item
+                    for item in encounter.get("combatants", [])
+                    if str(item.get("actor_id") or "") == target_id
+                ),
+                None,
+            )
+            source_position = dict((source_combatant or {}).get("position") or {})
+            target_position = dict((target_combatant or {}).get("position") or {})
+            if set(source_position) != {"x", "y"} or set(target_position) != {
+                "x",
+                "y",
+            }:
+                raise NeedsRulingError(
+                    "source saving-throw activity requires battle-map positions",
+                    missing=("source_save_effect_positions",),
+                )
+            target_conditions = {
+                str(item).casefold()
+                for item in (target_combatant or {}).get("conditions", [])
+            }
+            visible_to = (target_combatant or {}).get("visible_to_actor_ids")
+            if (
+                target_combatant is None
+                or target_conditions & {"dead", "unconscious"}
+                or bool(target_combatant.get("hidden", False))
+                or "invisible" in target_conditions
+                or (
+                    isinstance(visible_to, list)
+                    and actor_id not in {str(item) for item in visible_to}
+                )
+            ):
+                raise CombatEngineError(
+                    "source saving-throw target must be living, conscious, and visible"
+                )
+            distance = (
+                max(
+                    abs(int(source_position["x"]) - int(target_position["x"])),
+                    abs(int(source_position["y"]) - int(target_position["y"])),
+                )
+                * 5
+            )
+            if distance > int(source_save_spec.get("range_ft", 0) or 0):
+                raise CombatEngineError(
+                    "source saving-throw target is outside the recorded range"
+                )
+            source_save_target_record = require_campaign_actor(campaign_id, target_id)
+            access.require_actor(
+                campaign_id,
+                target_id,
+                principal_id,
+                control=True,
+            )
+            source_save_target = combat_actor_snapshot(target_id)
         turn_undead = (
             activity_id == "dnd5e.content.srd2014.feature.cleric-channel-divinity"
             and str(dict(declaration or {}).get("option") or "")
@@ -10230,11 +10320,41 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             and not is_dm(campaign_id, principal_id)
         ):
             raise CombatEngineError("special activity triggers require a DM resolution")
-        next_encounter = pay_activity_activation(
-            encounter,
-            actor_id_value=actor_id,
-            activation_type=activation_type,
+        actor_combatant = next(
+            item
+            for item in encounter.get("combatants", [])
+            if str(item.get("actor_id") or "") == actor_id
         )
+        active_multiattack = dict(
+            dict(actor_combatant.get("turn_flags") or {}).get("multiattack")
+            or {}
+        )
+        remaining_multiattack = list(active_multiattack.get("remaining") or [])
+        source_save_is_followup = bool(
+            source_save_spec is not None
+            and any(
+                str(item.get("activity_id") or "") == activity_id
+                and int(item.get("count", 0) or 0) > 0
+                for item in remaining_multiattack
+                if isinstance(item, dict)
+            )
+        )
+        if source_save_is_followup:
+            next_encounter, activity_activation_payment = pay_multiattack_activity(
+                encounter,
+                actor_id,
+                activity_id=activity_id,
+            )
+        else:
+            next_encounter = pay_activity_activation(
+                encounter,
+                actor_id_value=actor_id,
+                activation_type=activation_type,
+            )
+            activity_activation_payment = {
+                "kind": "activity",
+                "activation_type": activation_type,
+            }
         next_encounter, core_effect = settle_core_activity_effect(
             next_encounter,
             actor_id_value=actor_id,
@@ -10313,6 +10433,58 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "targets": settled_random["targets"],
                 "requires_ruling": False,
             }
+        if source_save_spec is not None:
+            assert source_save_target_record is not None
+            assert source_save_target is not None
+            source_actor = combat_actor_snapshot(actor_id)
+            source_actor["sheet"] = applied["sheet"]
+            source_actor["derived"] = derive_character_sheet(applied["sheet"])
+            target_id = str(source_save_target["id"])
+            target_combatant = next(
+                item
+                for item in next_encounter.get("combatants", [])
+                if str(item.get("actor_id") or "") == target_id
+            )
+            settled_source = resolve_source_save_effect(
+                source_actor,
+                source_save_target,
+                spec=source_save_spec,
+                death_saves=bool(
+                    target_combatant.get("death_saves", False)
+                    or target_combatant.get("zero_hp_recovery", False)
+                ),
+                rules=rule_context,
+            )
+            target_sheet = validate_character_sheet(settled_source["sheet"])
+            sync_combatant_conditions(next_encounter, target_id, target_sheet)
+            concentration = dict(
+                dict(settled_source["result"].get("damage") or {}).get(
+                    "concentration"
+                )
+                or {}
+            )
+            add_concentration_window(
+                next_encounter,
+                target_id,
+                concentration or None,
+                next_revision=campaign.revision + 1,
+            )
+            additional_updates.append(
+                CharacterStateUpdate(
+                    character_id=target_id,
+                    sheet=target_sheet,
+                    notes=validate_character_notes(
+                        source_save_target_record.notes
+                    ),
+                    expected_revision=source_save_target_record.revision,
+                )
+            )
+            core_effect = {
+                **settled_source["result"],
+                "kind": "source_save_effect",
+                "activation_payment": activity_activation_payment,
+                "requires_ruling": False,
+            }
         if turn_undead:
             source_actor = combat_actor_snapshot(actor_id)
             source_actor["sheet"] = applied["sheet"]
@@ -10367,6 +10539,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "second_wind": "dnd5e.core.activity.second_wind",
                 "turn_undead": "dnd5e.core.activity.turn_undead",
                 "random_save_effects": "dnd5e.core.activity.random_save_effects",
+                "source_save_effect": "dnd5e.core.activity.source_save_effect",
             }[str(core_effect["kind"])]
             applied["rule_receipts"] = [
                 *list(applied.get("rule_receipts") or []),
