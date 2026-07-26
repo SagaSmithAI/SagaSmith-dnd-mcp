@@ -3173,7 +3173,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     def server_capabilities() -> dict[str, Any]:
         """Describe the MCP contract and the automatic-vs-ruling combat boundary."""
         return {
-            "contract_version": "2026-07-session-exposure-v2",
+            "contract_version": "2026-07-session-exposure-v3",
             "transport": "stdio",
             "state_owner": "sagasmith-dnd-mcp",
             "features": {
@@ -3243,6 +3243,30 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "validated_module_runtime_manifest": True,
                 "shared_continuity_budget": True,
                 "continuity_diagnostics": True,
+            },
+            "ruling_policy": {
+                "default_dm_resolver": "agent",
+                "agent_adjudicates": [
+                    "source_or_scene_fact",
+                    "descriptive_activity",
+                    "generic_spell_effect",
+                    "ready_release_effect",
+                    "environmental_consequence",
+                    "module_specific_procedure",
+                ],
+                "requires_external_input": [
+                    "player_owned_choice",
+                    "owner_approval",
+                    "permission_escalation",
+                    "missing_or_conflicting_source_review",
+                ],
+                "transaction_rules": [
+                    "inspect_existing_payment_before_settlement",
+                    "do_not_pay_twice",
+                    "use_public_tools_only",
+                    "preserve_source_revision_and_random_receipts",
+                    "use_combat_choice_only_for_an_owned_window",
+                ],
             },
             "rulebook_import": {
                 "stages": [

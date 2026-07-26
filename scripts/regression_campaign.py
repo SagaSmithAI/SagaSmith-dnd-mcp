@@ -22,6 +22,7 @@ from mcp.client.stdio import StdioServerParameters, stdio_client
 
 PRINCIPAL_ID = "system:local"
 RULE_STATBLOCK_OCR_PROFILE = "layout-ocr-v1"
+RULE_STATBLOCK_CARD_PROFILE = "agent-ruling-v1"
 
 
 def _load_review_override(path: Path, observation: str) -> tuple[str, str, Path]:
@@ -360,6 +361,7 @@ def _rule_statblock_operation_token(
         {
             "source": source_identity,
             "ocr_recovery_profile": RULE_STATBLOCK_OCR_PROFILE,
+            "card_profile": RULE_STATBLOCK_CARD_PROFILE,
             "actor_name": actor_name,
             "source_statblock_name": source_statblock_name or "",
             "actor_type": actor_type,

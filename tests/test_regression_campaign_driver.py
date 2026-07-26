@@ -71,6 +71,34 @@ def test_rule_statblock_idempotency_is_bound_to_source_and_actor_batch() -> None
     )
 
 
+def test_rule_statblock_idempotency_is_bound_to_card_profile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    base = {
+        "run_id": "campaign-run",
+        "source_identity": {"source_id": "srd-dragon"},
+        "actor_name": "Lennithon",
+        "actor_type": "monster",
+        "actor_count": 1,
+        "replace_actor_id": "dragon-id",
+        "chunk_ids": [],
+        "source_query": "adult blue dragon",
+        "source_page": 91,
+        "reviewed_content": None,
+        "review_observation": None,
+        "variant": None,
+    }
+    current = _rule_statblock_operation_token(**base)
+
+    monkeypatch.setattr(
+        campaign_driver,
+        "RULE_STATBLOCK_CARD_PROFILE",
+        "agent-ruling-v2",
+    )
+
+    assert current != _rule_statblock_operation_token(**base)
+
+
 def test_blocked_candidate_override_requires_nonempty_visual_evidence(tmp_path: Path) -> None:
     path = tmp_path / "wolf.md"
     path.write_text("# WOLF\n\n**Armor Class** 13\n", encoding="utf-8")

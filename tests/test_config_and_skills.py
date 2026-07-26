@@ -355,6 +355,30 @@ def test_server_capabilities_publish_the_rulebook_import_contract(tmp_path: Path
         assert capabilities["features"]["validated_module_runtime_manifest"] is True
         assert capabilities["features"]["shared_continuity_budget"] is True
         assert capabilities["features"]["continuity_diagnostics"] is True
+        assert capabilities["ruling_policy"] == {
+            "default_dm_resolver": "agent",
+            "agent_adjudicates": [
+                "source_or_scene_fact",
+                "descriptive_activity",
+                "generic_spell_effect",
+                "ready_release_effect",
+                "environmental_consequence",
+                "module_specific_procedure",
+            ],
+            "requires_external_input": [
+                "player_owned_choice",
+                "owner_approval",
+                "permission_escalation",
+                "missing_or_conflicting_source_review",
+            ],
+            "transaction_rules": [
+                "inspect_existing_payment_before_settlement",
+                "do_not_pay_twice",
+                "use_public_tools_only",
+                "preserve_source_revision_and_random_receipts",
+                "use_combat_choice_only_for_an_owned_window",
+            ],
+        }
         assert capabilities["module_import"]["runtime_manifest_schema"] == 1
         assert capabilities["rulebook_import"]["settlement_tools"] == {
             "play": "character_check",

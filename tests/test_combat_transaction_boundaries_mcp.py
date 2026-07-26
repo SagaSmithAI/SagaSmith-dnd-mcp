@@ -411,6 +411,89 @@ def test_action_surge_is_settled_without_a_manual_ruling(tmp_path: Path) -> None
     asyncio.run(exercise())
 
 
+def test_descriptive_activity_pays_action_and_enters_agent_ruling(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        server = create_server(_config(tmp_path))
+        campaign = await _call(
+            server,
+            "campaign_create",
+            {
+                "name": "Agent ruling boundary",
+                "edition": "2014",
+                "idempotency_key": "campaign",
+            },
+        )
+        source_excerpt = (
+            "The dragon exhales lightning at the defenders; use the authored "
+            "mission procedure to determine casualties."
+        )
+        sheet = default_character_sheet()
+        sheet["content"]["activities"] = [
+            {
+                "id": "lightning-breath-action",
+                "name": "Lightning Breath",
+                "source_key": "module-review:dragon",
+                "description": source_excerpt,
+                "activation": {"type": "action", "cost": 1},
+                "choices": {
+                    "manual_ruling": {
+                        "kind": "descriptive_activity",
+                        "source_excerpt": source_excerpt,
+                    }
+                },
+            }
+        ]
+        actor = await _call(
+            server,
+            "character_create",
+            {
+                "campaign_id": campaign["id"],
+                "name": "Dragon",
+                "sheet": sheet,
+                "idempotency_key": "actor",
+            },
+        )
+        campaign = await _call(server, "campaign_get", {"campaign_id": campaign["id"]})
+        started = await _call_raw(
+            server,
+            "combat_start",
+            {
+                "campaign_id": campaign["id"],
+                "participant_ids": [actor["id"]],
+                "participant_config": [{"actor_id": actor["id"], "initiative": 10}],
+                "expected_revision": campaign["revision"],
+                "idempotency_key": "start",
+            },
+        )
+
+        ruled = await _call_raw(
+            server,
+            "combat_use_activity",
+            {
+                "campaign_id": campaign["id"],
+                "actor_id": actor["id"],
+                "activity_id": "lightning-breath-action",
+                "expected_revision": started["campaign_revision"],
+                "idempotency_key": "breath",
+            },
+        )
+
+        assert ruled["status"] == "pending_ruling"
+        assert ruled["result"]["requires_ruling"] is True
+        assert ruled["result"]["choices"]["manual_ruling"] == {
+            "kind": "descriptive_activity",
+            "source_excerpt": source_excerpt,
+        }
+        current = ruled["combat"]["combatants"][ruled["combat"]["turn_index"]]
+        assert current["turn_budget"]["main_action"] == 0
+        actor_after = await _call(server, "character_get", {"character_id": actor["id"]})
+        assert actor_after["revision"] == actor["revision"] + 1
+
+    asyncio.run(exercise())
+
+
 def test_second_wind_heals_and_pays_bonus_action_atomically(tmp_path: Path) -> None:
     async def exercise() -> None:
         server = create_server(_config(tmp_path))
