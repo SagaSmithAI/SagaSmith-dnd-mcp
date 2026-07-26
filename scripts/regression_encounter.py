@@ -262,6 +262,17 @@ def _arguments() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--source-random-activity-json",
+        action="append",
+        type=json.loads,
+        default=[],
+        help=(
+            "Source-bound random saving-throw activity with actor_id, activity_id, "
+            "and an exact source_excerpt; the driver invokes the public activity "
+            "settlement instead of substituting a weapon attack"
+        ),
+    )
+    parser.add_argument(
         "--source-zero-hp-finisher-json",
         type=json.loads,
         default=None,
@@ -1538,6 +1549,68 @@ def _source_passive_allies(
     return normalized
 
 
+def _source_random_activities(
+    values: list[dict[str, Any]],
+    *,
+    participant_ids: list[str],
+    actors: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, dict[str, str]]:
+    normalized: dict[str, dict[str, str]] = {}
+    for index, raw in enumerate(values):
+        if not isinstance(raw, dict):
+            raise ValueError(f"source random activity {index} must be an object")
+        unknown = set(raw) - {"actor_id", "activity_id", "source_excerpt"}
+        if unknown:
+            raise ValueError(
+                f"source random activity {index} has unsupported fields: "
+                f"{', '.join(sorted(unknown))}"
+            )
+        actor_id = str(raw.get("actor_id") or "").strip()
+        activity_id = str(raw.get("activity_id") or "").strip()
+        source_excerpt = " ".join(
+            str(raw.get("source_excerpt") or "").split()
+        )
+        if (
+            actor_id not in participant_ids
+            or actor_id in normalized
+            or not activity_id
+            or not source_excerpt
+        ):
+            raise ValueError(
+                f"source random activity {index} requires one unique participant, "
+                "an activity_id, and an exact excerpt"
+            )
+        if actors is not None:
+            actor = actors.get(actor_id)
+            activities = (
+                dict(dict(actor or {}).get("sheet") or {})
+                .get("content", {})
+                .get("activities", [])
+            )
+            activity = next(
+                (
+                    item
+                    for item in activities
+                    if str(item.get("id") or "") == activity_id
+                ),
+                None,
+            )
+            description = " ".join(
+                str(dict(activity or {}).get("description") or "").split()
+            )
+            if activity is None or source_excerpt not in description:
+                raise ValueError(
+                    f"source random activity {index} must match its actor card and "
+                    "contain the exact excerpt"
+                )
+        normalized[actor_id] = {
+            "actor_id": actor_id,
+            "activity_id": activity_id,
+            "source_excerpt": source_excerpt,
+        }
+    return normalized
+
+
 async def _campaign(client: ExposureClient, campaign_id: str) -> dict[str, Any]:
     return _facade_value(
         await client.core(
@@ -1913,6 +1986,11 @@ async def _start(
         args.source_passive_ally_json,
         ally_ids=ally_ids,
     )
+    random_activities = _source_random_activities(
+        args.source_random_activity_json,
+        participant_ids=[*party_ids, *all_hostile_ids],
+        actors=actors,
+    )
     for actor_id in set(all_hostile_ids) | {
         ruling_actor_id for ruling_actor_id, _ in on_hit_rulings
     }:
@@ -2192,6 +2270,7 @@ async def _start(
         "source_on_hit_rulings": list(on_hit_rulings.values()),
         "source_delayed_actions": list(delayed_actions.values()),
         "source_passive_allies": list(passive_allies.values()),
+        "source_random_activities": list(random_activities.values()),
         "source_opening_casts": _source_opening_casts(
             args.source_opening_cast_json,
             participant_ids=[*party_ids, *all_hostile_ids],
@@ -2943,6 +3022,16 @@ async def _auto_run(
         "combat_query",
         {"campaign_id": args.campaign_id, "view": "status"},
     )
+    initial_actors = await _characters(
+        client,
+        args.campaign_id,
+        [*party_ids, *hostile_ids],
+    )
+    random_activities = _source_random_activities(
+        args.source_random_activity_json,
+        participant_ids=[*party_ids, *hostile_ids],
+        actors=initial_actors,
+    )
     revealed_surprised = [
         str(item["actor_id"])
         for item in initial_combat.get("combatants", [])
@@ -3322,6 +3411,113 @@ async def _auto_run(
                     "result": stood,
                 }
             )
+            continue
+        random_activity = random_activities.get(actor_id)
+        if random_activity is not None and _hit_points(actor) > 0:
+            opponents = (
+                [
+                    hostile_id
+                    for hostile_id in hostile_ids
+                    if hostile_id not in fled_hostile_ids
+                ]
+                if actor_id in party_ids
+                else party_ids
+            )
+            living_targets = [
+                target_id
+                for target_id in opponents
+                if _hit_points(actors[target_id]) > 0
+            ]
+            living_targets = _observable_target_ids(
+                combat,
+                observer_id=actor_id,
+                target_ids=living_targets,
+            )
+            combatants = {
+                str(item["actor_id"]): item for item in combat["combatants"]
+            }
+            living_targets.sort(
+                key=lambda target_id: _distance(
+                    dict(
+                        combatants[actor_id].get("position")
+                        or {"x": 0, "y": 0}
+                    ),
+                    dict(
+                        combatants[target_id].get("position")
+                        or {"x": 0, "y": 0}
+                    ),
+                )
+            )
+            living_targets = _prioritize_targets(
+                actor_id,
+                living_targets,
+                target_priorities,
+            )[:2]
+            if not living_targets:
+                ended_turn = await _end_turn(
+                    client,
+                    args,
+                    str(branch["id"]),
+                    actor_id,
+                    sequence,
+                )
+                turns.append(
+                    {
+                        "sequence": sequence,
+                        "kind": "source_random_activity_no_target",
+                        "actor_id": actor_id,
+                        "source_excerpt": random_activity["source_excerpt"],
+                        "result": ended_turn,
+                    }
+                )
+                continue
+            campaign = await _campaign(client, args.campaign_id)
+            settled_activity = await client.domain(
+                "combat_use_activity",
+                {
+                    "campaign_id": args.campaign_id,
+                    "actor_id": actor_id,
+                    "activity_id": random_activity["activity_id"],
+                    "declaration": {"target_ids": living_targets},
+                    "branch_id": branch["id"],
+                    "expected_revision": campaign["revision"],
+                    "idempotency_key": (
+                        "encounter-random-activity-"
+                        + _token(
+                            f"{args.run_id}:{sequence}:{actor_id}:"
+                            f"{random_activity['activity_id']}",
+                            length=24,
+                        )
+                    ),
+                },
+            )
+            if settled_activity.get("status") != "committed":
+                raise RuntimeError(
+                    "source random activity did not commit through structured "
+                    "settlement"
+                )
+            turn_entry = {
+                "sequence": sequence,
+                "kind": "source_random_activity",
+                "actor_id": actor_id,
+                "activity_id": random_activity["activity_id"],
+                "target_ids": living_targets,
+                "source_excerpt": random_activity["source_excerpt"],
+                "result": settled_activity,
+            }
+            if _has_blocking_pending(
+                dict(settled_activity.get("combat") or {})
+            ):
+                turns.append(turn_entry)
+                continue
+            turn_entry["end_turn"] = await _end_turn(
+                client,
+                args,
+                str(branch["id"]),
+                actor_id,
+                sequence,
+            )
+            turns.append(turn_entry)
             continue
         stabilization_target_id = _postcombat_stabilization_target(
             actor_id=actor_id,
@@ -4074,6 +4270,7 @@ async def _auto_run(
         "source_on_hit_rulings": list(on_hit_rulings.values()),
         "source_delayed_actions": list(delayed_actions.values()),
         "source_passive_allies": list(passive_allies.values()),
+        "source_random_activities": list(random_activities.values()),
         "source_zero_hp_finisher": source_zero_hp_finisher,
         "source_zero_hp_stabilization": source_zero_hp_stabilization,
         "source_target_priorities": list(

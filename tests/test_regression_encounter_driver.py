@@ -43,6 +43,7 @@ from scripts.regression_encounter import (
     _source_outcome,
     _source_passive_allies,
     _source_precombat_casts,
+    _source_random_activities,
     _source_surrender_outcome,
     _source_target_priorities,
     _source_traits,
@@ -265,6 +266,65 @@ def test_source_passive_allies_require_unique_allies_and_exact_evidence() -> Non
                 }
             ],
             ally_ids=["losser"],
+        )
+
+
+def test_source_random_activity_requires_exact_actor_card_evidence() -> None:
+    values = [
+        {
+            "actor_id": "gazer",
+            "activity_id": "eye-rays-action",
+            "source_excerpt": (
+                "shoots two of the following magical eye rays at random"
+            ),
+        }
+    ]
+    actors = {
+        "gazer": {
+            "sheet": {
+                "content": {
+                    "activities": [
+                        {
+                            "id": "eye-rays-action",
+                            "description": (
+                                "The gazer shoots two of the following magical eye "
+                                "rays at random (reroll duplicates)."
+                            ),
+                        }
+                    ]
+                }
+            }
+        }
+    }
+
+    assert _source_random_activities(
+        values,
+        participant_ids=["gazer", "pc"],
+        actors=actors,
+    ) == {
+        "gazer": {
+            "actor_id": "gazer",
+            "activity_id": "eye-rays-action",
+            "source_excerpt": (
+                "shoots two of the following magical eye rays at random"
+            ),
+        }
+    }
+    with pytest.raises(ValueError, match="contain the exact excerpt"):
+        _source_random_activities(
+            [
+                {
+                    **values[0],
+                    "source_excerpt": "invented automatic rays",
+                }
+            ],
+            participant_ids=["gazer", "pc"],
+            actors=actors,
+        )
+    with pytest.raises(ValueError, match="unique participant"):
+        _source_random_activities(
+            [{**values[0], "actor_id": "not-present"}],
+            participant_ids=["gazer", "pc"],
         )
 
 
