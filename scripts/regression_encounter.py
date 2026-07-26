@@ -106,6 +106,16 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--run-id", default="full-playthrough-encounter-v1")
     parser.add_argument("--party-report", type=Path, action="append", required=True)
     parser.add_argument(
+        "--party-loadout-json",
+        action="append",
+        type=json.loads,
+        default=[],
+        help=(
+            "Agent-selected pre-initiative equipment with actor_id, item_id, and "
+            "slot; repeat for distinct party equipment slots"
+        ),
+    )
+    parser.add_argument(
         "--ally-report",
         type=Path,
         action="append",
@@ -183,6 +193,15 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--source-excerpt")
     parser.add_argument("--encounter-name", default="Source-defined encounter")
     parser.add_argument("--hostile-label", default="Source-defined hostiles")
+    parser.add_argument(
+        "--hostile-source-excerpt",
+        default="",
+        help=(
+            "Exact scene excerpt proving the primary hostile group participates; "
+            "defaults to --source-excerpt when the same passage also defines the "
+            "complete encounter procedure"
+        ),
+    )
     parser.add_argument("--additional-hostile-label", default="Additional source hostiles")
     parser.add_argument("--additional-hostile-source-excerpt", default="")
     parser.add_argument("--reinforcement-hostile-label", default="Source reinforcements")
@@ -711,6 +730,16 @@ def _participant_manifest(
         "groups": groups,
         "notes": "Exact source count; no party-size scaling was applied.",
     }
+
+
+def _primary_hostile_source_excerpt(args: argparse.Namespace) -> str:
+    """Keep participant identity evidence distinct from full procedure evidence."""
+
+    return str(
+        getattr(args, "hostile_source_excerpt", "")
+        or getattr(args, "source_excerpt", "")
+        or ""
+    )
 
 
 def _source_departure_patch(
@@ -2306,6 +2335,135 @@ def _character_summary(actor: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _party_loadouts(
+    declarations: list[dict[str, Any]],
+    *,
+    party_ids: list[str],
+    actors: dict[str, dict[str, Any]],
+) -> list[dict[str, str]]:
+    """Validate Agent-selected pre-initiative equipment against owned items."""
+
+    party = set(party_ids)
+    normalized: list[dict[str, str]] = []
+    selected_slots: set[tuple[str, str]] = set()
+    allowed = {"actor_id", "item_id", "slot"}
+    for index, declaration in enumerate(declarations):
+        if not isinstance(declaration, dict):
+            raise ValueError(f"party loadout {index} must be an object")
+        unknown = set(declaration) - allowed
+        if unknown:
+            raise ValueError(
+                f"party loadout {index} has unsupported fields: "
+                + ", ".join(sorted(unknown))
+            )
+        actor_id = str(declaration.get("actor_id") or "").strip()
+        item_id = str(declaration.get("item_id") or "").strip()
+        slot = str(declaration.get("slot") or "").strip()
+        if actor_id not in party or not item_id or not slot:
+            raise ValueError(
+                f"party loadout {index} requires one party actor, item_id, and slot"
+            )
+        slot_key = (actor_id, slot)
+        if slot_key in selected_slots:
+            raise ValueError(
+                f"party loadout {index} duplicates {actor_id!r} slot {slot!r}"
+            )
+        actor = actors.get(actor_id)
+        items = list(
+            dict(dict(actor or {}).get("sheet") or {})
+            .get("inventory", {})
+            .get("items", [])
+        )
+        item = next(
+            (
+                value
+                for value in items
+                if isinstance(value, dict)
+                and str(value.get("id") or "").strip() == item_id
+            ),
+            None,
+        )
+        if item is None:
+            raise ValueError(
+                f"party loadout {index} item {item_id!r} is not owned by {actor_id!r}"
+            )
+        if slot in {"main_hand", "off_hand"} and str(item.get("kind") or "") != "weapon":
+            raise ValueError(
+                f"party loadout {index} cannot equip non-weapon {item_id!r} in {slot}"
+            )
+        normalized.append(
+            {
+                "actor_id": actor_id,
+                "item_id": item_id,
+                "slot": slot,
+            }
+        )
+        selected_slots.add(slot_key)
+    return normalized
+
+
+async def _apply_party_loadouts(
+    client: ExposureClient,
+    args: argparse.Namespace,
+    *,
+    party_ids: list[str],
+    actors: dict[str, dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
+    """Equip reviewed owned items through the public pre-combat inventory facade."""
+
+    loadouts = _party_loadouts(
+        list(getattr(args, "party_loadout_json", []) or []),
+        party_ids=party_ids,
+        actors=actors,
+    )
+    results: list[dict[str, Any]] = []
+    current_actors = dict(actors)
+    for loadout in loadouts:
+        actor = current_actors[loadout["actor_id"]]
+        item = next(
+            value
+            for value in dict(actor["sheet"]["inventory"]).get("items", [])
+            if str(value.get("id") or "") == loadout["item_id"]
+        )
+        if (
+            item.get("equipped") is True
+            and str(item.get("equipped_slot") or "") == loadout["slot"]
+        ):
+            results.append({**loadout, "status": "already_equipped"})
+            continue
+        equipped = await client.domain(
+            "inventory_change",
+            {
+                "owner": "character",
+                "action": "equip",
+                "owner_id": loadout["actor_id"],
+                "payload": {
+                    "item_id": loadout["item_id"],
+                    "slot": loadout["slot"],
+                },
+                "expected_revision": actor["revision"],
+                "idempotency_key": (
+                    "encounter-party-loadout-"
+                    + _operation_token(
+                        args,
+                        loadout["actor_id"],
+                        loadout["slot"],
+                        loadout["item_id"],
+                    )
+                ),
+            },
+        )
+        results.append({**loadout, "status": "equipped", "result": equipped})
+        current_actors.update(
+            await _characters(
+                client,
+                args.campaign_id,
+                [loadout["actor_id"]],
+            )
+        )
+    return results, current_actors
+
+
 def _validate_hostile_attacks(
     actor_id: str,
     attacks: list[dict[str, Any]],
@@ -2537,6 +2695,12 @@ async def _start(
         scene_id=args.scene_id,
         participant_ids=[*party_ids, *all_hostile_ids],
     )
+    precombat_loadouts, actors = await _apply_party_loadouts(
+        client,
+        args,
+        party_ids=pc_ids,
+        actors=actors,
+    )
     for actor_id in set(all_hostile_ids) | {
         ruling_actor_id for ruling_actor_id, _ in on_hit_rulings
     }:
@@ -2738,7 +2902,7 @@ async def _start(
         "participant_manifest": _participant_manifest(
             hostile_ids,
             label=args.hostile_label,
-            source_excerpt=str(args.source_excerpt or ""),
+            source_excerpt=_primary_hostile_source_excerpt(args),
             additional_hostile_ids=additional_hostile_ids,
             additional_label=args.additional_hostile_label,
             additional_source_excerpt=str(args.additional_hostile_source_excerpt or ""),
@@ -2811,6 +2975,7 @@ async def _start(
         "source_casualty_pools": list(source_casualty_pools.values()),
         "source_separations": list(source_separations.values()),
         "source_avoidances": source_avoidance_evidence,
+        "precombat_loadouts": precombat_loadouts,
         "source_opening_casts": _source_opening_casts(
             args.source_opening_cast_json,
             participant_ids=[*party_ids, *all_hostile_ids],

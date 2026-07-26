@@ -10,6 +10,7 @@ from scripts.regression_encounter import (
     GUIDING_BOLT_ON_HIT,
     HEALING_WORD_ID,
     MAGIC_MISSILE_ID,
+    _apply_party_loadouts,
     _apply_source_casualty_rolls,
     _apply_source_separations,
     _body_thief_sides,
@@ -29,11 +30,13 @@ from scripts.regression_encounter import (
     _participant_config,
     _participant_manifest,
     _party_ids,
+    _party_loadouts,
     _postcombat_stabilization_target,
     _preferred_hostile_weapon_id,
     _preferred_multiattack_option_id,
     _preflight_attack,
     _prepared_actor_ids,
+    _primary_hostile_source_excerpt,
     _prioritize_targets,
     _record_source_flee_damage,
     _reinforcement_config,
@@ -322,6 +325,87 @@ def test_status_uses_play_character_exposure_before_combat() -> None:
     assert result["actors"][0]["resources"]["test"]["value"] == 1
     assert result["actors"][0]["spell_slots"]["1"]["value"] == 2
     assert result["actors"][0]["prepared_spell_ids"] == ["spell-1"]
+
+
+def test_party_loadout_equips_owned_weapon_before_initiative() -> None:
+    actor = {
+        "id": "pc-1",
+        "revision": 4,
+        "sheet": {
+            "inventory": {
+                "items": [
+                    {
+                        "id": "shortsword",
+                        "kind": "weapon",
+                        "equipped": True,
+                        "equipped_slot": "main_hand",
+                    },
+                    {
+                        "id": "shortbow",
+                        "kind": "weapon",
+                        "equipped": False,
+                        "equipped_slot": None,
+                    },
+                ]
+            }
+        },
+    }
+
+    class Client:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict]] = []
+
+        async def domain(self, tool_id: str, arguments: dict) -> list[dict] | dict:
+            self.calls.append((tool_id, arguments))
+            if tool_id == "inventory_change":
+                actor["revision"] += 1
+                actor["sheet"]["inventory"]["items"][0].update(
+                    {"equipped": False, "equipped_slot": None}
+                )
+                actor["sheet"]["inventory"]["items"][1].update(
+                    {"equipped": True, "equipped_slot": "main_hand"}
+                )
+                return {"status": "committed"}
+            assert tool_id == "character_query"
+            return [actor]
+
+    declarations = [
+        {"actor_id": "pc-1", "item_id": "shortbow", "slot": "main_hand"}
+    ]
+    assert _party_loadouts(
+        declarations,
+        party_ids=["pc-1"],
+        actors={"pc-1": actor},
+    ) == declarations
+
+    client = Client()
+    results, actors = asyncio.run(
+        _apply_party_loadouts(
+            client,
+            SimpleNamespace(
+                campaign_id="campaign-1",
+                party_loadout_json=declarations,
+                action="start",
+                checkpoint_label="",
+                home="home",
+                output="output.json",
+                run_id="run-1",
+            ),
+            party_ids=["pc-1"],
+            actors={"pc-1": actor},
+        )
+    )
+
+    assert results[0]["status"] == "equipped"
+    assert actors["pc-1"]["revision"] == 5
+    assert [tool_id for tool_id, _ in client.calls] == [
+        "inventory_change",
+        "character_query",
+    ]
+    assert client.calls[0][1]["payload"] == {
+        "item_id": "shortbow",
+        "slot": "main_hand",
+    }
 
 
 def test_party_ids_combine_public_party_reports_and_require_global_uniqueness(
@@ -2491,6 +2575,29 @@ def test_encounter_manifest_preserves_exact_source_count_without_scaling() -> No
     assert manifest["groups"][0]["required_count"] == 4
     assert manifest["groups"][0]["actor_ids"] == hostile_ids
     assert manifest["notes"] == "Exact source count; no party-size scaling was applied."
+
+
+def test_primary_hostile_evidence_can_be_narrower_than_encounter_procedure() -> None:
+    procedure = (
+        "There are twenty defenders. Every breath attack kills 1d4 defenders. "
+        "The dragon leaves after taking 24 damage."
+    )
+
+    assert (
+        _primary_hostile_source_excerpt(
+            SimpleNamespace(
+                source_excerpt=procedure,
+                hostile_source_excerpt=(
+                    "The adult blue dragon Lennithon accompanied this raid."
+                ),
+            )
+        )
+        == "The adult blue dragon Lennithon accompanied this raid."
+    )
+    assert (
+        _primary_hostile_source_excerpt(SimpleNamespace(source_excerpt=procedure))
+        == procedure
+    )
 
 
 def test_encounter_manifest_tracks_arrived_source_group_separately() -> None:
