@@ -271,6 +271,9 @@ def test_scene_readiness_blocks_missing_combatants_and_reserves(tmp_path: Path) 
             "Parry requires a reaction decision",
             "Multiattack: Multiattack composition requires a DM ruling",
         ]
+        assert captain_card["default_dm_resolver"] == "agent"
+        assert captain_card["agent_rulings"] == captain_card["manual_rulings"]
+        assert captain_card["external_input_requirements"] == []
         assert {
             (item["reason"], item["default_resolver"], item["ruling_kind"])
             for item in captain_card["ruling_requirements"]
@@ -304,6 +307,12 @@ def test_scene_readiness_blocks_missing_combatants_and_reserves(tmp_path: Path) 
         ] == [
             ("external_input", "missing_or_conflicting_source_review"),
             ("agent", "agent_dm_adjudication"),
+        ]
+        assert mixed_card["agent_rulings"] == [
+            "Prepared spells require DM effect settlement: module-spell"
+        ]
+        assert mixed_card["external_input_requirements"] == [
+            "Mystery Bow: ranged weapon range is missing"
         ]
         assert ready["initial_actor_ids"] == [
             actors["captain"]["id"],

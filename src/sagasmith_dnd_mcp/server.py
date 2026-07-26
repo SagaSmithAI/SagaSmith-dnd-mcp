@@ -10,8 +10,9 @@ from contextlib import nullcontext
 from copy import deepcopy
 from dataclasses import asdict
 from datetime import datetime
+from functools import wraps
 from pathlib import Path
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Callable, Literal, TypeVar
 from uuid import uuid4
 from weakref import WeakValueDictionary
 
@@ -309,6 +310,7 @@ AGENT_RULING_TRANSACTION_RULES = (
     "preserve_source_revision_and_random_receipts",
     "use_combat_choice_only_for_an_owned_window",
 )
+_RULING_FUNCTION = TypeVar("_RULING_FUNCTION", bound=Callable[..., Any])
 
 
 def _agent_ruling_policy() -> dict[str, Any]:
@@ -357,13 +359,64 @@ def _ruling_requirement(reason: str, ruling_kind: str) -> dict[str, Any]:
     }
 
 
-def _ruling_status(status: str, ruling_kind: str) -> dict[str, str]:
-    """Attach an explicit kind whenever a domain result pauses for adjudication."""
+def _ruling_status(status: str, ruling_kind: str) -> dict[str, Any]:
+    """Attach a self-contained resolver contract to a paused adjudication."""
 
     result = {"status": status}
     if status == "pending_ruling":
-        result["ruling_kind"] = ruling_kind
+        result.update(_ruling_resolution_for_kind(ruling_kind))
     return result
+
+
+def _facade_result(action: str, result: Any) -> dict[str, Any]:
+    """Preserve a nested domain ruling's ownership at the public facade."""
+
+    status = result.get("status", "ok") if isinstance(result, dict) else "ok"
+    response = {"status": status, "action": action, "result": result}
+    if status == "pending_ruling" and isinstance(result, dict):
+        ruling_kind = str(result.get("ruling_kind") or "agent_dm_adjudication")
+        response.update(_ruling_resolution_for_kind(ruling_kind))
+    return response
+
+
+def _needs_ruling_kind(error: NeedsRulingError) -> str:
+    """Keep source defects out of the Agent's ordinary adjudication lane."""
+
+    message = str(error).casefold()
+    missing = {str(item).casefold() for item in error.missing}
+    if (
+        any(item.startswith(("weapon.range:", "spell.range:")) for item in missing)
+        or "unresolved rules" in message
+        or "unsupported source contract" in message
+    ):
+        return "missing_or_conflicting_source_review"
+    return "agent_dm_adjudication"
+
+
+def _agent_ruling_boundary(function: _RULING_FUNCTION) -> _RULING_FUNCTION:
+    """Convert a safe pre-commit engine boundary into a classified adjudication."""
+
+    @wraps(function)
+    def wrapped(*args: Any, **kwargs: Any) -> Any:
+        try:
+            return function(*args, **kwargs)
+        except NeedsRulingError as exc:
+            ruling_kind = _needs_ruling_kind(exc)
+            resolution = _ruling_resolution_for_kind(ruling_kind)
+            return {
+                "status": "pending_ruling",
+                **resolution,
+                "reason": str(exc),
+                "missing": list(exc.missing),
+                "committed": False,
+                "retry_contract": {
+                    "resolver": resolution["default_resolver"],
+                    "reuse_current_revision": True,
+                    "use_public_tools_only": True,
+                },
+            }
+
+    return wrapped  # type: ignore[return-value]
 
 
 SUPPORTED_FEATURE_SELECTION_KINDS = frozenset(
@@ -1309,39 +1362,35 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             *[
                 _ruling_requirement(
                     reason,
-                    (
-                        "missing_or_conflicting_source_review"
-                        if reason in missing_attack_range_reasons
-                        or reason.endswith(
-                            "no active spell artifact or complete statblock action exists"
-                        )
-                        or (
-                            reason.startswith("Spellcasting:")
-                            and reason.endswith(
-                                "descriptive passive is not automatically settled"
-                            )
-                        )
-                        else (
-                            "player_owned_choice"
-                            if character_type == "pc"
-                            and reason.endswith("requires a reaction decision")
-                            else "agent_dm_adjudication"
-                        )
+                    statblock_ruling_kind(
+                        reason,
+                        character_type=character_type,
                     ),
                 )
                 for reason in manual_rulings
             ],
         ]
         settlement = (
-            "dm_ruling_required" if unresolved else "mixed" if manual_rulings else "automatic"
+            "source_review_required" if unresolved else "mixed" if manual_rulings else "automatic"
         )
         return {
             "ready": not blockers,
             "settlement": settlement,
+            "default_dm_resolver": "agent",
             "blocking_reasons": sorted(set(blockers)),
             "unresolved_rules": unresolved,
             "manual_rulings": manual_rulings,
             "ruling_requirements": ruling_requirements,
+            "agent_rulings": [
+                item["reason"]
+                for item in ruling_requirements
+                if item["default_resolver"] == "agent"
+            ],
+            "external_input_requirements": [
+                item["reason"]
+                for item in ruling_requirements
+                if item["default_resolver"] == "external_input"
+            ],
             "hit_points": hit_points,
             "maximum_hit_points": int(dict(derived.get("hit_points") or {}).get("max", 0) or 0),
             "armor_class": int(derived.get("armor_class", 10) or 10),
@@ -1465,6 +1514,60 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             if "-".join(warning.partition(":")[0].strip().casefold().split())
             not in removed_subjects
         ]
+
+    def statblock_ruling_kind(reason: str, *, character_type: str = "") -> str:
+        """Classify a card boundary without treating absent source facts as DM fiat."""
+
+        if (
+            reason.endswith("ranged weapon range is missing")
+            or reason.endswith("thrown weapon range is missing")
+            or reason.endswith("no active spell artifact or complete statblock action exists")
+            or reason.endswith("trailing creature prose excluded from action settlement")
+            or (
+                reason.startswith("Spellcasting:")
+                and reason.endswith("descriptive passive is not automatically settled")
+            )
+        ):
+            return "missing_or_conflicting_source_review"
+        if character_type == "pc" and reason.endswith("requires a reaction decision"):
+            return "player_owned_choice"
+        return "agent_dm_adjudication"
+
+    def statblock_ruling_requirements(
+        warnings: list[str],
+        *,
+        character_type: str = "",
+    ) -> list[dict[str, Any]]:
+        return [
+            _ruling_requirement(
+                reason,
+                statblock_ruling_kind(reason, character_type=character_type),
+            )
+            for reason in warnings
+        ]
+
+    def statblock_settlement(
+        warnings: list[str],
+        *,
+        character_type: str = "",
+    ) -> dict[str, Any]:
+        requirements = statblock_ruling_requirements(
+            warnings,
+            character_type=character_type,
+        )
+        has_source_review = any(
+            item["default_resolver"] == "external_input" for item in requirements
+        )
+        return {
+            "warnings": list(warnings),
+            "settlement": (
+                "automatic"
+                if not requirements
+                else "source_review_required" if has_source_review else "mixed"
+            ),
+            "ruling_requirements": requirements,
+            "default_dm_resolver": "agent",
+        }
 
     def persist_source_bound_statblock(
         *,
@@ -2378,7 +2481,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         component_ruling: dict[str, Any] | None,
         principal_id: str,
     ) -> None:
-        """Apply a DM-owned observer matrix when perceivable casting breaks hiding."""
+        """Apply an Agent-as-DM observer matrix when casting can break hiding."""
         caster = next(
             item for item in encounter.get("combatants", []) if item.get("actor_id") == actor_id
         )
@@ -2403,7 +2506,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             return
         if not is_dm(campaign_id, principal_id):
             raise NeedsRulingError(
-                "a hidden caster's perceivable components require a DM observer ruling",
+                "a hidden caster's perceivable components require "
+                "Agent-as-DM observer adjudication",
                 missing=("spell_casting_perception",),
             )
         ruling = dict(component_ruling or {})
@@ -3838,7 +3942,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         principal_id: str = "system:local",
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
-        """Extract conservative source-linked D&D content candidates for DM review."""
+        """Extract conservative source-linked D&D content for Agent-as-DM review."""
         access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
         if not idempotency_key:
             raise ValueError("idempotency_key is required for candidate extraction")
@@ -5228,6 +5332,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
 
     @mcp.tool()
+    @_agent_ruling_boundary
     def combat_start(
         campaign_id: str,
         participant_ids: list[str],
@@ -5694,6 +5799,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
 
     @mcp.tool()
+    @_agent_ruling_boundary
     def combat_join(
         campaign_id: str,
         actor_id: str,
@@ -5858,6 +5964,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         }
 
     @mcp.tool()
+    @_agent_ruling_boundary
     def combat_preflight_attack(
         campaign_id: str,
         actor_id: str,
@@ -5890,7 +5997,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             )
         except NeedsRulingError:
             if access.require_campaign(campaign_id, principal_id).role not in {"owner", "dm"}:
-                raise CombatEngineError("attack requires a DM ruling") from None
+                raise CombatEngineError("attack requires Agent-as-DM adjudication") from None
             raise
         # Mechanical details are for the commit path and DM audit only.  A
         # player receives an opaque plan token and the legal action metadata,
@@ -5908,6 +6015,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         return plan
 
     @mcp.tool()
+    @_agent_ruling_boundary
     def combat_resolve_attack(
         campaign_id: str,
         actor_id: str,
@@ -6007,7 +6115,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 )
         except NeedsRulingError:
             if access.require_campaign(campaign_id, principal_id).role not in {"owner", "dm"}:
-                raise CombatEngineError("attack requires a DM ruling") from None
+                raise CombatEngineError("attack requires Agent-as-DM adjudication") from None
             raise
         if spell_resolution is not None:
             next_encounter = deepcopy(encounter)
@@ -6362,6 +6470,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
 
     @mcp.tool()
+    @_agent_ruling_boundary
     def combat_on_hit_ruling(
         campaign_id: str,
         target_id: str,
@@ -6439,7 +6548,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             ):
                 raise CombatEngineError(
                     "critical anatomical loss requires the exact attack excerpt "
-                    "and an explicit DM ruling about whether the target has limbs"
+                    "and Agent-as-DM adjudication of whether the target has limbs"
                 )
         elif selection_id == "critical_followup":
             raise CombatEngineError(
@@ -7074,6 +7183,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
 
     @mcp.tool()
+    @_agent_ruling_boundary
     def combat_end_turn(
         campaign_id: str,
         actor_id: str,
@@ -7601,6 +7711,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
 
     @mcp.tool()
+    @_agent_ruling_boundary
     def combat_reaction_attack(
         campaign_id: str,
         actor_id: str,
@@ -7957,6 +8068,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             remember_idempotent(scope, idempotency_key, payload, response, campaign_id=campaign_id),
         )
 
+    @_agent_ruling_boundary
     def combat_reaction_defense(
         campaign_id: str,
         actor_id: str,
@@ -8256,6 +8368,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
 
     @mcp.tool()
+    @_agent_ruling_boundary
     def combat_move(
         campaign_id: str,
         actor_id: str,
@@ -8525,6 +8638,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             remember_idempotent(scope, idempotency_key, payload_value, response, campaign_id),
         )
 
+    @_agent_ruling_boundary
     def combat_magic_missile_defense(
         campaign_id: str,
         actor_id: str,
@@ -8789,6 +8903,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         ]
 
     @mcp.tool()
+    @_agent_ruling_boundary
     def combat_cast_spell(
         campaign_id: str,
         actor_id: str,
@@ -9595,6 +9710,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
 
     @mcp.tool()
+    @_agent_ruling_boundary
     def combat_ready_spell(
         campaign_id: str,
         actor_id: str,
@@ -10074,6 +10190,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
 
     @mcp.tool()
+    @_agent_ruling_boundary
     def combat_use_activity(
         campaign_id: str,
         actor_id: str,
@@ -10124,7 +10241,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         source_contest_knowledge_count = 0
         if random_save_spec is not None:
             if not is_dm(campaign_id, principal_id):
-                raise PermissionError("source-random multi-actor settlement requires the DM")
+                raise PermissionError(
+                    "source-random multi-actor settlement requires the Agent in the DM role"
+                )
             declared = dict(declaration or {})
             if set(declared) != {"target_ids"}:
                 raise CombatEngineError(
@@ -10217,7 +10336,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 random_targets.append(combat_actor_snapshot(target_id))
         if source_save_spec is not None:
             if not is_dm(campaign_id, principal_id):
-                raise PermissionError("source saving-throw activity settlement requires the DM")
+                raise PermissionError(
+                    "source saving-throw activity settlement requires the Agent in the DM role"
+                )
             declared = dict(declaration or {})
             if set(declared) != {"target_id", "target_has_brain"}:
                 raise CombatEngineError(
@@ -10296,7 +10417,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             source_save_target = combat_actor_snapshot(target_id)
         if source_contest_spec is not None:
             if not is_dm(campaign_id, principal_id):
-                raise PermissionError("source ability-contest activity settlement requires the DM")
+                raise PermissionError(
+                    "source ability-contest activity settlement requires the Agent in the DM role"
+                )
             declared = dict(declaration or {})
             if set(declared) != {"target_id", "target_is_humanoid"}:
                 raise CombatEngineError(
@@ -10400,7 +10523,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         turn_target_records: dict[str, Any] = {}
         if turn_undead:
             if not is_dm(campaign_id, principal_id):
-                raise PermissionError("Turn Undead multi-actor settlement requires the DM")
+                raise PermissionError(
+                    "Turn Undead multi-actor settlement requires the Agent in the DM role"
+                )
             declared = dict(declaration or {})
             if set(declared) != {"option", "perception"}:
                 raise CombatEngineError(
@@ -10912,6 +11037,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
 
     @mcp.tool()
+    @_agent_ruling_boundary
     def character_check(
         campaign_id: str,
         actor_id: str,
@@ -11009,6 +11135,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
 
     @mcp.tool()
+    @_agent_ruling_boundary
     def character_contest(
         campaign_id: str,
         source_actor_id: str,
@@ -11423,6 +11550,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
 
     @mcp.tool()
+    @_agent_ruling_boundary
     def combat_check(
         campaign_id: str,
         actor_id: str,
@@ -11448,11 +11576,17 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         settlement_facts = checked_rule_facts(rule_facts)
         if not is_dm(campaign_id, principal_id):
             if kind != "death_save":
-                raise CombatEngineError("checks and saves require a DM-issued resolution")
+                raise CombatEngineError(
+                    "checks and saves require an Agent-as-DM issued resolution"
+                )
             if advantage or disadvantage or proficient or bonus:
-                raise CombatEngineError("death-save modifiers require a DM ruling")
+                raise CombatEngineError(
+                    "death-save modifiers require Agent-as-DM adjudication"
+                )
             if settlement_facts:
-                raise CombatEngineError("rule facts require a DM-issued resolution")
+                raise CombatEngineError(
+                    "rule facts require an Agent-as-DM issued resolution"
+                )
         if kind == "death_save" and settlement_facts:
             raise CombatEngineError("rule facts are not accepted for death saves")
         if kind == "death_save" and target_id is not None:
@@ -11839,6 +11973,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
 
     @mcp.tool()
+    @_agent_ruling_boundary
     def combat_concentration_check(
         campaign_id: str,
         target_id: str,
@@ -11964,6 +12099,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             remember_idempotent(scope, idempotency_key, payload, response, campaign_id),
         )
 
+    @_agent_ruling_boundary
     def combat_source_stabilize(
         campaign_id: str,
         target_id: str,
@@ -12085,6 +12221,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
 
     @mcp.tool()
+    @_agent_ruling_boundary
     def combat_apply_damage(
         campaign_id: str,
         target_id: str,
@@ -12206,6 +12343,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
 
     @mcp.tool()
+    @_agent_ruling_boundary
     def combat_heal(
         campaign_id: str,
         target_id: str,
@@ -13504,7 +13642,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "satisfies every source-defined prerequisite"
                 )
             if not is_dm(current.campaign_id, principal_id):
-                raise PermissionError("attunement prerequisite confirmation requires the DM")
+                raise PermissionError(
+                    "attunement prerequisite confirmation requires the Agent in the DM role"
+                )
             attune_inventory_item(current.sheet, str(attune_item_id))
         elif attunement_prerequisite_confirmed is not None:
             raise CombatEngineError("attunement_prerequisite_confirmed requires attune_item_id")
@@ -14792,7 +14932,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         preserve_life = str(activity_id).endswith("life-domain-channel-divinity-preserve-life")
         if preserve_life:
             if not is_dm(current.campaign_id, principal_id):
-                raise PermissionError("Preserve Life multi-actor settlement requires the DM")
+                raise PermissionError(
+                    "Preserve Life multi-actor settlement requires the Agent in the DM role"
+                )
             if current.revision != expected_revision:
                 raise ValueError(f"character revision conflict: {character_id}")
             declared = dict(declaration or {})
@@ -14820,7 +14962,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 target_id = str(allocation.get("target_id") or "")
                 if allocation.get("within_30_ft") is not True:
                     raise CombatEngineError(
-                        "Preserve Life requires DM-role confirmation that the target "
+                        "Preserve Life requires Agent-as-DM confirmation that the target "
                         "is within 30 feet"
                     )
                 target = characters.get(target_id)
@@ -15063,7 +15205,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         expected_revision: int | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
-        """Apply DM-issued damage during play without mutating encounter state."""
+        """Apply Agent-as-DM-issued damage without mutating encounter state."""
         current = characters.get(character_id)
         require_character_control(current, principal_id)
         require_outside_active_combat(current, "noncombat damage")
@@ -15114,7 +15256,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         expected_revision: int | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
-        """Apply DM-issued source-aware healing during play."""
+        """Apply Agent-as-DM-issued source-aware healing during play."""
         current = characters.get(character_id)
         require_character_control(current, principal_id)
         require_outside_active_combat(current, "noncombat healing")
@@ -16399,7 +16541,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         branch_id: str | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
-        """Record DM-role-confirmed world changes from an active temporary battle map."""
+        """Record Agent-as-DM-confirmed changes from a temporary battle map."""
         access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
         require_write_contract(expected_revision, idempotency_key)
         resolved_branch_id = require_current_branch(campaign_id, branch_id)
@@ -16450,7 +16592,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 seen_departure_actors.add(target_id)
                 reason = str(departure.get("reason") or "").strip()
                 if not reason:
-                    raise ValueError("combatant_departure requires a source or DM ruling reason")
+                    raise ValueError(
+                        "combatant_departure requires a source or Agent-as-DM ruling reason"
+                    )
                 destination = str(departure.get("destination_location_key") or "").strip()
                 combatant = next(
                     item
@@ -16483,7 +16627,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 )
             seen_visibility_actors.add(target_id)
             if not str(visibility.get("reason") or "").strip():
-                raise ValueError("combatant_visibility requires a DM ruling reason")
+                raise ValueError(
+                    "combatant_visibility requires an Agent-as-DM ruling reason"
+                )
             if "hidden" not in visibility and "visible_to_actor_ids" not in visibility:
                 raise ValueError("combatant_visibility must change hidden or visible_to_actor_ids")
             if "hidden" in visibility and not isinstance(visibility["hidden"], bool):
@@ -16963,12 +17109,30 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             source_key=str(job.payload.get("source_key") or job.artifact),
             preview=preview,
         )
+        diff_ruling_requirements: list[dict[str, Any]] = []
+        for impact in diff.get("progress_impact", []):
+            if impact.get("action") != "needs_dm_review":
+                continue
+            reason = (
+                "The active module revision removed the scene referenced by "
+                f"progress scope {impact.get('scope_id')}; decide its source-backed remap."
+            )
+            requirement = _ruling_requirement(reason, "source_or_scene_fact")
+            impact["ruling_requirement"] = requirement
+            diff_ruling_requirements.append(
+                {
+                    "scope_id": impact.get("scope_id"),
+                    "scene_id": impact.get("scene_id"),
+                    **requirement,
+                }
+            )
         validation = {
             "valid": bool(preview.get("valid")),
             "errors": list(preview.get("errors") or []),
             "warnings": list(preview.get("warnings") or []),
             "preview": preview,
             "diff": diff,
+            "ruling_requirements": diff_ruling_requirements,
         }
         updated = import_jobs.record_validation(
             job_id,
@@ -17388,8 +17552,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "name": parsed.name,
                 "challenge_rating": parsed.challenge_rating,
                 "experience_points": parsed.experience_points,
-                "warnings": list(parsed.warnings),
-                "settlement": "automatic" if not parsed.warnings else "mixed",
+                **statblock_settlement(list(parsed.warnings)),
             },
         }
         return remember_idempotent(
@@ -17429,11 +17592,20 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             candidate["review_tool"] = "module_review"
             candidate["review_action"] = "submit_content"
             candidate["module_id"] = module_id
+            if candidate.get("review_status") == "manual_review_required":
+                candidate["ruling_requirement"] = _ruling_requirement(
+                    str(candidate.get("review_error") or "statblock source needs review"),
+                    "missing_or_conflicting_source_review",
+                )
             if len(candidate.get("source_scene_ids") or []) != 1:
                 candidate["execution_state"] = "blocked"
                 candidate["review_status"] = "manual_review_required"
                 candidate["review_error"] = (
                     "statblock candidate source chunks must belong to one scene"
+                )
+                candidate["ruling_requirement"] = _ruling_requirement(
+                    candidate["review_error"],
+                    "missing_or_conflicting_source_review",
                 )
                 continue
             candidate["scene_id"] = candidate["source_scene_ids"][0]
@@ -17816,7 +17988,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         scale: float = 1.5,
         principal_id: str = "system:local",
     ) -> Any:
-        """Render one staged rulebook PDF page as checksum-bound DM review evidence."""
+        """Render one staged rulebook PDF page as checksum-bound Agent review evidence."""
         access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
         job = require_import_job(campaign_id, job_id, "rulebook")
         source = storage.artifact_rulebook_path(job.artifact)
@@ -18881,9 +19053,20 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         "source": source_key,
                         "component_details": "not_repeated_in_statblock",
                     },
+                    "ruling_requirements": [
+                        _ruling_requirement(
+                            "Confirm the statblock spell's omitted component details "
+                            "from available source and scene facts.",
+                            "source_or_scene_fact",
+                        ),
+                        _ruling_requirement(
+                            "Adjudicate the source-described spell effect.",
+                            "generic_spell_effect",
+                        ),
+                    ],
                     "notes": (
                         "Source-bound statblock spell action. Component legality and "
-                        "effect settlement require a DM ruling."
+                        "effect settlement return to Agent-as-DM adjudication."
                     ),
                     "pack_id": "",
                     "pack_version": "",
@@ -18896,8 +19079,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     card["mechanic_refs"] = [SPELL_RESOLUTION_MECHANIC_ID]
                     card["notes"] = (
                         "Source-bound statblock spell attack. Component legality still "
-                        "requires a DM ruling."
+                        "returns to Agent-as-DM adjudication."
                     )
+                    card["ruling_requirements"] = card["ruling_requirements"][:1]
                     warnings.append(
                         f"{display_name}: source-bound statblock spell requires component ruling"
                     )
@@ -19929,8 +20113,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         application_state = str(artifact.get("application_state") or "selection_ready")
         if application_state != "selection_ready":
             return {
-                "status": "pending_ruling",
-                "ruling_kind": "missing_or_conflicting_source_review",
+                **_ruling_status(
+                    "pending_ruling",
+                    "missing_or_conflicting_source_review",
+                ),
                 "reason": (
                     "catalog artifact is source-linked but not selection-ready; "
                     "complete reviewer validation before applying it to an actor"
@@ -20059,8 +20245,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     return {"status": "pending_choice", "reason": reason}
                 if reason == "spell artifact has no structured class-list eligibility":
                     return {
-                        "status": "pending_ruling",
-                        "ruling_kind": "missing_or_conflicting_source_review",
+                        **_ruling_status(
+                            "pending_ruling",
+                            "missing_or_conflicting_source_review",
+                        ),
                         "reason": reason,
                     }
                 raise ValueError(reason) from error
@@ -20124,10 +20312,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 raise ValueError("content feat is already present")
             for prerequisite in card.get("prerequisites", []):
                 if prerequisite.get("kind") != "ability_minimum":
+                    ruling_kind = str(
+                        prerequisite.get("ruling_kind") or "source_or_scene_fact"
+                    )
                     return {
-                        "status": "pending_ruling",
-                        "ruling_kind": "source_or_scene_fact",
-                        "reason": "feat has a prerequisite that needs DM review",
+                        **_ruling_status("pending_ruling", ruling_kind),
+                        "reason": "feat has a prerequisite that needs Agent-as-DM review",
                     }
                 ability = str(prerequisite.get("ability") or "")
                 score = int(sheet.get("abilities", {}).get(ability, {}).get("score", 0) or 0)
@@ -20191,8 +20381,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 )
                 if spell_match is None:
                     return {
-                        "status": "pending_ruling",
-                        "ruling_kind": "missing_or_conflicting_source_review",
+                        **_ruling_status(
+                            "pending_ruling",
+                            "missing_or_conflicting_source_review",
+                        ),
                         "reason": (
                             f"subclass spell is not available in the active catalog: {spell_name}"
                         ),
@@ -20347,8 +20539,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             grants = dict(card.get("grants") or {})
             if grants.get("unresolved"):
                 return {
-                    "status": "pending_ruling",
-                    "ruling_kind": "missing_or_conflicting_source_review",
+                    **_ruling_status(
+                        "pending_ruling",
+                        "missing_or_conflicting_source_review",
+                    ),
                     "reason": "species has unresolved structured grants",
                     "missing": list(grants.get("unresolved") or []),
                 }
@@ -21431,9 +21625,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 sheet["content"][section].append(card)
         else:
             return {
-                "status": "pending_ruling",
-                "ruling_kind": "agent_dm_adjudication",
-                "reason": f"{kind} is catalogued but needs a DM-reviewed application",
+                **_ruling_status("pending_ruling", "agent_dm_adjudication"),
+                "reason": (
+                    f"{kind} is catalogued but needs an Agent-as-DM reviewed application"
+                ),
             }
         if kind in {"subclass", "background", "species"}:
             if any(
@@ -21722,8 +21917,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             raise ValueError(f"payload.{name} must be ISO-8601") from exc
 
     def facade_result(action: str, result: Any) -> dict[str, Any]:
-        status = result.get("status", "ok") if isinstance(result, dict) else "ok"
-        return {"status": status, "action": action, "result": result}
+        return _facade_result(action, result)
 
     def facade_render_result(rendered: Any) -> CallToolResult:
         """Preserve native image content while satisfying a facade's structured output."""
@@ -22701,7 +22895,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         "satisfies every source-defined prerequisite"
                     )
                 if not is_dm(current.campaign_id, principal_id):
-                    raise PermissionError("attunement prerequisite confirmation requires the DM")
+                    raise PermissionError(
+                        "attunement prerequisite confirmation requires the Agent in the DM role"
+                    )
                 attune_inventory_item(current.sheet, attune_item_id)
             elif data.get("attunement_prerequisite_confirmed") is not None:
                 raise CombatEngineError("attunement_prerequisite_confirmed requires attune_item_id")
@@ -23114,8 +23310,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "statblock": {
                     "challenge_rating": challenge_rating,
                     "experience_points": experience_points,
-                    "warnings": list(statblock_warnings),
-                    "settlement": "automatic" if not statblock_warnings else "mixed",
+                    **statblock_settlement(statblock_warnings),
                 },
                 "variant": deepcopy(variant) if variant is not None else None,
                 "variant_evidence": variant_evidence,
@@ -23214,8 +23409,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "statblock": {
                     "challenge_rating": challenge_rating,
                     "experience_points": experience_points,
-                    "warnings": list(statblock_warnings),
-                    "settlement": "automatic" if not statblock_warnings else "mixed",
+                    **statblock_settlement(statblock_warnings),
                 },
                 "variant": deepcopy(variant) if variant is not None else None,
                 "variant_evidence": variant_evidence,
@@ -23360,8 +23554,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "statblock": {
                     "challenge_rating": challenge_rating,
                     "experience_points": experience_points,
-                    "warnings": list(statblock_warnings),
-                    "settlement": "automatic" if not statblock_warnings else "mixed",
+                    **statblock_settlement(statblock_warnings),
                 },
                 "variant": deepcopy(variant) if variant is not None else None,
                 "variant_evidence": variant_evidence,

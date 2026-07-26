@@ -2,7 +2,6 @@ import asyncio
 import random
 from pathlib import Path
 
-import pytest
 from sagasmith_dnd.character_schema import default_character_sheet
 from sagasmith_dnd.engine import roll as engine_roll
 from sagasmith_dnd.spells import (
@@ -156,20 +155,23 @@ def test_hidden_perceivable_cast_requires_dm_observer_matrix(tmp_path: Path) -> 
             hidden_caster=True,
         )
 
-        with pytest.raises(Exception, match="casting_perception"):
-            await _raw(
-                server,
-                "combat_cast_spell",
-                {
-                    "campaign_id": campaign["id"],
-                    "actor_id": actors[0]["id"],
-                    "spell_id": CORE_MAGIC_MISSILE_SPELL_ID,
-                    "cast_level": 1,
-                    "target_allocations": [{"target_id": actors[1]["id"], "darts": 3}],
-                    "expected_revision": campaign["revision"],
-                    "idempotency_key": "missing-perception",
-                },
-            )
+        pending = await _raw(
+            server,
+            "combat_cast_spell",
+            {
+                "campaign_id": campaign["id"],
+                "actor_id": actors[0]["id"],
+                "spell_id": CORE_MAGIC_MISSILE_SPELL_ID,
+                "cast_level": 1,
+                "target_allocations": [{"target_id": actors[1]["id"], "darts": 3}],
+                "expected_revision": campaign["revision"],
+                "idempotency_key": "missing-perception",
+            },
+        )
+        assert pending["status"] == "pending_ruling"
+        assert pending["default_resolver"] == "agent"
+        assert pending["committed"] is False
+        assert pending["missing"] == ["spell_casting_perception"]
         unchanged = await _call(
             server, "character_get", {"character_id": actors[0]["id"]}
         )

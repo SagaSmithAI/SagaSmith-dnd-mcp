@@ -13,11 +13,14 @@ from mcp.client.stdio import StdioServerParameters, stdio_client
 from mcp.types import ImageContent
 from pypdf import PdfWriter
 from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
+from sagasmith_dnd.combat_engine import NeedsRulingError
 
 from sagasmith_dnd_mcp.config import McpConfig
 from sagasmith_dnd_mcp.exposure import ExposureError, ExposureRegistry
 from sagasmith_dnd_mcp.server import (
+    _agent_ruling_boundary,
     _agent_ruling_resolution,
+    _facade_result,
     _ruling_status,
     create_server,
 )
@@ -30,7 +33,15 @@ def test_pending_ruling_envelope_defaults_to_agent_reasoning() -> None:
     }
     assert _ruling_status("pending_ruling", "generic_spell_effect") == {
         "status": "pending_ruling",
+        "default_resolver": "agent",
         "ruling_kind": "generic_spell_effect",
+        "policy_ref": "server_capabilities.ruling_policy",
+        "requires_external_input_only_for": [
+            "player_owned_choice",
+            "owner_approval",
+            "permission_escalation",
+            "missing_or_conflicting_source_review",
+        ],
     }
     assert _agent_ruling_resolution({"status": "committed"}) is None
     assert _agent_ruling_resolution({"status": "pending_choice"}) is None
@@ -55,6 +66,71 @@ def test_pending_ruling_envelope_defaults_to_agent_reasoning() -> None:
         "ruling_kind": "missing_or_conflicting_source_review",
         "policy_ref": "server_capabilities.ruling_policy",
     }
+
+
+def test_facade_preserves_external_ruling_ownership() -> None:
+    result = _facade_result(
+        "apply",
+        {
+            **_ruling_status(
+                "pending_ruling",
+                "missing_or_conflicting_source_review",
+            ),
+            "reason": "source card is incomplete",
+        },
+    )
+
+    assert result["status"] == "pending_ruling"
+    assert result["default_resolver"] == "external_input"
+    assert result["ruling_kind"] == "missing_or_conflicting_source_review"
+    assert result["result"]["reason"] == "source card is incomplete"
+
+
+def test_needs_ruling_boundary_returns_to_agent_without_committing() -> None:
+    @_agent_ruling_boundary
+    def operation() -> None:
+        raise NeedsRulingError(
+            "module procedure needs a narrative fact",
+            missing=("module_fact",),
+        )
+
+    assert operation() == {
+        "status": "pending_ruling",
+        "default_resolver": "agent",
+        "ruling_kind": "agent_dm_adjudication",
+        "policy_ref": "server_capabilities.ruling_policy",
+        "requires_external_input_only_for": [
+            "player_owned_choice",
+            "owner_approval",
+            "permission_escalation",
+            "missing_or_conflicting_source_review",
+        ],
+        "reason": "module procedure needs a narrative fact",
+        "missing": ["module_fact"],
+        "committed": False,
+        "retry_contract": {
+            "resolver": "agent",
+            "reuse_current_revision": True,
+            "use_public_tools_only": True,
+        },
+    }
+
+
+def test_needs_ruling_boundary_keeps_source_defects_external() -> None:
+    @_agent_ruling_boundary
+    def operation() -> None:
+        raise NeedsRulingError(
+            "weapon ranged attack has no recorded range",
+            missing=("weapon.range:source-bow",),
+        )
+
+    result = operation()
+
+    assert result["status"] == "pending_ruling"
+    assert result["default_resolver"] == "external_input"
+    assert result["ruling_kind"] == "missing_or_conflicting_source_review"
+    assert result["committed"] is False
+    assert result["retry_contract"]["resolver"] == "external_input"
 
 
 def test_exposure_call_marks_live_dm_ruling_for_agent(

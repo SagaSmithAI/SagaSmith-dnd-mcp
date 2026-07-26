@@ -805,6 +805,24 @@ def test_combat_move_charges_reviewed_difficult_cells_and_records_core_receipt(
             },
         )
 
+        pending = await _call(
+            server,
+            "combat_move",
+            {
+                "campaign_id": campaign["id"],
+                "actor_id": mover["id"],
+                "distance": 10,
+                "destination": {"x": 2, "y": 0},
+                "expected_revision": started["campaign_revision"],
+                "idempotency_key": "move-without-path",
+            },
+        )
+
+        assert pending["status"] == "pending_ruling"
+        assert pending["default_resolver"] == "agent"
+        assert pending["committed"] is False
+        assert pending["missing"] == ["movement_path_for_difficult_terrain"]
+
         moved = await _call_raw(
             server,
             "combat_move",

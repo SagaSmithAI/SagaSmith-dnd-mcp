@@ -201,6 +201,8 @@ def test_imported_rule_source_creates_a_source_bound_combat_actor(tmp_path: Path
             "experience_points": 10,
             "warnings": [],
             "settlement": "automatic",
+            "ruling_requirements": [],
+            "default_dm_resolver": "agent",
         }
         actor = created["character"]
         assert actor["name"] == "Falten"
@@ -699,6 +701,10 @@ def test_statblock_spellcasting_binds_slots_and_active_content(tmp_path: Path) -
             "Silvered Skull Flail: on-hit effect requires DM settlement",
             "Ray of Sickness: source-bound statblock spell requires component ruling",
         ]
+        assert {
+            item["default_resolver"]
+            for item in created["statblock"]["ruling_requirements"]
+        } == {"agent"}
 
     asyncio.run(exercise())
 

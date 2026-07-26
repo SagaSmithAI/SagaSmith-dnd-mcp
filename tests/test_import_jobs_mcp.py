@@ -754,6 +754,18 @@ def test_rule_and_module_import_jobs_are_reviewable_and_activation_safe(tmp_path
         assert module_activated["activation"]["module_id"] == imported_module["module_id"]
         index = await call(server, "module_index", {"campaign_id": campaign["id"]})
         assert "Arrival" in {item["title"] for item in index}
+        arrival = next(item for item in index if item["title"] == "Arrival")
+        await call(
+            server,
+            "module_set_progress",
+            {
+                "campaign_id": campaign["id"],
+                "scene_id": arrival["scene_id"],
+                "progress": 25,
+                "expected_state_version": 0,
+                "idempotency_key": "arrival-progress",
+            },
+        )
 
         await call(
             server,
@@ -761,8 +773,8 @@ def test_rule_and_module_import_jobs_are_reviewable_and_activation_safe(tmp_path
             {
                 "name": "import-job-module",
                 "content": (
-                    "# Chapter One\n\n## Arrival\nRevised entrance.\n\n"
-                    "## Finale\n\n#### B1. Observatory\n25 by 25 feet\n"
+                    "# Chapter One\n\n## Finale\n\n"
+                    "#### B1. Observatory\n25 by 25 feet\n"
                 ),
             },
         )
@@ -799,6 +811,20 @@ def test_rule_and_module_import_jobs_are_reviewable_and_activation_safe(tmp_path
             == imported_module["module_id"]
         )
         assert revision_validation["validation"]["diff"]["added"]
+        progress_impact = revision_validation["validation"]["diff"]["progress_impact"]
+        assert len(progress_impact) == 1
+        assert progress_impact[0]["action"] == "needs_dm_review"
+        assert progress_impact[0]["ruling_requirement"]["default_resolver"] == "agent"
+        assert (
+            progress_impact[0]["ruling_requirement"]["ruling_kind"]
+            == "source_or_scene_fact"
+        )
+        aggregate = revision_validation["validation"]["ruling_requirements"]
+        assert len(aggregate) == 1
+        assert aggregate[0]["scope_id"] == "party"
+        assert aggregate[0]["scene_id"] == arrival["scene_id"]
+        assert aggregate[0]["default_resolver"] == "agent"
+        assert aggregate[0]["ruling_kind"] == "source_or_scene_fact"
 
     asyncio.run(exercise())
 
