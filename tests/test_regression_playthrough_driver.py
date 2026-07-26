@@ -63,6 +63,7 @@ from scripts.regression_playthrough import (
     _refresh_module,
     _register_replacement,
     _relock_core,
+    _remap_ending_sources_for_module_revision,
     _remove_source_effect,
     _resolve_check,
     _restore_phase_after_failed_refresh,
@@ -3051,6 +3052,83 @@ def test_module_revision_extension_remaps_current_and_traversed_scenes() -> None
     assert manifest["module_ids"] == ["module-v1"]
 
 
+def test_module_revision_remaps_exact_ending_source_and_scene_check() -> None:
+    source_ref = _manifest_source_ref()
+    source_ref.update(
+        {
+            "asset_sha256": "f" * 64,
+            "module_id": "module-v1",
+            "scene_id": "ending-v1",
+            "chunk_id": "chunk-v1",
+            "chunk_content_sha256": "e" * 64,
+            "excerpt": "The characters should be 5th level.",
+        }
+    )
+    manifest = new_playthrough_manifest(
+        run_id="run-1",
+        campaign_line_id="line-1",
+        module_ids=["module-v1", "module-v2"],
+        recommended_party_minimum=1,
+        recommended_party_maximum=1,
+        selected_party_size=1,
+        source_refs=[],
+    )
+    manifest["ending"]["conditions"] = [
+        {
+            "id": "ending",
+            "label": "Reach the conclusion",
+            "source_ref": source_ref,
+            "all_of": [
+                {
+                    "kind": "manifest_value",
+                    "path": "current.scene_id",
+                    "actor_id": "",
+                    "fact_key": "",
+                    "operator": "equals",
+                    "value": "ending-v1",
+                }
+            ],
+        }
+    ]
+
+    class Client:
+        async def domain(self, tool_id: str, arguments: dict):
+            if tool_id == "module_search":
+                assert arguments["module_ids"] == ["module-v2"]
+                return [{"id": "chunk-v2"}]
+            if tool_id == "module_expand":
+                assert arguments == {"chunk_id": "chunk-v2"}
+                return {
+                    "content": "The characters should be 5th level.",
+                    "source_ref": {
+                        "module_id": "module-v2",
+                        "scene_id": "ending-v2",
+                        "chunk_id": "chunk-v2",
+                        "page_start": 99,
+                        "page_end": 99,
+                        "heading_path": ["Conclusion"],
+                        "content_sha256": "e" * 64,
+                    },
+                }
+            raise AssertionError((tool_id, arguments))
+
+    updated = asyncio.run(
+        _remap_ending_sources_for_module_revision(
+            Client(),
+            manifest,
+            campaign_id="campaign-1",
+            new_module_id="module-v2",
+            source_asset_sha256="f" * 64,
+        )
+    )
+
+    condition = updated["ending"]["conditions"][0]
+    assert condition["source_ref"]["module_id"] == "module-v2"
+    assert condition["source_ref"]["scene_id"] == "ending-v2"
+    assert condition["source_ref"]["chunk_id"] == "chunk-v2"
+    assert condition["all_of"][0]["value"] == "ending-v2"
+
+
 def test_module_refresh_validates_ingested_scene_mapping_before_activation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -3349,6 +3427,31 @@ def test_replacement_join_preserves_predecessor_and_only_hands_off_explicit_know
             {"source": "generated", "source_asset_path": "", "status": "dead"},
         )
     ]
+    manifest["ending"]["conditions"] = [
+        {
+            "id": "party-level-ending",
+            "label": "Active party reaches level 5",
+            "source_ref": _manifest_source_ref(),
+            "all_of": [
+                {
+                    "kind": "actor_value",
+                    "path": "sheet.progression.level",
+                    "actor_id": "predecessor",
+                    "fact_key": "",
+                    "operator": "at_least",
+                    "value": 5,
+                },
+                {
+                    "kind": "actor_value",
+                    "path": "sheet.combat.hp.value",
+                    "actor_id": "predecessor",
+                    "fact_key": "",
+                    "operator": "equals",
+                    "value": 0,
+                },
+            ],
+        }
+    ]
 
     class Client:
         def __init__(self) -> None:
@@ -3479,6 +3582,9 @@ def test_replacement_join_preserves_predecessor_and_only_hands_off_explicit_know
             "handoff_event_id": "event-join",
         }
     ]
+    ending_checks = client.manifest["ending"]["conditions"][0]["all_of"]
+    assert ending_checks[0]["actor_id"] == "replacement"
+    assert ending_checks[1]["actor_id"] == "predecessor"
     if defer_checkpoint:
         assert result["checkpoint"] is None
         assert client.head_snapshot_id == ""

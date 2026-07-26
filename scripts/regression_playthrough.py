@@ -643,6 +643,118 @@ def _extend_manifest_for_module_revision(
     return value
 
 
+def _remap_replacement_level_endings(
+    manifest: dict[str, Any],
+    *,
+    predecessor_actor_id: str,
+    replacement_actor_id: str,
+) -> None:
+    """Keep party-level endings bound to the active party slot.
+
+    This deliberately remaps only level checks. Other actor-value endings can
+    describe the predecessor's own fate and must remain bound to that actor.
+    """
+
+    for condition in list(dict(manifest.get("ending") or {}).get("conditions") or []):
+        for check in list(dict(condition).get("all_of") or []):
+            if (
+                str(dict(check).get("kind") or "") == "actor_value"
+                and str(dict(check).get("path") or "") == "sheet.progression.level"
+                and str(dict(check).get("actor_id") or "") == predecessor_actor_id
+            ):
+                check["actor_id"] = replacement_actor_id
+
+
+async def _remap_ending_sources_for_module_revision(
+    client: ExposureClient,
+    manifest: dict[str, Any],
+    *,
+    campaign_id: str,
+    new_module_id: str,
+    source_asset_sha256: str,
+) -> dict[str, Any]:
+    """Resolve ending citations against the newly ingested module revision."""
+
+    value = deepcopy(manifest)
+    module_ids = {str(item) for item in list(value.get("module_ids") or [])}
+    for condition in list(dict(value.get("ending") or {}).get("conditions") or []):
+        source_ref = dict(dict(condition).get("source_ref") or {})
+        if (
+            str(source_ref.get("asset_sha256") or "").casefold()
+            != source_asset_sha256.casefold()
+            or str(source_ref.get("module_id") or "") == new_module_id
+            or str(source_ref.get("module_id") or "") not in module_ids
+        ):
+            continue
+        excerpt = str(source_ref.get("excerpt") or "").strip()
+        content_sha256 = str(source_ref.get("chunk_content_sha256") or "").casefold()
+        if not excerpt or not content_sha256:
+            raise ValueError(
+                "module refresh cannot remap an ending citation without its excerpt "
+                "and chunk content hash"
+            )
+        search_result = await client.domain(
+            "module_search",
+            {
+                "campaign_id": campaign_id,
+                "query": excerpt,
+                "top_k": 50,
+                "module_ids": [new_module_id],
+            },
+        )
+        hits = (
+            search_result.get("result")
+            if isinstance(search_result, dict)
+            and isinstance(search_result.get("result"), list)
+            else search_result
+        )
+        if not isinstance(hits, list):
+            raise RuntimeError("module_search returned an invalid result collection")
+        matches: list[dict[str, Any]] = []
+        for hit in hits:
+            if not isinstance(hit, dict):
+                continue
+            chunk_id = str(hit.get("chunk_id") or hit.get("id") or "")
+            if not chunk_id:
+                continue
+            expanded = await client.domain("module_expand", {"chunk_id": chunk_id})
+            exact_ref = dict(dict(expanded).get("source_ref") or {})
+            if (
+                str(exact_ref.get("module_id") or "") == new_module_id
+                and str(exact_ref.get("content_sha256") or "").casefold()
+                == content_sha256
+                and _normalized_source_text(excerpt)
+                in _normalized_source_text(dict(expanded).get("content"))
+            ):
+                matches.append(exact_ref)
+        if len(matches) != 1:
+            raise ValueError(
+                "module refresh must resolve each ending citation to exactly one "
+                "content-hash-matched chunk in the new revision"
+            )
+        exact_ref = matches[0]
+        previous_scene_id = str(source_ref.get("scene_id") or "")
+        replacement_scene_id = str(exact_ref["scene_id"])
+        condition["source_ref"] = {
+            **source_ref,
+            "page_start": int(exact_ref["page_start"]),
+            "page_end": int(exact_ref["page_end"]),
+            "heading_path": list(exact_ref["heading_path"]),
+            "chunk_content_sha256": str(exact_ref["content_sha256"]).casefold(),
+            "module_id": new_module_id,
+            "scene_id": replacement_scene_id,
+            "chunk_id": str(exact_ref["chunk_id"]),
+        }
+        for check in list(dict(condition).get("all_of") or []):
+            if (
+                str(dict(check).get("kind") or "") == "manifest_value"
+                and str(dict(check).get("path") or "") == "current.scene_id"
+                and str(dict(check).get("value") or "") == previous_scene_id
+            ):
+                check["value"] = replacement_scene_id
+    return value
+
+
 def _module_refresh_manifest_action(old_module_id: str, new_module_id: str) -> str:
     return "replace" if new_module_id == old_module_id else "extend_modules"
 
@@ -728,6 +840,14 @@ def _idempotency_request_hash(payload: dict[str, Any]) -> str:
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def _module_refresh_identity(
     *,
     old_module_id: str,
@@ -735,16 +855,13 @@ def _module_refresh_identity(
     source_path: Path,
     title: str,
     parser_revision: str,
+    source_sha256: str = "",
 ) -> str:
-    digest = hashlib.sha256()
-    with source_path.open("rb") as source:
-        for chunk in iter(lambda: source.read(1024 * 1024), b""):
-            digest.update(chunk)
     serialized = json.dumps(
         {
             "old_module_id": old_module_id,
             "source_key": source_key,
-            "source_sha256": digest.hexdigest(),
+            "source_sha256": source_sha256 or _file_sha256(source_path),
             "title": title,
             "parser_revision": parser_revision,
         },
@@ -1338,6 +1455,11 @@ async def _register_replacement(
             "replacement_actor_id": replacement_id,
             "handoff_event_id": f"pending:{_token(run_id + replacement_id)}",
         }
+    )
+    _remap_replacement_level_endings(
+        prospective,
+        predecessor_actor_id=predecessor_id,
+        replacement_actor_id=replacement_id,
     )
     validate_playthrough_manifest(prospective)
 
@@ -8284,12 +8406,14 @@ async def _refresh_module(
         raise ValueError("refresh-module could not identify the logical module source key")
     resolved_source_path = source_path.expanduser().resolve()
     resolved_title = title.strip() or resolved_source_path.stem
+    source_asset_sha256 = _file_sha256(resolved_source_path)
     refresh_identity = _module_refresh_identity(
         old_module_id=old_module_id,
         source_key=source_key,
         source_path=resolved_source_path,
         title=resolved_title,
         parser_revision=f"{DndModuleProfile.name}:{DndModuleProfile.version}",
+        source_sha256=source_asset_sha256,
     )
     branches = await client.domain(
         "branch_query",
@@ -8388,6 +8512,13 @@ async def _refresh_module(
         new_module_id=new_module_id,
         old_index=old_index,
         new_index=new_index,
+    )
+    refreshed_manifest = await _remap_ending_sources_for_module_revision(
+        client,
+        refreshed_manifest,
+        campaign_id=campaign_id,
+        new_module_id=new_module_id,
+        source_asset_sha256=source_asset_sha256,
     )
     campaign = await _campaign(client, campaign_id)
     activated = await client.domain(
