@@ -769,6 +769,20 @@ def _module_refresh_manifest_action(old_module_id: str, new_module_id: str) -> s
     return "replace" if new_module_id == old_module_id else "extend_modules"
 
 
+def _module_refresh_manifest_identity(
+    *,
+    old_module_id: str,
+    new_module_id: str,
+    refresh_identity: str,
+    manifest: dict[str, Any],
+) -> str:
+    request_hash = _idempotency_request_hash(manifest)[:24]
+    return (
+        f"refresh-module-manifest:{old_module_id}:{new_module_id}:"
+        f"{refresh_identity}:{request_hash}"
+    )
+
+
 def _normalized_source_text(value: Any) -> str:
     return " ".join(str(value or "").split())
 
@@ -8548,9 +8562,11 @@ async def _refresh_module(
         campaign_id=campaign_id,
         action=_module_refresh_manifest_action(old_module_id, new_module_id),
         run_id=run_id,
-        identity=(
-            f"refresh-module-manifest:{old_module_id}:{new_module_id}:"
-            f"{refresh_identity}"
+        identity=_module_refresh_manifest_identity(
+            old_module_id=old_module_id,
+            new_module_id=new_module_id,
+            refresh_identity=refresh_identity,
+            manifest=refreshed_manifest,
         ),
         payload={"manifest": refreshed_manifest},
     )

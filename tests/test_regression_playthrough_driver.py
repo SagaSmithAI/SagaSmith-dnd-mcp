@@ -45,6 +45,7 @@ from scripts.regression_playthrough import (
     _matching_check_progress,
     _module_refresh_identity,
     _module_refresh_manifest_action,
+    _module_refresh_manifest_identity,
     _mutation_key,
     _occurrence_identity,
     _party_member,
@@ -3353,6 +3354,30 @@ def test_in_place_module_refresh_does_not_duplicate_manifest_module_id() -> None
         _module_refresh_manifest_action("module-v1", "module-v2")
         == "extend_modules"
     )
+
+
+def test_module_refresh_manifest_identity_tracks_the_exact_manifest_payload() -> None:
+    first = _module_refresh_manifest_identity(
+        old_module_id="module-v1",
+        new_module_id="module-v2",
+        refresh_identity="refresh",
+        manifest={"current": {"scene_id": "scene-1"}},
+    )
+    retry = _module_refresh_manifest_identity(
+        old_module_id="module-v1",
+        new_module_id="module-v2",
+        refresh_identity="refresh",
+        manifest={"current": {"scene_id": "scene-1"}},
+    )
+    changed = _module_refresh_manifest_identity(
+        old_module_id="module-v1",
+        new_module_id="module-v2",
+        refresh_identity="refresh",
+        manifest={"current": {"scene_id": "scene-2"}},
+    )
+
+    assert retry == first
+    assert changed != first
 
 
 def test_scene_progress_percent_accepts_query_and_mutation_shapes() -> None:
