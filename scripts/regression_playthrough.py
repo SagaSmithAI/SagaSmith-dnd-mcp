@@ -5328,10 +5328,12 @@ async def _pool_character_currency(
         ),
         None,
     )
-    state = deepcopy(dict((progress_before or {}).get("state") or {}))
-    pools = deepcopy(dict(state.get("full_playthrough_currency_pools") or {}))
+    state_before = deepcopy(dict((progress_before or {}).get("state") or {}))
+    pools_before = deepcopy(
+        dict(state_before.get("full_playthrough_currency_pools") or {})
+    )
     identity_token = _token(pool_identity)
-    expected_pool = {
+    pool_details = {
         "occurrence_id": pool_identity,
         "actor_id": normalized_actor_id,
         "denomination": normalized_denomination,
@@ -5339,28 +5341,37 @@ async def _pool_character_currency(
         "reason": normalized_reason,
         "source_ref": exact_ref,
     }
-    existing_pool = pools.get(identity_token)
+    existing_pool = pools_before.get(identity_token)
     if existing_pool is not None:
-        if existing_pool != expected_pool:
+        if not isinstance(existing_pool, dict) or any(
+            existing_pool.get(key) != value for key, value in pool_details.items()
+        ):
             raise ValueError("pool-coins occurrence id already exists with different details")
-        return {
-            "scene": {
-                "scene_id": scene_id,
-                "source_scene_id": cited_scene_id,
-                "location_key": location_key,
-                "source_ref": exact_ref,
-            },
-            "occurrence_id": pool_identity,
-            "actor_id": normalized_actor_id,
-            "denomination": normalized_denomination,
-            "amount": amount,
-            "reason": normalized_reason,
-            "transfer": None,
-            "progress": progress_before,
-            "continuity": None,
-            "sync": None,
-            "recovered": True,
-        }
+        if str(existing_pool.get("status") or "") == "completed":
+            return {
+                "scene": {
+                    "scene_id": scene_id,
+                    "source_scene_id": cited_scene_id,
+                    "location_key": location_key,
+                    "source_ref": exact_ref,
+                },
+                "occurrence_id": pool_identity,
+                "actor_id": normalized_actor_id,
+                "denomination": normalized_denomination,
+                "amount": amount,
+                "reason": normalized_reason,
+                "transfer": None,
+                "progress": progress_before,
+                "continuity": None,
+                "sync": None,
+                "recovered": True,
+            }
+        if (
+            str(existing_pool.get("status") or "") != "planned"
+            or not isinstance(existing_pool.get("expected_campaign_revision"), int)
+            or not isinstance(existing_pool.get("expected_character_revision"), int)
+        ):
+            raise RuntimeError("pool-coins progress contains an invalid planned transfer")
 
     actor = dict(
         _facade_value(
@@ -5375,62 +5386,83 @@ async def _pool_character_currency(
     campaign = await _campaign(client, campaign_id)
     idempotency_key = _mutation_key(run_id, "currency-pool", pool_identity)
 
-    async def transfer(
-        expected_campaign_revision: int,
-        expected_character_revision: int,
-    ) -> dict[str, Any]:
-        return dict(
-            _facade_value(
-                await client.domain(
-                    "wallet_change",
-                    {
-                        "owner": "party",
-                        "action": "transfer_from_character",
-                        "owner_id": campaign_id,
-                        "denomination": normalized_denomination,
-                        "amount": amount,
-                        "payload": {
-                            "character_id": normalized_actor_id,
-                            "expected_campaign_revision": expected_campaign_revision,
-                            "expected_character_revision": expected_character_revision,
-                        },
-                        "idempotency_key": idempotency_key,
+    if existing_pool is None:
+        planned_pool = {
+            **pool_details,
+            "status": "planned",
+            "expected_campaign_revision": int(campaign["revision"]) + 1,
+            "expected_character_revision": int(actor["revision"]),
+        }
+        planned_state = deepcopy(state_before)
+        planned_pools = deepcopy(pools_before)
+        planned_pools[identity_token] = planned_pool
+        planned_state["full_playthrough_currency_pools"] = planned_pools
+        progress_planned = await client.domain(
+            "module_set_progress",
+            {
+                "campaign_id": campaign_id,
+                "scene_id": scene_id,
+                "status": str((progress_before or {}).get("status") or "active"),
+                "progress": _scene_progress_percent(progress_before),
+                "state": planned_state,
+                "current_location_key": location_key,
+                "expected_state_version": int(
+                    (progress_before or {}).get("state_version", 0) or 0
+                ),
+                "idempotency_key": _mutation_key(
+                    run_id, "currency-pool-progress-plan", pool_identity
+                ),
+            },
+        )
+    else:
+        planned_pool = deepcopy(existing_pool)
+        progress_planned = progress_before
+
+    transferred = dict(
+        _facade_value(
+            await client.domain(
+                "wallet_change",
+                {
+                    "owner": "party",
+                    "action": "transfer_from_character",
+                    "owner_id": campaign_id,
+                    "denomination": normalized_denomination,
+                    "amount": amount,
+                    "payload": {
+                        "character_id": normalized_actor_id,
+                        "expected_campaign_revision": planned_pool[
+                            "expected_campaign_revision"
+                        ],
+                        "expected_character_revision": planned_pool[
+                            "expected_character_revision"
+                        ],
                     },
-                )
+                    "idempotency_key": idempotency_key,
+                },
             )
         )
+    )
 
-    recovered_transfer = False
-    try:
-        transferred = await transfer(
-            int(campaign["revision"]) - 1,
-            int(actor["revision"]) - 1,
-        )
-        recovered_transfer = True
-    except Exception as exc:
-        if "revision conflict" not in str(exc).lower():
-            raise
-        transferred = await transfer(
-            int(campaign["revision"]),
-            int(actor["revision"]),
-        )
-
-    pools[identity_token] = expected_pool
-    state["full_playthrough_currency_pools"] = pools
+    completed_state = deepcopy(dict((progress_planned or {}).get("state") or {}))
+    completed_pools = deepcopy(
+        dict(completed_state.get("full_playthrough_currency_pools") or {})
+    )
+    completed_pools[identity_token] = {**planned_pool, "status": "completed"}
+    completed_state["full_playthrough_currency_pools"] = completed_pools
     progress = await client.domain(
         "module_set_progress",
         {
             "campaign_id": campaign_id,
             "scene_id": scene_id,
-            "status": str((progress_before or {}).get("status") or "active"),
-            "progress": _scene_progress_percent(progress_before),
-            "state": state,
+            "status": str((progress_planned or {}).get("status") or "active"),
+            "progress": _scene_progress_percent(progress_planned),
+            "state": completed_state,
             "current_location_key": location_key,
             "expected_state_version": int(
-                (progress_before or {}).get("state_version", 0) or 0
+                (progress_planned or {}).get("state_version", 0) or 0
             ),
             "idempotency_key": _mutation_key(
-                run_id, "currency-pool-progress", pool_identity
+                run_id, "currency-pool-progress-complete", pool_identity
             ),
         },
     )
@@ -5509,7 +5541,7 @@ async def _pool_character_currency(
         "progress": progress,
         "continuity": committed,
         "sync": synced,
-        "recovered": recovered_transfer,
+        "recovered": existing_pool is not None,
     }
 
 

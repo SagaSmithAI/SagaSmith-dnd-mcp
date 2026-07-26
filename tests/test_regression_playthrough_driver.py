@@ -1771,11 +1771,9 @@ def test_currency_pool_driver_uses_public_atomic_party_transfer() -> None:
             if tool_id == "wallet_change":
                 self.wallet_calls.append(deepcopy(arguments))
                 expected = arguments["payload"]
-                if expected["expected_campaign_revision"] == 8:
-                    raise RuntimeError("campaign revision conflict: campaign-1")
                 assert expected == {
                     "character_id": "actor-1",
-                    "expected_campaign_revision": 9,
+                    "expected_campaign_revision": 10,
                     "expected_character_revision": 4,
                 }
                 self.campaign_revision += 1
@@ -1797,7 +1795,9 @@ def test_currency_pool_driver_uses_public_atomic_party_transfer() -> None:
                     "scope_id": "party",
                     "status": "active",
                     "progress": 0,
-                    "state_version": 1,
+                    "state_version": (
+                        int(arguments.get("expected_state_version", 0)) + 1
+                    ),
                     "state": deepcopy(arguments["state"]),
                 }
             if tool_id == "branch_query":
@@ -1834,7 +1834,7 @@ def test_currency_pool_driver_uses_public_atomic_party_transfer() -> None:
         )
     )
 
-    assert len(client.wallet_calls) == 2
+    assert len(client.wallet_calls) == 1
     assert client.wallet_calls[-1]["owner"] == "party"
     assert client.wallet_calls[-1]["action"] == "transfer_from_character"
     pool_state = client.progress_arguments["state"]["full_playthrough_currency_pools"]
@@ -1861,6 +1861,9 @@ def test_currency_pool_driver_recovers_completed_progress_without_double_transfe
         "amount": 10,
         "reason": "The actor pools 10 gp.",
         "source_ref": source_ref,
+        "status": "completed",
+        "expected_campaign_revision": 8,
+        "expected_character_revision": 3,
     }
 
     class Client:
