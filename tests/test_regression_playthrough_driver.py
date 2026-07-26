@@ -2654,6 +2654,33 @@ def test_query_source_scopes_search_to_the_current_manifest_module_revision() ->
     assert [item["chunk_id"] for item in result["expanded_chunks"]] == ["new-chunk"]
 
 
+def test_query_source_explicit_module_works_before_manifest_initialization() -> None:
+    class Client:
+        async def domain(self, tool_id: str, arguments: dict):
+            assert tool_id == "module_search"
+            assert arguments == {
+                "campaign_id": "campaign-1",
+                "query": "Outline of Episodes",
+                "top_k": 5,
+                "module_ids": ["module-1"],
+            }
+            return {"result": []}
+
+    result = asyncio.run(
+        _query_source(
+            Client(),
+            campaign_id="campaign-1",
+            query="Outline of Episodes",
+            top_k=5,
+            expand=False,
+            module_id=" module-1 ",
+        )
+    )
+
+    assert result["preferred_module_id"] == "module-1"
+    assert result["hits"] == []
+
+
 def test_index_source_uses_exact_public_mcp_module_query() -> None:
     class Client:
         async def domain(self, tool_id: str, arguments: dict):

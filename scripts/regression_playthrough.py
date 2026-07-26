@@ -402,22 +402,25 @@ async def _query_source(
     query: str,
     top_k: int,
     expand: bool,
+    module_id: str = "",
 ) -> dict[str, Any]:
     normalized_query = query.strip()
     if not normalized_query:
         raise ValueError("query-source requires --source-query")
     if top_k < 1 or top_k > 50:
         raise ValueError("--source-top-k must be between 1 and 50")
-    manifest_result = await client.domain(
-        "playthrough_manifest",
-        {"campaign_id": campaign_id, "action": "get"},
-    )
-    preferred_module_id = str(
-        dict(dict(manifest_result.get("manifest") or {}).get("current") or {}).get(
-            "module_id"
+    preferred_module_id = module_id.strip()
+    if not preferred_module_id:
+        manifest_result = await client.domain(
+            "playthrough_manifest",
+            {"campaign_id": campaign_id, "action": "get"},
         )
-        or ""
-    )
+        preferred_module_id = str(
+            dict(dict(manifest_result.get("manifest") or {}).get("current") or {}).get(
+                "module_id"
+            )
+            or ""
+        )
     search_arguments: dict[str, Any] = {
         "campaign_id": campaign_id,
         "query": normalized_query,
@@ -8841,6 +8844,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     query=args.source_query,
                     top_k=args.source_top_k,
                     expand=args.source_expand,
+                    module_id=args.module_id,
                 )
             elif args.action == "index-source":
                 await client.load(*_source_groups(phase))
