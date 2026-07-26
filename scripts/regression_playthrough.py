@@ -150,6 +150,14 @@ def _arguments() -> argparse.Namespace:
             "the action occurs"
         ),
     )
+    parser.add_argument(
+        "--occurrence-scene-id",
+        default="",
+        help=(
+            "Current scene where a transition begins when its cited source text "
+            "is indexed under a different scene"
+        ),
+    )
     parser.add_argument("--location-key", default="")
     parser.add_argument("--source-excerpt", default="")
     parser.add_argument(
@@ -1434,6 +1442,7 @@ async def _advance_scene(
     mark_visited: bool,
     reachable_scene_ids: list[str],
     excluded_scenes: list[dict[str, Any]],
+    occurrence_scene_id: str = "",
 ) -> dict[str, Any]:
     scene_identity = _occurrence_identity(occurrence_id, "advance-scene")
     if not all((scene_id, source_scene_id, source_excerpt)):
@@ -1453,6 +1462,20 @@ async def _advance_scene(
         raise RuntimeError("scene is redacted or does not belong to this campaign")
     current = await _manifest_get(client, campaign_id)
     manifest = deepcopy(current["manifest"])
+    transition_from_scene_id = occurrence_scene_id.strip() or source_scene_id
+    occurrence_scene = await client.domain(
+        "module_query",
+        {
+            "campaign_id": campaign_id,
+            "view": "scene",
+            "payload": {"scene_id": transition_from_scene_id},
+        },
+    )
+    if (
+        occurrence_scene.get("redacted")
+        or str(occurrence_scene.get("scene_id") or "") != transition_from_scene_id
+    ):
+        raise RuntimeError("transition occurrence scene is redacted or invalid")
     source_scene = await client.domain(
         "module_query",
         {
@@ -1474,7 +1497,7 @@ async def _advance_scene(
         )
     )
     transition_record = {
-        "from_scene_id": source_scene_id,
+        "from_scene_id": transition_from_scene_id,
         "to_scene_id": scene_id,
         "source_excerpt": source_excerpt,
         "source_ref": exact_ref,
@@ -1486,16 +1509,16 @@ async def _advance_scene(
     )
     initial_scene_selection = (
         not current_scene_id
-        and source_scene_id == scene_id
+        and transition_from_scene_id == scene_id
         and not transitions
     )
     if (
-        current_scene_id != source_scene_id
+        current_scene_id != transition_from_scene_id
         and not exact_retry
         and not initial_scene_selection
     ):
         raise ValueError(
-            "advance-scene source scene must be the manifest current scene "
+            "advance-scene occurrence scene must be the manifest current scene "
             "or the exact initial scene"
         )
     if existing_transition is not None and existing_transition != transition_record:
@@ -7474,6 +7497,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     mark_visited=args.mark_visited,
                     reachable_scene_ids=args.reachable_scene_id,
                     excluded_scenes=args.excluded_scene_json,
+                    occurrence_scene_id=args.occurrence_scene_id,
                 )
             elif args.action == "branch-from-snapshot":
                 report["result"] = await _branch_from_snapshot(

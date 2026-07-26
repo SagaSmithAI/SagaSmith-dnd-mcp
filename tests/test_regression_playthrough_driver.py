@@ -276,6 +276,15 @@ def test_advance_scene_identity_supports_exact_retry_and_later_revisit() -> None
                         "title": "Road",
                         "content": source_excerpt,
                     }
+                if requested_scene_id == "scene-citation":
+                    return {
+                        "module_id": "module-1",
+                        "chapter_id": "chapter-1",
+                        "chapter": "Chapter",
+                        "scene_id": "scene-citation",
+                        "title": "Sibling source",
+                        "content": "The survivors carry the Stone to Town.",
+                    }
                 assert requested_scene_id == "scene-town"
                 return {
                     "module_id": "module-1",
@@ -343,6 +352,39 @@ def test_advance_scene_identity_supports_exact_retry_and_later_revisit() -> None
             "source_excerpt": source_excerpt,
             "source_ref": source_ref,
         },
+    }
+
+    citation_ref = {
+        **source_ref,
+        "scene_id": "scene-citation",
+        "chunk_id": "chunk-sibling-transition",
+        "content_sha256": "b" * 64,
+    }
+    client.manifest["current"]["scene_id"] = "scene-old"
+    asyncio.run(
+        _advance_scene(
+            client,
+            campaign_id="campaign-1",
+            run_id="run-1",
+            occurrence_id="town-visit-sibling-source",
+            scene_id="scene-town",
+            source_scene_id="scene-citation",
+            source_excerpt="The survivors carry the Stone to Town.",
+            source_ref=citation_ref,
+            objective="Follow the Stone.",
+            mark_visited=True,
+            reachable_scene_ids=[],
+            excluded_scenes=[],
+            occurrence_scene_id="scene-old",
+        )
+    )
+    assert client.manifest["world_state"]["scene_transitions"][
+        "town-visit-sibling-source"
+    ] == {
+        "from_scene_id": "scene-old",
+        "to_scene_id": "scene-town",
+        "source_excerpt": "The survivors carry the Stone to Town.",
+        "source_ref": citation_ref,
     }
 
 
