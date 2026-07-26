@@ -8620,10 +8620,19 @@ async def _advance_level(
             "level spell selections do not satisfy the reported cantrip and leveled-spell "
             f"choices: expected {required_cantrips}/{required_leveled}, got "
             f"{selected_cantrips}/{selected_leveled}"
-        )
+    )
     applied_spells: list[str] = []
+    reused_spells: list[str] = []
     for selection in spell_selections:
         artifact_id = selection["artifact_id"]
+        actor_spell_ids = {
+            str(item.get("id") or "")
+            for item in dict(actor["sheet"].get("content") or {}).get("spells", [])
+        }
+        if selection["method"] == "class_prepared" and artifact_id in actor_spell_ids:
+            applied_spells.append(artifact_id)
+            reused_spells.append(artifact_id)
+            continue
         applied = _facade_value(
             await client.domain(
                 "character_content_apply",
@@ -8784,6 +8793,7 @@ async def _advance_level(
         "selected_subclass": selected_subclass,
         "applied_features": applied_features,
         "applied_spells": applied_spells,
+        "reused_spells": reused_spells,
         "feature_spell_grants": feature_spell_grants,
         "advancement_plan": (deepcopy(preflight["plan"]) if preflight is not None else None),
         "prepared_spell_additions": prepared_additions,
@@ -9954,26 +9964,36 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     reason=args.xp_reason,
                 )
             elif args.action == "advance-level":
-                report["result"] = await _advance_level(
-                    client,
-                    campaign_id=args.campaign_id,
-                    run_id=args.run_id,
-                    initial_phase=phase,
-                    return_phase=str(args.level_return_phase or ""),
-                    scene_id=str(args.scene_id or ""),
-                    source_ref=args.source_ref_json,
-                    actor_id=args.level_actor_id,
-                    target_level=args.level_target,
-                    class_name=args.level_class_name,
-                    hp_method=str(args.level_hp_method or ""),
-                    reason=args.level_reason,
-                    subclass_artifact_id=args.level_subclass_artifact_id,
-                    feature_selection_values=args.level_feature_selection_json,
-                    spell_selection_values=args.level_spell_json,
-                    prepared_spell_ids=args.level_prepared_spell_id,
-                    checkpoint_label=args.checkpoint_label,
-                    defer_checkpoint=args.defer_checkpoint,
-                )
+                try:
+                    report["result"] = await _advance_level(
+                        client,
+                        campaign_id=args.campaign_id,
+                        run_id=args.run_id,
+                        initial_phase=phase,
+                        return_phase=str(args.level_return_phase or ""),
+                        scene_id=str(args.scene_id or ""),
+                        source_ref=args.source_ref_json,
+                        actor_id=args.level_actor_id,
+                        target_level=args.level_target,
+                        class_name=args.level_class_name,
+                        hp_method=str(args.level_hp_method or ""),
+                        reason=args.level_reason,
+                        subclass_artifact_id=args.level_subclass_artifact_id,
+                        feature_selection_values=args.level_feature_selection_json,
+                        spell_selection_values=args.level_spell_json,
+                        prepared_spell_ids=args.level_prepared_spell_id,
+                        checkpoint_label=args.checkpoint_label,
+                        defer_checkpoint=args.defer_checkpoint,
+                    )
+                except Exception:
+                    await _restore_phase_after_failed_lobby_action(
+                        client,
+                        campaign_id=args.campaign_id,
+                        run_id=args.run_id,
+                        original_phase=phase,
+                        identity=f"level:{args.level_actor_id}:{args.level_target}",
+                    )
+                    raise
             elif args.action == "checkpoint":
                 label = args.checkpoint_label or f"Full playthrough checkpoint: {args.run_id}"
                 report["result"] = await _checkpoint(

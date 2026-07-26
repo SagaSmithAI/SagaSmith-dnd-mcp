@@ -4196,6 +4196,133 @@ def test_level_advancement_rejects_malformed_choices_before_public_mutation() ->
         )
 
 
+def test_resumed_level_skips_existing_class_prepared_spell_hydration() -> None:
+    source_ref = {
+        "module_id": "module-1",
+        "scene_id": "scene-1",
+        "chunk_id": "chunk-milestone",
+        "page_start": 20,
+        "page_end": 20,
+        "heading_path": ["Rewards"],
+        "content_sha256": "abc123",
+    }
+    sheet = default_character_sheet()
+    sheet["progression"].update(
+        {
+            "level": 3,
+            "classes": [
+                {
+                    "name": "Cleric",
+                    "level": 3,
+                    "subclass": "Life Domain",
+                    "hit_die": 8,
+                }
+            ],
+        }
+    )
+    sheet["spellcasting"].update(
+        {
+            "preparation": {"mode": "prepared", "selected_spell_ids": []},
+            "spell_slots": {"2": {"max": 2, "value": 2}},
+        }
+    )
+    sheet["content"]["spells"].append({"id": "spell-lesser-restoration"})
+
+    class Client:
+        def __init__(self) -> None:
+            self.actor = {
+                "id": "cleric-1",
+                "name": "Mercy",
+                "campaign_id": "campaign-1",
+                "revision": 8,
+                "sheet": deepcopy(sheet),
+            }
+
+        async def open(self, campaign_id: str):
+            assert campaign_id == "campaign-1"
+            return {"exposure_id": "exposure"}
+
+        async def load(self, *_group_ids: str):
+            return None
+
+        async def domain(self, tool_id: str, arguments: dict):
+            if tool_id == "module_query":
+                return {
+                    "module_id": "module-1",
+                    "scene_id": "scene-1",
+                    "content": "The characters reach 3rd level.",
+                }
+            if tool_id == "character_query":
+                return deepcopy(self.actor)
+            if tool_id == "branch_query":
+                return [{"id": "branch-1", "is_current": True}]
+            if tool_id == "character_state_change":
+                assert arguments["action"] == "level_advance"
+                return {
+                    "status": "committed",
+                    "character": deepcopy(self.actor),
+                    "advancement": {
+                        "follow_up": {
+                            "feature_artifacts": [],
+                            "subclass_options": [],
+                            "spell_choices": {
+                                "cantrips_to_add": 0,
+                                "leveled_spells_to_add": 0,
+                            },
+                            "prepared_spell_event": None,
+                        }
+                    },
+                }
+            if tool_id == "rule_pack_query":
+                if arguments["payload"]["kind"] == "feature":
+                    return []
+                return [
+                    {
+                        "id": "spell-lesser-restoration",
+                        "name": "Lesser Restoration",
+                        "selection_requirements": {
+                            "level": 2,
+                            "eligible_classes": ["Cleric"],
+                        },
+                    }
+                ]
+            if tool_id == "character_content_apply":
+                raise AssertionError("existing class-prepared spell must not be applied twice")
+            raise AssertionError((tool_id, arguments))
+
+    result = asyncio.run(
+        _advance_level(
+            Client(),
+            campaign_id="campaign-1",
+            run_id="run-1",
+            initial_phase="lobby",
+            return_phase="lobby",
+            scene_id="scene-1",
+            source_ref=source_ref,
+            actor_id="cleric-1",
+            target_level=3,
+            class_name="Cleric",
+            hp_method="fixed",
+            reason="Episode milestone.",
+            subclass_artifact_id="",
+            feature_selection_values=[],
+            spell_selection_values=[
+                {
+                    "artifact_id": "spell-lesser-restoration",
+                    "source_class": "Cleric",
+                    "method": "class_prepared",
+                }
+            ],
+            prepared_spell_ids=[],
+            checkpoint_label="",
+            defer_checkpoint=True,
+        )
+    )
+
+    assert result["applied_spells"] == ["spell-lesser-restoration"]
+    assert result["reused_spells"] == ["spell-lesser-restoration"]
+
+
 def test_level_preflight_rejects_missing_feature_choice_without_mutation() -> None:
     sheet = default_character_sheet()
     sheet["progression"].update(
