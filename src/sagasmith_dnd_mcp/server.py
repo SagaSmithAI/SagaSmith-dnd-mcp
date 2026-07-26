@@ -151,6 +151,7 @@ from sagasmith_dnd.lifecycle import (
     advance_world_effect_durations,
     allows_trance_rest,
     apply_rest,
+    expire_combat_bound_effects,
     initialize_source_state,
     knock_prone_outside_combat,
     record_rest_completion,
@@ -15701,7 +15702,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             for effect in sheet.get("effects", []):
                 if str(effect.get("id")) in holding_ids:
                     effect["active"] = False
-            advanced = advance_effect_durations(sheet, period="encounter")
+            advanced = expire_combat_bound_effects(sheet)
             expired_effects.update(advanced["expired"])
             character_updates.append(
                 CharacterStateUpdate(
