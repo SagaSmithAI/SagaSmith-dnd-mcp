@@ -6683,18 +6683,13 @@ async def _refresh_module(
             "idempotency_key": _mutation_key(run_id, "module-refresh-ingest", job_id),
         },
     )
-    campaign = await _campaign(client, campaign_id)
-    activated = await client.domain(
-        "module_import",
-        {
-            "campaign_id": campaign_id,
-            "action": "activate",
-            "payload": {"job_id": job_id},
-            "expected_revision": campaign["revision"],
-            "idempotency_key": _mutation_key(run_id, "module-refresh-activate", job_id),
-        },
+    new_module_id = str(
+        ingested.get("module_id")
+        or dict(ingested.get("module") or {}).get("id")
+        or ""
     )
-    new_module_id = str(activated["activation"]["module_id"])
+    if not new_module_id:
+        raise RuntimeError("module revision ingestion returned no module id")
     new_index = await client.domain(
         "module_query",
         {
@@ -6710,6 +6705,19 @@ async def _refresh_module(
         old_index=old_index,
         new_index=new_index,
     )
+    campaign = await _campaign(client, campaign_id)
+    activated = await client.domain(
+        "module_import",
+        {
+            "campaign_id": campaign_id,
+            "action": "activate",
+            "payload": {"job_id": job_id},
+            "expected_revision": campaign["revision"],
+            "idempotency_key": _mutation_key(run_id, "module-refresh-activate", job_id),
+        },
+    )
+    if str(activated["activation"]["module_id"]) != new_module_id:
+        raise RuntimeError("module activation returned a different ingested module id")
     extended = await _manifest_mutation(
         client,
         campaign_id=campaign_id,

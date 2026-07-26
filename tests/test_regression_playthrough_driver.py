@@ -53,6 +53,7 @@ from scripts.regression_playthrough import (
     _record_outcome,
     _recover_committed_check,
     _recover_stable_party,
+    _refresh_module,
     _register_replacement,
     _relock_core,
     _resolve_check,
@@ -1850,6 +1851,121 @@ def test_module_revision_extension_remaps_current_and_traversed_scenes() -> None
         "scene-v2",
     ]
     assert manifest["module_ids"] == ["module-v1"]
+
+
+def test_module_refresh_validates_ingested_scene_mapping_before_activation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "module.md"
+    source.write_text("# Chapter\n## Cave\nBody.\n", encoding="utf-8")
+    manifest = {
+        "module_ids": ["module-v1"],
+        "current": {
+            "module_id": "module-v1",
+            "chapter_id": "chapter-v1",
+            "chapter_title": "Chapter",
+            "scene_id": "scene-v1",
+            "scene_title": "Cave",
+        },
+        "traversal": {
+            "reachable_scene_ids": ["scene-v1"],
+            "visited_scene_ids": ["scene-v1"],
+        },
+    }
+    events: list[str] = []
+    indexes = {
+        "module-v1": [
+            {"scene_id": "scene-v1", "stable_key": "chapter-cave"}
+        ],
+        "module-v2": [
+            {
+                "scene_id": "scene-v2",
+                "stable_key": "chapter-cave",
+                "chapter_id": "chapter-v2",
+                "chapter": "Chapter",
+                "title": "Cave",
+            }
+        ],
+    }
+
+    class Client:
+        async def load(self, *group_ids: str) -> None:
+            assert group_ids in {
+                ("lobby.modules",),
+                ("lobby.campaign", "lobby.modules"),
+            }
+
+        async def open(self, campaign_id: str) -> None:
+            assert campaign_id == "campaign-1"
+
+        async def domain(self, tool_id: str, arguments: dict):
+            if tool_id == "module_query":
+                module_id = arguments["payload"]["module_id"]
+                events.append(f"index:{module_id}")
+                return indexes[module_id]
+            if tool_id == "branch_query":
+                return [{"id": "branch-1", "is_current": True}]
+            if tool_id == "module_import":
+                action = arguments["action"]
+                events.append(action)
+                return {
+                    "stage": {"job": {"id": "job-1"}},
+                    "inspect": {
+                        "preview": {
+                            "valid": True,
+                            "errors": [],
+                            "warnings": [],
+                        }
+                    },
+                    "validate": {"validation": {"valid": True}},
+                    "ingest": {"module_id": "module-v2"},
+                    "activate": {
+                        "activation": {
+                            "module_id": "module-v2",
+                            "active": True,
+                            "replaced_module_ids": ["module-v1"],
+                        }
+                    },
+                }[action]
+            raise AssertionError((tool_id, arguments))
+
+    async def manifest_get(client, campaign_id: str):
+        return {"manifest": deepcopy(manifest)}
+
+    async def campaign_get(client, campaign_id: str):
+        return {
+            "revision": 4,
+            "state": {
+                "game_phase": "lobby",
+                "module_imports": {
+                    "active": {"module-key": {"module_id": "module-v1"}}
+                },
+            },
+        }
+
+    async def manifest_mutation(client, **kwargs):
+        return {"manifest": deepcopy(kwargs.get("payload", {}).get("manifest", manifest))}
+
+    monkeypatch.setattr(regression_playthrough, "_manifest_get", manifest_get)
+    monkeypatch.setattr(regression_playthrough, "_campaign", campaign_get)
+    monkeypatch.setattr(regression_playthrough, "_manifest_mutation", manifest_mutation)
+
+    result = asyncio.run(
+        _refresh_module(
+            Client(),
+            campaign_id="campaign-1",
+            run_id="run-1",
+            initial_phase="lobby",
+            source_path=source,
+            source_key="module-key",
+            title="Module",
+            return_phase="lobby",
+        )
+    )
+
+    assert result["new_module_id"] == "module-v2"
+    assert events.index("index:module-v2") < events.index("activate")
 
 
 def test_in_place_module_refresh_does_not_duplicate_manifest_module_id() -> None:
