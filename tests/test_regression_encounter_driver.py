@@ -1667,6 +1667,68 @@ def test_movement_destination_stops_next_to_target_without_sharing_space() -> No
     assert destination[1] <= 30
 
 
+def test_movement_destination_never_approaches_a_visible_fear_source() -> None:
+    combat = {
+        "battle_map": {
+            "bounds": {"width_cells": 12, "height_cells": 12},
+            "blocked_cells": [],
+            "difficult_cells": [],
+        },
+        "combatants": [
+            {
+                "actor_id": "frightened-pc",
+                "position": {"x": 1, "y": 3},
+                "conditions": ["frightened"],
+                "condition_sources": {"frightened": ["gazer"]},
+                "turn_budget": {"movement": 25},
+            },
+            {
+                "actor_id": "gazer",
+                "position": {"x": 7, "y": 2},
+                "conditions": [],
+                "hidden": False,
+                "turn_budget": {"movement": 30},
+            },
+        ],
+    }
+
+    assert _choose_destination(combat, "frightened-pc", "gazer") is None
+
+
+def test_movement_destination_excludes_blocked_cells_but_not_dead_occupants() -> None:
+    combat = {
+        "battle_map": {
+            "bounds": {"width_cells": 12, "height_cells": 12},
+            "blocked_cells": ["6,2"],
+            "difficult_cells": [],
+        },
+        "combatants": [
+            {
+                "actor_id": "pc",
+                "position": {"x": 1, "y": 1},
+                "conditions": [],
+                "turn_budget": {"movement": 30},
+            },
+            {
+                "actor_id": "goblin",
+                "position": {"x": 7, "y": 2},
+                "conditions": [],
+                "turn_budget": {"movement": 30},
+            },
+            {
+                "actor_id": "dead-guard",
+                "position": {"x": 6, "y": 1},
+                "conditions": ["dead", "prone"],
+                "turn_budget": {"movement": 0},
+            },
+        ],
+    }
+
+    destination = _choose_destination(combat, "pc", "goblin")
+
+    assert destination == ({"x": 6, "y": 1}, 25)
+
+
 def test_roll_total_accepts_public_facade_and_raw_shapes() -> None:
     assert _roll_total({"total": 8, "rolls": [2]}) == 8
     assert _roll_total({"result": {"total": 14}}) == 14

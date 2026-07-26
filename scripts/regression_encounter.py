@@ -2425,16 +2425,90 @@ def _choose_destination(
     goal = dict(target.get("position") or {})
     if set(origin) != {"x", "y"} or set(goal) != {"x", "y"}:
         return None
+    conditions = {
+        str(item).casefold() for item in acting.get("conditions", [])
+    }
+    if conditions & {
+        "dead",
+        "unconscious",
+        "stunned",
+        "paralyzed",
+        "petrified",
+        "restrained",
+        "grappled",
+        "prone",
+    } or bool(acting.get("surprised")):
+        return None
     budget_cells = int(dict(acting.get("turn_budget") or {}).get("movement", 0) or 0) // 5
+    if budget_cells <= 0:
+        return None
+
+    def _source_details(
+        source_id: str,
+    ) -> tuple[bool, dict[str, Any] | None] | None:
+        source = next(
+            (
+                item
+                for item in combatants
+                if str(item.get("actor_id") or "") == source_id
+            ),
+            None,
+        )
+        if source is None:
+            return None
+        visible_to = source.get("visible_to_actor_ids")
+        if isinstance(visible_to, list):
+            visible = actor_id in {str(item) for item in visible_to}
+        else:
+            source_conditions = {
+                str(item).casefold() for item in source.get("conditions", [])
+            }
+            visible = not source.get("hidden", False) and "invisible" not in source_conditions
+        position = dict(source.get("position") or {})
+        return visible, position if set(position) == {"x", "y"} else None
+
+    fear_source_positions: list[dict[str, Any]] = []
+    if "frightened" in conditions:
+        raw_fear_sources = dict(acting.get("condition_sources") or {}).get(
+            "frightened"
+        )
+        if not isinstance(raw_fear_sources, list) or not raw_fear_sources:
+            return None
+        for source_id in raw_fear_sources:
+            source_details = _source_details(str(source_id))
+            if source_details is None:
+                return None
+            visible, source_position = source_details
+            if visible and source_position is None:
+                return None
+            if visible:
+                fear_source_positions.append(source_position)
+
+    turn_source_position = None
+    if "turned" in conditions:
+        turn_source_id = str(dict(acting.get("turned") or {}).get("source_actor_id") or "")
+        if not turn_source_id:
+            return None
+        turn_source_details = _source_details(turn_source_id)
+        if turn_source_details is None or turn_source_details[1] is None:
+            return None
+        turn_source_position = turn_source_details[1]
+
     occupied = {
         (
             int(dict(item.get("position") or {}).get("x", -1)),
             int(dict(item.get("position") or {}).get("y", -1)),
         )
         for item in combatants
-        if item.get("actor_id") != actor_id and isinstance(item.get("position"), dict)
+        if item.get("actor_id") != actor_id
+        and "dead"
+        not in {str(value).casefold() for value in item.get("conditions", [])}
+        and isinstance(item.get("position"), dict)
     }
-    bounds = dict(dict(combat.get("battle_map") or {}).get("bounds") or {})
+    battle_map = dict(combat.get("battle_map") or {})
+    bounds = dict(battle_map.get("bounds") or {})
+    blocked_cells = set(battle_map.get("blocked_cells") or [])
+    difficult_cells = set(battle_map.get("difficult_cells") or [])
     candidates: list[tuple[int, int, int]] = []
     for x in range(int(goal["x"]) - 1, int(goal["x"]) + 2):
         for y in range(int(goal["y"]) - 1, int(goal["y"]) + 2):
@@ -2442,13 +2516,27 @@ def _choose_destination(
             if (
                 (x, y) in occupied
                 or (x == int(goal["x"]) and y == int(goal["y"]))
+                or f"{x},{y}" in blocked_cells
                 or not 0 <= x < int(bounds.get("width_cells", 0) or 0)
                 or not 0 <= y < int(bounds.get("height_cells", 0) or 0)
             ):
                 continue
             steps = _distance(origin, destination)
-            if 0 < steps <= budget_cells:
-                candidates.append((steps, x, y))
+            if not 0 < steps <= budget_cells:
+                continue
+            if difficult_cells and steps > 1:
+                continue
+            if any(
+                _distance(destination, source_position)
+                < _distance(origin, source_position)
+                for source_position in fear_source_positions
+            ):
+                continue
+            if turn_source_position is not None and _distance(
+                destination, turn_source_position
+            ) <= _distance(origin, turn_source_position):
+                continue
+            candidates.append((steps, x, y))
     if not candidates:
         return None
     steps, x, y = min(candidates)
