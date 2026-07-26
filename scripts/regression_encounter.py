@@ -2844,6 +2844,61 @@ def _body_thief_sides(
     }
 
 
+def _body_thief_target_ids(
+    combat: dict[str, Any],
+    *,
+    actors: dict[str, dict[str, Any]],
+    source_actor_id: str,
+    party_ids: list[str],
+    range_ft: int,
+) -> list[str]:
+    """Return living incapacitated targets, including creatures at 0 HP."""
+
+    combatants = {
+        str(item.get("actor_id") or ""): item
+        for item in combat.get("combatants", [])
+        if isinstance(item, dict)
+    }
+    source = combatants.get(source_actor_id)
+    if source is None:
+        return []
+    source_position = dict(source.get("position") or {"x": 0, "y": 0})
+    eligible = [
+        target_id
+        for target_id in party_ids
+        if target_id in actors
+        and target_id in combatants
+        and "dead" not in _conditions(actors[target_id])
+        and _conditions(actors[target_id])
+        & {
+            "incapacitated",
+            "paralyzed",
+            "petrified",
+            "stunned",
+            "unconscious",
+        }
+        and _distance(
+            source_position,
+            dict(
+                combatants[target_id].get("position")
+                or {"x": 0, "y": 0}
+            ),
+        )
+        * 5
+        <= range_ft
+    ]
+    eligible.sort(
+        key=lambda target_id: _distance(
+            source_position,
+            dict(
+                combatants[target_id].get("position")
+                or {"x": 0, "y": 0}
+            ),
+        )
+    )
+    return eligible
+
+
 def _wound_priority(actor: dict[str, Any]) -> tuple[bool, float]:
     hp = dict(dict(actor.get("sheet") or {}).get("combat") or {}).get("hp", {})
     current = max(0, int(dict(hp).get("value", 0) or 0))
@@ -4101,43 +4156,12 @@ async def _auto_run(
                 .get("range_ft", 0)
                 or 0
             )
-            eligible_targets = [
-                target_id
-                for target_id in effective_party_ids
-                if _hit_points(actors[target_id]) > 0
-                and "dead" not in _conditions(actors[target_id])
-                and _conditions(actors[target_id])
-                & {
-                    "incapacitated",
-                    "paralyzed",
-                    "petrified",
-                    "stunned",
-                    "unconscious",
-                }
-                and _distance(
-                    dict(
-                        combatants[actor_id].get("position")
-                        or {"x": 0, "y": 0}
-                    ),
-                    dict(
-                        combatants[target_id].get("position")
-                        or {"x": 0, "y": 0}
-                    ),
-                )
-                * 5
-                <= contest_range_ft
-            ]
-            eligible_targets.sort(
-                key=lambda target_id: _distance(
-                    dict(
-                        combatants[actor_id].get("position")
-                        or {"x": 0, "y": 0}
-                    ),
-                    dict(
-                        combatants[target_id].get("position")
-                        or {"x": 0, "y": 0}
-                    ),
-                )
+            eligible_targets = _body_thief_target_ids(
+                combat,
+                actors=actors,
+                source_actor_id=actor_id,
+                party_ids=effective_party_ids,
+                range_ft=contest_range_ft,
             )
             eligible_targets = _prioritize_targets(
                 actor_id,

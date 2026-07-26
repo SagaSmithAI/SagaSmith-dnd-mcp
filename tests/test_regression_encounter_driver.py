@@ -11,6 +11,7 @@ from scripts.regression_encounter import (
     HEALING_WORD_ID,
     MAGIC_MISSILE_ID,
     _body_thief_sides,
+    _body_thief_target_ids,
     _characters,
     _choose_destination,
     _choose_party_spell,
@@ -502,6 +503,47 @@ def test_body_thief_sides_substitutes_host_without_erasing_actors() -> None:
     assert sides["effective_party_ids"] == ["pc-2"]
     assert sides["attackable_hostile_ids"] == ["kobold", "pc-1"]
     assert sides["hostile_turn_actor_ids"] == {"kobold", "pc-1"}
+
+
+def test_body_thief_targets_living_zero_hp_incapacitated_creature() -> None:
+    combat = {
+        "combatants": [
+            {"actor_id": "devourer", "position": {"x": 3, "y": 2}},
+            {"actor_id": "downed", "position": {"x": 2, "y": 2}},
+            {"actor_id": "dead", "position": {"x": 3, "y": 3}},
+            {"actor_id": "far", "position": {"x": 5, "y": 2}},
+        ]
+    }
+    actors = {
+        "downed": {
+            "sheet": {
+                "combat": {"hp": {"value": 0, "max": 10}},
+                "conditions": ["unconscious", "stable"],
+            }
+        },
+        "dead": {
+            "sheet": {
+                "combat": {"hp": {"value": 0, "max": 10}},
+                "conditions": ["dead", "unconscious"],
+            }
+        },
+        "far": {
+            "sheet": {
+                "combat": {"hp": {"value": 5, "max": 10}},
+                "conditions": ["stunned"],
+            }
+        },
+    }
+
+    assert _body_thief_target_ids(
+        combat,
+        actors=actors,
+        source_actor_id="devourer",
+        party_ids=["downed", "dead", "far"],
+        range_ft=5,
+    ) == ["downed"]
+
+
 def test_encounter_actor_groups_keep_allies_out_of_registered_party_and_reject_overlap(
     tmp_path,
 ) -> None:
