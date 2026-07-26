@@ -16,7 +16,7 @@ from mcp import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
 
 from scripts.regression_modules import PRINCIPAL_ID, ExposureClient, _token
-from scripts.regression_playthrough import _checkpoint
+from scripts.regression_playthrough import _checkpoint, _manifest_get
 
 GUIDING_BOLT_ID = "dnd5e.content.srd2014.spell.guiding-bolt"
 GUIDING_BOLT_ON_HIT = (
@@ -381,6 +381,42 @@ def _encounter_actor_groups(args: argparse.Namespace) -> dict[str, list[str]]:
     if overlaps:
         raise ValueError(f"encounter actor reports must be disjoint: {overlaps}")
     return groups
+
+
+def _require_live_active_party(
+    reported_party_ids: list[str],
+    manifest_result: dict[str, Any],
+) -> list[str]:
+    """Reject stale reports that reintroduce departed PCs or omit replacements."""
+
+    manifest = manifest_result.get("manifest")
+    if not isinstance(manifest, dict):
+        raise RuntimeError("playthrough manifest query returned no manifest")
+    party = manifest.get("party")
+    members = party.get("members") if isinstance(party, dict) else None
+    if not isinstance(members, list):
+        raise RuntimeError("playthrough manifest has no party members")
+    active_ids = [
+        str(item.get("actor_id") or "")
+        for item in members
+        if isinstance(item, dict) and item.get("status") == "active"
+    ]
+    if (
+        not active_ids
+        or any(not actor_id for actor_id in active_ids)
+        or len(active_ids) != len(set(active_ids))
+    ):
+        raise RuntimeError("playthrough manifest active party is invalid")
+    if set(reported_party_ids) != set(active_ids) or len(reported_party_ids) != len(
+        active_ids
+    ):
+        missing = sorted(set(active_ids) - set(reported_party_ids))
+        unexpected = sorted(set(reported_party_ids) - set(active_ids))
+        raise ValueError(
+            "party reports do not match the live active manifest party "
+            f"(missing={missing}, unexpected={unexpected})"
+        )
+    return active_ids
 
 
 def _participant_manifest(
@@ -1706,6 +1742,10 @@ async def _start(
     phase = str(dict(campaign.get("state") or {}).get("game_phase") or "")
     if phase != "play":
         raise RuntimeError("encounter start requires the play phase")
+    _require_live_active_party(
+        party_ids,
+        await _manifest_get(client, args.campaign_id),
+    )
     branch = await _current_branch(client, args.campaign_id)
     ally_ids = (
         _prepared_actor_ids(args.ally_report, report_kind="ally")

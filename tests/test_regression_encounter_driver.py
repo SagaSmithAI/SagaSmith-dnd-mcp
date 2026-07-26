@@ -27,6 +27,7 @@ from scripts.regression_encounter import (
     _prepared_actor_ids,
     _prioritize_targets,
     _reinforcement_config,
+    _require_live_active_party,
     _resolve_pending,
     _roll_total,
     _should_stand,
@@ -236,6 +237,30 @@ def test_encounter_actor_groups_keep_allies_out_of_registered_party_and_reject_o
         assert "must be disjoint" in str(exc)
     else:
         raise AssertionError("the same actor cannot be both an ally and a hostile")
+
+
+def test_live_manifest_party_rejects_departed_predecessor_and_missing_replacement() -> None:
+    manifest_result = {
+        "manifest": {
+            "party": {
+                "members": [
+                    {"actor_id": "cleric", "status": "active"},
+                    {"actor_id": "replacement", "status": "active"},
+                ]
+            }
+        }
+    }
+
+    assert _require_live_active_party(
+        ["replacement", "cleric"],
+        manifest_result,
+    ) == ["cleric", "replacement"]
+
+    with pytest.raises(ValueError, match="missing=.*replacement.*unexpected=.*predecessor"):
+        _require_live_active_party(
+            ["cleric", "predecessor"],
+            manifest_result,
+        )
 
 
 def test_character_reads_are_batched_per_encounter_step() -> None:
