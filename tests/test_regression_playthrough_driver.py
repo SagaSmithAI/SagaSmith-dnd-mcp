@@ -27,6 +27,7 @@ from scripts.regression_playthrough import (
     _award_experience,
     _branch_from_snapshot,
     _campaign_phase,
+    _cast_healing_spell,
     _cast_source_spell,
     _check_identity,
     _check_knowledge_key,
@@ -2004,6 +2005,158 @@ def test_source_object_attack_uses_public_character_action() -> None:
         ),
     }
     assert result["object"]["hit_points"] == 19
+
+
+def test_healing_spell_driver_pays_rolls_and_applies_public_healing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_ref = {
+        "module_id": "module-1",
+        "scene_id": "scene-1",
+        "chunk_id": "bridge-chunk",
+        "page_start": 95,
+        "page_end": 96,
+        "heading_path": ["Vault", "Bridge"],
+        "content_sha256": "a" * 64,
+    }
+    caster_sheet = default_character_sheet()
+    caster_sheet["abilities"]["wisdom"]["score"] = 18
+    caster_sheet["spellcasting"]["ability"] = "wisdom"
+    caster_sheet["content"]["spells"] = [
+        {
+            "id": "healing-word",
+            "name": "Healing Word",
+            "level": 1,
+            "resolution": {
+                "kind": "healing",
+                "targeting": {
+                    "mode": "creature",
+                    "requires_sight": True,
+                    "max_targets": 1,
+                    "excluded_creature_types": ["construct", "undead"],
+                    "area": None,
+                },
+                "attack": None,
+                "save": None,
+                "healing": {
+                    "base_dice": "1d4",
+                    "per_slot_dice": "1d4",
+                    "slot_base_level": 1,
+                    "cantrip_dice": {},
+                    "add_spellcasting_modifier": True,
+                },
+            },
+        }
+    ]
+    target_sheet = default_character_sheet()
+    target_sheet["combat"]["hp"] = {"value": 0, "max": 20, "temp": 0}
+    target_sheet["conditions"] = ["prone", "unconscious"]
+
+    class Client:
+        def __init__(self) -> None:
+            self.cast_arguments: dict | None = None
+            self.roll_arguments: dict | None = None
+            self.heal_arguments: dict | None = None
+
+        async def core(self, tool_id: str, arguments: dict):
+            assert tool_id == "campaign_query"
+            return {"id": "campaign-1", "revision": 12, "state": {}}
+
+        async def domain(self, tool_id: str, arguments: dict):
+            if tool_id == "module_query":
+                return {
+                    "module_id": "module-1",
+                    "scene_id": "scene-1",
+                    "content": "A failed save causes a 60-foot fall.",
+                    "spatial": {
+                        "locations": [{"key": "bridge", "title": "Bridge"}]
+                    },
+                }
+            if tool_id == "character_query":
+                actor_id = arguments["payload"]["character_id"]
+                if actor_id == "cleric":
+                    return {
+                        "id": "cleric",
+                        "name": "Cleric",
+                        "campaign_id": "campaign-1",
+                        "revision": 7,
+                        "sheet": deepcopy(caster_sheet),
+                    }
+                return {
+                    "id": "fallen",
+                    "name": "Fallen",
+                    "campaign_id": "campaign-1",
+                    "revision": 4,
+                    "sheet": deepcopy(target_sheet),
+                }
+            if tool_id == "character_action":
+                self.cast_arguments = deepcopy(arguments)
+                return {"status": "pending_ruling", "result": {"payment": {"cost": 1}}}
+            if tool_id == "branch_query":
+                return [{"id": "branch-1", "is_current": True}]
+            if tool_id == "dnd_dice_roll":
+                self.roll_arguments = deepcopy(arguments)
+                return {
+                    "total": 7,
+                    "rolls": [3],
+                    "expression": "1d4 + 4",
+                    "detail": "1d4[3] +4",
+                }
+            if tool_id == "character_state_change":
+                self.heal_arguments = deepcopy(arguments)
+                healed_sheet = deepcopy(target_sheet)
+                healed_sheet["combat"]["hp"]["value"] = 7
+                healed_sheet["conditions"] = ["prone"]
+                return {
+                    "character": {
+                        "id": "fallen",
+                        "revision": 5,
+                        "sheet": healed_sheet,
+                    }
+                }
+            if tool_id == "continuity_commit":
+                return {"event": {"id": "event-1"}}
+            raise AssertionError((tool_id, arguments))
+
+    async def manifest_mutation(*_args, **_kwargs):
+        return {"manifest": {"status": "in_progress"}}
+
+    monkeypatch.setattr(regression_playthrough, "_manifest_mutation", manifest_mutation)
+    client = Client()
+    result = asyncio.run(
+        _cast_healing_spell(
+            client,
+            campaign_id="campaign-1",
+            run_id="run-1",
+            occurrence_id="heal-fallen",
+            scene_id="scene-1",
+            source_excerpt="A failed save causes a 60-foot fall.",
+            source_ref=source_ref,
+            location_key="bridge",
+            actor_id="cleric",
+            target_id="fallen",
+            spell_id="healing-word",
+            cast_level=1,
+            component_ruling=None,
+            reason="The cleric restored the fallen ally.",
+            knowledge_actor_ids=[],
+            defer_checkpoint=True,
+        )
+    )
+
+    assert client.cast_arguments["action"] == "cast_spell"
+    assert client.cast_arguments["payload"] == {
+        "spell_id": "healing-word",
+        "cast_level": 1,
+    }
+    assert client.roll_arguments["expression"] == "1d4 + 4"
+    assert client.heal_arguments["payload"] == {
+        "amount": 7,
+        "source_actor_id": "cleric",
+        "spell_id": "healing-word",
+        "spell_level": 1,
+    }
+    assert result["roll"]["total"] == 7
 
 
 def test_currency_pool_driver_uses_public_atomic_party_transfer() -> None:

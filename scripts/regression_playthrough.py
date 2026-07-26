@@ -36,6 +36,7 @@ DEFERRED_CHECKPOINT_ACTIONS = frozenset(
         "stand-up",
         "use-activity",
         "cast-source-spell",
+        "cast-healing-spell",
         "record-event",
         "record-outcome",
         "register-replacement",
@@ -77,6 +78,7 @@ def _arguments() -> argparse.Namespace:
             "stand-up",
             "use-activity",
             "cast-source-spell",
+            "cast-healing-spell",
             "branch-from-snapshot",
             "initialize-clock",
             "advance-time",
@@ -229,6 +231,7 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--spell-actor-id", default="")
     parser.add_argument("--spell-id", default="")
     parser.add_argument("--spell-source-item-id", default="")
+    parser.add_argument("--spell-target-id", default="")
     parser.add_argument("--spell-cast-level", type=int)
     parser.add_argument("--spell-component-ruling-json", type=json.loads)
     parser.add_argument("--spell-reason", default="")
@@ -4023,6 +4026,250 @@ async def _cast_source_spell(
         "cast": acted,
         "cast_recovered": cast_recovered,
         "charges": {"before": before_charges, "after": after_charges},
+        "knowledge_actor_ids": recipients,
+        "continuity": committed,
+        "sync": synced,
+    }
+
+
+async def _cast_healing_spell(
+    client: ExposureClient,
+    *,
+    campaign_id: str,
+    run_id: str,
+    occurrence_id: str,
+    scene_id: str,
+    source_excerpt: str,
+    source_ref: dict[str, Any] | None,
+    location_key: str,
+    actor_id: str,
+    target_id: str,
+    spell_id: str,
+    cast_level: int | None,
+    component_ruling: dict[str, Any] | None,
+    reason: str,
+    knowledge_actor_ids: list[str],
+    defer_checkpoint: bool = False,
+) -> dict[str, Any]:
+    cast_identity = _occurrence_identity(occurrence_id, "cast-healing-spell")
+    normalized_actor_id = actor_id.strip()
+    normalized_target_id = target_id.strip()
+    normalized_spell_id = spell_id.strip()
+    normalized_reason = reason.strip()
+    if not all(
+        (
+            scene_id,
+            location_key,
+            source_excerpt.strip(),
+            normalized_actor_id,
+            normalized_target_id,
+            normalized_spell_id,
+            normalized_reason,
+        )
+    ):
+        raise ValueError(
+            "cast-healing-spell requires scene, location, source, caster, target, "
+            "spell, and reason"
+        )
+    scene = await client.domain(
+        "module_query",
+        {
+            "campaign_id": campaign_id,
+            "view": "scene",
+            "payload": {"scene_id": scene_id},
+        },
+    )
+    exact_ref = _validate_source_ref(scene, source_ref, excerpt=source_excerpt)
+    if location_key not in {str(item.get("key") or "") for item in _scene_locations(scene)}:
+        raise ValueError("cast-healing-spell location is not present in the scene atlas")
+    actor = await client.domain(
+        "character_query",
+        {"view": "get", "payload": {"character_id": normalized_actor_id}},
+    )
+    target = await client.domain(
+        "character_query",
+        {"view": "get", "payload": {"character_id": normalized_target_id}},
+    )
+    if actor.get("campaign_id") != campaign_id or target.get("campaign_id") != campaign_id:
+        raise ValueError("cast-healing-spell actors must belong to the campaign")
+    spell = next(
+        (
+            dict(item)
+            for item in dict(actor.get("sheet") or {}).get("content", {}).get("spells", [])
+            if str(item.get("id") or "") == normalized_spell_id
+        ),
+        None,
+    )
+    resolution = dict((spell or {}).get("resolution") or {})
+    healing = dict(resolution.get("healing") or {})
+    if resolution.get("kind") != "healing" or not healing:
+        raise ValueError("cast-healing-spell requires a structured healing spell card")
+    spell_level = int((spell or {}).get("level", 0) or 0)
+    paid_level = spell_level if cast_level is None else cast_level
+    if paid_level < max(1, spell_level):
+        raise ValueError("cast-healing-spell cast level is below the spell level")
+    slot_base_level = int(healing.get("slot_base_level", spell_level) or spell_level)
+    base_dice = str(healing.get("base_dice") or "").strip()
+    per_slot_dice = str(healing.get("per_slot_dice") or "").strip()
+    if not base_dice:
+        raise ValueError("cast-healing-spell healing card has no base dice")
+    expression_parts = [base_dice]
+    expression_parts.extend(
+        per_slot_dice
+        for _ in range(max(0, paid_level - slot_base_level))
+        if per_slot_dice
+    )
+    if healing.get("add_spellcasting_modifier"):
+        ability = str(dict(actor["sheet"].get("spellcasting") or {}).get("ability") or "")
+        score = int(dict(actor["sheet"].get("abilities") or {}).get(ability, {}).get("score", 10))
+        modifier = (score - 10) // 2
+        if modifier:
+            expression_parts.append(str(modifier))
+    healing_expression = " + ".join(expression_parts)
+
+    cast_payload: dict[str, Any] = {
+        "spell_id": normalized_spell_id,
+        "cast_level": paid_level,
+    }
+    if component_ruling is not None:
+        cast_payload["component_ruling"] = deepcopy(component_ruling)
+    cast = await client.domain(
+        "character_action",
+        {
+            "character_id": normalized_actor_id,
+            "action": "cast_spell",
+            "payload": cast_payload,
+            "expected_revision": actor["revision"],
+            "idempotency_key": _mutation_key(
+                run_id,
+                "healing-spell-cast",
+                cast_identity,
+            ),
+        },
+    )
+    if cast.get("status") not in {"committed", "pending_ruling"}:
+        raise RuntimeError("healing spell did not consume its canonical resource")
+    branches = await client.domain(
+        "branch_query",
+        {"campaign_id": campaign_id, "view": "list"},
+    )
+    branch = next((item for item in branches if item.get("is_current")), None)
+    if branch is None:
+        raise RuntimeError("campaign has no current branch")
+    campaign = await _campaign(client, campaign_id)
+    rolled = await client.domain(
+        "dnd_dice_roll",
+        {
+            "campaign_id": campaign_id,
+            "expression": healing_expression,
+            "branch_id": str(branch["id"]),
+            "expected_campaign_revision": campaign["revision"],
+            "idempotency_key": _mutation_key(
+                run_id,
+                "healing-spell-roll",
+                cast_identity,
+            ),
+        },
+    )
+    roll_result = _dice_result(rolled)
+    target_after_roll = await client.domain(
+        "character_query",
+        {"view": "get", "payload": {"character_id": normalized_target_id}},
+    )
+    healed = await client.domain(
+        "character_state_change",
+        {
+            "character_id": normalized_target_id,
+            "action": "heal",
+            "payload": {
+                "amount": int(roll_result["total"]),
+                "source_actor_id": normalized_actor_id,
+                "spell_id": normalized_spell_id,
+                "spell_level": paid_level,
+            },
+            "expected_revision": target_after_roll["revision"],
+            "idempotency_key": _mutation_key(
+                run_id,
+                "healing-spell-apply",
+                cast_identity,
+            ),
+        },
+    )
+    recipients = list(
+        dict.fromkeys(
+            [normalized_actor_id, normalized_target_id, *knowledge_actor_ids]
+        )
+    )
+    campaign = await _campaign(client, campaign_id)
+    continuity_payload = {
+        "event": {
+            "summary": normalized_reason,
+            "event_type": "healing_spell_cast",
+            "audience_scope": "party",
+            "payload": {
+                "scene_id": scene_id,
+                "location_key": location_key,
+                "occurrence_id": cast_identity,
+                "actor_id": normalized_actor_id,
+                "target_id": normalized_target_id,
+                "spell_id": normalized_spell_id,
+                "cast_level": paid_level,
+                "healing_expression": healing_expression,
+                "healing_roll": roll_result,
+                "source_excerpt": source_excerpt,
+                "source_ref": exact_ref,
+            },
+        },
+        "actor_knowledge": [
+            {
+                "actor_id": recipient,
+                "knowledge_key": (
+                    f"playthrough.{_token(run_id)}.healing_spell.{_token(cast_identity)}"
+                ),
+                "proposition": normalized_reason,
+                "disclosure_scope": "owner",
+            }
+            for recipient in recipients
+        ],
+        "branch_id": str(branch["id"]),
+    }
+    if not defer_checkpoint:
+        continuity_payload["snapshot"] = {
+            "label": f"Full playthrough healing spell: {normalized_spell_id}"
+        }
+    committed = await client.domain(
+        "continuity_commit",
+        {
+            "campaign_id": campaign_id,
+            "payload": continuity_payload,
+            "expected_revision": campaign["revision"],
+            "idempotency_key": _mutation_key(
+                run_id,
+                "healing-spell-continuity",
+                cast_identity,
+            ),
+        },
+    )
+    synced = await _manifest_mutation(
+        client,
+        campaign_id=campaign_id,
+        action="sync",
+        run_id=run_id,
+        identity=f"healing-spell-sync:{cast_identity}",
+    )
+    return {
+        "scene_id": scene_id,
+        "location_key": location_key,
+        "source_ref": exact_ref,
+        "occurrence_id": cast_identity,
+        "actor_id": normalized_actor_id,
+        "target_id": normalized_target_id,
+        "spell_id": normalized_spell_id,
+        "cast_level": paid_level,
+        "cast": cast,
+        "healing_expression": healing_expression,
+        "roll": roll_result,
+        "healing": healed,
         "knowledge_actor_ids": recipients,
         "continuity": committed,
         "sync": synced,
@@ -8713,6 +8960,28 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     actor_id=args.spell_actor_id,
                     spell_id=args.spell_id,
                     source_item_id=args.spell_source_item_id,
+                    cast_level=args.spell_cast_level,
+                    component_ruling=args.spell_component_ruling_json,
+                    reason=args.spell_reason,
+                    knowledge_actor_ids=args.knowledge_actor_id,
+                    defer_checkpoint=args.defer_checkpoint,
+                )
+            elif args.action == "cast-healing-spell":
+                if phase != "play":
+                    raise RuntimeError("cast-healing-spell requires the play phase")
+                await client.load("play.characters", "play.resolution")
+                report["result"] = await _cast_healing_spell(
+                    client,
+                    campaign_id=args.campaign_id,
+                    run_id=args.run_id,
+                    occurrence_id=args.occurrence_id,
+                    scene_id=str(args.scene_id or ""),
+                    source_excerpt=args.source_excerpt,
+                    source_ref=args.source_ref_json,
+                    location_key=args.location_key,
+                    actor_id=args.spell_actor_id,
+                    target_id=args.spell_target_id,
+                    spell_id=args.spell_id,
                     cast_level=args.spell_cast_level,
                     component_ruling=args.spell_component_ruling_json,
                     reason=args.spell_reason,
