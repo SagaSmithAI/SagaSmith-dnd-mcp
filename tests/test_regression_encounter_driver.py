@@ -17,6 +17,7 @@ from scripts.regression_encounter import (
     _choose_party_spell,
     _defense_selection,
     _encounter_actor_groups,
+    _has_action_budget,
     _has_blocking_pending,
     _has_multiattack_followup,
     _observable_target_ids,
@@ -542,6 +543,25 @@ def test_body_thief_targets_living_zero_hp_incapacitated_creature() -> None:
         party_ids=["downed", "dead", "far"],
         range_ft=5,
     ) == ["downed"]
+
+
+def test_body_thief_requires_unspent_action_budget() -> None:
+    combat = {
+        "combatants": [
+            {
+                "actor_id": "devourer",
+                "turn_budget": {
+                    "main_action": 0,
+                    "extra_action": 0,
+                    "attack_budget": 1,
+                },
+            }
+        ]
+    }
+
+    assert not _has_action_budget(combat, "devourer")
+    combat["combatants"][0]["turn_budget"]["extra_action"] = 1
+    assert _has_action_budget(combat, "devourer")
 
 
 def test_encounter_actor_groups_keep_allies_out_of_registered_party_and_reject_overlap(

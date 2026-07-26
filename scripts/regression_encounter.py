@@ -2899,6 +2899,25 @@ def _body_thief_target_ids(
     return eligible
 
 
+def _has_action_budget(combat: dict[str, Any], actor_id: str) -> bool:
+    combatant = next(
+        (
+            item
+            for item in combat.get("combatants", [])
+            if isinstance(item, dict)
+            and str(item.get("actor_id") or "") == actor_id
+        ),
+        None,
+    )
+    if combatant is None:
+        return False
+    budget = dict(combatant.get("turn_budget") or {})
+    return (
+        int(budget.get("main_action", 0) or 0) > 0
+        or int(budget.get("extra_action", 0) or 0) > 0
+    )
+
+
 def _wound_priority(actor: dict[str, Any]) -> tuple[bool, float]:
     hp = dict(dict(actor.get("sheet") or {}).get("combat") or {}).get("hp", {})
     current = max(0, int(dict(hp).get("value", 0) or 0))
@@ -4137,6 +4156,7 @@ async def _auto_run(
             contest_activity is not None
             and _hit_points(actor) > 0
             and actor_id not in body_thief_sides["inside_sources"]
+            and _has_action_budget(combat, actor_id)
         ):
             combatants = {
                 str(item["actor_id"]): item
