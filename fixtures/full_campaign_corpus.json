@@ -315,9 +315,10 @@
             "page_end": 7,
             "heading_path": [
               "Front Matter",
-              "Outline of Episodes"
+              "Outline of Episodes",
+              "advancement"
             ],
-            "chunk_content_sha256": "b6a24aea4e7dbbcce13482f0031d6edfe2ad6206702aea0ab559e7e805e2697f"
+            "chunk_content_sha256": "9318d3c251a126a7c7b1a79cf9d12d5947a70a22d8d2e881894a97010450f5ef"
           }
         ]
       }
