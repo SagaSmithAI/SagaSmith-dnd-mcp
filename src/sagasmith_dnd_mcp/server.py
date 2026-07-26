@@ -3342,6 +3342,32 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         value["party"]["inventory"] = sheet["inventory"]
         return validate_party_state(value)
 
+    def inventory_item_for_receipt(
+        target_sheet: dict[str, Any],
+        item: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Detach inventory-local links that do not exist at the destination."""
+        received = deepcopy(item)
+        if str(received.get("kind") or "") != "weapon":
+            return received
+        mechanics = dict(received.get("mechanics") or {})
+        ammunition_item_id = str(mechanics.get("ammunition_item_id") or "").strip()
+        if not ammunition_item_id:
+            return received
+        target_ammunition = next(
+            (
+                candidate
+                for candidate in dict(target_sheet.get("inventory") or {}).get("items", [])
+                if str(candidate.get("id") or "") == ammunition_item_id
+                and str(candidate.get("kind") or "") == "ammunition"
+            ),
+            None,
+        )
+        if target_ammunition is None:
+            mechanics["ammunition_item_id"] = None
+            received["mechanics"] = mechanics
+        return received
+
     def replay_idempotent(
         scope: str, key: str | None, payload: dict[str, Any]
     ) -> dict[str, Any] | None:
@@ -13511,6 +13537,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         access.require_actor(source.campaign_id, source.id, principal_id, control=True)
         access.require_actor(source.campaign_id, target.id, principal_id, control=True)
         source_sheet, moved = remove_inventory_item(source.sheet, item_id, quantity)
+        moved = inventory_item_for_receipt(target.sheet, moved)
         target_sheet = receive_inventory_item(target.sheet, moved)
         mutations = StateMutationService(storage.database)
         mutations.replace(
@@ -15681,9 +15708,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         shared = party_sheet(campaign.state)
         if direction == "deposit":
             character_sheet, moved = remove_inventory_item(character.sheet, item_id, quantity)
+            moved = inventory_item_for_receipt(shared, moved)
             shared_sheet = receive_inventory_item(shared, moved)
         else:
             shared_sheet, moved = remove_inventory_item(shared, item_id, quantity)
+            moved = inventory_item_for_receipt(character.sheet, moved)
             character_sheet = receive_inventory_item(character.sheet, moved)
         updated_state = party_state(campaign.state, shared_sheet)
         StateMutationService(storage.database).replace(
