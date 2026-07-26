@@ -27,6 +27,7 @@ from scripts.regression_playthrough import (
     _check_identity,
     _check_knowledge_key,
     _checkpoint,
+    _claim_party_item_for_character,
     _committed_check_result,
     _configure_advancement,
     _configure_ending_conditions,
@@ -1197,6 +1198,116 @@ def test_source_item_transfer_driver_uses_atomic_character_to_party_public_tool(
         _occurrence_identity("staff-handoff-1", "transfer-source-item"),
     )
     assert result["transfer"]["item"]["id"] == "staff-of-defense"
+    assert checkpoint_calls == (0 if defer_checkpoint else 1)
+    if defer_checkpoint:
+        assert result["checkpoint"] is None
+    else:
+        assert result["checkpoint"]["verification"]["valid"] is True
+
+
+@pytest.mark.parametrize("defer_checkpoint", [False, True])
+def test_party_item_claim_driver_uses_atomic_party_to_character_public_tool(
+    defer_checkpoint: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_ref = {
+        "module_id": "module-1",
+        "scene_id": "scene-1",
+        "chunk_id": "gazer-chunk",
+        "page_start": 79,
+        "page_end": 79,
+        "heading_path": ["Old Tower", "Gazer Attack"],
+        "content_sha256": "a" * 64,
+    }
+    stone = {
+        "id": "stone-of-golorr",
+        "name": "Stone of Golorr",
+        "kind": "magic_item",
+        "quantity": 1,
+    }
+
+    class Client:
+        def __init__(self) -> None:
+            sheet = default_character_sheet()
+            self.actor = {
+                "id": "pip",
+                "name": "Pip",
+                "campaign_id": "campaign-1",
+                "revision": 7,
+                "sheet": sheet,
+                "derived": {"armor_class": 15},
+            }
+            self.party = {"inventory": {"items": [deepcopy(stone)]}}
+            self.transfer_arguments: dict | None = None
+
+        async def core(self, tool_id: str, arguments: dict):
+            assert tool_id == "campaign_query"
+            if arguments["view"] == "party":
+                return {"result": deepcopy(self.party)}
+            return {"result": {"id": "campaign-1", "revision": 21}}
+
+        async def domain(self, tool_id: str, arguments: dict):
+            if tool_id == "module_query":
+                return {
+                    "module_id": "module-1",
+                    "scene_id": "scene-1",
+                    "content": "They use telekinetic rays to steal it.",
+                    "spatial": {
+                        "locations": [{"key": "upper-level", "title": "Upper Level"}]
+                    },
+                }
+            if tool_id == "character_query":
+                return deepcopy(self.actor)
+            if tool_id == "inventory_transfer":
+                self.transfer_arguments = deepcopy(arguments)
+                moved = self.party["inventory"]["items"].pop()
+                self.actor["sheet"]["inventory"]["items"].append(deepcopy(moved))
+                self.actor["revision"] += 1
+                return {
+                    "party": deepcopy(self.party),
+                    "character": deepcopy(self.actor),
+                    "item": moved,
+                }
+            raise AssertionError((tool_id, arguments))
+
+    checkpoint_calls = 0
+
+    async def checkpoint(*_args, **_kwargs):
+        nonlocal checkpoint_calls
+        checkpoint_calls += 1
+        return {"snapshot": {"slot": 14}, "verification": {"valid": True}}
+
+    monkeypatch.setattr(regression_playthrough, "_checkpoint", checkpoint)
+    client = Client()
+    result = asyncio.run(
+        _claim_party_item_for_character(
+            client,
+            campaign_id="campaign-1",
+            run_id="run-1",
+            occurrence_id="stone-bearer-1",
+            scene_id="scene-1",
+            location_key="upper-level",
+            source_excerpt="They use telekinetic rays to steal it.",
+            source_ref=source_ref,
+            character_id="pip",
+            item_id="stone-of-golorr",
+            quantity=None,
+            reason="The party entrusts the recovered Stone to Pip.",
+            checkpoint_label="Pip carries the Stone",
+            defer_checkpoint=defer_checkpoint,
+        )
+    )
+
+    assert client.transfer_arguments is not None
+    assert client.transfer_arguments["mode"] == "party_to_character"
+    assert client.transfer_arguments["payload"]["expected_campaign_revision"] == 21
+    assert client.transfer_arguments["payload"]["expected_character_revision"] == 7
+    assert client.transfer_arguments["idempotency_key"] == _mutation_key(
+        "run-1",
+        "party-item-claim",
+        _occurrence_identity("stone-bearer-1", "claim-party-item"),
+    )
+    assert result["transfer"]["item"]["id"] == "stone-of-golorr"
     assert checkpoint_calls == (0 if defer_checkpoint else 1)
     if defer_checkpoint:
         assert result["checkpoint"] is None

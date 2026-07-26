@@ -41,6 +41,7 @@ DEFERRED_CHECKPOINT_ACTIONS = frozenset(
         "prepare-narrative-npc",
         "provision-source-item",
         "transfer-source-item",
+        "claim-party-item",
         "acquire-loot",
         "spend-coins",
         "spend-item",
@@ -77,6 +78,7 @@ def _arguments() -> argparse.Namespace:
             "recover-stable",
             "provision-source-item",
             "transfer-source-item",
+            "claim-party-item",
             "acquire-loot",
             "spend-coins",
             "spend-item",
@@ -4743,6 +4745,161 @@ async def _transfer_source_item_to_party(
     }
 
 
+async def _claim_party_item_for_character(
+    client: ExposureClient,
+    *,
+    campaign_id: str,
+    run_id: str,
+    occurrence_id: str,
+    scene_id: str,
+    location_key: str,
+    source_excerpt: str,
+    source_ref: dict[str, Any] | None,
+    character_id: str,
+    item_id: str,
+    quantity: int | None,
+    reason: str,
+    checkpoint_label: str,
+    defer_checkpoint: bool = False,
+) -> dict[str, Any]:
+    claim_identity = _occurrence_identity(occurrence_id, "claim-party-item")
+    normalized_character_id = character_id.strip()
+    normalized_item_id = item_id.strip()
+    normalized_reason = reason.strip()
+    if not all(
+        (
+            scene_id,
+            location_key,
+            source_excerpt.strip(),
+            normalized_character_id,
+            normalized_item_id,
+            normalized_reason,
+        )
+    ):
+        raise ValueError(
+            "claim-party-item requires scene, location, excerpt, character, item, and reason"
+        )
+    if quantity is not None and quantity <= 0:
+        raise ValueError("claim-party-item quantity must be positive")
+
+    scene = await client.domain(
+        "module_query",
+        {
+            "campaign_id": campaign_id,
+            "view": "scene",
+            "payload": {"scene_id": scene_id},
+        },
+    )
+    exact_ref = _validate_source_ref(scene, source_ref, excerpt=source_excerpt)
+    if location_key not in {str(item.get("key") or "") for item in _scene_locations(scene)}:
+        raise ValueError("claim-party-item location is not present in the scene atlas")
+
+    actor = dict(
+        _facade_value(
+            await client.domain(
+                "character_query",
+                {"view": "get", "payload": {"character_id": normalized_character_id}},
+            )
+        )
+    )
+    party = dict(
+        _facade_value(
+            await client.core(
+                "campaign_query",
+                {
+                    "view": "party",
+                    "payload": {"campaign_id": campaign_id},
+                    "principal_id": PRINCIPAL_ID,
+                },
+            )
+        )
+    )
+    actor_item = next(
+        (
+            dict(item)
+            for item in actor["sheet"]["inventory"]["items"]
+            if str(item.get("id") or "") == normalized_item_id
+        ),
+        None,
+    )
+    party_item = next(
+        (
+            dict(item)
+            for item in party["inventory"]["items"]
+            if str(item.get("id") or "") == normalized_item_id
+        ),
+        None,
+    )
+    recovered = party_item is None and actor_item is not None
+    if party_item is None and not recovered:
+        raise ValueError("party inventory does not carry the requested item")
+    if actor_item is not None and party_item is not None:
+        raise RuntimeError("claimed item id already exists in both inventories")
+
+    if recovered:
+        transferred: dict[str, Any] = {
+            "party": party,
+            "character": actor,
+            "item": actor_item,
+            "status": "recovered",
+        }
+    else:
+        campaign = await _campaign(client, campaign_id)
+        payload: dict[str, Any] = {
+            "campaign_id": campaign_id,
+            "character_id": normalized_character_id,
+            "item_id": normalized_item_id,
+            "expected_campaign_revision": campaign["revision"],
+            "expected_character_revision": actor["revision"],
+        }
+        if quantity is not None:
+            payload["quantity"] = quantity
+        transferred = dict(
+            _facade_value(
+                await client.domain(
+                    "inventory_transfer",
+                    {
+                        "mode": "party_to_character",
+                        "payload": payload,
+                        "idempotency_key": _mutation_key(
+                            run_id,
+                            "party-item-claim",
+                            claim_identity,
+                        ),
+                    },
+                )
+            )
+        )
+        if str(dict(transferred.get("item") or {}).get("id") or "") != normalized_item_id:
+            raise RuntimeError("party item claim returned a different item")
+
+    checkpoint = (
+        None
+        if defer_checkpoint
+        else await _checkpoint(
+            client,
+            campaign_id=campaign_id,
+            run_id=run_id,
+            label=(
+                checkpoint_label.strip()
+                or f"Full playthrough party item claimed: {normalized_item_id}"
+            ),
+            checkpoint_id=f"party-item-claim:{claim_identity}",
+        )
+    )
+    return {
+        "character_id": normalized_character_id,
+        "item_id": normalized_item_id,
+        "quantity": quantity,
+        "occurrence_id": claim_identity,
+        "reason": normalized_reason,
+        "source_ref": exact_ref,
+        "transfer": transferred,
+        "recovered": recovered,
+        "checkpoint": checkpoint,
+    }
+
+
 async def _acquire_source_loot(
     client: ExposureClient,
     *,
@@ -6975,7 +7132,13 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError(
             f"--defer-checkpoint is unsupported for {args.action}; supported: {supported}"
         )
-    if args.action in {"advance-scene", "checkpoint", "sync", "transfer-source-item"}:
+    if args.action in {
+        "advance-scene",
+        "checkpoint",
+        "sync",
+        "transfer-source-item",
+        "claim-party-item",
+    }:
         _occurrence_identity(args.occurrence_id, args.action)
     server = _server_parameters(args)
     report: dict[str, Any] = {
@@ -7420,6 +7583,26 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     raise RuntimeError("transfer-source-item requires the play phase")
                 await client.load("play.characters")
                 report["result"] = await _transfer_source_item_to_party(
+                    client,
+                    campaign_id=args.campaign_id,
+                    run_id=args.run_id,
+                    occurrence_id=args.occurrence_id,
+                    scene_id=str(args.scene_id or ""),
+                    location_key=args.location_key,
+                    source_excerpt=args.source_excerpt,
+                    source_ref=args.source_ref_json,
+                    character_id=args.transfer_character_id,
+                    item_id=args.transfer_item_id,
+                    quantity=args.transfer_item_quantity,
+                    reason=args.transfer_reason,
+                    checkpoint_label=args.checkpoint_label,
+                    defer_checkpoint=args.defer_checkpoint,
+                )
+            elif args.action == "claim-party-item":
+                if phase != "play":
+                    raise RuntimeError("claim-party-item requires the play phase")
+                await client.load("play.characters")
+                report["result"] = await _claim_party_item_for_character(
                     client,
                     campaign_id=args.campaign_id,
                     run_id=args.run_id,
