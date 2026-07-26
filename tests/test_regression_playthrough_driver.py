@@ -22,6 +22,7 @@ from scripts.regression_playthrough import (
     _advance_time,
     _apply_source_damage,
     _apply_source_effect,
+    _attack_source_object,
     _award_experience,
     _branch_from_snapshot,
     _campaign_phase,
@@ -1895,6 +1896,106 @@ def test_source_exhaustion_uses_public_character_transition() -> None:
     }
     assert result["before"] == 0
     assert result["after"] == 1
+
+
+def test_source_object_attack_uses_public_character_action() -> None:
+    source_ref = {
+        "module_id": "module-1",
+        "scene_id": "scene-1",
+        "chunk_id": "fresco-chunk",
+        "page_start": 96,
+        "page_end": 96,
+        "heading_path": ["Vault", "Enthralling Fresco"],
+        "content_sha256": "a" * 64,
+    }
+    source_object = {
+        "id": "fresco-section",
+        "name": "Enthralling Fresco Section",
+        "scene_id": "scene-1",
+        "armor_class": 17,
+        "hit_points": 25,
+        "damage_immunities": ["poison", "psychic"],
+    }
+
+    class Client:
+        def __init__(self) -> None:
+            self.action_arguments: dict | None = None
+
+        async def domain(self, tool_id: str, arguments: dict):
+            if tool_id == "module_query":
+                return {
+                    "module_id": "module-1",
+                    "scene_id": "scene-1",
+                    "content": "Each section has AC 17 and 25 hit points.",
+                    "spatial": {
+                        "locations": [{"key": "fresco", "title": "Fresco"}]
+                    },
+                }
+            if tool_id == "character_query":
+                return {
+                    "id": "breaker",
+                    "campaign_id": "campaign-1",
+                    "revision": 7,
+                    "sheet": default_character_sheet(),
+                }
+            if tool_id == "campaign_query":
+                return {"id": "campaign-1", "revision": 12}
+            if tool_id == "character_action":
+                self.action_arguments = deepcopy(arguments)
+                return {
+                    "status": "committed",
+                    "object": {
+                        **deepcopy(source_object),
+                        "hit_point_maximum": 25,
+                        "hit_points": 19,
+                        "destroyed": False,
+                        "source_ref": deepcopy(source_ref),
+                    },
+                }
+            raise AssertionError((tool_id, arguments))
+
+    client = Client()
+    result = asyncio.run(
+        _attack_source_object(
+            client,
+            campaign_id="campaign-1",
+            run_id="run-1",
+            occurrence_id="fresco-attack-1",
+            scene_id="scene-1",
+            location_key="fresco",
+            source_excerpt="Each section has AC 17 and 25 hit points.",
+            source_ref=source_ref,
+            character_id="breaker",
+            object_state=source_object,
+            weapon_id="mace",
+            reason="The fresco is within melee reach.",
+            advantage=False,
+            disadvantage=False,
+            checkpoint_label="",
+            defer_checkpoint=True,
+        )
+    )
+
+    assert client.action_arguments == {
+        "character_id": "breaker",
+        "action": "attack_source_object",
+        "payload": {
+            "object": source_object,
+            "weapon_id": "mace",
+            "source_ref": source_ref,
+            "reason": "The fresco is within melee reach.",
+            "advantage": False,
+            "disadvantage": False,
+            "expected_campaign_revision": 12,
+        },
+        "expected_revision": 7,
+        "idempotency_key": _mutation_key(
+            "run-1",
+            "source-object-attack",
+            _occurrence_identity("fresco-attack-1", "attack-source-object"),
+        ),
+    }
+    assert result["object"]["hit_points"] == 19
 
 
 def test_currency_pool_driver_uses_public_atomic_party_transfer() -> None:

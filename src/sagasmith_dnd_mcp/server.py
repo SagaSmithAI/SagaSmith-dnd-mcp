@@ -147,7 +147,7 @@ from sagasmith_dnd.core_content import PACK_ID as CORE_CONTENT_PACK_ID
 from sagasmith_dnd.core_content import PACK_VERSION as CORE_CONTENT_PACK_VERSION
 from sagasmith_dnd.core_content import build_srd2014_content
 from sagasmith_dnd.core_rule_pack import get_core_rule_pack
-from sagasmith_dnd.engine import resolve_check, roll
+from sagasmith_dnd.engine import resolve_attack, resolve_check, roll
 from sagasmith_dnd.lifecycle import (
     advance_effect_durations,
     advance_elapsed_effect_durations,
@@ -11047,6 +11047,290 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         }
         return remember_idempotent(
             scope, idempotency_key, payload, response, campaign_id=campaign_id
+        )
+
+    @mcp.tool()
+    def character_source_object_attack(
+        character_id: str,
+        object_state: dict[str, Any],
+        weapon_id: str,
+        source_ref: dict[str, Any],
+        reason: str,
+        advantage: bool = False,
+        disadvantage: bool = False,
+        principal_id: str = "system:local",
+        expected_revision: int | None = None,
+        expected_campaign_revision: int | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Attack a source-defined destructible scene object outside combat."""
+        current = characters.get(character_id)
+        require_character_control(current, principal_id)
+        require_outside_active_combat(current, "source object attacks")
+        require_write_contract(expected_revision, idempotency_key)
+        if expected_campaign_revision is None:
+            raise ValueError("expected_campaign_revision is required")
+        campaign_id = str(current.campaign_id or "")
+        campaign = campaigns.get(campaign_id)
+        resolved_branch_id = require_current_branch(campaign_id, None)
+        normalized_reason = str(reason).strip()
+        if not normalized_reason:
+            raise ValueError("source object attack requires a reason")
+        requested = deepcopy(dict(object_state or {}))
+        unknown = set(requested) - {
+            "id",
+            "name",
+            "scene_id",
+            "armor_class",
+            "hit_points",
+            "damage_immunities",
+        }
+        if unknown:
+            raise ValueError(f"unsupported source object fields: {sorted(unknown)}")
+        object_id = str(requested.get("id") or "").strip()
+        object_name = str(requested.get("name") or "").strip()
+        scene_id = str(requested.get("scene_id") or "").strip()
+        armor_class = requested.get("armor_class")
+        hit_point_maximum = requested.get("hit_points")
+        immunities = sorted(
+            {
+                str(item).strip().casefold()
+                for item in requested.get("damage_immunities") or []
+                if str(item).strip()
+            }
+        )
+        if not object_id or not object_name or not scene_id:
+            raise ValueError("source object requires id, name, and scene_id")
+        if (
+            isinstance(armor_class, bool)
+            or not isinstance(armor_class, int)
+            or not 1 <= armor_class <= 30
+        ):
+            raise ValueError("source object armor_class must be an integer from 1 to 30")
+        if (
+            isinstance(hit_point_maximum, bool)
+            or not isinstance(hit_point_maximum, int)
+            or hit_point_maximum < 1
+        ):
+            raise ValueError("source object hit_points must be a positive integer")
+        exact_source = deepcopy(dict(source_ref or {}))
+        required_source_fields = {
+            "module_id",
+            "scene_id",
+            "chunk_id",
+            "page_start",
+            "page_end",
+            "heading_path",
+            "content_sha256",
+        }
+        if set(exact_source) != required_source_fields or not all(
+            exact_source.get(field)
+            for field in ("module_id", "scene_id", "chunk_id", "content_sha256")
+        ):
+            raise ValueError("source object attack requires one complete exact source_ref")
+        if str(exact_source["scene_id"]) != scene_id:
+            raise ValueError("source object scene_id must match source_ref.scene_id")
+        payload = {
+            "character_id": character_id,
+            "object_state": requested,
+            "weapon_id": weapon_id,
+            "source_ref": exact_source,
+            "reason": normalized_reason,
+            "advantage": bool(advantage),
+            "disadvantage": bool(disadvantage),
+            "branch_id": resolved_branch_id,
+        }
+        scope = (
+            f"source-object-attack:{campaign_id}:{resolved_branch_id}:{principal_id}"
+        )
+        replay = replay_idempotent(scope, idempotency_key, payload)
+        if replay is not None:
+            return replay
+        if current.revision != expected_revision:
+            raise ValueError(
+                "character revision conflict: "
+                f"expected {expected_revision}, found {current.revision}"
+            )
+        if campaign.revision != expected_campaign_revision:
+            raise ValueError(
+                "campaign revision conflict: "
+                f"expected {expected_campaign_revision}, found {campaign.revision}"
+            )
+
+        attacker = combat_actor_snapshot(character_id)
+        conditions = {
+            str(item).strip().casefold()
+            for item in dict(attacker.get("sheet") or {}).get("conditions", [])
+        }
+        if conditions & {"dead", "incapacitated", "paralyzed", "stunned", "unconscious"}:
+            raise CombatEngineError("an incapacitated or dead character cannot attack an object")
+        attack = next(
+            (
+                item
+                for item in dict(attacker.get("derived") or {})
+                .get("inventory", {})
+                .get("weapon_attacks", [])
+                if str(item.get("item_id") or "") == str(weapon_id)
+            ),
+            None,
+        )
+        if attack is None:
+            raise LookupError("weapon_id is not an equipped source object attack")
+        if not str(attack.get("damage_expression") or ""):
+            raise CombatEngineError("selected weapon has no damage expression")
+
+        scene_objects = deepcopy(dict(campaign.state.get("scene_objects") or {}))
+        scene_state = deepcopy(dict(scene_objects.get(scene_id) or {}))
+        existing = deepcopy(dict(scene_state.get(object_id) or {}))
+        immutable = {
+            "id": object_id,
+            "name": object_name,
+            "scene_id": scene_id,
+            "armor_class": armor_class,
+            "hit_point_maximum": hit_point_maximum,
+            "damage_immunities": immunities,
+            "source_ref": exact_source,
+        }
+        if existing:
+            if any(existing.get(key) != value for key, value in immutable.items()):
+                raise ValueError(
+                    "source object id already exists with different source-defined data"
+                )
+            if existing.get("destroyed"):
+                raise CombatEngineError("source object is already destroyed")
+            hit_points_before = int(existing["hit_points"])
+        else:
+            hit_points_before = hit_point_maximum
+
+        exhaustion = int(
+            dict(attacker["sheet"].get("combat") or {}).get("exhaustion", 0) or 0
+        )
+        attack_bonus = int(attack["attack_bonus"])
+        attack_disadvantage = bool(disadvantage)
+        if str(attacker["sheet"].get("edition") or "2014") == "2014":
+            attack_disadvantage = attack_disadvantage or exhaustion >= 3
+        else:
+            attack_bonus -= 2 * exhaustion
+        attack_roll = resolve_attack(
+            armor_class=armor_class,
+            attack_bonus=attack_bonus,
+            advantage=bool(advantage),
+            disadvantage=attack_disadvantage,
+        )
+        object_sheet = default_character_sheet()
+        object_sheet["edition"] = str(attacker["sheet"].get("edition") or "2014")
+        object_sheet["combat"]["hp"] = {
+            "value": hit_points_before,
+            "max": hit_point_maximum,
+            "temp": 0,
+        }
+        object_sheet["combat"]["ac"]["override"] = armor_class
+        object_sheet["traits"]["immunities"] = immunities
+        target = {
+            "id": f"scene-object:{scene_id}:{object_id}",
+            "name": object_name,
+            "sheet": validate_character_sheet(object_sheet),
+            "derived": derive_character_sheet(object_sheet),
+        }
+        plan = {
+            "damage_expression": str(attack["damage_expression"]),
+            "damage_type": str(attack.get("damage_type") or ""),
+            "additional_damage": [],
+            "ruleset": object_sheet["edition"],
+            "target_uses_death_saves": False,
+            "knock_out": False,
+            "melee": str(attack.get("attack_type") or "") == "melee",
+        }
+        updated_attacker, updated_target, settled = resolve_attack_damage(
+            attacker,
+            target,
+            plan=plan,
+            attack=attack_roll,
+            rules=effective_rule_context(
+                campaign_id,
+                facts={
+                    "actor_id": character_id,
+                    "target_kind": "source_object",
+                    "target_id": object_id,
+                    "scene_id": scene_id,
+                },
+                branch_id=resolved_branch_id,
+            ),
+        )
+        next_attacker_sheet = deepcopy(updated_attacker["sheet"])
+        ammunition = None
+        if attack.get("ammunition_item_id"):
+            next_attacker_sheet, ammunition = consume_weapon_ammunition(
+                next_attacker_sheet,
+                str(weapon_id),
+            )
+        hit_points_after = int(updated_target["sheet"]["combat"]["hp"]["value"])
+        object_after = {
+            **immutable,
+            "hit_points": hit_points_after,
+            "destroyed": hit_points_after <= 0,
+            "last_attack": {
+                "character_id": character_id,
+                "weapon_id": str(weapon_id),
+                "reason": normalized_reason,
+                "attack": deepcopy(attack_roll),
+                "damage": deepcopy(settled.get("damage")),
+            },
+        }
+        scene_state[object_id] = object_after
+        scene_objects[scene_id] = scene_state
+        next_campaign_state = deepcopy(dict(campaign.state or {}))
+        next_campaign_state["scene_objects"] = scene_objects
+        next_campaign_state["resolution_log"] = [
+            *list(next_campaign_state.get("resolution_log") or []),
+            {
+                "type": "source_object_attack",
+                "actor_id": character_id,
+                "object_id": object_id,
+                "scene_id": scene_id,
+                "attack": deepcopy(attack_roll),
+                "damage": deepcopy(settled.get("damage")),
+                "hit_points_before": hit_points_before,
+                "hit_points_after": hit_points_after,
+            },
+        ][-100:]
+        character_updates = []
+        if next_attacker_sheet != current.sheet:
+            character_updates.append(
+                CharacterStateUpdate(
+                    character_id=character_id,
+                    sheet=validate_character_sheet(next_attacker_sheet),
+                    notes=validate_character_notes(current.notes),
+                    expected_revision=current.revision,
+                )
+            )
+        revisions_result = StateMutationService(storage.database).replace(
+            campaign_id,
+            campaign_state=validate_party_state(next_campaign_state),
+            character_updates=character_updates,
+            expected_campaign_revision=campaign.revision,
+            operation="character.source_object.attack",
+            actor=principal_id,
+            branch_id=resolved_branch_id,
+            idempotency_key=idempotency_key,
+            rule_receipts=list(settled.get("rule_receipts") or []),
+        )
+        response = {
+            "status": "committed",
+            "character": character_view(characters.get(character_id)),
+            "object": object_after,
+            "attack": attack_roll,
+            "damage": settled.get("damage"),
+            "ammunition": ammunition,
+            "campaign_revision": mutation_revision(campaign_id),
+            "revisions": [asdict(item) for item in revisions_result or []],
+        }
+        return remember_idempotent(
+            scope,
+            idempotency_key,
+            payload,
+            response,
+            campaign_id=campaign_id,
         )
 
     @mcp.tool()
@@ -22739,7 +23023,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     @mcp.tool()
     def character_action(
         character_id: str,
-        action: Literal["cast_spell", "use_activity"],
+        action: Literal["cast_spell", "use_activity", "attack_source_object"],
         payload: dict[str, Any],
         principal_id: str = "system:local",
         expected_revision: int | None = None,
@@ -22760,13 +23044,27 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 expected_revision=expected_revision,
                 idempotency_key=idempotency_key,
             )
-        else:
+        elif action == "use_activity":
             result = character_use_activity(
                 character_id,
                 required(data, "activity_id"),
                 data.get("declaration"),
                 principal_id,
                 expected_revision,
+                idempotency_key,
+            )
+        else:
+            result = character_source_object_attack(
+                character_id,
+                required(data, "object"),
+                required(data, "weapon_id"),
+                required(data, "source_ref"),
+                required(data, "reason"),
+                data.get("advantage", False),
+                data.get("disadvantage", False),
+                principal_id,
+                expected_revision,
+                required(data, "expected_campaign_revision"),
                 idempotency_key,
             )
         return facade_result(action, result)
@@ -24295,6 +24593,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         "character_rest",
         "character_cast_spell",
         "character_use_activity",
+        "character_source_object_attack",
         "character_resource_set",
         "character_spell_prepare_list",
         "character_memory_add",

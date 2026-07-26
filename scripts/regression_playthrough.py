@@ -47,6 +47,7 @@ DEFERRED_CHECKPOINT_ACTIONS = frozenset(
         "apply-source-effect",
         "remove-source-effect",
         "set-source-exhaustion",
+        "attack-source-object",
         "acquire-loot",
         "spend-coins",
         "spend-item",
@@ -89,6 +90,7 @@ def _arguments() -> argparse.Namespace:
             "apply-source-effect",
             "remove-source-effect",
             "set-source-exhaustion",
+            "attack-source-object",
             "acquire-loot",
             "spend-coins",
             "spend-item",
@@ -264,6 +266,9 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--effect-json", type=json.loads)
     parser.add_argument("--effect-reason", default="")
     parser.add_argument("--exhaustion-level", type=int)
+    parser.add_argument("--object-json", type=json.loads)
+    parser.add_argument("--object-weapon-id", default="")
+    parser.add_argument("--object-reason", default="")
     parser.add_argument("--loot-acquisition-id", default="")
     parser.add_argument("--loot-coins-json", type=json.loads, default={})
     parser.add_argument("--loot-item-json", action="append", type=json.loads, default=[])
@@ -5936,6 +5941,133 @@ async def _set_source_exhaustion(
     }
 
 
+async def _attack_source_object(
+    client: ExposureClient,
+    *,
+    campaign_id: str,
+    run_id: str,
+    occurrence_id: str,
+    scene_id: str,
+    location_key: str,
+    source_excerpt: str,
+    source_ref: dict[str, Any] | None,
+    character_id: str,
+    object_state: dict[str, Any] | None,
+    weapon_id: str,
+    reason: str,
+    advantage: bool,
+    disadvantage: bool,
+    checkpoint_label: str,
+    defer_checkpoint: bool = False,
+) -> dict[str, Any]:
+    attack_identity = _occurrence_identity(occurrence_id, "attack-source-object")
+    normalized_character_id = character_id.strip()
+    normalized_weapon_id = weapon_id.strip()
+    normalized_reason = reason.strip()
+    requested_object = deepcopy(object_state) if isinstance(object_state, dict) else {}
+    if not all(
+        (
+            scene_id,
+            location_key,
+            source_excerpt.strip(),
+            normalized_character_id,
+            normalized_weapon_id,
+            str(requested_object.get("id") or "").strip(),
+            normalized_reason,
+        )
+    ):
+        raise ValueError(
+            "attack-source-object requires scene, location, excerpt, character, "
+            "object, weapon, and reason"
+        )
+    scene = await client.domain(
+        "module_query",
+        {
+            "campaign_id": campaign_id,
+            "view": "scene",
+            "payload": {"scene_id": scene_id},
+        },
+    )
+    exact_ref = _validate_source_ref(scene, source_ref, excerpt=source_excerpt)
+    if location_key not in {str(item.get("key") or "") for item in _scene_locations(scene)}:
+        raise ValueError("attack-source-object location is not present in the scene atlas")
+    if str(requested_object.get("scene_id") or "") != scene_id:
+        raise ValueError("attack-source-object object scene_id must match the cited scene")
+    actor = dict(
+        _facade_value(
+            await client.domain(
+                "character_query",
+                {"view": "get", "payload": {"character_id": normalized_character_id}},
+            )
+        )
+    )
+    if str(actor.get("campaign_id") or "") != campaign_id:
+        raise ValueError("attack-source-object actor does not belong to the campaign")
+    campaign = dict(
+        _facade_value(
+            await client.domain(
+                "campaign_query",
+                {"view": "get", "payload": {"campaign_id": campaign_id}},
+            )
+        )
+    )
+    attacked = dict(
+        _facade_value(
+            await client.domain(
+                "character_action",
+                {
+                    "character_id": normalized_character_id,
+                    "action": "attack_source_object",
+                    "payload": {
+                        "object": requested_object,
+                        "weapon_id": normalized_weapon_id,
+                        "source_ref": exact_ref,
+                        "reason": normalized_reason,
+                        "advantage": advantage,
+                        "disadvantage": disadvantage,
+                        "expected_campaign_revision": campaign["revision"],
+                    },
+                    "expected_revision": actor["revision"],
+                    "idempotency_key": _mutation_key(
+                        run_id,
+                        "source-object-attack",
+                        attack_identity,
+                    ),
+                },
+            )
+        )
+    )
+    if attacked.get("status") != "committed":
+        raise RuntimeError("source object attack did not commit")
+    settled_object = dict(attacked.get("object") or {})
+    if str(settled_object.get("id") or "") != str(requested_object["id"]):
+        raise RuntimeError("source object attack returned the wrong object")
+    checkpoint = (
+        None
+        if defer_checkpoint
+        else await _checkpoint(
+            client,
+            campaign_id=campaign_id,
+            run_id=run_id,
+            label=(
+                checkpoint_label.strip()
+                or f"Full playthrough source object attack: {requested_object['id']}"
+            ),
+            checkpoint_id=f"source-object-attack:{attack_identity}",
+        )
+    )
+    return {
+        "character_id": normalized_character_id,
+        "weapon_id": normalized_weapon_id,
+        "occurrence_id": attack_identity,
+        "reason": normalized_reason,
+        "source_ref": exact_ref,
+        "attack": attacked,
+        "object": settled_object,
+        "checkpoint": checkpoint,
+    }
+
+
 async def _acquire_source_loot(
     client: ExposureClient,
     *,
@@ -8754,6 +8886,28 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     character_id=args.effect_character_id,
                     level=args.exhaustion_level,
                     reason=args.effect_reason,
+                    checkpoint_label=args.checkpoint_label,
+                    defer_checkpoint=args.defer_checkpoint,
+                )
+            elif args.action == "attack-source-object":
+                if phase != "play":
+                    raise RuntimeError("attack-source-object requires the play phase")
+                await client.load("play.characters")
+                report["result"] = await _attack_source_object(
+                    client,
+                    campaign_id=args.campaign_id,
+                    run_id=args.run_id,
+                    occurrence_id=args.occurrence_id,
+                    scene_id=str(args.scene_id or ""),
+                    location_key=args.location_key,
+                    source_excerpt=args.source_excerpt,
+                    source_ref=args.source_ref_json,
+                    character_id=args.check_actor_id,
+                    object_state=args.object_json,
+                    weapon_id=args.object_weapon_id,
+                    reason=args.object_reason,
+                    advantage=args.check_advantage,
+                    disadvantage=args.check_disadvantage,
                     checkpoint_label=args.checkpoint_label,
                     defer_checkpoint=args.defer_checkpoint,
                 )
