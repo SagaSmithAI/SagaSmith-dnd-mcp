@@ -2872,6 +2872,7 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
                     payload["review_id"] = rule_review["id"]
                 else:
                     payload["source_id"] = source_id
+                    payload["source_statblock_name"] = source_statblock_name
                     if selected_chunk_ids:
                         payload["chunk_ids"] = selected_chunk_ids
                 if variant is not None:

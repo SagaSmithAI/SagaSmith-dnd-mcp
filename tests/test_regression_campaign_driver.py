@@ -527,6 +527,7 @@ def test_prepare_rule_statblock_discovers_chunks_by_source_page_and_text(
     args.chunk_id = []
     args.source_query = "Kenku"
     args.source_page = 195
+    args.source_statblock_name = "Kenku"
 
     report = asyncio.run(_prepare_rule_statblock(args))
 
@@ -547,6 +548,7 @@ def test_prepare_rule_statblock_discovers_chunks_by_source_page_and_text(
         if scope == "domain" and tool_id == "character_create_from"
     )
     assert create_call["payload"]["chunk_ids"] == ["kenku-chunk"]
+    assert create_call["payload"]["source_statblock_name"] == "Kenku"
     assert report["selected_source_chunks"][0]["page_start"] == 195
 
 

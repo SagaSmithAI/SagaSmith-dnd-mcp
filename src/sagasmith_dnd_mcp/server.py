@@ -146,6 +146,7 @@ from sagasmith_dnd.content_import import (
     compiled_artifacts_from_candidates,
     extract_content_candidates,
     module_statblock_review_candidates,
+    normalize_2014_statblock_candidate,
     validate_selection_ready_artifacts,
 )
 from sagasmith_dnd.core_content import PACK_ID as CORE_CONTENT_PACK_ID
@@ -234,6 +235,7 @@ from sagasmith_dnd.spells import (
     validate_spell_grant,
 )
 from sagasmith_dnd.statblocks import (
+    StatblockImportError,
     apply_statblock_variant,
     effective_statblock_rating,
     gazer_eye_ray_spec,
@@ -23475,12 +23477,42 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     )
                 )
             source_text = "\n\n".join(rendered_chunks)
-            parsed = parse_2014_statblock(
-                source_text,
-                source_key=f"rule-source:{source['source_key']}",
-                rule_refs=selected_chunk_ids,
-                name=str(data.get("name") or source.get("title") or "").strip() or None,
-            )
+            actor_name = str(data.get("name") or source.get("title") or "").strip()
+            source_statblock_name = str(data.get("source_statblock_name") or "").strip()
+            if source_statblock_name and not 2 <= len(source_statblock_name) <= 200:
+                raise ValueError(
+                    "payload.source_statblock_name must contain 2 to 200 characters"
+                )
+            text_layout_recovery: dict[str, Any] | None = None
+            try:
+                parsed = parse_2014_statblock(
+                    source_text,
+                    source_key=f"rule-source:{source['source_key']}",
+                    rule_refs=selected_chunk_ids,
+                    name=actor_name or None,
+                )
+            except StatblockImportError:
+                if not source_statblock_name:
+                    raise
+                recovered_candidate = normalize_2014_statblock_candidate(
+                    source_statblock_name,
+                    selected_chunks,
+                )
+                recovered_chunk_ids = list(recovered_candidate["source_chunk_ids"])
+                selected_chunks = [by_chunk_id[item] for item in recovered_chunk_ids]
+                selected_chunk_ids = recovered_chunk_ids
+                source_text = str(recovered_candidate["normalized_content"])
+                parsed = parse_2014_statblock(
+                    source_text,
+                    source_key=f"rule-source:{source['source_key']}",
+                    rule_refs=selected_chunk_ids,
+                    name=actor_name or None,
+                )
+                text_layout_recovery = {
+                    "profile": "deterministic-text-layout-v1",
+                    "source_statblock_name": source_statblock_name,
+                    "chunk_ids": selected_chunk_ids,
+                }
             source_key = f"rule-source:{source['source_key']}"
             hydrated_sheet, spell_warnings = hydrate_statblock_spellcasting(
                 campaign_id,
@@ -23520,6 +23552,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 f"Statblock import: rule-source:{source['source_key']} "
                 f"(source_id={source_id}; chunks={','.join(selected_chunk_ids)})."
             )
+            if text_layout_recovery is not None:
+                provenance += (
+                    "\nText-layout recovery: "
+                    f"{text_layout_recovery['profile']} "
+                    f"(printed heading={source_statblock_name})."
+                )
             if variant is not None:
                 changed_fields = (
                     ", ".join(sorted(set(variant) - {"source_ref", "source_refs"})) or "none"
@@ -23555,6 +23593,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "edition": source_edition,
                     "checksum": source["checksum"],
                     "chunk_ids": selected_chunk_ids,
+                    "text_layout_recovery": text_layout_recovery,
                 },
                 "statblock": {
                     "challenge_rating": challenge_rating,

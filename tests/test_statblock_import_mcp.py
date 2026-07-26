@@ -42,6 +42,50 @@ REACTIVE_COMMONER = COMMONER + """
 """
 
 
+SPLIT_GUARD_LAYOUT = """# Appendix B: Nonplayer Characters
+
+## CULT FANATIC
+
+### GUARD
+
+Medium humanoid (any race), any alignment Armor Class 16 (chain shirt, shield)
+Hit Points 11 (2d8 + 2) Speed 30ft.
+
+#### STR
+
+13 (+1)
+
+#### DEX
+
+12 (+1) Skills Perception +2
+
+#### CON
+
+12 (+1) Senses passive Perception 12
+
+#### INT
+
+10 (+0)
+
+#### WIS
+
+11 (+0) Languages any one language (usually Common) Challenge 1/8 (25 XP)
+
+#### ACTIONS
+
+#### CHA
+
+10 (+0) Spear. Melee or Ranged Weapon Attack: +3 to hit, reach 5 ft. or range
+20f60 ft., one target. Hit: 4 (1d6 + 1) piercing damage. Guards include members
+of a city watch, sentries in a citadel or fortified town.
+
+### KNIGHT
+
+Medium humanoid (any race), any alignment Armor Class 18 (plate) Hit Points 52
+(8d8 + 16) Speed 30ft.
+"""
+
+
 STATBLOCK_SPELLCASTER = """### Master of Souls
 
 *Medium humanoid (human), neutral evil*
@@ -433,6 +477,119 @@ def test_imported_rule_source_creates_a_source_bound_combat_actor(tmp_path: Path
                     "idempotency_key": "source-state-unmanaged",
                 },
             )
+
+    asyncio.run(exercise())
+
+
+def test_rule_statblock_recovers_split_text_layout_without_images(tmp_path: Path) -> None:
+    import_root = tmp_path / "rules"
+    import_root.mkdir()
+    source_path = import_root / "split-guard.md"
+    source_path.write_text(SPLIT_GUARD_LAYOUT, encoding="utf-8")
+    config = McpConfig(
+        home=tmp_path / "home",
+        database_url=None,
+        chroma_url=None,
+        chroma_path_override=None,
+        dnd_skills_dir=tmp_path / "dnd",
+        modulegen_skills_dir=tmp_path / "modulegen",
+        rule_import_roots=(import_root,),
+        auto_seed_rules=False,
+    )
+
+    async def exercise() -> None:
+        server = create_server(config)
+        campaign = await _call(
+            server,
+            "campaign_create",
+            {
+                "name": "Text layout recovery",
+                "edition": "2014",
+                "idempotency_key": "campaign",
+            },
+        )
+        staged = await _call(
+            server,
+            "rule_import",
+            {
+                "campaign_id": campaign["id"],
+                "action": "stage",
+                "payload": {
+                    "source_path": str(source_path),
+                    "source_key": "mm/split-guard",
+                    "title": "Split Guard",
+                    "edition": "2014",
+                    "publication_id": "mm2014",
+                },
+                "idempotency_key": "stage",
+            },
+        )
+        job_id = staged["job"]["id"]
+        await _call(
+            server,
+            "rule_import",
+            {
+                "campaign_id": campaign["id"],
+                "action": "inspect",
+                "payload": {"job_id": job_id},
+                "idempotency_key": "inspect",
+            },
+        )
+        ingested = await _call(
+            server,
+            "rule_import",
+            {
+                "campaign_id": campaign["id"],
+                "action": "ingest",
+                "payload": {"job_id": job_id},
+                "idempotency_key": "ingest",
+            },
+        )
+        chunks = await _call(
+            server,
+            "rule_pack_query",
+            {
+                "view": "source_chunks",
+                "payload": {"source_id": ingested["source_id"], "limit": 200},
+            },
+        )
+
+        created = await _call(
+            server,
+            "character_create_from",
+            {
+                "mode": "statblock",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "source_id": ingested["source_id"],
+                    "chunk_ids": [item["id"] for item in chunks],
+                    "source_statblock_name": "Guard",
+                    "name": "Mill Ruse Guard",
+                    "character_type": "monster",
+                },
+                "idempotency_key": "create-guard",
+            },
+        )
+
+        recovery = created["source"]["text_layout_recovery"]
+        assert recovery["profile"] == "deterministic-text-layout-v1"
+        assert recovery["source_statblock_name"] == "Guard"
+        assert created["source"]["chunk_ids"] == recovery["chunk_ids"]
+        assert len(recovery["chunk_ids"]) == 8
+        assert all(
+            "KNIGHT"
+            not in next(item for item in chunks if item["id"] == chunk_id)["heading_path"]
+            for chunk_id in recovery["chunk_ids"]
+        )
+        assert created["statblock"]["challenge_rating"] == "1/8"
+        assert created["statblock"]["experience_points"] == 25
+        spear = created["character"]["derived"]["inventory"]["weapon_attacks"][0]
+        assert spear["item_id"] == "spear"
+        assert spear["attack_bonus"] == 3
+        assert spear["range_ft"] == {"normal": 20, "long": 60}
+        assert "Text-layout recovery: deterministic-text-layout-v1" in created[
+            "character"
+        ]["notes"]["profile"]["dm_notes"]
 
     asyncio.run(exercise())
 
