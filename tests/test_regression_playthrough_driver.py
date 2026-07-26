@@ -2391,6 +2391,36 @@ def test_currency_pool_driver_uses_public_atomic_party_transfer() -> None:
     assert "snapshot" not in client.continuity_payload
     assert result["recovered"] is False
 
+    distribution_client = Client()
+    distributed = asyncio.run(
+        _pool_character_currency(
+            distribution_client,
+            campaign_id="campaign-1",
+            run_id="run-1",
+            occurrence_id="distribution-1",
+            scene_id="scene-1",
+            source_scene_id="source-scene-1",
+            location_key="market",
+            source_excerpt="Twenty steel mirrors cost 5 gp each.",
+            source_ref=source_ref,
+            actor_id="actor-1",
+            denomination="gp",
+            amount=10,
+            reason="The party pays the actor 10 gp from a source-defined reward.",
+            defer_checkpoint=True,
+            direction="to_character",
+        )
+    )
+
+    assert len(distribution_client.wallet_calls) == 1
+    assert distribution_client.wallet_calls[-1]["owner"] == "party"
+    assert distribution_client.wallet_calls[-1]["action"] == "transfer_to_character"
+    distribution_state = distribution_client.progress_arguments["state"][
+        "full_playthrough_currency_distributions"
+    ]
+    assert next(iter(distribution_state.values()))["amount"] == 10
+    assert distributed["direction"] == "to_character"
+
 
 def test_currency_pool_driver_recovers_completed_progress_without_double_transfer() -> None:
     source_ref = {

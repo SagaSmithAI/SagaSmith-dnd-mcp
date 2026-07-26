@@ -48,6 +48,7 @@ DEFERRED_CHECKPOINT_ACTIONS = frozenset(
         "prepare-narrative-npc",
         "provision-source-item",
         "pool-coins",
+        "distribute-coins",
         "transfer-source-item",
         "claim-party-item",
         "apply-source-effect",
@@ -93,6 +94,7 @@ def _arguments() -> argparse.Namespace:
             "recover-stable",
             "provision-source-item",
             "pool-coins",
+            "distribute-coins",
             "transfer-source-item",
             "claim-party-item",
             "apply-source-effect",
@@ -6091,8 +6093,21 @@ async def _pool_character_currency(
     amount: int | None,
     reason: str,
     defer_checkpoint: bool = False,
+    direction: str = "from_character",
 ) -> dict[str, Any]:
-    pool_identity = _occurrence_identity(occurrence_id, "pool-coins")
+    if direction not in {"from_character", "to_character"}:
+        raise ValueError("currency transfer direction must be from_character or to_character")
+    distributing = direction == "to_character"
+    action_name = "distribute-coins" if distributing else "pool-coins"
+    transfer_action = "transfer_to_character" if distributing else "transfer_from_character"
+    state_key = (
+        "full_playthrough_currency_distributions"
+        if distributing
+        else "full_playthrough_currency_pools"
+    )
+    event_type = "currency_distributed" if distributing else "currency_pooled"
+    identity_label = "currency-distribution" if distributing else "currency-pool"
+    pool_identity = _occurrence_identity(occurrence_id, action_name)
     normalized_actor_id = actor_id.strip()
     normalized_denomination = denomination.strip().lower()
     normalized_reason = reason.strip()
@@ -6108,12 +6123,12 @@ async def _pool_character_currency(
         )
     ):
         raise ValueError(
-            "pool-coins requires scene, location, excerpt, actor, denomination, and reason"
+            f"{action_name} requires scene, location, excerpt, actor, denomination, and reason"
         )
     if normalized_denomination not in {"cp", "sp", "ep", "gp", "pp"}:
-        raise ValueError("pool-coins denomination must be cp, sp, ep, gp, or pp")
+        raise ValueError(f"{action_name} denomination must be cp, sp, ep, gp, or pp")
     if isinstance(amount, bool) or not isinstance(amount, int) or amount <= 0:
-        raise ValueError("pool-coins amount must be a positive integer")
+        raise ValueError(f"{action_name} amount must be a positive integer")
 
     occurrence_scene = await client.domain(
         "module_query",
@@ -6139,7 +6154,9 @@ async def _pool_character_currency(
     if location_key not in {
         str(item.get("key") or "") for item in _scene_locations(occurrence_scene)
     }:
-        raise ValueError("pool-coins location is not present in the occurrence scene atlas")
+        raise ValueError(
+            f"{action_name} location is not present in the occurrence scene atlas"
+        )
 
     progress_rows = await client.domain(
         "module_query",
@@ -6155,7 +6172,7 @@ async def _pool_character_currency(
         None,
     )
     state_before = deepcopy(dict((progress_before or {}).get("state") or {}))
-    pools_before = deepcopy(dict(state_before.get("full_playthrough_currency_pools") or {}))
+    pools_before = deepcopy(dict(state_before.get(state_key) or {}))
     identity_token = _token(pool_identity)
     pool_details = {
         "occurrence_id": pool_identity,
@@ -6170,7 +6187,9 @@ async def _pool_character_currency(
         if not isinstance(existing_pool, dict) or any(
             existing_pool.get(key) != value for key, value in pool_details.items()
         ):
-            raise ValueError("pool-coins occurrence id already exists with different details")
+            raise ValueError(
+                f"{action_name} occurrence id already exists with different details"
+            )
         if str(existing_pool.get("status") or "") == "completed":
             return {
                 "scene": {
@@ -6195,7 +6214,9 @@ async def _pool_character_currency(
             or not isinstance(existing_pool.get("expected_campaign_revision"), int)
             or not isinstance(existing_pool.get("expected_character_revision"), int)
         ):
-            raise RuntimeError("pool-coins progress contains an invalid planned transfer")
+            raise RuntimeError(
+                f"{action_name} progress contains an invalid planned transfer"
+            )
 
     actor = dict(
         _facade_value(
@@ -6206,9 +6227,9 @@ async def _pool_character_currency(
         )
     )
     if str(actor.get("campaign_id") or "") != campaign_id:
-        raise ValueError("pool-coins actor must belong to the campaign")
+        raise ValueError(f"{action_name} actor must belong to the campaign")
     campaign = await _campaign(client, campaign_id)
-    idempotency_key = _mutation_key(run_id, "currency-pool", pool_identity)
+    idempotency_key = _mutation_key(run_id, identity_label, pool_identity)
 
     if existing_pool is None:
         planned_pool = {
@@ -6220,7 +6241,7 @@ async def _pool_character_currency(
         planned_state = deepcopy(state_before)
         planned_pools = deepcopy(pools_before)
         planned_pools[identity_token] = planned_pool
-        planned_state["full_playthrough_currency_pools"] = planned_pools
+        planned_state[state_key] = planned_pools
         progress_planned = await client.domain(
             "module_set_progress",
             {
@@ -6232,7 +6253,7 @@ async def _pool_character_currency(
                 "current_location_key": location_key,
                 "expected_state_version": int((progress_before or {}).get("state_version", 0) or 0),
                 "idempotency_key": _mutation_key(
-                    run_id, "currency-pool-progress-plan", pool_identity
+                    run_id, f"{identity_label}-progress-plan", pool_identity
                 ),
             },
         )
@@ -6246,7 +6267,7 @@ async def _pool_character_currency(
                 "wallet_change",
                 {
                     "owner": "party",
-                    "action": "transfer_from_character",
+                    "action": transfer_action,
                     "owner_id": campaign_id,
                     "denomination": normalized_denomination,
                     "amount": amount,
@@ -6262,9 +6283,9 @@ async def _pool_character_currency(
     )
 
     completed_state = deepcopy(dict((progress_planned or {}).get("state") or {}))
-    completed_pools = deepcopy(dict(completed_state.get("full_playthrough_currency_pools") or {}))
+    completed_pools = deepcopy(dict(completed_state.get(state_key) or {}))
     completed_pools[identity_token] = {**planned_pool, "status": "completed"}
-    completed_state["full_playthrough_currency_pools"] = completed_pools
+    completed_state[state_key] = completed_pools
     progress = await client.domain(
         "module_set_progress",
         {
@@ -6276,7 +6297,7 @@ async def _pool_character_currency(
             "current_location_key": location_key,
             "expected_state_version": int((progress_planned or {}).get("state_version", 0) or 0),
             "idempotency_key": _mutation_key(
-                run_id, "currency-pool-progress-complete", pool_identity
+                run_id, f"{identity_label}-progress-complete", pool_identity
             ),
         },
     )
@@ -6291,7 +6312,7 @@ async def _pool_character_currency(
     continuity_payload: dict[str, Any] = {
         "event": {
             "summary": normalized_reason,
-            "event_type": "currency_pooled",
+            "event_type": event_type,
             "audience_scope": "party",
             "payload": {
                 "scene_id": scene_id,
@@ -6308,7 +6329,9 @@ async def _pool_character_currency(
         "actor_knowledge": [
             {
                 "actor_id": normalized_actor_id,
-                "knowledge_key": (f"playthrough.{_token(run_id)}.currency_pool.{identity_token}"),
+                "knowledge_key": (
+                    f"playthrough.{_token(run_id)}.{_token(identity_label)}.{identity_token}"
+                ),
                 "proposition": normalized_reason,
                 "disclosure_scope": "owner",
             }
@@ -6317,7 +6340,10 @@ async def _pool_character_currency(
     }
     if not defer_checkpoint:
         continuity_payload["snapshot"] = {
-            "label": f"Full playthrough currency pooled: {normalized_reason}"
+            "label": (
+                f"Full playthrough currency "
+                f"{'distributed' if distributing else 'pooled'}: {normalized_reason}"
+            )
         }
     committed = await client.domain(
         "memory_change",
@@ -6326,7 +6352,9 @@ async def _pool_character_currency(
             "action": "commit",
             "payload": continuity_payload,
             "expected_revision": campaign["revision"],
-            "idempotency_key": _mutation_key(run_id, "currency-pool-continuity", pool_identity),
+            "idempotency_key": _mutation_key(
+                run_id, f"{identity_label}-continuity", pool_identity
+            ),
         },
     )
     synced = await _manifest_mutation(
@@ -6334,7 +6362,7 @@ async def _pool_character_currency(
         campaign_id=campaign_id,
         action="sync",
         run_id=run_id,
-        identity=f"currency-pool-sync:{pool_identity}",
+        identity=f"{identity_label}-sync:{pool_identity}",
     )
     return {
         "scene": {
@@ -6347,6 +6375,7 @@ async def _pool_character_currency(
         "actor_id": normalized_actor_id,
         "denomination": normalized_denomination,
         "amount": amount,
+        "direction": direction,
         "reason": normalized_reason,
         "transfer": transferred,
         "progress": progress,
@@ -9698,6 +9727,27 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     amount=args.pool_amount,
                     reason=args.pool_reason,
                     defer_checkpoint=args.defer_checkpoint,
+                )
+            elif args.action == "distribute-coins":
+                if phase != "play":
+                    raise RuntimeError("distribute-coins requires the play phase")
+                await client.load("play.characters")
+                report["result"] = await _pool_character_currency(
+                    client,
+                    campaign_id=args.campaign_id,
+                    run_id=args.run_id,
+                    occurrence_id=args.occurrence_id,
+                    scene_id=str(args.scene_id or ""),
+                    source_scene_id=args.source_scene_id,
+                    location_key=args.location_key,
+                    source_excerpt=args.source_excerpt,
+                    source_ref=args.source_ref_json,
+                    actor_id=args.pool_actor_id,
+                    denomination=args.pool_denomination,
+                    amount=args.pool_amount,
+                    reason=args.pool_reason,
+                    defer_checkpoint=args.defer_checkpoint,
+                    direction="to_character",
                 )
             elif args.action == "apply-source-effect":
                 if phase != "play":
