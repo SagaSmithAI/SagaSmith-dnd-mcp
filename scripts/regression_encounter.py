@@ -317,6 +317,16 @@ def _arguments() -> argparse.Namespace:
             "minimum_distance_ft, and exact source_excerpt"
         ),
     )
+    parser.add_argument(
+        "--agent-position-json",
+        action="append",
+        type=json.loads,
+        default=[],
+        help=(
+            "Agent-as-DM temporary-map placement with actor_id, x, y, exact "
+            "source_excerpt, and ruling_reason; repeat for every overridden participant"
+        ),
+    )
     parser.add_argument("--truce-after-defeated", type=int, default=0)
     parser.add_argument("--truce-actor-id", default="")
     parser.add_argument("--truce-source-excerpt", default="")
@@ -833,6 +843,87 @@ def _source_separations(
     return by_actor
 
 
+def _agent_positions(
+    declarations: list[dict[str, Any]],
+    *,
+    participant_ids: list[str],
+    encounter_source_excerpt: str,
+    width_cells: int = 12,
+    height_cells: int = 12,
+) -> dict[str, dict[str, Any]]:
+    """Validate source-cited temporary-map positions chosen by the Agent as DM."""
+
+    participants = set(participant_ids)
+    encounter_excerpt = _normalized_source_text(encounter_source_excerpt)
+    by_actor: dict[str, dict[str, Any]] = {}
+    occupied: set[tuple[int, int]] = set()
+    allowed = {"actor_id", "x", "y", "source_excerpt", "ruling_reason"}
+    for index, declaration in enumerate(declarations):
+        if not isinstance(declaration, dict):
+            raise ValueError(f"Agent position {index} must be an object")
+        unknown = set(declaration) - allowed
+        if unknown:
+            raise ValueError(
+                f"Agent position {index} has unsupported fields: "
+                + ", ".join(sorted(unknown))
+            )
+        actor_id = str(declaration.get("actor_id") or "").strip()
+        x = declaration.get("x")
+        y = declaration.get("y")
+        source_excerpt = str(declaration.get("source_excerpt") or "").strip()
+        ruling_reason = str(declaration.get("ruling_reason") or "").strip()
+        if (
+            actor_id not in participants
+            or actor_id in by_actor
+            or isinstance(x, bool)
+            or not isinstance(x, int)
+            or isinstance(y, bool)
+            or not isinstance(y, int)
+            or not 0 <= x < width_cells
+            or not 0 <= y < height_cells
+            or (x, y) in occupied
+            or not source_excerpt
+            or _normalized_source_text(source_excerpt) not in encounter_excerpt
+            or not ruling_reason
+        ):
+            raise ValueError(
+                f"Agent position {index} requires a unique participant and cell, "
+                "an exact encounter excerpt, and an explicit ruling reason"
+            )
+        occupied.add((x, y))
+        by_actor[actor_id] = {
+            "actor_id": actor_id,
+            "position": {"x": x, "y": y},
+            "source_excerpt": source_excerpt,
+            "ruling_reason": ruling_reason,
+        }
+    return by_actor
+
+
+def _apply_agent_positions(
+    configs: list[dict[str, Any]],
+    positions: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Apply validated Agent positions without altering any other participant facts."""
+
+    values = deepcopy(configs)
+    by_actor = {str(item["actor_id"]): item for item in values}
+    for actor_id, ruling in positions.items():
+        if actor_id not in by_actor:
+            raise ValueError("Agent position actor is absent from participant config")
+        by_actor[actor_id]["position"] = deepcopy(ruling["position"])
+    occupied = [
+        (
+            int(dict(item.get("position") or {}).get("x", -1)),
+            int(dict(item.get("position") or {}).get("y", -1)),
+        )
+        for item in values
+    ]
+    if len(occupied) != len(set(occupied)):
+        raise ValueError("Agent positions overlap another encounter participant")
+    return values
+
+
 def _apply_source_separations(
     configs: list[dict[str, Any]],
     separations: dict[str, dict[str, Any]],
@@ -909,6 +1000,7 @@ def _participant_config(
     source_conditions_by_actor: dict[str, list[dict[str, Any]]] | None = None,
     source_traits_by_actor: dict[str, list[dict[str, Any]]] | None = None,
     source_separations: dict[str, dict[str, Any]] | None = None,
+    agent_positions: dict[str, dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     allies = list(ally_ids or [])
     if len(party_ids) + len(allies) > 10 or len(hostile_ids) > 10:
@@ -988,6 +1080,7 @@ def _participant_config(
         }
         for index, actor_id in enumerate(hostile_ids)
     )
+    configs = _apply_agent_positions(configs, dict(agent_positions or {}))
     return _apply_source_separations(configs, dict(source_separations or {}))
 
 
@@ -2689,6 +2782,11 @@ async def _start(
         hostile_ids=initial_hostile_ids,
         encounter_source_excerpt=str(args.source_excerpt or ""),
     )
+    agent_positions = _agent_positions(
+        args.agent_position_json,
+        participant_ids=[*party_ids, *initial_hostile_ids],
+        encounter_source_excerpt=str(args.source_excerpt or ""),
+    )
     _, source_avoidance_evidence = _source_avoidances(
         args.source_avoidance_report,
         campaign_id=args.campaign_id,
@@ -2898,6 +2996,7 @@ async def _start(
             source_conditions_by_actor=source_conditions_by_actor,
             source_traits_by_actor=source_traits_by_actor,
             source_separations=source_separations,
+            agent_positions=agent_positions,
         ),
         "participant_manifest": _participant_manifest(
             hostile_ids,
@@ -2974,6 +3073,7 @@ async def _start(
         "source_attack_environments": list(attack_environments.values()),
         "source_casualty_pools": list(source_casualty_pools.values()),
         "source_separations": list(source_separations.values()),
+        "agent_positions": list(agent_positions.values()),
         "source_avoidances": source_avoidance_evidence,
         "precombat_loadouts": precombat_loadouts,
         "source_opening_casts": _source_opening_casts(

@@ -10,6 +10,8 @@ from scripts.regression_encounter import (
     GUIDING_BOLT_ON_HIT,
     HEALING_WORD_ID,
     MAGIC_MISSILE_ID,
+    _agent_positions,
+    _apply_agent_positions,
     _apply_party_loadouts,
     _apply_source_casualty_rolls,
     _apply_source_separations,
@@ -1781,6 +1783,83 @@ def test_source_separation_rejects_an_uncorroborated_distance() -> None:
             participant_ids=["pc-1", "lennithon"],
             hostile_ids=["lennithon"],
             encounter_source_excerpt=excerpt,
+        )
+
+
+def test_agent_positions_are_source_cited_and_preserve_the_ruling() -> None:
+    excerpt = (
+        "Group C consists of two cultists and six kobolds clustered tightly "
+        "around the temple's back door."
+    )
+    positions = _agent_positions(
+        [
+            {
+                "actor_id": "kobold-1",
+                "x": 2,
+                "y": 1,
+                "source_excerpt": excerpt,
+                "ruling_reason": "Place the tightly clustered rear-door group together.",
+            },
+            {
+                "actor_id": "kobold-2",
+                "x": 2,
+                "y": 2,
+                "source_excerpt": excerpt,
+                "ruling_reason": "Place the tightly clustered rear-door group together.",
+            },
+        ],
+        participant_ids=["pc-1", "kobold-1", "kobold-2"],
+        encounter_source_excerpt=f"Sanctuary. {excerpt}",
+    )
+
+    config = _participant_config(
+        ["pc-1"],
+        ["kobold-1", "kobold-2"],
+        surprise_by_actor={"kobold-1": True, "kobold-2": True},
+        agent_positions=positions,
+    )
+    by_actor = {item["actor_id"]: item for item in config}
+
+    assert by_actor["kobold-1"]["position"] == {"x": 2, "y": 1}
+    assert by_actor["kobold-2"]["position"] == {"x": 2, "y": 2}
+    assert positions["kobold-1"] == {
+        "actor_id": "kobold-1",
+        "position": {"x": 2, "y": 1},
+        "source_excerpt": excerpt,
+        "ruling_reason": "Place the tightly clustered rear-door group together.",
+    }
+
+
+def test_agent_positions_reject_missing_evidence_and_participant_overlap() -> None:
+    with pytest.raises(ValueError, match="exact encounter excerpt"):
+        _agent_positions(
+            [
+                {
+                    "actor_id": "kobold-1",
+                    "x": 2,
+                    "y": 1,
+                    "source_excerpt": "A different encounter.",
+                    "ruling_reason": "Place the hostile.",
+                }
+            ],
+            participant_ids=["pc-1", "kobold-1"],
+            encounter_source_excerpt="Group C is clustered tightly.",
+        )
+
+    with pytest.raises(ValueError, match="overlap"):
+        _apply_agent_positions(
+            [
+                {"actor_id": "pc-1", "position": {"x": 1, "y": 1}},
+                {"actor_id": "kobold-1", "position": {"x": 2, "y": 2}},
+            ],
+            {
+                "kobold-1": {
+                    "actor_id": "kobold-1",
+                    "position": {"x": 1, "y": 1},
+                    "source_excerpt": "Group C is clustered tightly.",
+                    "ruling_reason": "Place the hostile.",
+                }
+            },
         )
 
 
