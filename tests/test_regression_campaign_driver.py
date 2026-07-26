@@ -194,8 +194,9 @@ class _RuleStatblockTransport(AbstractAsyncContextManager):
 
 
 class _RuleStatblockClient:
-    def __init__(self) -> None:
+    def __init__(self, branch_id: str = "branch-1") -> None:
         self.revision = 10
+        self.branch_id = branch_id
         self.calls: list[tuple[str, str, dict]] = []
         self.loaded: list[tuple[str, ...]] = []
 
@@ -225,7 +226,7 @@ class _RuleStatblockClient:
         if tool_id == "branch_query":
             return [
                 {
-                    "id": "branch-1",
+                    "id": self.branch_id,
                     "is_current": True,
                     "head_snapshot_id": "snapshot-0",
                 }
@@ -372,6 +373,31 @@ def test_prepare_rule_statblock_can_defer_scene_batch_checkpoint(
         if scope == "core" and tool_id == "game_phase" and arguments["action"] == "set"
     ]
     assert phase_sets == ["lobby", "play"]
+
+
+def test_prepare_rule_statblock_scopes_actor_idempotency_to_current_branch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    keys: list[str] = []
+    for branch_id in ("branch-1", "branch-2"):
+        client = _RuleStatblockClient(branch_id)
+        _patch_rule_statblock_transport(monkeypatch, client)
+        asyncio.run(
+            _prepare_rule_statblock(
+                _rule_statblock_args(tmp_path, defer_checkpoint=True)
+            )
+        )
+        keys.append(
+            next(
+                arguments["idempotency_key"]
+                for scope, tool_id, arguments in client.calls
+                if scope == "domain" and tool_id == "character_create_from"
+            )
+        )
+
+    assert keys[0] != keys[1]
+    assert "branch-branch-1" in keys[0]
+    assert "branch-branch-2" in keys[1]
 
 
 def test_prepare_rule_statblock_checkpoints_after_returning_to_play(
@@ -697,6 +723,42 @@ def test_character_summary_keeps_provenance_for_a_disarmed_module_npc() -> None:
     )
 
     assert summary["source_bound"] is True
+
+
+def test_character_summary_counts_known_and_prepared_spells_without_conflation() -> None:
+    summary = _character_summary(
+        {
+            "id": "bard",
+            "name": "Bard",
+            "character_type": "pc",
+            "revision": 1,
+            "sheet": {
+                "inventory": {"items": []},
+                "content": {
+                    "spells": [
+                        {"id": "known-1", "access": {"known": True}},
+                        {"id": "known-2", "access": {"known": True}},
+                        {"id": "prepared-1", "access": {"prepared": True}},
+                        {"id": "spellbook-only", "access": {"spellbook": True}},
+                    ]
+                },
+            },
+            "derived": {
+                "hit_points": {"value": 8, "max": 8, "temp": 0},
+                "armor_class": 12,
+                "inventory": {"weapon_attacks": []},
+                "spellcasting": {
+                    "prepared_spell_ids": ["prepared-1"],
+                },
+            },
+            "notes": {"profile": {}},
+        }
+    )
+
+    assert summary["spell_count"] == 3
+    assert summary["known_spell_count"] == 2
+    assert summary["prepared_spell_count"] == 1
+    assert summary["spell_card_count"] == 4
 
 
 def test_expanded_source_ref_keeps_exact_module_scene_and_content_identity() -> None:

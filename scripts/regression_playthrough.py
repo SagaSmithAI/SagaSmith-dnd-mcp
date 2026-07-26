@@ -433,9 +433,7 @@ async def _query_source(
             {"campaign_id": campaign_id, "action": "get"},
         )
         preferred_module_id = str(
-            dict(dict(manifest_result.get("manifest") or {}).get("current") or {}).get(
-                "module_id"
-            )
+            dict(dict(manifest_result.get("manifest") or {}).get("current") or {}).get("module_id")
             or ""
         )
     search_arguments: dict[str, Any] = {
@@ -534,10 +532,7 @@ async def _index_source(
     )
     if not isinstance(result, list) or any(not isinstance(item, dict) for item in result):
         raise RuntimeError("module_query returned an invalid module index")
-    returned_module_ids = {
-        str(item.get("module_id") or "")
-        for item in result
-    }
+    returned_module_ids = {str(item.get("module_id") or "") for item in result}
     if returned_module_ids - {normalized_module_id}:
         raise RuntimeError("module_query returned a different module index")
     return {"module_id": normalized_module_id, "scenes": result}
@@ -700,8 +695,7 @@ async def _remap_ending_sources_for_module_revision(
     for condition in list(dict(value.get("ending") or {}).get("conditions") or []):
         source_ref = dict(dict(condition).get("source_ref") or {})
         if (
-            str(source_ref.get("asset_sha256") or "").casefold()
-            != source_asset_sha256.casefold()
+            str(source_ref.get("asset_sha256") or "").casefold() != source_asset_sha256.casefold()
             or str(source_ref.get("module_id") or "") == new_module_id
             or str(source_ref.get("module_id") or "") not in module_ids
         ):
@@ -724,8 +718,7 @@ async def _remap_ending_sources_for_module_revision(
         )
         hits = (
             search_result.get("result")
-            if isinstance(search_result, dict)
-            and isinstance(search_result.get("result"), list)
+            if isinstance(search_result, dict) and isinstance(search_result.get("result"), list)
             else search_result
         )
         if not isinstance(hits, list):
@@ -741,8 +734,7 @@ async def _remap_ending_sources_for_module_revision(
             exact_ref = dict(dict(expanded).get("source_ref") or {})
             if (
                 str(exact_ref.get("module_id") or "") == new_module_id
-                and str(exact_ref.get("content_sha256") or "").casefold()
-                == content_sha256
+                and str(exact_ref.get("content_sha256") or "").casefold() == content_sha256
                 and _normalized_source_text(excerpt)
                 in _normalized_source_text(dict(expanded).get("content"))
             ):
@@ -775,12 +767,8 @@ async def _remap_ending_sources_for_module_revision(
     for replacement in list(dict(value.get("party") or {}).get("replacements") or []):
         _remap_replacement_level_endings(
             value,
-            predecessor_actor_id=str(
-                dict(replacement).get("predecessor_actor_id") or ""
-            ),
-            replacement_actor_id=str(
-                dict(replacement).get("replacement_actor_id") or ""
-            ),
+            predecessor_actor_id=str(dict(replacement).get("predecessor_actor_id") or ""),
+            replacement_actor_id=str(dict(replacement).get("replacement_actor_id") or ""),
         )
     return value
 
@@ -798,8 +786,7 @@ def _module_refresh_manifest_identity(
 ) -> str:
     request_hash = _idempotency_request_hash(manifest)[:24]
     return (
-        f"refresh-module-manifest:{old_module_id}:{new_module_id}:"
-        f"{refresh_identity}:{request_hash}"
+        f"refresh-module-manifest:{old_module_id}:{new_module_id}:{refresh_identity}:{request_hash}"
     )
 
 
@@ -1153,7 +1140,7 @@ def _recover_committed_contest(
     state = dict(campaign.get("state") or {})
     random_stream = dict(state.get("random_stream") or {})
     last_receipt = dict(random_stream.get("last_receipt") or {})
-    if last_receipt.get("operation") != "character_contest":
+    if last_receipt.get("operation") != "character_check":
         return None
     resolution_log = list(state.get("resolution_log") or [])
     if not resolution_log:
@@ -1242,9 +1229,7 @@ async def _checkpoint(
             },
         )
         recovered = dict(receipt.get("response") or {})
-        receipt_branch_id = str(
-            receipt.get("branch_id") or recovered.get("branch_id") or ""
-        )
+        receipt_branch_id = str(receipt.get("branch_id") or recovered.get("branch_id") or "")
         if receipt_branch_id != str(current_branch["id"]):
             raise RuntimeError("checkpoint recovery receipt is from another branch")
         expected_request_hash = _idempotency_request_hash(
@@ -1257,8 +1242,7 @@ async def _checkpoint(
             str(receipt.get("request_hash") or "") != expected_request_hash
             or str(recovered.get("label") or "") != label
             or str(recovered.get("branch_id") or "") != str(current_branch["id"])
-            or str(recovered.get("id") or "")
-            != str(current_branch.get("head_snapshot_id") or "")
+            or str(recovered.get("id") or "") != str(current_branch.get("head_snapshot_id") or "")
         ):
             raise RuntimeError("checkpoint recovery receipt does not match the current branch head")
         snapshots = await client.domain(
@@ -1602,9 +1586,10 @@ async def _register_replacement(
 
     campaign = await _campaign(client, campaign_id)
     committed = await client.domain(
-        "continuity_commit",
+        "memory_change",
         {
             "campaign_id": campaign_id,
+            "action": "commit",
             "payload": {
                 "event": {
                     "summary": normalized_summary,
@@ -1778,10 +1763,7 @@ async def _advance_scene(
     )
     current_scene_id = str(dict(manifest.get("current") or {}).get("scene_id") or "")
     transitions = deepcopy(
-        dict(
-            dict(manifest.get("world_state") or {}).get("scene_transitions")
-            or {}
-        )
+        dict(dict(manifest.get("world_state") or {}).get("scene_transitions") or {})
     )
     transition_record = {
         "from_scene_id": transition_from_scene_id,
@@ -1790,14 +1772,9 @@ async def _advance_scene(
         "source_ref": exact_ref,
     }
     existing_transition = transitions.get(scene_identity)
-    exact_retry = (
-        existing_transition == transition_record
-        and current_scene_id == scene_id
-    )
+    exact_retry = existing_transition == transition_record and current_scene_id == scene_id
     initial_scene_selection = (
-        not current_scene_id
-        and transition_from_scene_id == scene_id
-        and not transitions
+        not current_scene_id and transition_from_scene_id == scene_id and not transitions
     )
     if (
         current_scene_id != transition_from_scene_id
@@ -2148,13 +2125,16 @@ async def _resolve_check(
             "character_check",
             {
                 "campaign_id": campaign_id,
-                "actor_id": actor_id,
-                "kind": kind,
-                "ability": ability,
-                "dc": dc,
-                "proficient": proficient,
-                "advantage": advantage,
-                "disadvantage": disadvantage,
+                "action": "check",
+                "payload": {
+                    "actor_id": actor_id,
+                    "kind": kind,
+                    "ability": ability,
+                    "dc": dc,
+                    "proficient": proficient,
+                    "advantage": advantage,
+                    "disadvantage": disadvantage,
+                },
                 "branch_id": str(branch["id"]),
                 "expected_revision": campaign["revision"],
                 "idempotency_key": _mutation_key(
@@ -2212,9 +2192,10 @@ async def _resolve_check(
             "label": f"Full playthrough check: {kind} at {location_key}"
         }
     committed = await client.domain(
-        "continuity_commit",
+        "memory_change",
         {
             "campaign_id": campaign_id,
+            "action": "commit",
             "payload": continuity_payload,
             "expected_revision": campaign["revision"],
             "idempotency_key": _mutation_key(run_id, "continuity", check_identity),
@@ -2283,19 +2264,14 @@ async def _resolve_contest(
         )
     ):
         raise ValueError(
-            "resolve-contest requires scene, location, excerpt, both actors, "
-            "and both abilities"
+            "resolve-contest requires scene, location, excerpt, both actors, and both abilities"
         )
     if source_actor_id == target_actor_id:
         raise ValueError("resolve-contest requires two different actors")
     if source_advantage and source_disadvantage:
-        raise ValueError(
-            "resolve-contest source cannot have advantage and disadvantage together"
-        )
+        raise ValueError("resolve-contest source cannot have advantage and disadvantage together")
     if target_advantage and target_disadvantage:
-        raise ValueError(
-            "resolve-contest target cannot have advantage and disadvantage together"
-        )
+        raise ValueError("resolve-contest target cannot have advantage and disadvantage together")
     scene = await client.domain(
         "module_query",
         {
@@ -2373,9 +2349,7 @@ async def _resolve_contest(
                     },
                 },
                 "current_location_key": location_key,
-                "expected_state_version": int(
-                    (progress_before or {}).get("state_version", 0) or 0
-                ),
+                "expected_state_version": int((progress_before or {}).get("state_version", 0) or 0),
                 "idempotency_key": _mutation_key(
                     run_id,
                     "scene-progress",
@@ -2399,19 +2373,22 @@ async def _resolve_contest(
     )
     if recovered is None:
         settled = await client.domain(
-            "character_contest",
+            "character_check",
             {
                 "campaign_id": campaign_id,
-                "source_actor_id": source_actor_id,
-                "target_actor_id": target_actor_id,
-                "source_ability": source_ability,
-                "target_ability": target_ability,
-                "source_proficient": source_proficient,
-                "target_proficient": target_proficient,
-                "source_advantage": source_advantage,
-                "source_disadvantage": source_disadvantage,
-                "target_advantage": target_advantage,
-                "target_disadvantage": target_disadvantage,
+                "action": "contest",
+                "payload": {
+                    "source_actor_id": source_actor_id,
+                    "target_actor_id": target_actor_id,
+                    "source_ability": source_ability,
+                    "target_ability": target_ability,
+                    "source_proficient": source_proficient,
+                    "target_proficient": target_proficient,
+                    "source_advantage": source_advantage,
+                    "source_disadvantage": source_disadvantage,
+                    "target_advantage": target_advantage,
+                    "target_disadvantage": target_disadvantage,
+                },
                 "branch_id": str(branch["id"]),
                 "expected_revision": campaign["revision"],
                 "idempotency_key": _mutation_key(
@@ -2436,9 +2413,7 @@ async def _resolve_contest(
             f"{source_ability.title()} versus {target_ability.title()} contest: "
             f"{outcome.replace('_', ' ')}."
         )
-    recipients = list(
-        dict.fromkeys([source_actor_id, target_actor_id, *knowledge_actor_ids])
-    )
+    recipients = list(dict.fromkeys([source_actor_id, target_actor_id, *knowledge_actor_ids]))
     campaign = await _campaign(client, campaign_id)
     continuity_payload = {
         "event": {
@@ -2486,9 +2461,10 @@ async def _resolve_contest(
             "label": f"Full playthrough ability contest at {location_key}"
         }
     committed = await client.domain(
-        "continuity_commit",
+        "memory_change",
         {
             "campaign_id": campaign_id,
+            "action": "commit",
             "payload": continuity_payload,
             "expected_revision": campaign["revision"],
             "idempotency_key": _mutation_key(
@@ -2659,9 +2635,10 @@ async def _record_event(
     if not defer_checkpoint:
         continuity_payload["snapshot"] = {"label": f"Full playthrough event: {summary.strip()}"}
     committed = await client.domain(
-        "continuity_commit",
+        "memory_change",
         {
             "campaign_id": campaign_id,
+            "action": "commit",
             "payload": continuity_payload,
             "expected_revision": campaign["revision"],
             "idempotency_key": _mutation_key(run_id, "continuity-event", event_identity),
@@ -2757,8 +2734,7 @@ async def _prepare_narrative_npc(
         f"{normalized_source_identity} [{normalized_instance_key}]"
     ):
         raise ValueError(
-            "anonymous narrative NPC name must equal "
-            "'<source identity> [<instance key>]'"
+            "anonymous narrative NPC name must equal '<source identity> [<instance key>]'"
         )
     if not normalized_instance_key and normalized_source_identity != normalized_name:
         raise ValueError(
@@ -3165,9 +3141,10 @@ async def _record_outcome(
         raise RuntimeError("campaign has no current branch")
     campaign = await _campaign(client, campaign_id)
     committed = await client.domain(
-        "continuity_commit",
+        "memory_change",
         {
             "campaign_id": campaign_id,
+            "action": "commit",
             "payload": {
                 "event": {
                     "summary": summary.strip(),
@@ -3392,9 +3369,10 @@ async def _roll_source_table(
             "label": f"Full playthrough source roll: {normalized_roll_id}"
         }
     committed = await client.domain(
-        "continuity_commit",
+        "memory_change",
         {
             "campaign_id": campaign_id,
+            "action": "commit",
             "payload": continuity_payload,
             "expected_revision": campaign["revision"],
             "idempotency_key": _mutation_key(
@@ -3497,9 +3475,7 @@ async def _apply_source_damage(
             "expression": expression,
             "branch_id": str(branch["id"]),
             "expected_campaign_revision": campaign["revision"],
-            "idempotency_key": _mutation_key(
-                run_id, "source-damage-roll", normalized_event_id
-            ),
+            "idempotency_key": _mutation_key(run_id, "source-damage-roll", normalized_event_id),
         },
     )
     roll_result = _dice_result(rolled)
@@ -3514,9 +3490,7 @@ async def _apply_source_damage(
                 "parts": [{"amount": amount, "damage_type": damage_type}],
             },
             "expected_revision": actor["revision"],
-            "idempotency_key": _mutation_key(
-                run_id, "source-damage", normalized_event_id
-            ),
+            "idempotency_key": _mutation_key(run_id, "source-damage", normalized_event_id),
         },
     )
     character_after = dict(damaged["character"])
@@ -3581,8 +3555,7 @@ async def _apply_source_damage(
                     f"{_token(normalized_event_id)}"
                 ),
                 "proposition": (
-                    f"{actor['name']} took {amount} {damage_type} damage "
-                    f"from {reason.strip()}."
+                    f"{actor['name']} took {amount} {damage_type} damage from {reason.strip()}."
                 ),
                 "disclosure_scope": "owner",
             }
@@ -3592,15 +3565,13 @@ async def _apply_source_damage(
     }
     if not checkpoint_deferred:
         continuity_payload["snapshot"] = {
-            "label": (
-                f"Full playthrough environmental damage: "
-                f"{actor['name']} at {location_key}"
-            )
+            "label": (f"Full playthrough environmental damage: {actor['name']} at {location_key}")
         }
     committed = await client.domain(
-        "continuity_commit",
+        "memory_change",
         {
             "campaign_id": campaign_id,
+            "action": "commit",
             "payload": continuity_payload,
             "expected_revision": campaign["revision"],
             "idempotency_key": _mutation_key(
@@ -3731,9 +3702,10 @@ async def _stand_after_source_event(
             "label": f"Full playthrough stand: {actor['name']} at {location_key}"
         }
     committed = await client.domain(
-        "continuity_commit",
+        "memory_change",
         {
             "campaign_id": campaign_id,
+            "action": "commit",
             "payload": continuity_payload,
             "expected_revision": campaign["revision"],
             "idempotency_key": _mutation_key(
@@ -3879,9 +3851,10 @@ async def _initialize_source_state(
             "label": f"Full playthrough source state: {actor['name']} at {location_key}"
         }
     committed = await client.domain(
-        "continuity_commit",
+        "memory_change",
         {
             "campaign_id": campaign_id,
+            "action": "commit",
             "payload": continuity_payload,
             "expected_revision": campaign["revision"],
             "idempotency_key": _mutation_key(run_id, "source-state-continuity", identity),
@@ -4031,8 +4004,7 @@ async def _short_rest(
     if song_source_ids - set(actor_ids):
         raise ValueError("every Song of Rest source must participate in the same short rest")
     if any(
-        item["song_of_rest_source_actor_id"] is not None
-        and not item["hit_dice_spends"]
+        item["song_of_rest_source_actor_id"] is not None and not item["hit_dice_spends"]
         for item in normalized
     ):
         raise ValueError("Song of Rest applies only to members who spend one or more Hit Dice")
@@ -4058,9 +4030,7 @@ async def _short_rest(
                     "hit_dice_spends": member["hit_dice_spends"],
                     "arcane_recovery": member["arcane_recovery"],
                     "natural_recovery": member["natural_recovery"],
-                    "song_of_rest_source_actor_id": member[
-                        "song_of_rest_source_actor_id"
-                    ],
+                    "song_of_rest_source_actor_id": member["song_of_rest_source_actor_id"],
                     "attune_item_id": member.get("attune_item_id"),
                     "attunement_prerequisite_confirmed": member.get(
                         "attunement_prerequisite_confirmed"
@@ -4142,9 +4112,7 @@ async def _short_rest(
         if member["natural_recovery"]:
             payload["natural_recovery"] = member["natural_recovery"]
         if member["song_of_rest_source_actor_id"] is not None:
-            payload["song_of_rest_source_actor_id"] = member[
-                "song_of_rest_source_actor_id"
-            ]
+            payload["song_of_rest_source_actor_id"] = member["song_of_rest_source_actor_id"]
         if member.get("attune_item_id"):
             payload["attune_item_id"] = member["attune_item_id"]
             payload["attunement_prerequisite_confirmed"] = True
@@ -4169,9 +4137,10 @@ async def _short_rest(
         rested.append(result)
     campaign = await _campaign(client, campaign_id)
     committed = await client.domain(
-        "continuity_commit",
+        "memory_change",
         {
             "campaign_id": campaign_id,
+            "action": "commit",
             "payload": {
                 "event": {
                     "summary": reason.strip(),
@@ -4280,9 +4249,7 @@ async def _use_activity(
             "action": "use_activity",
             "payload": payload,
             "expected_revision": actor["revision"],
-            "idempotency_key": _mutation_key(
-                run_id, "play-activity", normalized_event_id
-            ),
+            "idempotency_key": _mutation_key(run_id, "play-activity", normalized_event_id),
         },
     )
     if acted.get("status") != "committed":
@@ -4333,14 +4300,14 @@ async def _use_activity(
     if not defer_checkpoint:
         continuity_payload["snapshot"] = {
             "label": (
-                f"Full playthrough activity: {actor['name']} used "
-                f"{activity_id} at {location_key}"
+                f"Full playthrough activity: {actor['name']} used {activity_id} at {location_key}"
             )
         }
     committed = await client.domain(
-        "continuity_commit",
+        "memory_change",
         {
             "campaign_id": campaign_id,
+            "action": "commit",
             "payload": continuity_payload,
             "expected_revision": campaign["revision"],
             "idempotency_key": _mutation_key(
@@ -4552,15 +4519,13 @@ async def _cast_source_spell(
     }
     if not defer_checkpoint:
         continuity_payload["snapshot"] = {
-            "label": (
-                f"Full playthrough source spell: {actor['name']} cast "
-                f"{normalized_spell_id}"
-            )
+            "label": (f"Full playthrough source spell: {actor['name']} cast {normalized_spell_id}")
         }
     committed = await client.domain(
-        "continuity_commit",
+        "memory_change",
         {
             "campaign_id": campaign_id,
+            "action": "commit",
             "payload": continuity_payload,
             "expected_revision": campaign["revision"],
             "idempotency_key": _mutation_key(
@@ -4633,8 +4598,7 @@ async def _cast_healing_spell(
         )
     ):
         raise ValueError(
-            "cast-healing-spell requires scene, location, source, caster, target, "
-            "spell, and reason"
+            "cast-healing-spell requires scene, location, source, caster, target, spell, and reason"
         )
     scene = await client.domain(
         "module_query",
@@ -4680,9 +4644,7 @@ async def _cast_healing_spell(
         raise ValueError("cast-healing-spell healing card has no base dice")
     expression_parts = [base_dice]
     expression_parts.extend(
-        per_slot_dice
-        for _ in range(max(0, paid_level - slot_base_level))
-        if per_slot_dice
+        per_slot_dice for _ in range(max(0, paid_level - slot_base_level)) if per_slot_dice
     )
     if healing.get("add_spellcasting_modifier"):
         ability = str(dict(actor["sheet"].get("spellcasting") or {}).get("ability") or "")
@@ -4761,9 +4723,7 @@ async def _cast_healing_spell(
         },
     )
     recipients = list(
-        dict.fromkeys(
-            [normalized_actor_id, normalized_target_id, *knowledge_actor_ids]
-        )
+        dict.fromkeys([normalized_actor_id, normalized_target_id, *knowledge_actor_ids])
     )
     campaign = await _campaign(client, campaign_id)
     continuity_payload = {
@@ -4803,9 +4763,10 @@ async def _cast_healing_spell(
             "label": f"Full playthrough healing spell: {normalized_spell_id}"
         }
     committed = await client.domain(
-        "continuity_commit",
+        "memory_change",
         {
             "campaign_id": campaign_id,
+            "action": "commit",
             "payload": continuity_payload,
             "expected_revision": campaign["revision"],
             "idempotency_key": _mutation_key(
@@ -4960,9 +4921,7 @@ async def _long_rest(
                 },
                 "branch_id": str(branch["id"]),
                 "expected_revision": campaign["revision"],
-                "idempotency_key": _mutation_key(
-                    run_id, "long-rest-clock-set", rest_identity
-                ),
+                "idempotency_key": _mutation_key(run_id, "long-rest-clock-set", rest_identity),
             },
         )
     elif start_clock is not None:
@@ -5076,9 +5035,10 @@ async def _long_rest(
         raise RuntimeError("long rest did not commit")
     campaign = await _campaign(client, campaign_id)
     committed = await client.domain(
-        "continuity_commit",
+        "memory_change",
         {
             "campaign_id": campaign_id,
+            "action": "commit",
             "payload": {
                 "event": {
                     "summary": reason.strip(),
@@ -5108,9 +5068,7 @@ async def _long_rest(
                 "branch_id": str(branch["id"]),
             },
             "expected_revision": campaign["revision"],
-            "idempotency_key": _mutation_key(
-                run_id, "long-rest-continuity", rest_identity
-            ),
+            "idempotency_key": _mutation_key(run_id, "long-rest-continuity", rest_identity),
         },
     )
     synced = await _manifest_mutation(
@@ -5271,9 +5229,10 @@ async def _advance_time(
             "label": f"Full playthrough time advance: {normalized_reason}"
         }
     committed = await client.domain(
-        "continuity_commit",
+        "memory_change",
         {
             "campaign_id": campaign_id,
+            "action": "commit",
             "payload": continuity_payload,
             "expected_revision": campaign["revision"],
             "idempotency_key": _mutation_key(run_id, "advance-time-continuity", identity),
@@ -5339,9 +5298,7 @@ async def _initialize_clock(
             int(existing.get("elapsed_minutes", -1)) != requested_elapsed
             or str(existing.get("label") or "") != label
         ):
-            raise ValueError(
-                "campaign clock is already initialized to a different DM anchor"
-            )
+            raise ValueError("campaign clock is already initialized to a different DM anchor")
         return {
             "occurrence_id": identity,
             "already_initialized": True,
@@ -5368,9 +5325,7 @@ async def _initialize_clock(
             },
             "branch_id": str(branch["id"]),
             "expected_revision": campaign["revision"],
-            "idempotency_key": _mutation_key(
-                run_id, "initialize-clock", identity
-            ),
+            "idempotency_key": _mutation_key(run_id, "initialize-clock", identity),
         },
     )
     return {
@@ -5436,9 +5391,10 @@ async def _recover_stable_party(
     recipients = list(dict.fromkeys([*member_ids, *knowledge_actor_ids]))
     campaign = await _campaign(client, campaign_id)
     committed = await client.domain(
-        "continuity_commit",
+        "memory_change",
         {
             "campaign_id": campaign_id,
+            "action": "commit",
             "payload": {
                 "event": {
                     "summary": reason.strip(),
@@ -5825,11 +5781,7 @@ async def _transfer_source_item_to_party(
         else party["inventory"]["items"]
     )
     recipient_item = next(
-        (
-            dict(item)
-            for item in recipient_items
-            if str(item.get("id") or "") == normalized_item_id
-        ),
+        (dict(item) for item in recipient_items if str(item.get("id") or "") == normalized_item_id),
         None,
     )
     recovered = actor_item is None and recipient_item is not None
@@ -5898,9 +5850,7 @@ async def _transfer_source_item_to_party(
                 checkpoint_label.strip()
                 or f"Full playthrough source item transferred: {normalized_item_id}"
             ),
-            checkpoint_id=(
-                f"source-item-transfer:{transfer_identity}"
-            ),
+            checkpoint_id=(f"source-item-transfer:{transfer_identity}"),
         )
     )
     return {
@@ -6152,9 +6102,7 @@ async def _pool_character_currency(
         None,
     )
     state_before = deepcopy(dict((progress_before or {}).get("state") or {}))
-    pools_before = deepcopy(
-        dict(state_before.get("full_playthrough_currency_pools") or {})
-    )
+    pools_before = deepcopy(dict(state_before.get("full_playthrough_currency_pools") or {}))
     identity_token = _token(pool_identity)
     pool_details = {
         "occurrence_id": pool_identity,
@@ -6229,9 +6177,7 @@ async def _pool_character_currency(
                 "progress": _scene_progress_percent(progress_before),
                 "state": planned_state,
                 "current_location_key": location_key,
-                "expected_state_version": int(
-                    (progress_before or {}).get("state_version", 0) or 0
-                ),
+                "expected_state_version": int((progress_before or {}).get("state_version", 0) or 0),
                 "idempotency_key": _mutation_key(
                     run_id, "currency-pool-progress-plan", pool_identity
                 ),
@@ -6253,12 +6199,8 @@ async def _pool_character_currency(
                     "amount": amount,
                     "payload": {
                         "character_id": normalized_actor_id,
-                        "expected_campaign_revision": planned_pool[
-                            "expected_campaign_revision"
-                        ],
-                        "expected_character_revision": planned_pool[
-                            "expected_character_revision"
-                        ],
+                        "expected_campaign_revision": planned_pool["expected_campaign_revision"],
+                        "expected_character_revision": planned_pool["expected_character_revision"],
                     },
                     "idempotency_key": idempotency_key,
                 },
@@ -6267,9 +6209,7 @@ async def _pool_character_currency(
     )
 
     completed_state = deepcopy(dict((progress_planned or {}).get("state") or {}))
-    completed_pools = deepcopy(
-        dict(completed_state.get("full_playthrough_currency_pools") or {})
-    )
+    completed_pools = deepcopy(dict(completed_state.get("full_playthrough_currency_pools") or {}))
     completed_pools[identity_token] = {**planned_pool, "status": "completed"}
     completed_state["full_playthrough_currency_pools"] = completed_pools
     progress = await client.domain(
@@ -6281,9 +6221,7 @@ async def _pool_character_currency(
             "progress": _scene_progress_percent(progress_planned),
             "state": completed_state,
             "current_location_key": location_key,
-            "expected_state_version": int(
-                (progress_planned or {}).get("state_version", 0) or 0
-            ),
+            "expected_state_version": int((progress_planned or {}).get("state_version", 0) or 0),
             "idempotency_key": _mutation_key(
                 run_id, "currency-pool-progress-complete", pool_identity
             ),
@@ -6317,9 +6255,7 @@ async def _pool_character_currency(
         "actor_knowledge": [
             {
                 "actor_id": normalized_actor_id,
-                "knowledge_key": (
-                    f"playthrough.{_token(run_id)}.currency_pool.{identity_token}"
-                ),
+                "knowledge_key": (f"playthrough.{_token(run_id)}.currency_pool.{identity_token}"),
                 "proposition": normalized_reason,
                 "disclosure_scope": "owner",
             }
@@ -6331,14 +6267,13 @@ async def _pool_character_currency(
             "label": f"Full playthrough currency pooled: {normalized_reason}"
         }
     committed = await client.domain(
-        "continuity_commit",
+        "memory_change",
         {
             "campaign_id": campaign_id,
+            "action": "commit",
             "payload": continuity_payload,
             "expected_revision": campaign["revision"],
-            "idempotency_key": _mutation_key(
-                run_id, "currency-pool-continuity", pool_identity
-            ),
+            "idempotency_key": _mutation_key(run_id, "currency-pool-continuity", pool_identity),
         },
     )
     synced = await _manifest_mutation(
@@ -6417,9 +6352,7 @@ async def _apply_source_effect(
         raise ValueError("apply-source-effect location is not present in the scene atlas")
     expected_source = f"module-chunk:{exact_ref['chunk_id']}"
     if str(requested_effect.get("source") or "") != expected_source:
-        raise ValueError(
-            "source effect source must be module-chunk:<source_ref.chunk_id>"
-        )
+        raise ValueError("source effect source must be module-chunk:<source_ref.chunk_id>")
 
     actor = dict(
         _facade_value(
@@ -6445,9 +6378,7 @@ async def _apply_source_effect(
             existing.get(field) != requested_effect.get(field)
             for field in ("id", "name", "kind", "source", "duration", "changes")
         ):
-            raise ValueError(
-                "apply-source-effect id already exists with different effect data"
-            )
+            raise ValueError("apply-source-effect id already exists with different effect data")
         applied: dict[str, Any] = {
             "character": actor,
             "effect_id": effect_id,
@@ -6493,8 +6424,7 @@ async def _apply_source_effect(
             campaign_id=campaign_id,
             run_id=run_id,
             label=(
-                checkpoint_label.strip()
-                or f"Full playthrough source effect applied: {effect_id}"
+                checkpoint_label.strip() or f"Full playthrough source effect applied: {effect_id}"
             ),
             checkpoint_id=f"source-effect-add:{application_identity}",
         )
@@ -6543,8 +6473,7 @@ async def _remove_source_effect(
         )
     ):
         raise ValueError(
-            "remove-source-effect requires scene, location, excerpt, character, "
-            "effect, and reason"
+            "remove-source-effect requires scene, location, excerpt, character, effect, and reason"
         )
 
     scene = await client.domain(
@@ -6666,8 +6595,7 @@ async def _set_source_exhaustion(
         )
     ):
         raise ValueError(
-            "set-source-exhaustion requires scene, location, excerpt, character, "
-            "level, and reason"
+            "set-source-exhaustion requires scene, location, excerpt, character, level, and reason"
         )
     if level is None or not 0 <= level <= 6:
         raise ValueError("set-source-exhaustion level must be between 0 and 6")
@@ -6720,9 +6648,7 @@ async def _set_source_exhaustion(
             )
         )
         actor_after = dict(changed.get("character") or changed)
-        after = int(
-            dict(actor_after["sheet"].get("combat") or {}).get("exhaustion", 0) or 0
-        )
+        after = int(dict(actor_after["sheet"].get("combat") or {}).get("exhaustion", 0) or 0)
         if after != level:
             raise RuntimeError("source exhaustion update did not set the requested level")
 
@@ -6920,9 +6846,7 @@ async def _acquire_source_loot(
             continue
         mechanics = item.get("mechanics")
         if not isinstance(mechanics, dict):
-            raise ValueError(
-                f"acquire-loot spellbook item {index} requires explicit mechanics"
-            )
+            raise ValueError(f"acquire-loot spellbook item {index} requires explicit mechanics")
         required_spellbook_fields = {
             "spell_ids",
             "unresolved_spell_names",
@@ -6930,19 +6854,13 @@ async def _acquire_source_loot(
         }
         missing = sorted(required_spellbook_fields - set(mechanics))
         if missing:
-            raise ValueError(
-                f"acquire-loot spellbook item {index} mechanics is missing {missing}"
-            )
+            raise ValueError(f"acquire-loot spellbook item {index} mechanics is missing {missing}")
         if not isinstance(mechanics["spell_ids"], list) or not isinstance(
             mechanics["unresolved_spell_names"], list
         ):
-            raise ValueError(
-                f"acquire-loot spellbook item {index} spell contents must be arrays"
-            )
+            raise ValueError(f"acquire-loot spellbook item {index} spell contents must be arrays")
         if not str(mechanics["source_scene_id"] or "").strip():
-            raise ValueError(
-                f"acquire-loot spellbook item {index} requires a source scene id"
-            )
+            raise ValueError(f"acquire-loot spellbook item {index} requires a source scene id")
 
     source_scene = await client.domain(
         "module_query",
@@ -7067,9 +6985,10 @@ async def _acquire_source_loot(
             "label": f"Full playthrough loot: {normalized_acquisition_id}"
         }
     committed = await client.domain(
-        "continuity_commit",
+        "memory_change",
         {
             "campaign_id": campaign_id,
+            "action": "commit",
             "payload": continuity_payload,
             "expected_revision": campaign["revision"],
             "idempotency_key": _mutation_key(run_id, "loot-continuity", normalized_acquisition_id),
@@ -7258,9 +7177,10 @@ async def _spend_source_currency(
             "label": f"Full playthrough currency spend: {normalized_spend_id}"
         }
     committed = await client.domain(
-        "continuity_commit",
+        "memory_change",
         {
             "campaign_id": campaign_id,
+            "action": "commit",
             "payload": continuity_payload,
             "expected_revision": campaign["revision"],
             "idempotency_key": _mutation_key(
@@ -7453,9 +7373,10 @@ async def _spend_source_item(
             "label": f"Full playthrough item spend: {normalized_spend_id}"
         }
     committed = await client.domain(
-        "continuity_commit",
+        "memory_change",
         {
             "campaign_id": campaign_id,
+            "action": "commit",
             "payload": continuity_payload,
             "expected_revision": campaign["revision"],
             "idempotency_key": _mutation_key(run_id, "item-spend-continuity", normalized_spend_id),
@@ -7619,9 +7540,10 @@ async def _use_shared_consumable(
             "label": f"Full playthrough consumable: {normalized_use_id}"
         }
     committed = await client.domain(
-        "continuity_commit",
+        "memory_change",
         {
             "campaign_id": campaign_id,
+            "action": "commit",
             "payload": continuity_payload,
             "expected_revision": campaign["revision"],
             "idempotency_key": _mutation_key(run_id, "consumable-continuity", normalized_use_id),
@@ -7836,12 +7758,12 @@ async def _start_play(
         client,
         campaign_id=campaign_id,
         run_id=run_id,
-            occurrence_id=f"start-play:{scene_id}",
-            scene_id=scene_id,
-            source_scene_id=scene_id,
-            source_excerpt=source_excerpt,
-            source_ref=source_ref,
-            objective=objective,
+        occurrence_id=f"start-play:{scene_id}",
+        scene_id=scene_id,
+        source_scene_id=scene_id,
+        source_excerpt=source_excerpt,
+        source_ref=source_ref,
+        objective=objective,
         mark_visited=True,
         reachable_scene_ids=reachable_scene_ids,
         excluded_scenes=[],
@@ -8763,17 +8685,22 @@ async def _relock_core(
     if branch is None or not branch.get("head_snapshot_id"):
         raise RuntimeError("Core relock requires a current branch head snapshot")
     campaign = await _campaign(client, campaign_id)
-    relocked = await client.domain(
-        "campaign_core_relock",
-        {
-            "campaign_id": campaign_id,
-            "expected_core_fingerprint": previous_fingerprint,
-            "reason": normalized_reason,
-            "branch_id": str(branch["id"]),
-            "expected_revision": campaign["revision"],
-            "expected_head_snapshot_id": str(branch["head_snapshot_id"]),
-            "idempotency_key": _mutation_key(run_id, "core-relock", previous_fingerprint),
-        },
+    relocked = _facade_value(
+        await client.domain(
+            "campaign_rules",
+            {
+                "campaign_id": campaign_id,
+                "action": "core_relock",
+                "payload": {
+                    "expected_core_fingerprint": previous_fingerprint,
+                    "reason": normalized_reason,
+                    "expected_head_snapshot_id": str(branch["head_snapshot_id"]),
+                },
+                "branch_id": str(branch["id"]),
+                "expected_revision": campaign["revision"],
+                "idempotency_key": _mutation_key(run_id, "core-relock", previous_fingerprint),
+            },
+        )
     )
     if relocked.get("status") != "relocked":
         raise RuntimeError("Core relock did not commit")
@@ -8896,9 +8823,7 @@ async def _refresh_module(
                 "source_key": source_key,
                 "title": resolved_title,
             },
-            "idempotency_key": _mutation_key(
-                run_id, "module-refresh-stage", refresh_identity
-            ),
+            "idempotency_key": _mutation_key(run_id, "module-refresh-stage", refresh_identity),
         },
     )
     job_id = str(staged["job"]["id"])
@@ -8935,9 +8860,7 @@ async def _refresh_module(
         },
     )
     new_module_id = str(
-        ingested.get("module_id")
-        or dict(ingested.get("module") or {}).get("id")
-        or ""
+        ingested.get("module_id") or dict(ingested.get("module") or {}).get("id") or ""
     )
     if not new_module_id:
         raise RuntimeError("module revision ingestion returned no module id")

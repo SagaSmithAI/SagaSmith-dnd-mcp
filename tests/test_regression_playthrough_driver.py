@@ -390,9 +390,7 @@ def test_advance_scene_identity_supports_exact_retry_and_later_revisit() -> None
             occurrence_scene_id="scene-old",
         )
     )
-    assert client.manifest["world_state"]["scene_transitions"][
-        "town-visit-sibling-source"
-    ] == {
+    assert client.manifest["world_state"]["scene_transitions"]["town-visit-sibling-source"] == {
         "from_scene_id": "scene-old",
         "to_scene_id": "scene-town",
         "source_excerpt": "The survivors carry the Stone to Town.",
@@ -412,7 +410,7 @@ def test_core_relock_driver_requires_current_checkpoint_and_public_profile() -> 
 
         async def domain(self, tool_id: str, arguments: dict):
             self.tools.append(tool_id)
-            if tool_id == "campaign_rules":
+            if tool_id == "campaign_rules" and arguments["action"] == "get_profile":
                 return {
                     "profile": {"options": {"_core_rule_pack_lock": {"fingerprint": "old-core"}}}
                 }
@@ -424,9 +422,9 @@ def test_core_relock_driver_requires_current_checkpoint_and_public_profile() -> 
                         "head_snapshot_id": "snapshot-1",
                     }
                 ]
-            if tool_id == "campaign_core_relock":
-                assert arguments["expected_core_fingerprint"] == "old-core"
-                assert arguments["expected_head_snapshot_id"] == "snapshot-1"
+            if tool_id == "campaign_rules" and arguments["action"] == "core_relock":
+                assert arguments["payload"]["expected_core_fingerprint"] == "old-core"
+                assert arguments["payload"]["expected_head_snapshot_id"] == "snapshot-1"
                 self.revision += 1
                 return {
                     "status": "relocked",
@@ -448,7 +446,7 @@ def test_core_relock_driver_requires_current_checkpoint_and_public_profile() -> 
 
     assert result["checkpoint_snapshot_id"] == "snapshot-1"
     assert result["relock"]["core_pack"]["fingerprint"] == "new-core"
-    assert client.tools.count("campaign_core_relock") == 1
+    assert client.tools.count("campaign_rules") == 2
 
 
 def test_failed_module_refresh_restores_its_entry_phase() -> None:
@@ -799,7 +797,7 @@ def test_shared_consumable_driver_keeps_roll_item_and_healing_in_one_transition(
                 }
             if tool_id == "branch_query":
                 return [{"id": "branch-1", "is_current": True}]
-            if tool_id == "continuity_commit":
+            if tool_id == "memory_change":
                 self.continuity_payload = deepcopy(arguments["payload"])
                 return {
                     "event": {"id": "event-1"},
@@ -886,7 +884,7 @@ def test_source_loot_driver_uses_one_public_atomic_campaign_transition() -> None
                 }
             if tool_id == "branch_query":
                 return [{"id": "branch-1", "is_current": True}]
-            if tool_id == "continuity_commit":
+            if tool_id == "memory_change":
                 self.continuity_payload = deepcopy(arguments["payload"])
                 assert len(arguments["payload"]["actor_knowledge"]) == 2
                 return {"event": {"id": "event-1"}, "snapshot": {"slot": 7}}
@@ -990,9 +988,7 @@ def test_source_loot_driver_accepts_explicit_spellbook_contents() -> None:
                     "module_id": "module-1",
                     "scene_id": "scene-1",
                     "content": "The spellbook contains burning hands.",
-                    "spatial": {
-                        "locations": [{"key": "treasure-room", "title": "Treasure Room"}]
-                    },
+                    "spatial": {"locations": [{"key": "treasure-room", "title": "Treasure Room"}]},
                 }
             if tool_id == "campaign_change":
                 self.revision += 1
@@ -1004,7 +1000,7 @@ def test_source_loot_driver_accepts_explicit_spellbook_contents() -> None:
                 }
             if tool_id == "branch_query":
                 return [{"id": "branch-1", "is_current": True}]
-            if tool_id == "continuity_commit":
+            if tool_id == "memory_change":
                 self.revision += 1
                 return {"event": {"id": "event-1"}}
             if tool_id == "playthrough_manifest":
@@ -1574,9 +1570,7 @@ def test_party_item_claim_driver_uses_atomic_party_to_character_public_tool(
                     "module_id": "module-1",
                     "scene_id": "scene-1",
                     "content": "They use telekinetic rays to steal it.",
-                    "spatial": {
-                        "locations": [{"key": "upper-level", "title": "Upper Level"}]
-                    },
+                    "spatial": {"locations": [{"key": "upper-level", "title": "Upper Level"}]},
                 }
             if tool_id == "character_query":
                 return deepcopy(self.actor)
@@ -1678,9 +1672,7 @@ def test_source_effect_application_uses_public_character_transition(
                     "module_id": "module-1",
                     "scene_id": "scene-1",
                     "content": "A failed save charms the creature for 24 hours.",
-                    "spatial": {
-                        "locations": [{"key": "fresco", "title": "Fresco"}]
-                    },
+                    "spatial": {"locations": [{"key": "fresco", "title": "Fresco"}]},
                 }
             if tool_id == "character_query":
                 return deepcopy(self.actor)
@@ -1796,9 +1788,7 @@ def test_source_effect_removal_uses_public_character_transition(
                     "module_id": "module-1",
                     "scene_id": "scene-1",
                     "content": "The target is frightened until the next turn.",
-                    "spatial": {
-                        "locations": [{"key": "upper-level", "title": "Upper Level"}]
-                    },
+                    "spatial": {"locations": [{"key": "upper-level", "title": "Upper Level"}]},
                 }
             if tool_id == "character_query":
                 return deepcopy(self.actor)
@@ -1882,9 +1872,7 @@ def test_source_exhaustion_uses_public_character_transition() -> None:
                     "module_id": "module-1",
                     "scene_id": "scene-1",
                     "content": "After 24 hours, the creature gains one level of exhaustion.",
-                    "spatial": {
-                        "locations": [{"key": "fresco", "title": "Fresco"}]
-                    },
+                    "spatial": {"locations": [{"key": "fresco", "title": "Fresco"}]},
                 }
             if tool_id == "character_query":
                 return deepcopy(self.actor)
@@ -1967,9 +1955,7 @@ def test_source_object_attack_uses_public_character_action() -> None:
                     "module_id": "module-1",
                     "scene_id": "scene-1",
                     "content": "Each section has AC 17 and 25 hit points.",
-                    "spatial": {
-                        "locations": [{"key": "fresco", "title": "Fresco"}]
-                    },
+                    "spatial": {"locations": [{"key": "fresco", "title": "Fresco"}]},
                 }
             if tool_id == "character_query":
                 return {
@@ -2097,9 +2083,7 @@ def test_healing_spell_driver_pays_rolls_and_applies_public_healing(
                     "module_id": "module-1",
                     "scene_id": "scene-1",
                     "content": "A failed save causes a 60-foot fall.",
-                    "spatial": {
-                        "locations": [{"key": "bridge", "title": "Bridge"}]
-                    },
+                    "spatial": {"locations": [{"key": "bridge", "title": "Bridge"}]},
                 }
             if tool_id == "character_query":
                 actor_id = arguments["payload"]["character_id"]
@@ -2143,7 +2127,7 @@ def test_healing_spell_driver_pays_rolls_and_applies_public_healing(
                         "sheet": healed_sheet,
                     }
                 }
-            if tool_id == "continuity_commit":
+            if tool_id == "memory_change":
                 return {"event": {"id": "event-1"}}
             raise AssertionError((tool_id, arguments))
 
@@ -2235,9 +2219,7 @@ def test_currency_pool_driver_uses_public_atomic_party_transfer() -> None:
                 return {
                     "module_id": "module-1",
                     "scene_id": scene_id,
-                    "spatial": {
-                        "locations": [{"key": "market", "title": "Market"}]
-                    },
+                    "spatial": {"locations": [{"key": "market", "title": "Market"}]},
                 }
             if tool_id == "character_query":
                 return {
@@ -2272,14 +2254,12 @@ def test_currency_pool_driver_uses_public_atomic_party_transfer() -> None:
                     "scope_id": "party",
                     "status": "active",
                     "progress": 0,
-                    "state_version": (
-                        int(arguments.get("expected_state_version", 0)) + 1
-                    ),
+                    "state_version": (int(arguments.get("expected_state_version", 0)) + 1),
                     "state": deepcopy(arguments["state"]),
                 }
             if tool_id == "branch_query":
                 return [{"id": "branch-1", "is_current": True}]
-            if tool_id == "continuity_commit":
+            if tool_id == "memory_change":
                 self.continuity_payload = deepcopy(arguments["payload"])
                 self.campaign_revision += 1
                 return {"event": {"id": "event-1"}}
@@ -2371,9 +2351,7 @@ def test_currency_pool_driver_recovers_completed_progress_without_double_transfe
                 return {
                     "module_id": "module-1",
                     "scene_id": scene_id,
-                    "spatial": {
-                        "locations": [{"key": "market", "title": "Market"}]
-                    },
+                    "spatial": {"locations": [{"key": "market", "title": "Market"}]},
                 }
             raise AssertionError((tool_id, arguments))
 
@@ -2450,7 +2428,7 @@ def test_source_currency_spend_driver_uses_one_public_atomic_campaign_transition
                 }
             if tool_id == "branch_query":
                 return [{"id": "branch-1", "is_current": True}]
-            if tool_id == "continuity_commit":
+            if tool_id == "memory_change":
                 self.continuity_payload = deepcopy(arguments["payload"])
                 assert len(arguments["payload"]["actor_knowledge"]) == 2
                 assert arguments["payload"]["event"]["event_type"] == "currency_spent"
@@ -2542,7 +2520,7 @@ def test_source_item_spend_driver_uses_one_public_atomic_campaign_transition(
                 }
             if tool_id == "branch_query":
                 return [{"id": "branch-1", "is_current": True}]
-            if tool_id == "continuity_commit":
+            if tool_id == "memory_change":
                 self.continuity_payload = deepcopy(arguments["payload"])
                 assert len(arguments["payload"]["actor_knowledge"]) == 3
                 assert arguments["payload"]["event"]["event_type"] == "item_spent"
@@ -2853,7 +2831,7 @@ def test_source_table_roll_is_public_replayable_and_deferred() -> None:
                 assert next(iter(stored.values()))["result"]["total"] == 18
                 assert arguments["expected_state_version"] == 2
                 return {"scene_id": "scene-1", "state_version": 3}
-            if tool_id == "continuity_commit":
+            if tool_id == "memory_change":
                 event = arguments["payload"]["event"]
                 assert event["event_type"] == "source_table_roll"
                 assert event["audience_scope"] == "dm"
@@ -2933,7 +2911,7 @@ def test_stable_party_recovery_uses_one_public_campaign_transition() -> None:
                     "recoveries": {"actor-1": {}, "actor-2": {}},
                     "random_stream_receipt": {"start_position": 10, "end_position": 12},
                 }
-            if tool_id == "continuity_commit":
+            if tool_id == "memory_change":
                 assert len(arguments["payload"]["actor_knowledge"]) == 3
                 self.keys["continuity"] = arguments["idempotency_key"]
                 return {"event": {"id": "event-1"}, "snapshot": {"slot": 7}}
@@ -3149,7 +3127,7 @@ def test_module_revision_remaps_exact_ending_source_and_scene_check() -> None:
                     "fact_key": "",
                     "operator": "at_least",
                     "value": 5,
-                }
+                },
             ],
         }
     ]
@@ -3222,9 +3200,7 @@ def test_module_refresh_validates_ingested_scene_mapping_before_activation(
     }
     events: list[str] = []
     indexes = {
-        "module-v1": [
-            {"scene_id": "scene-v1", "stable_key": "chapter-cave"}
-        ],
+        "module-v1": [{"scene_id": "scene-v1", "stable_key": "chapter-cave"}],
         "module-v2": [
             {
                 "scene_id": "scene-v2",
@@ -3285,9 +3261,7 @@ def test_module_refresh_validates_ingested_scene_mapping_before_activation(
             "revision": 4,
             "state": {
                 "game_phase": "lobby",
-                "module_imports": {
-                    "active": {"module-key": {"module_id": "module-v1"}}
-                },
+                "module_imports": {"active": {"module-key": {"module_id": "module-v1"}}},
             },
         }
 
@@ -3341,9 +3315,7 @@ def test_module_refresh_rejects_changing_the_logical_source_key(
         return {
             "revision": 4,
             "state": {
-                "module_imports": {
-                    "active": {"stable-module-key": {"module_id": "module-v1"}}
-                }
+                "module_imports": {"active": {"stable-module-key": {"module_id": "module-v1"}}}
             },
         }
 
@@ -3404,10 +3376,7 @@ def test_in_place_module_refresh_does_not_duplicate_manifest_module_id() -> None
     assert updated["traversal"]["reachable_scene_ids"] == ["scene-v1"]
     assert manifest["module_ids"] == ["module-v1"]
     assert _module_refresh_manifest_action("module-v1", "module-v1") == "replace"
-    assert (
-        _module_refresh_manifest_action("module-v1", "module-v2")
-        == "extend_modules"
-    )
+    assert _module_refresh_manifest_action("module-v1", "module-v2") == "extend_modules"
 
 
 def test_module_refresh_manifest_identity_tracks_the_exact_manifest_payload() -> None:
@@ -3614,7 +3583,7 @@ def test_replacement_join_preserves_predecessor_and_only_hands_off_explicit_know
                 ]
             if tool_id == "actor_knowledge_query":
                 return deepcopy(self.knowledge[arguments["actor_id"]])
-            if tool_id == "continuity_commit":
+            if tool_id == "memory_change":
                 assert "snapshot" not in arguments["payload"]
                 rows = arguments["payload"]["actor_knowledge"]
                 assert [item["actor_id"] for item in rows] == [
@@ -4484,16 +4453,17 @@ def test_source_cited_check_persists_result_and_explicit_knowledge(
             if tool_id == "branch_query":
                 return [{"id": "branch-1", "is_current": True}]
             if tool_id == "character_check":
-                assert arguments["kind"] == "ability"
-                assert arguments["ability"] == "survival"
-                assert arguments["advantage"] is False
-                assert arguments["disadvantage"] is True
+                assert arguments["action"] == "check"
+                assert arguments["payload"]["kind"] == "ability"
+                assert arguments["payload"]["ability"] == "survival"
+                assert arguments["payload"]["advantage"] is False
+                assert arguments["payload"]["disadvantage"] is True
                 assert arguments["idempotency_key"] == _mutation_key(
                     "run-1", "character-check", expected_identity
                 )
                 self.revision += 1
                 return {"status": "committed", "result": {"success": True, "total": 14}}
-            if tool_id == "continuity_commit":
+            if tool_id == "memory_change":
                 assert [item["actor_id"] for item in arguments["payload"]["actor_knowledge"]] == [
                     "actor-1",
                     "actor-2",
@@ -4503,8 +4473,7 @@ def test_source_cited_check_persists_result_and_explicit_knowledge(
                     for item in arguments["payload"]["actor_knowledge"]
                 )
                 assert all(
-                    item["knowledge_key"]
-                    == _check_knowledge_key("run-1", expected_identity)
+                    item["knowledge_key"] == _check_knowledge_key("run-1", expected_identity)
                     for item in arguments["payload"]["actor_knowledge"]
                 )
                 assert arguments["payload"]["event"]["payload"]["source_ref"] == source_ref
@@ -4556,9 +4525,9 @@ def test_source_cited_check_persists_result_and_explicit_knowledge(
     assert result["check"] == {"success": True, "total": 14}
     assert result["knowledge_actor_ids"] == ["actor-1", "actor-2"]
     assert result["sync"]["campaign_revision"] == 7
-    assert _check_knowledge_key(
-        "run-1", "trail-survival-1"
-    ) != _check_knowledge_key("run-1", "trail-survival-2")
+    assert _check_knowledge_key("run-1", "trail-survival-1") != _check_knowledge_key(
+        "run-1", "trail-survival-2"
+    )
 
 
 def test_check_identity_uses_explicit_occurrence_not_mutable_check_content() -> None:
@@ -4684,9 +4653,7 @@ def test_ability_contest_accepts_full_and_compact_exposure_shapes() -> None:
         "winner_actor_id": "bard",
     }
 
-    assert _committed_contest_result(
-        {"status": "committed", "result": result}
-    ) == result
+    assert _committed_contest_result({"status": "committed", "result": result}) == result
     assert _committed_contest_result(result) == result
     with pytest.raises(RuntimeError, match="did not commit"):
         _committed_contest_result({"status": "pending_ruling"})
@@ -4843,7 +4810,7 @@ def test_source_damage_rolls_then_damages_and_knocks_prone_through_public_tools(
                     },
                     "status": "knocked_prone",
                 }
-            if tool_id == "continuity_commit":
+            if tool_id == "memory_change":
                 event = arguments["payload"]["event"]
                 assert event["payload"]["amount"] == expected_amount
                 assert event["payload"]["damage_roll"]["total"] == 4
@@ -4899,13 +4866,9 @@ def test_source_damage_rolls_then_damages_and_knocks_prone_through_public_tools(
         assert result["checkpoint_deferred"] is defer_checkpoint
         assert ("snapshot" in result["continuity"]) is not defer_checkpoint
     assert result["knowledge_actor_ids"] == ["actor-1", "actor-2"]
-    assert _mutation_key(
-        "run-1", "source-damage-roll", "chimney-fall-1"
-    ) in client.keys
+    assert _mutation_key("run-1", "source-damage-roll", "chimney-fall-1") in client.keys
     assert _mutation_key("run-1", "source-damage", "chimney-fall-1") in client.keys
-    assert _mutation_key(
-        "run-1", "source-damage-continuity", "chimney-fall-1"
-    ) in client.keys
+    assert _mutation_key("run-1", "source-damage-continuity", "chimney-fall-1") in client.keys
 
 
 @pytest.mark.parametrize("defer_checkpoint", [False, True])
@@ -4954,7 +4917,7 @@ def test_source_event_stand_uses_validated_public_character_action(
                 return {"status": "stood", "character": {"revision": 5}}
             if tool_id == "branch_query":
                 return [{"id": "branch-1", "is_current": True}]
-            if tool_id == "continuity_commit":
+            if tool_id == "memory_change":
                 assert arguments["payload"]["event"]["payload"]["source_ref"] == source_ref
                 assert ("snapshot" in arguments["payload"]) is not defer_checkpoint
                 self.keys["continuity"] = arguments["idempotency_key"]
@@ -5054,7 +5017,7 @@ def test_source_state_initialization_uses_cited_public_action_without_fake_damag
                 }
             if tool_id == "branch_query":
                 return [{"id": "branch-1", "is_current": True}]
-            if tool_id == "continuity_commit":
+            if tool_id == "memory_change":
                 assert arguments["payload"]["event"]["audience_scope"] == "dm"
                 assert arguments["payload"]["event"]["payload"]["source_ref"] == source_ref
                 assert ("snapshot" in arguments["payload"]) is not defer_checkpoint
@@ -5136,13 +5099,8 @@ def test_short_rest_advances_clock_and_applies_only_explicit_resource_choices() 
                         assert arguments["payload"]["hit_dice_spends"] == [
                             {"key": "fighter:d10", "count": 1}
                         ]
-                        assert (
-                            arguments["payload"]["song_of_rest_source_actor_id"]
-                            == "wizard"
-                        )
-                        assert arguments["payload"]["rest_activity_minutes"] == {
-                            "meditation": 30
-                        }
+                        assert arguments["payload"]["song_of_rest_source_actor_id"] == "wizard"
+                        assert arguments["payload"]["rest_activity_minutes"] == {"meditation": 30}
                     if actor_id == "wizard":
                         assert arguments["payload"]["arcane_recovery"] == {"1": 1}
                     return {"ready": True, "character_id": actor_id}
@@ -5188,13 +5146,8 @@ def test_short_rest_advances_clock_and_applies_only_explicit_resource_choices() 
                     assert arguments["payload"]["hit_dice_spends"] == [
                         {"key": "fighter:d10", "count": 1}
                     ]
-                    assert (
-                        arguments["payload"]["song_of_rest_source_actor_id"]
-                        == "wizard"
-                    )
-                    assert arguments["payload"]["rest_activity_minutes"] == {
-                        "meditation": 30
-                    }
+                    assert arguments["payload"]["song_of_rest_source_actor_id"] == "wizard"
+                    assert arguments["payload"]["rest_activity_minutes"] == {"meditation": 30}
                 else:
                     assert "hit_dice_spends" not in arguments["payload"]
                     assert "rest_activity_minutes" not in arguments["payload"]
@@ -5207,7 +5160,7 @@ def test_short_rest_advances_clock_and_applies_only_explicit_resource_choices() 
                     "status": "committed",
                     "character": {"id": arguments["character_id"]},
                 }
-            if tool_id == "continuity_commit":
+            if tool_id == "memory_change":
                 self.remember("continuity", arguments["idempotency_key"])
                 assert arguments["payload"]["event"]["payload"]["duration_minutes"] == 60
                 self.revision += 1
@@ -5322,7 +5275,7 @@ def test_source_bound_time_advance_commits_clock_knowledge_and_snapshot(
                 }
                 self.revision += 1
                 return {"world_time": deepcopy(self.world_time)}
-            if tool_id == "continuity_commit":
+            if tool_id == "memory_change":
                 payload = arguments["payload"]
                 assert payload["event"]["payload"]["source_ref"] == source_ref
                 assert payload["event"]["payload"]["elapsed_minutes"] == 780
@@ -5430,7 +5383,7 @@ def test_play_activity_records_structured_effect_and_random_receipt(
                 }
             if tool_id == "branch_query":
                 return [{"id": "branch-1", "is_current": True}]
-            if tool_id == "continuity_commit":
+            if tool_id == "memory_change":
                 payload = arguments["payload"]["event"]["payload"]
                 assert payload["core_effect"]["kind"] == "second_wind"
                 assert payload["activity_event_id"] == "second-wind-before-pursuit"
@@ -5468,12 +5421,11 @@ def test_play_activity_records_structured_effect_and_random_receipt(
     assert result["action"]["result"]["core_effect"]["after_hp"] == 10
     assert result["knowledge_actor_ids"] == ["fighter", "cleric"]
     assert ("snapshot" in result["continuity"]) is not defer_checkpoint
-    assert _mutation_key(
-        "run-1", "play-activity", "second-wind-before-pursuit"
-    ) in Client.keys
-    assert _mutation_key(
-        "run-1", "play-activity-continuity", "second-wind-before-pursuit"
-    ) in Client.keys
+    assert _mutation_key("run-1", "play-activity", "second-wind-before-pursuit") in Client.keys
+    assert (
+        _mutation_key("run-1", "play-activity-continuity", "second-wind-before-pursuit")
+        in Client.keys
+    )
 
 
 @pytest.mark.parametrize("defer_checkpoint", [False, True])
@@ -5582,7 +5534,7 @@ def test_source_spell_driver_consumes_item_charge_and_preserves_dm_boundary(
                 }
             if tool_id == "branch_query":
                 return [{"id": "branch-1", "is_current": True}]
-            if tool_id == "continuity_commit":
+            if tool_id == "memory_change":
                 event = arguments["payload"]["event"]
                 assert event["event_type"] == "magic_item_spell_cast"
                 assert event["payload"]["resolution_status"] == "pending_ruling"
@@ -5661,7 +5613,7 @@ def test_dm_event_keeps_enemy_knowledge_out_of_party_event_stream() -> None:
                 return {"scene_id": "scene-1", "state_version": 1}
             if tool_id == "branch_query":
                 return [{"id": "branch-1", "is_current": True}]
-            if tool_id == "continuity_commit":
+            if tool_id == "memory_change":
                 event = arguments["payload"]["event"]
                 assert event["audience_scope"] == "dm"
                 knowledge = arguments["payload"]["actor_knowledge"]
@@ -5773,7 +5725,7 @@ def test_long_rest_uses_atomic_party_rest_and_unique_occurrence_knowledge() -> N
                     "world_time": self.world_time,
                     "member_ids": ["fighter", "cleric"],
                 }
-            if tool_id == "continuity_commit":
+            if tool_id == "memory_change":
                 self.continuity_keys.append(arguments["idempotency_key"])
                 event = arguments["payload"]["event"]
                 assert event["event_type"] == "long_rest"
@@ -5971,7 +5923,7 @@ def test_long_rest_recovers_committed_receipt_without_advancing_time_twice() -> 
                         "preparations": {"cleric": {"selected_spell_ids": ["cure-wounds"]}},
                     },
                 }
-            if tool_id == "continuity_commit":
+            if tool_id == "memory_change":
                 self.revision += 1
                 return {"event": {"id": "event-1"}, "snapshot": {"slot": 5}}
             if tool_id == "playthrough_manifest":
@@ -6060,7 +6012,7 @@ def test_partially_committed_contest_is_recovered_without_reroll() -> None:
     }
     campaign = {
         "state": {
-            "random_stream": {"last_receipt": {"operation": "character_contest"}},
+            "random_stream": {"last_receipt": {"operation": "character_check"}},
             "resolution_log": [
                 {
                     "type": "ability_contest",
@@ -6260,7 +6212,7 @@ def test_source_cited_automatic_event_does_not_roll() -> None:
                 return {"state_version": 1}
             if tool_id == "branch_query":
                 return [{"id": "branch-1", "is_current": True}]
-            if tool_id == "continuity_commit":
+            if tool_id == "memory_change":
                 self.continuity_payload = deepcopy(arguments["payload"])
                 assert len(arguments["payload"]["actor_knowledge"]) == 2
                 return {"event": {"id": "event-1"}, "snapshot": {"slot": 4}}
@@ -6346,7 +6298,7 @@ def test_record_event_preserves_prior_scene_events_in_same_run() -> None:
                 return {"scene_id": "scene-1", "state_version": 4}
             if tool_id == "branch_query":
                 return [{"id": "branch-1", "is_current": True}]
-            if tool_id == "continuity_commit":
+            if tool_id == "memory_change":
                 assert arguments["payload"]["actor_knowledge"][0]["cause"] == ("told_by")
                 return {"event": {"id": "event-2"}, "snapshot": {"slot": 5}}
             if tool_id == "playthrough_manifest":
@@ -6481,7 +6433,7 @@ def test_record_outcome_commits_facts_then_syncs_manifest_and_checkpoint(
                         "head_snapshot_id": "snapshot-old",
                     }
                 ]
-            if tool_id == "continuity_commit":
+            if tool_id == "memory_change":
                 self.continuity_payload = deepcopy(arguments["payload"])
                 assert "snapshot" not in self.continuity_payload
                 assert {item["cause"] for item in self.continuity_payload["actor_knowledge"]} == {
@@ -6820,10 +6772,10 @@ def test_start_play_uses_public_quality_gate_phase_and_scene_tools() -> None:
                     "module_id": "module-1",
                     "scene_id": "scene-1",
                     "chapter_id": "chapter-1",
-                        "chapter": "Chapter 1",
-                        "title": "Opening",
-                        "content": source_excerpt,
-                    }
+                    "chapter": "Chapter 1",
+                    "title": "Opening",
+                    "content": source_excerpt,
+                }
             raise AssertionError((tool_id, arguments))
 
     client = Client()
@@ -6832,11 +6784,11 @@ def test_start_play_uses_public_quality_gate_phase_and_scene_tools() -> None:
             client,
             campaign_id="campaign-1",
             run_id="run-1",
-                initial_phase="lobby",
-                scene_id="scene-1",
-                source_excerpt=source_excerpt,
-                source_ref=source_ref,
-                objective="Survive the ambush",
+            initial_phase="lobby",
+            scene_id="scene-1",
+            source_excerpt=source_excerpt,
+            source_ref=source_ref,
+            objective="Survive the ambush",
             reachable_scene_ids=["scene-2"],
         )
     )

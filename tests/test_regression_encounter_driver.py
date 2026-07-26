@@ -30,6 +30,7 @@ from scripts.regression_encounter import (
     _postcombat_stabilization_target,
     _preferred_hostile_weapon_id,
     _preferred_multiattack_option_id,
+    _preflight_attack,
     _prepared_actor_ids,
     _prioritize_targets,
     _reinforcement_config,
@@ -149,15 +150,54 @@ def test_encounter_start_token_binds_the_complete_public_request() -> None:
 
     token = _encounter_start_operation_token(request)
 
-    assert token == _encounter_start_operation_token(
-        dict(reversed(list(request.items())))
-    )
+    assert token == _encounter_start_operation_token(dict(reversed(list(request.items()))))
     assert token != _encounter_start_operation_token(
         {**request, "participant_ids": ["pc-1", "kobold-2"]}
     )
-    assert token != _encounter_start_operation_token(
-        {**request, "expected_revision": 13}
+    assert token != _encounter_start_operation_token({**request, "expected_revision": 13})
+
+
+def test_preflight_capture_uses_only_melee_and_declares_knockout() -> None:
+    class Client:
+        def __init__(self) -> None:
+            self.calls: list[dict] = []
+
+        async def domain(self, tool_id: str, arguments: dict) -> dict:
+            assert tool_id == "combat_preflight_attack"
+            self.calls.append(arguments)
+            return {"status": "ready", **arguments["action"]}
+
+    client = Client()
+    actor = {
+        "id": "pc-1",
+        "derived": {
+            "inventory": {
+                "weapon_attacks": [
+                    {"item_id": "shortbow", "attack_type": "ranged"},
+                    {"item_id": "shortsword", "attack_type": "melee"},
+                ]
+            }
+        },
+    }
+
+    target_id, action, plan = asyncio.run(
+        _preflight_attack(
+            client,
+            SimpleNamespace(campaign_id="campaign-1"),
+            actor,
+            ["cultist-1"],
+            knock_out_target_ids={"cultist-1"},
+        )
     )
+
+    assert target_id == "cultist-1"
+    assert action == {
+        "weapon_id": "shortsword",
+        "attack_mode": "melee",
+        "knock_out": True,
+    }
+    assert plan["knock_out"] is True
+    assert [call["action"] for call in client.calls] == [action]
 
 
 def test_status_uses_play_character_exposure_before_combat() -> None:
@@ -215,9 +255,7 @@ def test_status_uses_play_character_exposure_before_combat() -> None:
             ]
 
     client = Client()
-    result = asyncio.run(
-        _status(client, campaign_id="campaign-1", actor_ids=["pc-1", "pc-2"])
-    )
+    result = asyncio.run(_status(client, campaign_id="campaign-1", actor_ids=["pc-1", "pc-2"]))
 
     assert result["phase"] == "play"
     assert result["combat"] is None
@@ -346,9 +384,7 @@ def test_source_passive_allies_require_unique_allies_and_exact_evidence() -> Non
     assert passive == {
         "losser": {
             "actor_id": "losser",
-            "source_excerpt": (
-                "The characters find Losser cowering in one corner."
-            ),
+            "source_excerpt": ("The characters find Losser cowering in one corner."),
         }
     }
     with pytest.raises(ValueError, match="requires one unique allied actor"):
@@ -374,9 +410,7 @@ def test_source_random_activity_requires_exact_actor_card_evidence() -> None:
         {
             "actor_id": "gazer",
             "activity_id": "eye-rays-action",
-            "source_excerpt": (
-                "shoots two of the following magical eye rays at random"
-            ),
+            "source_excerpt": ("shoots two of the following magical eye rays at random"),
         }
     ]
     actors = {
@@ -405,9 +439,7 @@ def test_source_random_activity_requires_exact_actor_card_evidence() -> None:
         "gazer": {
             "actor_id": "gazer",
             "activity_id": "eye-rays-action",
-            "source_excerpt": (
-                "shoots two of the following magical eye rays at random"
-            ),
+            "source_excerpt": ("shoots two of the following magical eye rays at random"),
         }
     }
     with pytest.raises(ValueError, match="contain the exact excerpt"):
@@ -429,10 +461,7 @@ def test_source_random_activity_requires_exact_actor_card_evidence() -> None:
 
 
 def test_source_save_activity_requires_structured_card_and_brain_ruling() -> None:
-    excerpt = (
-        "The target must succeed on a DC 12 Intelligence saving throw "
-        "against this magic"
-    )
+    excerpt = "The target must succeed on a DC 12 Intelligence saving throw against this magic"
     values = [
         {
             "actor_id": "devourer",
@@ -449,11 +478,7 @@ def test_source_save_activity_requires_structured_card_and_brain_ruling() -> Non
                         {
                             "id": "devour-intellect-action",
                             "description": excerpt,
-                            "choices": {
-                                "source_save_effect": {
-                                    "target_requirement": "has_brain"
-                                }
-                            },
+                            "choices": {"source_save_effect": {"target_requirement": "has_brain"}},
                         }
                     ]
                 }
@@ -517,9 +542,7 @@ def test_source_contest_activity_requires_body_thief_card_and_humanoid_ruling() 
                             "description": excerpt,
                             "choices": {
                                 "source_contest_effect": {
-                                    "kind": (
-                                        "intellect_devourer_body_thief_2014"
-                                    ),
+                                    "kind": ("intellect_devourer_body_thief_2014"),
                                     "target_requirements": [
                                         "incapacitated",
                                         "humanoid",
@@ -712,6 +735,52 @@ def test_encounter_actor_groups_keep_allies_out_of_registered_party_and_reject_o
         raise AssertionError("the same actor cannot be both an ally and a hostile")
 
 
+def test_encounter_actor_groups_reject_incomplete_source_hostile_selection(
+    tmp_path,
+) -> None:
+    party_report = tmp_path / "party.json"
+    hostile_report = tmp_path / "hostile.json"
+    party_report.write_text(
+        json.dumps({"characters": [{"actor_id": "pc-1"}]}),
+        encoding="utf-8",
+    )
+    hostile_report.write_text(
+        json.dumps(
+            {
+                "actors": [
+                    {"id": "cultist-1"},
+                    {"id": "cultist-2"},
+                    {"id": "acolyte-1"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    args = SimpleNamespace(
+        party_report=[party_report],
+        ally_report=[],
+        ally_actor_id=[],
+        hostile_report=[hostile_report],
+        hostile_actor_id=["cultist-1", "cultist-2"],
+        required_hostile_count=3,
+        hostile_count_basis="Episode 1 table roll 5: 2 cultists and 1 acolyte.",
+        additional_hostile_report=[],
+        additional_hostile_actor_id=[],
+        reinforcement_hostile_report=[],
+        reinforcement_hostile_actor_id=[],
+    )
+
+    with pytest.raises(ValueError, match="does not match"):
+        _encounter_actor_groups(args)
+
+    args.hostile_actor_id.append("acolyte-1")
+    assert _encounter_actor_groups(args)["hostile_ids"] == [
+        "cultist-1",
+        "cultist-2",
+        "acolyte-1",
+    ]
+
+
 def test_live_manifest_party_rejects_departed_predecessor_and_missing_replacement() -> None:
     manifest_result = {
         "manifest": {
@@ -841,9 +910,7 @@ def test_party_spell_tactics_respect_preparation_and_upcast_when_needed() -> Non
         "prepared": False,
         "in_spellbook": True,
     }
-    wizard["derived"] = {
-        "spellcasting": {"prepared_spell_ids": [MAGIC_MISSILE_ID]}
-    }
+    wizard["derived"] = {"spellcasting": {"prepared_spell_ids": [MAGIC_MISSILE_ID]}}
     actors = {"wizard": wizard, "goblin": _spell_actor(slots=0)}
 
     assert _choose_party_spell(
@@ -911,9 +978,7 @@ def test_movement_pending_reaction_blocks_followup_attack() -> None:
             ]
         }
     )
-    assert not _has_blocking_pending(
-        {"pending": [{"id": "reaction-1", "status": "resolved"}]}
-    )
+    assert not _has_blocking_pending({"pending": [{"id": "reaction-1", "status": "resolved"}]})
 
 
 def test_reaction_tactics_spend_shield_only_when_it_changes_the_attack() -> None:
@@ -1147,9 +1212,7 @@ def test_source_traits_and_allied_npcs_preserve_distinct_zero_hp_rules() -> None
                 "actor_id": "troll",
                 "kind": "regeneration",
                 "feature_id": "regeneration-passive",
-                "source_excerpt": (
-                    "The troll regains 10 hit points at the start of its turn."
-                ),
+                "source_excerpt": ("The troll regains 10 hit points at the start of its turn."),
             }
         ],
         participant_ids=["pc-1", "durnan", "troll"],
@@ -1172,9 +1235,7 @@ def test_source_traits_and_allied_npcs_preserve_distinct_zero_hp_rules() -> None
         {
             "kind": "regeneration",
             "feature_id": "regeneration-passive",
-            "source_excerpt": (
-                "The troll regains 10 hit points at the start of its turn."
-            ),
+            "source_excerpt": ("The troll regains 10 hit points at the start of its turn."),
         }
     ]
 
@@ -1192,9 +1253,7 @@ def test_source_zero_hp_finisher_requires_module_and_oil_rule_evidence() -> None
         {
             "target_id": "troll",
             "actor_ids": ["pc-1", "pc-2"],
-            "source_excerpt": (
-                "douse the troll with lamp oil and set it on fire when it falls"
-            ),
+            "source_excerpt": ("douse the troll with lamp oil and set it on fire when it falls"),
             "oil_rule_excerpt": oil_rule,
         },
         participant_ids=["pc-1", "pc-2", "troll"],
@@ -1407,8 +1466,7 @@ def test_source_avoidance_requires_public_actor_knowledge(
                             "id": "event-1",
                             "event_type": "trap_detected",
                             "summary": (
-                                "The marked traps are at cells 3,3; 5,3; "
-                                "6,3; 8,3; and 10,3."
+                                "The marked traps are at cells 3,3; 5,3; 6,3; 8,3; and 10,3."
                             ),
                             "payload": {
                                 "scene_id": "scene-1",
@@ -1420,8 +1478,7 @@ def test_source_avoidance_requires_public_actor_knowledge(
                             {
                                 "actor_id": "pc-1",
                                 "proposition": (
-                                    "The actor knows and avoids cells 3,3; 5,3; "
-                                    "6,3; 8,3; and 10,3."
+                                    "The actor knows and avoids cells 3,3; 5,3; 6,3; 8,3; and 10,3."
                                 ),
                             }
                         ],
@@ -1439,9 +1496,7 @@ def test_source_avoidance_requires_public_actor_knowledge(
         participant_ids=["pc-1"],
     )
 
-    assert avoided == {
-        "pc-1": {"3,3", "5,3", "6,3", "8,3", "10,3"}
-    }
+    assert avoided == {"pc-1": {"3,3", "5,3", "6,3", "8,3", "10,3"}}
     assert evidence[0]["event_id"] == "event-1"
     assert evidence[0]["source_ref"] == {"chunk_id": "chunk-1"}
 
@@ -1488,17 +1543,14 @@ def test_source_authored_precombat_and_attack_tactics_are_structured() -> None:
                 "weapon_id": "blood-drain",
                 "id": "attachment",
                 "source_excerpt": (
-                    "the stirge attaches to the target. While attached, the "
-                    "stirge doesn't attack."
+                    "the stirge attaches to the target. While attached, the stirge doesn't attack."
                 ),
             },
             {
                 "actor_id": "duergar",
                 "weapon_id": "war-pick",
                 "id": "dismiss",
-                "source_excerpt": (
-                    "or 11 (2d8 + 2) piercing damage while enlarged."
-                ),
+                "source_excerpt": ("or 11 (2d8 + 2) piercing damage while enlarged."),
             },
             {
                 "actor_id": "spider-1",
@@ -1542,9 +1594,7 @@ def test_source_authored_precombat_and_attack_tactics_are_structured() -> None:
             {
                 "actor_id": "nezznar",
                 "until_round": 2,
-                "source_excerpt": (
-                    "Nezznar joins the fray in the round after the spiders attack."
-                ),
+                "source_excerpt": ("Nezznar joins the fray in the round after the spiders attack."),
             }
         ],
         participant_ids=["nezznar", "spider-1"],
@@ -1664,8 +1714,9 @@ def test_interrupted_guiding_bolt_ruling_resumes_with_exact_effect() -> None:
     )
 
     assert result == {"status": "committed"}
-    assert calls[0][0] == "combat_on_hit_ruling"
-    assert calls[0][1]["selection"] == {
+    assert calls[0][0] == "combat_choice"
+    assert calls[0][1]["action"] == "on_hit_ruling"
+    assert calls[0][1]["payload"]["selection"] == {
         "id": "next_attack_advantage",
         "source_excerpt": GUIDING_BOLT_ON_HIT,
     }
@@ -1673,9 +1724,7 @@ def test_interrupted_guiding_bolt_ruling_resumes_with_exact_effect() -> None:
 
 def test_interrupted_source_attachment_resumes_with_declared_settlement() -> None:
     calls: list[tuple[str, dict]] = []
-    excerpt = (
-        "the stirge attaches to the target. While attached, the stirge doesn't attack."
-    )
+    excerpt = "the stirge attaches to the target. While attached, the stirge doesn't attack."
 
     class Client:
         async def core(self, tool_id: str, arguments: dict) -> dict:
@@ -1722,22 +1771,21 @@ def test_interrupted_source_attachment_resumes_with_declared_settlement() -> Non
     assert result == {"status": "committed"}
     assert calls == [
         (
-            "combat_on_hit_ruling",
+            "combat_choice",
             {
                 "campaign_id": "campaign-1",
-                "target_id": "target-1",
-                "choice_id": "choice-2",
-                "selection": {
-                    "id": "attachment",
-                    "source_excerpt": excerpt,
+                "action": "on_hit_ruling",
+                "actor_id": "target-1",
+                "payload": {
+                    "choice_id": "choice-2",
+                    "selection": {
+                        "id": "attachment",
+                        "source_excerpt": excerpt,
+                    },
                 },
                 "branch_id": "branch-1",
                 "expected_revision": 18,
-                "idempotency_key": (
-                    calls[0][1]["idempotency_key"]
-                    if calls
-                    else ""
-                ),
+                "idempotency_key": (calls[0][1]["idempotency_key"] if calls else ""),
             },
         )
     ]
@@ -1790,8 +1838,9 @@ def test_interrupted_source_alternative_damage_resumes_with_reviewed_dismissal()
     )
 
     assert result == {"status": "committed"}
-    assert calls[0][0] == "combat_on_hit_ruling"
-    assert calls[0][1]["selection"] == {
+    assert calls[0][0] == "combat_choice"
+    assert calls[0][1]["action"] == "on_hit_ruling"
+    assert calls[0][1]["payload"]["selection"] == {
         "id": "dismiss",
         "source_excerpt": excerpt,
     }
@@ -1980,10 +2029,7 @@ def test_source_six_hostile_layout_keeps_every_actor_on_a_unique_space() -> None
     hostile_ids = [f"goblin-{index}" for index in range(1, 7)]
 
     config = _participant_config(party_ids, hostile_ids, surprise_by_actor={})
-    positions = [
-        (item["position"]["x"], item["position"]["y"])
-        for item in config
-    ]
+    positions = [(item["position"]["x"], item["position"]["y"]) for item in config]
 
     assert len(config) == 11
     assert len(positions) == len(set(positions))
@@ -1997,9 +2043,7 @@ def test_no_surprise_layout_marks_neither_side_surprised() -> None:
     config = _participant_config(
         party_ids,
         hostile_ids,
-        surprise_by_actor={
-            actor_id: False for actor_id in [*party_ids, *hostile_ids]
-        },
+        surprise_by_actor={actor_id: False for actor_id in [*party_ids, *hostile_ids]},
         hostiles_hidden=False,
     )
 
@@ -2135,10 +2179,13 @@ def test_movement_destination_stops_next_to_target_without_sharing_space() -> No
 
     assert destination is not None
     assert destination[0] != {"x": 7, "y": 2}
-    assert max(
-        abs(destination[0]["x"] - 7),
-        abs(destination[0]["y"] - 2),
-    ) == 1
+    assert (
+        max(
+            abs(destination[0]["x"] - 7),
+            abs(destination[0]["y"] - 2),
+        )
+        == 1
+    )
     assert destination[1] <= 30
 
 
@@ -2239,9 +2286,7 @@ def test_movement_path_routes_around_source_known_hazard_cells() -> None:
 
     assert destination is not None
     assert destination[1] <= 30
-    assert "5,3" not in {
-        f"{cell['x']},{cell['y']}" for cell in destination[2]
-    }
+    assert "5,3" not in {f"{cell['x']},{cell['y']}" for cell in destination[2]}
     assert destination[2][-1] == destination[0]
 
 
@@ -2317,36 +2362,24 @@ def test_hostile_multiattack_selection_follows_the_preferred_weapon() -> None:
             "multiattack_options": [
                 {
                     "id": "melee",
-                    "attacks": [
-                        {"weapon_id": "shortsword", "attack_mode": "melee", "count": 2}
-                    ],
+                    "attacks": [{"weapon_id": "shortsword", "attack_mode": "melee", "count": 2}],
                 },
                 {
                     "id": "ranged",
-                    "attacks": [
-                        {"weapon_id": "shortbow", "attack_mode": "ranged", "count": 2}
-                    ],
+                    "attacks": [{"weapon_id": "shortbow", "attack_mode": "ranged", "count": 2}],
                 },
             ]
         }
     }
 
-    assert (
-        _preferred_multiattack_option_id(actor, preferred_weapon_id="shortsword")
-        == "melee"
-    )
-    assert (
-        _preferred_multiattack_option_id(actor, preferred_weapon_id="shortbow")
-        == "ranged"
-    )
+    assert _preferred_multiattack_option_id(actor, preferred_weapon_id="shortsword") == "melee"
+    assert _preferred_multiattack_option_id(actor, preferred_weapon_id="shortbow") == "ranged"
 
     actor["derived"]["multiattack_options"] = [
         {
             "id": "mixed-special-action",
             "attacks": [{"weapon_id": "claws", "attack_mode": "melee", "count": 1}],
-            "activities": [
-                {"activity_id": "devour-intellect-action", "count": 1}
-            ],
+            "activities": [{"activity_id": "devour-intellect-action", "count": 1}],
         }
     ]
     assert (

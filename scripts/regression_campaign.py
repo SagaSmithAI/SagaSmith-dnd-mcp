@@ -58,9 +58,7 @@ def _review_override_page(
         )
     selected = int(requested_page)
     if not first <= selected <= last:
-        raise ValueError(
-            "review override --source-page is outside the candidate source page range"
-        )
+        raise ValueError("review override --source-page is outside the candidate source page range")
     return selected
 
 
@@ -512,6 +510,20 @@ def _character_summary(character: dict[str, Any]) -> dict[str, Any]:
     spellcasting = (
         derived.get("spellcasting") if isinstance(derived.get("spellcasting"), dict) else {}
     )
+    spell_cards = [
+        item
+        for item in dict(sheet.get("content") or {}).get("spells", [])
+        if isinstance(item, dict) and str(item.get("id") or "")
+    ]
+    prepared_spell_ids = {
+        str(item) for item in spellcasting.get("prepared_spell_ids", []) if str(item)
+    }
+    known_spell_ids = {
+        str(item["id"])
+        for item in spell_cards
+        if dict(item.get("access") or {}).get("known") is True
+    }
+    active_spell_ids = prepared_spell_ids | known_spell_ids
     sheet_inventory = sheet.get("inventory") if isinstance(sheet.get("inventory"), dict) else {}
     source_items = [item for item in (sheet_inventory.get("items") or []) if isinstance(item, dict)]
     for collection in (sheet.get("content") or {}).values():
@@ -522,9 +534,7 @@ def _character_summary(character: dict[str, Any]) -> dict[str, Any]:
         for item in source_items
         if isinstance(item, dict)
     )
-    notes = (
-        character.get("notes") if isinstance(character.get("notes"), dict) else {}
-    )
+    notes = character.get("notes") if isinstance(character.get("notes"), dict) else {}
     profile = notes.get("profile") if isinstance(notes.get("profile"), dict) else {}
     provenance = str(profile.get("dm_notes") or "")
     source_bound = source_bound or any(
@@ -542,7 +552,10 @@ def _character_summary(character: dict[str, Any]) -> dict[str, Any]:
         "revision": character.get("revision"),
         "hp": derived.get("hit_points"),
         "armor_class": derived.get("armor_class"),
-        "spell_count": len(spellcasting.get("prepared_spell_ids") or []),
+        "spell_count": len(active_spell_ids),
+        "known_spell_count": len(known_spell_ids),
+        "prepared_spell_count": len(prepared_spell_ids),
+        "spell_card_count": len(spell_cards),
         "attack_count": len(attacks),
         "source_bound": bool(source_bound),
     }
@@ -1276,9 +1289,10 @@ async def _walk_scenes(args: argparse.Namespace) -> dict[str, Any]:
                 )
                 committed = _facade_value(
                     await client.domain(
-                        "continuity_commit",
+                        "memory_change",
                         {
                             "campaign_id": args.campaign_id,
+                            "action": "commit",
                             "payload": {
                                 "event": {
                                     "summary": (
@@ -1394,7 +1408,13 @@ async def _walk_scenes(args: argparse.Namespace) -> dict[str, Any]:
             if incomplete:
                 raise RuntimeError(f"scene traversal did not persist for {len(incomplete)} scenes")
             diagnostics = _facade_value(
-                await client.domain("continuity_diagnostics", {"campaign_id": args.campaign_id})
+                await client.domain(
+                    "memory_query",
+                    {
+                        "campaign_id": args.campaign_id,
+                        "view": "diagnostics",
+                    },
+                )
             )
 
             campaign_regression_play = _facade_value(
@@ -1577,7 +1597,7 @@ async def _walk_scenes(args: argparse.Namespace) -> dict[str, Any]:
                 ),
                 "scene_reports": scene_reports,
                 "checkpoint_snapshots": checkpoint_snapshots,
-                "continuity_diagnostics": diagnostics,
+                "memory_diagnostics": diagnostics,
                 "regression_lobby_snapshot": regression_lobby_snapshot,
                 "checkout": checkout,
                 "source_isolation": {
@@ -1820,20 +1840,25 @@ async def _relock_core(args: argparse.Namespace) -> dict[str, Any]:
                     },
                 )
             )
-            relocked = await client.domain(
-                "campaign_core_relock",
-                {
-                    "campaign_id": args.campaign_id,
-                    "expected_core_fingerprint": old_fingerprint,
-                    "reason": (
-                        "Adopt the current tested built-in D&D 5e Core before the "
-                        "Avernus structured-spell regression; no character data migration."
-                    ),
-                    "branch_id": current_branch["id"],
-                    "expected_revision": campaign_at_relock["revision"],
-                    "expected_head_snapshot_id": pre_snapshot["id"],
-                    "idempotency_key": f"{token}-core-relock",
-                },
+            relocked = _facade_value(
+                await client.domain(
+                    "campaign_rules",
+                    {
+                        "campaign_id": args.campaign_id,
+                        "action": "core_relock",
+                        "payload": {
+                            "expected_core_fingerprint": old_fingerprint,
+                            "reason": (
+                                "Adopt the current tested built-in D&D 5e Core before the "
+                                "Avernus structured-spell regression; no character data migration."
+                            ),
+                            "expected_head_snapshot_id": pre_snapshot["id"],
+                        },
+                        "branch_id": current_branch["id"],
+                        "expected_revision": campaign_at_relock["revision"],
+                        "idempotency_key": f"{token}-core-relock",
+                    },
+                )
             )
             rules_after = _facade_value(
                 await client.domain(
@@ -1903,9 +1928,7 @@ async def _prepare_statblock(args: argparse.Namespace) -> dict[str, Any]:
     if bool(args.review_id) == bool(args.candidate_id):
         raise ValueError("prepare-statblock requires exactly one of --review-id or --candidate-id")
     if args.defer_checkpoint and args.isolate_branch:
-        raise ValueError(
-            "prepare-statblock cannot defer the checkpoint on an isolated branch"
-        )
+        raise ValueError("prepare-statblock cannot defer the checkpoint on an isolated branch")
     variant = None
     variant_path = None
     if args.statblock_variant is not None:
@@ -2079,9 +2102,7 @@ async def _prepare_statblock(args: argparse.Namespace) -> dict[str, Any]:
                         if str(item.get("media_type") or "") == "application/pdf"
                     ]
                     if len(pdf_assets) != 1:
-                        raise RuntimeError(
-                            "review override requires exactly one source PDF asset"
-                        )
+                        raise RuntimeError("review override requires exactly one source PDF asset")
                     source_asset_id = str(pdf_assets[0]["id"])
                     source_chunk_ids = None
                     review_metadata = {
@@ -2091,21 +2112,24 @@ async def _prepare_statblock(args: argparse.Namespace) -> dict[str, Any]:
                     }
                 reviewed = _facade_value(
                     await client.domain(
-                        "module_content_review",
+                        "module_review",
                         {
                             "campaign_id": args.campaign_id,
-                            "module_id": candidate["module_id"],
-                            "scene_id": candidate["scene_id"],
-                            "content_key": (
-                                f"{_idempotency_token(str(candidate['name'])).lower()}-"
-                                f"{str(candidate['id']).split(':')[-1][:10]}"
-                            ),
-                            "normalized_content": normalized_content,
-                            "source_chunk_ids": source_chunk_ids,
-                            "source_asset_id": source_asset_id,
-                            "page_number": page_number,
-                            "observation": observation,
-                            "metadata": review_metadata,
+                            "action": "submit_content",
+                            "payload": {
+                                "module_id": candidate["module_id"],
+                                "scene_id": candidate["scene_id"],
+                                "content_key": (
+                                    f"{_idempotency_token(str(candidate['name'])).lower()}-"
+                                    f"{str(candidate['id']).split(':')[-1][:10]}"
+                                ),
+                                "normalized_content": normalized_content,
+                                "source_chunk_ids": source_chunk_ids,
+                                "source_asset_id": source_asset_id,
+                                "page_number": page_number,
+                                "observation": observation,
+                                "metadata": review_metadata,
+                            },
                             "idempotency_key": f"{token}-review-candidate",
                         },
                     )
@@ -2231,8 +2255,7 @@ async def _prepare_statblock(args: argparse.Namespace) -> dict[str, Any]:
                                 branch_after.get("head_snapshot_id") or ""
                             ),
                             "idempotency_key": (
-                                f"{token}-prepared-actor-snapshot-"
-                                f"r{campaign_after['revision']}"
+                                f"{token}-prepared-actor-snapshot-r{campaign_after['revision']}"
                             ),
                         },
                     )
@@ -2248,9 +2271,7 @@ async def _prepare_statblock(args: argparse.Namespace) -> dict[str, Any]:
                 )
             if args.isolate_branch:
                 if snapshot is None:
-                    raise RuntimeError(
-                        "isolated reviewed actor preparation requires a checkpoint"
-                    )
+                    raise RuntimeError("isolated reviewed actor preparation requires a checkpoint")
                 campaign_working_play = _facade_value(
                     await client.core(
                         "campaign_query",
@@ -2502,8 +2523,7 @@ async def _restore_statblock_preparation_context(
                     "expected_revision": campaign["revision"],
                     "expected_branch_id": current["branch_id"],
                     "idempotency_key": (
-                        f"{token}-failure-return-"
-                        f"{_idempotency_token(original_branch_id).lower()}"
+                        f"{token}-failure-return-{_idempotency_token(original_branch_id).lower()}"
                     ),
                 },
             )
@@ -2626,9 +2646,7 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
             args.statblock_variant,
             "statblock variant",
         )
-    resolved_source_path = (
-        args.source_path.expanduser().resolve() if args.source_path else None
-    )
+    resolved_source_path = args.source_path.expanduser().resolve() if args.source_path else None
     source_identity = (
         {
             "source_path": str(resolved_source_path),
@@ -2671,6 +2689,7 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
             current_branch = next((item for item in branches if item.get("is_current")), None)
             if current_branch is None:
                 raise RuntimeError("campaign has no current branch")
+            branch_token = f"{token}-branch-{_idempotency_token(str(current_branch['id'])).lower()}"
             if initial_phase != "lobby":
                 campaign = _facade_value(
                     await client.core(
@@ -2687,7 +2706,7 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
                         "expected_revision": campaign["revision"],
                         "branch_id": current_branch["id"],
                         "idempotency_key": _phase_transition_key(
-                            token, "rule-statblock-enter-lobby", campaign
+                            branch_token, "rule-statblock-enter-lobby", campaign
                         ),
                     },
                 )
@@ -2802,9 +2821,7 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
                         )
                     )
                 )
-                selected_chunk_ids = [
-                    str(item["id"]) for item in selected_source_chunks
-                ]
+                selected_chunk_ids = [str(item["id"]) for item in selected_source_chunks]
                 if not selected_chunk_ids:
                     raise RuntimeError(
                         "rule statblock source discovery returned no matching chunks"
@@ -2846,7 +2863,7 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
                         {
                             "mode": creation_mode,
                             "payload": payload,
-                            "idempotency_key": f"{token}-create-rule-statblock-{index}",
+                            "idempotency_key": (f"{branch_token}-create-rule-statblock-{index}"),
                         },
                     )
                 )
@@ -2874,7 +2891,7 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
                         "expected_revision": campaign_lobby["revision"],
                         "branch_id": current_branch["id"],
                         "idempotency_key": _phase_transition_key(
-                            token, "rule-statblock-return-play", campaign_lobby
+                            branch_token, "rule-statblock-return-play", campaign_lobby
                         ),
                     },
                 )
@@ -2902,10 +2919,8 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
                         "campaign_id": args.campaign_id,
                         "label": f"Prepared rule statblock actors: {args.actor_name}",
                         "expected_revision": campaign_after["revision"],
-                        "expected_head_snapshot_id": (
-                            branch_after.get("head_snapshot_id") or ""
-                        ),
-                        "idempotency_key": f"{token}-rule-statblock-snapshot",
+                        "expected_head_snapshot_id": (branch_after.get("head_snapshot_id") or ""),
+                        "idempotency_key": (f"{branch_token}-rule-statblock-snapshot"),
                     },
                 )
                 verified = _facade_value(
@@ -3775,11 +3790,14 @@ async def _noncombat_check(args: argparse.Namespace) -> dict[str, Any]:
                 "character_check",
                 {
                     "campaign_id": args.campaign_id,
-                    "actor_id": args.check_actor_id,
-                    "kind": args.check_kind,
-                    "ability": args.check_ability,
-                    "dc": args.check_dc,
-                    "proficient": args.check_proficient,
+                    "action": "check",
+                    "payload": {
+                        "actor_id": args.check_actor_id,
+                        "kind": args.check_kind,
+                        "ability": args.check_ability,
+                        "dc": args.check_dc,
+                        "proficient": args.check_proficient,
+                    },
                     "branch_id": regression_branch["id"],
                     "expected_revision": campaign_before_check["revision"],
                     "idempotency_key": f"{token}-character-check",
@@ -3797,9 +3815,10 @@ async def _noncombat_check(args: argparse.Namespace) -> dict[str, Any]:
             success = bool(check_result.get("success"))
             committed = _facade_value(
                 await client.domain(
-                    "continuity_commit",
+                    "memory_change",
                     {
                         "campaign_id": args.campaign_id,
+                        "action": "commit",
                         "payload": {
                             "event": {
                                 "summary": (
@@ -4325,9 +4344,10 @@ async def _branch_continuity(args: argparse.Namespace) -> dict[str, Any]:
             )
             committed = _facade_value(
                 await client.domain(
-                    "continuity_commit",
+                    "memory_change",
                     {
                         "campaign_id": args.campaign_id,
+                        "action": "commit",
                         "payload": {
                             "event": {
                                 "summary": (f"Regression entered module scene {scene['title']}."),
@@ -4370,7 +4390,13 @@ async def _branch_continuity(args: argparse.Namespace) -> dict[str, Any]:
                 )
             )
             diagnostics = _facade_value(
-                await client.domain("continuity_diagnostics", {"campaign_id": args.campaign_id})
+                await client.domain(
+                    "memory_query",
+                    {
+                        "campaign_id": args.campaign_id,
+                        "view": "diagnostics",
+                    },
+                )
             )
             campaign_regression_play = _facade_value(
                 await client.core(

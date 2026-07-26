@@ -161,9 +161,7 @@ def _complication_choice(number: int, actor: dict[str, Any]) -> str:
     }.get(number, ("",))
     return max(
         choices,
-        key=lambda item: int(
-            skill_values.get(item, ability_values.get(item, 0)) or 0
-        ),
+        key=lambda item: int(skill_values.get(item, ability_values.get(item, 0)) or 0),
     )
 
 
@@ -188,30 +186,37 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             )
             actors = await _actors(client, args.campaign_id, participant_ids)
             campaign = await _campaign(client, args.campaign_id)
-            existing = await client.domain(
-                "chase_query",
-                {"campaign_id": args.campaign_id},
+            existing = _facade_value(
+                await client.domain(
+                    "chase",
+                    {"campaign_id": args.campaign_id, "action": "query"},
+                )
             )
             chase = dict(existing.get("chase") or {})
             started = None
             if not chase.get("active", False) and not chase.get("outcome"):
-                started = await client.domain(
-                    "chase_start",
-                    {
-                        "campaign_id": args.campaign_id,
-                        "participant_ids": participant_ids,
-                        "quarry_ids": quarry_ids,
-                        "initial_distance_ft": args.initial_distance_ft,
-                        "scene_id": args.scene_id,
-                        "source_ref": args.source_ref_json,
-                        "source_excerpt": args.source_excerpt,
-                        "name": args.name,
-                        "close_transition": args.close_transition_json,
-                        "expected_revision": campaign["revision"],
-                        "idempotency_key": (
-                            f"chase-start-{_token(f'{args.run_id}:{args.scene_id}', length=24)}"
-                        ),
-                    },
+                started = _facade_value(
+                    await client.domain(
+                        "chase",
+                        {
+                            "campaign_id": args.campaign_id,
+                            "action": "start",
+                            "payload": {
+                                "participant_ids": participant_ids,
+                                "quarry_ids": quarry_ids,
+                                "initial_distance_ft": args.initial_distance_ft,
+                                "scene_id": args.scene_id,
+                                "source_ref": args.source_ref_json,
+                                "source_excerpt": args.source_excerpt,
+                                "name": args.name,
+                                "close_transition": args.close_transition_json,
+                            },
+                            "expected_revision": campaign["revision"],
+                            "idempotency_key": (
+                                f"chase-start-{_token(f'{args.run_id}:{args.scene_id}', length=24)}"
+                            ),
+                        },
+                    )
                 )
                 chase = dict(started["chase"])
             turns = []
@@ -225,26 +230,31 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                 pending = dict(chase.get("pending_complication") or {})
                 choice = _complication_choice(int(pending.get("number", 0) or 0), actor)
                 campaign = await _campaign(client, args.campaign_id)
-                settled = await client.domain(
-                    "chase_take_turn",
-                    {
-                        "campaign_id": args.campaign_id,
-                        "actor_id": actor_id,
-                        "action": "dash",
-                        "complication_choice": choice,
-                        "quarry_visibility": {
-                            identifier: True for identifier in quarry_ids
+                settled = _facade_value(
+                    await client.domain(
+                        "chase",
+                        {
+                            "campaign_id": args.campaign_id,
+                            "action": "take_turn",
+                            "payload": {
+                                "actor_id": actor_id,
+                                "turn_action": "dash",
+                                "complication_choice": choice,
+                                "quarry_visibility": {
+                                    identifier: True for identifier in quarry_ids
+                                },
+                                "expected_actor_revision": actor["revision"],
+                            },
+                            "expected_revision": campaign["revision"],
+                            "idempotency_key": (
+                                "chase-turn-"
+                                + _token(
+                                    f"{args.run_id}:{chase['id']}:{sequence}:{actor_id}",
+                                    length=24,
+                                )
+                            ),
                         },
-                        "expected_revision": campaign["revision"],
-                        "expected_actor_revision": actor["revision"],
-                        "idempotency_key": (
-                            "chase-turn-"
-                            + _token(
-                                f"{args.run_id}:{chase['id']}:{sequence}:{actor_id}",
-                                length=24,
-                            )
-                        ),
-                    },
+                    )
                 )
                 turns.append(deepcopy(settled["turn"]))
                 chase = dict(settled["chase"])
@@ -280,9 +290,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                             dict(actor.get("derived") or {}).get("hit_points") or {}
                         ),
                         "exhaustion": int(
-                            dict(actor.get("sheet") or {})
-                            .get("combat", {})
-                            .get("exhaustion", 0)
+                            dict(actor.get("sheet") or {}).get("combat", {}).get("exhaustion", 0)
                             or 0
                         ),
                     }

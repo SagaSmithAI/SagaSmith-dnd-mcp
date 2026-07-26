@@ -21,8 +21,7 @@ from scripts.regression_playthrough import _checkpoint, _manifest_get
 
 GUIDING_BOLT_ID = "dnd5e.content.srd2014.spell.guiding-bolt"
 GUIDING_BOLT_ON_HIT = (
-    "The next attack against the target before the end of the caster's next "
-    "turn has advantage."
+    "The next attack against the target before the end of the caster's next turn has advantage."
 )
 HEALING_WORD_ID = "dnd5e.content.srd2014.spell.healing-word"
 MAGIC_MISSILE_ID = "dnd5e.content.srd2014.spell.magic-missile"
@@ -45,11 +44,7 @@ def _encounter_operation_scope(
         "operation_scope",
         "output",
     }
-    configuration = {
-        key: value
-        for key, value in vars(args).items()
-        if key not in excluded
-    }
+    configuration = {key: value for key, value in vars(args).items() if key not in excluded}
     identity = {
         "branch_id": branch_id,
         "combat_id": combat_id,
@@ -80,18 +75,12 @@ def _operation_token(
     *parts: object,
     length: int = 24,
 ) -> str:
-    identity = ":".join(
-        [_operation_scope(args), *(str(part) for part in parts)]
-    )
+    identity = ":".join([_operation_scope(args), *(str(part) for part in parts)])
     return _token(identity, length=length)
 
 
 def _encounter_start_operation_token(request: dict[str, Any]) -> str:
-    identity = {
-        key: value
-        for key, value in request.items()
-        if key != "idempotency_key"
-    }
+    identity = {key: value for key, value in request.items() if key != "idempotency_key"}
     return "encounter-start-" + _token(
         json.dumps(
             identity,
@@ -425,6 +414,25 @@ def _arguments() -> argparse.Namespace:
         action="store_true",
         help="Confirm the source surrender condition's no-escape predicate",
     )
+    parser.add_argument(
+        "--knock-out-hostile-id",
+        action="append",
+        default=[],
+        help=(
+            "Hostile to capture with the public 2014/2024 melee knockout rule; "
+            "repeat for multiple source-required prisoners"
+        ),
+    )
+    parser.add_argument(
+        "--required-hostile-count",
+        type=int,
+        help="Complete source-grounded count for the primary hostile group",
+    )
+    parser.add_argument(
+        "--hostile-count-basis",
+        default="",
+        help="Exact source or recorded table-roll basis for the required hostile count",
+    )
     parser.add_argument("--max-turns", type=int, default=200)
     parser.add_argument("--checkpoint-label", default="Encounter complete")
     return parser.parse_args()
@@ -465,9 +473,7 @@ def _party_ids(paths: list[Path]) -> list[str]:
         else:
             result = report.get("result")
             manifest = (
-                result.get("manifest")
-                if isinstance(result, dict)
-                else report.get("manifest")
+                result.get("manifest") if isinstance(result, dict) else report.get("manifest")
             )
             party = manifest.get("party") if isinstance(manifest, dict) else None
             members = party.get("members") if isinstance(party, dict) else None
@@ -478,11 +484,7 @@ def _party_ids(paths: list[Path]) -> list[str]:
                 for item in members
                 if isinstance(item, dict) and item.get("status") == "active"
             ]
-        values.extend(
-            str(item.get("actor_id") or "")
-            for item in members
-            if isinstance(item, dict)
-        )
+        values.extend(str(item.get("actor_id") or "") for item in members if isinstance(item, dict))
     if not values or any(not item for item in values) or len(values) != len(set(values)):
         raise ValueError("party report must contain unique character actor_id values")
     return values
@@ -494,24 +496,13 @@ def _prepared_actor_ids(paths: list[Path], *, report_kind: str) -> list[str]:
         report = _read_report(path)
         actors = report.get("actors")
         if isinstance(actors, list) and actors:
-            report_values = [
-                str(item.get("id") or "")
-                for item in actors
-                if isinstance(item, dict)
-            ]
+            report_values = [str(item.get("id") or "") for item in actors if isinstance(item, dict)]
         else:
             report_values = [
-                str(
-                    dict(dict(report.get("created") or {}).get("character") or {}).get(
-                        "id"
-                    )
-                    or ""
-                )
+                str(dict(dict(report.get("created") or {}).get("character") or {}).get("id") or "")
             ]
         if not report_values or any(not item for item in report_values):
-            raise ValueError(
-                f"{report_kind} report must contain prepared actor id values"
-            )
+            raise ValueError(f"{report_kind} report must contain prepared actor id values")
         values.extend(report_values)
     if not values or any(not item for item in values) or len(values) != len(set(values)):
         raise ValueError(f"{report_kind} reports must contain globally unique actor ids")
@@ -524,26 +515,16 @@ def _selected_prepared_actor_ids(
     *,
     report_kind: str,
 ) -> list[str]:
-    available = (
-        _prepared_actor_ids(paths, report_kind=report_kind)
-        if paths
-        else []
-    )
+    available = _prepared_actor_ids(paths, report_kind=report_kind) if paths else []
     requested = [str(actor_id).strip() for actor_id in requested_actor_ids]
     if not requested:
         return available
-    if (
-        any(not actor_id for actor_id in requested)
-        or len(requested) != len(set(requested))
-    ):
-        raise ValueError(
-            f"selected {report_kind} actor ids must be non-empty and unique"
-        )
+    if any(not actor_id for actor_id in requested) or len(requested) != len(set(requested)):
+        raise ValueError(f"selected {report_kind} actor ids must be non-empty and unique")
     unknown = sorted(set(requested) - set(available))
     if unknown:
         raise ValueError(
-            f"selected {report_kind} actor ids are absent from prepared reports: "
-            f"{unknown}"
+            f"selected {report_kind} actor ids are absent from prepared reports: {unknown}"
         )
     return requested
 
@@ -572,6 +553,23 @@ def _encounter_actor_groups(args: argparse.Namespace) -> dict[str, list[str]]:
             report_kind="reinforcement hostile",
         ),
     }
+    required_hostile_count = getattr(args, "required_hostile_count", None)
+    hostile_count_basis = str(getattr(args, "hostile_count_basis", "") or "").strip()
+    if required_hostile_count is None:
+        if hostile_count_basis:
+            raise ValueError("--hostile-count-basis requires --required-hostile-count")
+    elif (
+        isinstance(required_hostile_count, bool)
+        or required_hostile_count <= 0
+        or not hostile_count_basis
+    ):
+        raise ValueError("required hostile count must be positive and include its source basis")
+    elif len(groups["hostile_ids"]) != required_hostile_count:
+        raise ValueError(
+            "prepared primary hostile count does not match the complete "
+            f"source-grounded count ({len(groups['hostile_ids'])} != "
+            f"{required_hostile_count}): {hostile_count_basis}"
+        )
     actor_sets = [(name, set(values)) for name, values in groups.items()]
     overlaps = [
         (left_name, right_name, sorted(left & right))
@@ -608,9 +606,7 @@ def _require_live_active_party(
         or len(active_ids) != len(set(active_ids))
     ):
         raise RuntimeError("playthrough manifest active party is invalid")
-    if set(reported_party_ids) != set(active_ids) or len(reported_party_ids) != len(
-        active_ids
-    ):
+    if set(reported_party_ids) != set(active_ids) or len(reported_party_ids) != len(active_ids):
         missing = sorted(set(active_ids) - set(reported_party_ids))
         unexpected = sorted(set(reported_party_ids) - set(active_ids))
         raise ValueError(
@@ -712,17 +708,14 @@ def _participant_config(
     allies = list(ally_ids or [])
     if len(party_ids) + len(allies) > 10 or len(hostile_ids) > 10:
         raise ValueError(
-            "default encounter layout supports at most 10 friendly actors "
-            "and 10 hostiles"
+            "default encounter layout supports at most 10 friendly actors and 10 hostiles"
         )
     if set(party_ids) & set(allies):
         raise ValueError("PC and allied-NPC participant ids must be disjoint")
 
     def source_fields(actor_id: str) -> dict[str, Any]:
         fields: dict[str, Any] = {}
-        conditions = list(
-            dict(source_conditions_by_actor or {}).get(actor_id) or []
-        )
+        conditions = list(dict(source_conditions_by_actor or {}).get(actor_id) or [])
         traits = list(dict(source_traits_by_actor or {}).get(actor_id) or [])
         if conditions:
             fields["source_conditions"] = conditions
@@ -858,10 +851,7 @@ def _surprise_from_check_report(
     ):
         raise ValueError("surprise check report does not match this encounter")
     noticed_threat = bool(check["success"])
-    surprise = {
-        actor_id: not noticed_threat
-        for actor_id in party_ids
-    }
+    surprise = {actor_id: not noticed_threat for actor_id in party_ids}
     surprise.update({actor_id: False for actor_id in hostile_ids})
     return surprise, {
         "mode": "source_cited_party_scout",
@@ -972,9 +962,7 @@ def _source_traits(
             raise ValueError(f"source trait {index} must be an object")
         unknown = set(declaration) - allowed
         if unknown:
-            raise ValueError(
-                f"source trait {index} has unsupported fields: {sorted(unknown)}"
-            )
+            raise ValueError(f"source trait {index} has unsupported fields: {sorted(unknown)}")
         actor_id = str(declaration.get("actor_id") or "").strip()
         kind = str(declaration.get("kind") or "").strip().casefold()
         feature_id = str(declaration.get("feature_id") or "").strip()
@@ -1021,17 +1009,12 @@ def _source_zero_hp_finisher(
     unknown = set(declaration) - allowed
     if unknown:
         raise ValueError(
-            "source zero-HP finisher has unsupported fields: "
-            + ", ".join(sorted(unknown))
+            "source zero-HP finisher has unsupported fields: " + ", ".join(sorted(unknown))
         )
     target_id = str(declaration.get("target_id") or "").strip()
-    actor_ids = [
-        str(item).strip() for item in declaration.get("actor_ids") or []
-    ]
+    actor_ids = [str(item).strip() for item in declaration.get("actor_ids") or []]
     source_excerpt = str(declaration.get("source_excerpt") or "").strip()
-    oil_rule_excerpt = str(
-        declaration.get("oil_rule_excerpt") or ""
-    ).strip()
+    oil_rule_excerpt = str(declaration.get("oil_rule_excerpt") or "").strip()
     participants = set(participant_ids)
     encounter_excerpt = _normalized_source_text(encounter_source_excerpt)
     damage_match = re.search(
@@ -1086,12 +1069,9 @@ def _source_zero_hp_stabilization(
     unknown = set(declaration) - allowed
     if unknown:
         raise ValueError(
-            "source zero-HP stabilization has unsupported fields: "
-            + ", ".join(sorted(unknown))
+            "source zero-HP stabilization has unsupported fields: " + ", ".join(sorted(unknown))
         )
-    actor_ids = [
-        str(item).strip() for item in declaration.get("actor_ids") or []
-    ]
+    actor_ids = [str(item).strip() for item in declaration.get("actor_ids") or []]
     source_excerpt = str(declaration.get("source_excerpt") or "").strip()
     if (
         not actor_ids
@@ -1180,10 +1160,7 @@ def _source_target_priorities(
                 "each acting participant may be declared only once"
             )
         normalized_declaration_excerpt = _normalized_source_text(source_excerpt)
-        if (
-            not encounter_excerpt
-            or normalized_declaration_excerpt not in encounter_excerpt
-        ):
+        if not encounter_excerpt or normalized_declaration_excerpt not in encounter_excerpt:
             raise ValueError(
                 "source target priority excerpt is not contained in the encounter source"
             )
@@ -1257,8 +1234,7 @@ def _source_opening_casts(
         unknown = set(raw) - allowed
         if unknown:
             raise ValueError(
-                f"source opening cast {index} has unsupported fields: "
-                f"{', '.join(sorted(unknown))}"
+                f"source opening cast {index} has unsupported fields: {', '.join(sorted(unknown))}"
             )
         cast = {
             key: str(raw.get(key) or "").strip()
@@ -1320,10 +1296,7 @@ def _source_precombat_casts(
             or not isinstance(cast_level, int)
             or cast_level < 0
             or cast_level > 9
-            or (
-                component_ruling is not None
-                and not isinstance(component_ruling, dict)
-            )
+            or (component_ruling is not None and not isinstance(component_ruling, dict))
             or identity in seen
         ):
             raise ValueError(
@@ -1385,9 +1358,7 @@ def _source_attack_environments(
     normalized: dict[str, dict[str, Any]] = {}
     for index, raw in enumerate(values):
         if not isinstance(raw, dict):
-            raise ValueError(
-                f"source attack environment {index} must be an object"
-            )
+            raise ValueError(f"source attack environment {index} must be an object")
         unknown = set(raw) - {
             "actor_id",
             "direct_sunlight",
@@ -1399,9 +1370,7 @@ def _source_attack_environments(
                 f"{', '.join(sorted(unknown))}"
             )
         actor_id = str(raw.get("actor_id") or "").strip()
-        source_excerpt = " ".join(
-            str(raw.get("source_excerpt") or "").split()
-        )
+        source_excerpt = " ".join(str(raw.get("source_excerpt") or "").split())
         if (
             actor_id not in participant_ids
             or actor_id in normalized
@@ -1423,21 +1392,14 @@ def _source_attack_environments(
                         .get("features", [])
                     )
                     if str(
-                        dict(
-                            dict(item.get("choices") or {}).get(
-                                "source_trait"
-                            )
-                            or {}
-                        ).get("kind")
+                        dict(dict(item.get("choices") or {}).get("source_trait") or {}).get("kind")
                         or ""
                     )
                     == "sunlight_sensitivity"
                 ),
                 None,
             )
-            description = " ".join(
-                str(dict(feature or {}).get("description") or "").split()
-            )
+            description = " ".join(str(dict(feature or {}).get("description") or "").split())
             if feature is None or source_excerpt not in description:
                 raise ValueError(
                     f"source attack environment {index} must match the "
@@ -1464,23 +1426,17 @@ def _source_avoidances(
     cell_pattern = re.compile(r"(?<!\d)(\d+),(\d+)(?!\d)")
     for index, path in enumerate(paths):
         report = _read_report(path)
-        continuity = dict(
-            dict(report.get("result") or {}).get("continuity") or {}
-        )
+        continuity = dict(dict(report.get("result") or {}).get("continuity") or {})
         event = dict(continuity.get("event") or {})
         payload = dict(event.get("payload") or {})
         knowledge = list(continuity.get("actor_knowledge") or [])
         summary = str(event.get("summary") or "")
         source_excerpt = str(payload.get("source_excerpt") or "").strip()
-        cells = {
-            f"{int(x)},{int(y)}"
-            for x, y in cell_pattern.findall(summary)
-        }
+        cells = {f"{int(x)},{int(y)}" for x, y in cell_pattern.findall(summary)}
         if (
             report.get("campaign_id") != campaign_id
             or report.get("passed") is not True
-            or event.get("event_type")
-            not in {"trap_detected", "trap_locations_shared"}
+            or event.get("event_type") not in {"trap_detected", "trap_locations_shared"}
             or str(payload.get("scene_id") or "") != scene_id
             or not str(event.get("id") or "")
             or not source_excerpt
@@ -1494,10 +1450,7 @@ def _source_avoidances(
         for item in knowledge:
             actor_id = str(dict(item).get("actor_id") or "")
             proposition = str(dict(item).get("proposition") or "")
-            proposition_cells = {
-                f"{int(x)},{int(y)}"
-                for x, y in cell_pattern.findall(proposition)
-            }
+            proposition_cells = {f"{int(x)},{int(y)}" for x, y in cell_pattern.findall(proposition)}
             if (
                 actor_id not in participant_set
                 or not cells <= proposition_cells
@@ -1510,9 +1463,7 @@ def _source_avoidances(
             avoided_by_actor.setdefault(actor_id, set()).update(cells)
             actor_ids.append(actor_id)
         if not actor_ids or len(actor_ids) != len(set(actor_ids)):
-            raise ValueError(
-                f"source avoidance report {index} must contain unique actor knowledge"
-            )
+            raise ValueError(f"source avoidance report {index} must contain unique actor knowledge")
         evidence.append(
             {
                 "report_path": str(path.expanduser().resolve()),
@@ -1554,17 +1505,14 @@ def _source_on_hit_rulings(
         unknown = set(raw) - allowed
         if unknown:
             raise ValueError(
-                f"source on-hit ruling {index} has unsupported fields: "
-                f"{', '.join(sorted(unknown))}"
+                f"source on-hit ruling {index} has unsupported fields: {', '.join(sorted(unknown))}"
             )
         actor_id = str(raw.get("actor_id") or "").strip()
         weapon_id = str(raw.get("weapon_id") or "").strip()
         selection_id = str(raw.get("id") or "").strip().casefold()
         if not selection_id:
             selection_id = (
-                "saving_throw_damage"
-                if raw.get("save_ability") is not None
-                else "apply_condition"
+                "saving_throw_damage" if raw.get("save_ability") is not None else "apply_condition"
             )
         if selection_id not in {
             "apply_condition",
@@ -1573,9 +1521,7 @@ def _source_on_hit_rulings(
             "critical_followup",
             "dismiss",
         }:
-            raise ValueError(
-                f"source on-hit ruling {index} has unsupported id {selection_id!r}"
-            )
+            raise ValueError(f"source on-hit ruling {index} has unsupported id {selection_id!r}")
         source_excerpt = str(raw.get("source_excerpt") or "").strip()
         identity = (actor_id, weapon_id)
         if (
@@ -1585,8 +1531,7 @@ def _source_on_hit_rulings(
             or identity in normalized
         ):
             raise ValueError(
-                f"source on-hit ruling {index} requires one participant weapon "
-                "and exact excerpt"
+                f"source on-hit ruling {index} requires one participant weapon and exact excerpt"
             )
         if selection_id == "critical_followup":
             critical_fields = {
@@ -1600,9 +1545,8 @@ def _source_on_hit_rulings(
                 "half_on_success",
                 "zero_hp_effect",
             }
-            if (
-                any(raw.get(field) is not None for field in critical_fields)
-                or not isinstance(raw.get("target_has_limbs"), bool)
+            if any(raw.get(field) is not None for field in critical_fields) or not isinstance(
+                raw.get("target_has_limbs"), bool
             ):
                 raise ValueError(
                     f"source on-hit ruling {index} critical_followup accepts only "
@@ -1618,8 +1562,7 @@ def _source_on_hit_rulings(
             continue
         if raw.get("target_has_limbs") is not None:
             raise ValueError(
-                f"source on-hit ruling {index} target_has_limbs is only valid "
-                "for critical_followup"
+                f"source on-hit ruling {index} target_has_limbs is only valid for critical_followup"
             )
         if selection_id == "dismiss":
             settlement_fields = {
@@ -1693,10 +1636,7 @@ def _source_on_hit_rulings(
                 or not damage_formula
                 or not damage_type
                 or not isinstance(half_on_success, bool)
-                or (
-                    zero_hp_effect is not None
-                    and not isinstance(zero_hp_effect, dict)
-                )
+                or (zero_hp_effect is not None and not isinstance(zero_hp_effect, dict))
             ):
                 raise ValueError(
                     f"source on-hit ruling {index} requires reviewed save, "
@@ -1800,19 +1740,13 @@ def _source_passive_allies(
         unknown = set(raw) - {"actor_id", "source_excerpt"}
         if unknown:
             raise ValueError(
-                f"source passive ally {index} has unsupported fields: "
-                f"{', '.join(sorted(unknown))}"
+                f"source passive ally {index} has unsupported fields: {', '.join(sorted(unknown))}"
             )
         actor_id = str(raw.get("actor_id") or "").strip()
         source_excerpt = str(raw.get("source_excerpt") or "").strip()
-        if (
-            actor_id not in ally_ids
-            or actor_id in normalized
-            or not source_excerpt
-        ):
+        if actor_id not in ally_ids or actor_id in normalized or not source_excerpt:
             raise ValueError(
-                f"source passive ally {index} requires one unique allied actor "
-                "and an exact excerpt"
+                f"source passive ally {index} requires one unique allied actor and an exact excerpt"
             )
         normalized[actor_id] = {
             "actor_id": actor_id,
@@ -1839,9 +1773,7 @@ def _source_random_activities(
             )
         actor_id = str(raw.get("actor_id") or "").strip()
         activity_id = str(raw.get("activity_id") or "").strip()
-        source_excerpt = " ".join(
-            str(raw.get("source_excerpt") or "").split()
-        )
+        source_excerpt = " ".join(str(raw.get("source_excerpt") or "").split())
         if (
             actor_id not in participant_ids
             or actor_id in normalized
@@ -1855,21 +1787,13 @@ def _source_random_activities(
         if actors is not None:
             actor = actors.get(actor_id)
             activities = (
-                dict(dict(actor or {}).get("sheet") or {})
-                .get("content", {})
-                .get("activities", [])
+                dict(dict(actor or {}).get("sheet") or {}).get("content", {}).get("activities", [])
             )
             activity = next(
-                (
-                    item
-                    for item in activities
-                    if str(item.get("id") or "") == activity_id
-                ),
+                (item for item in activities if str(item.get("id") or "") == activity_id),
                 None,
             )
-            description = " ".join(
-                str(dict(activity or {}).get("description") or "").split()
-            )
+            description = " ".join(str(dict(activity or {}).get("description") or "").split())
             if activity is None or source_excerpt not in description:
                 raise ValueError(
                     f"source random activity {index} must match its actor card and "
@@ -1901,14 +1825,11 @@ def _source_save_activities(
         }
         if unknown:
             raise ValueError(
-                f"source save activity {index} has unsupported fields: "
-                f"{', '.join(sorted(unknown))}"
+                f"source save activity {index} has unsupported fields: {', '.join(sorted(unknown))}"
             )
         actor_id = str(raw.get("actor_id") or "").strip()
         activity_id = str(raw.get("activity_id") or "").strip()
-        source_excerpt = " ".join(
-            str(raw.get("source_excerpt") or "").split()
-        )
+        source_excerpt = " ".join(str(raw.get("source_excerpt") or "").split())
         if (
             actor_id not in participant_ids
             or actor_id in normalized
@@ -1934,15 +1855,8 @@ def _source_save_activities(
                 ),
                 None,
             )
-            spec = dict(
-                dict(activity or {}).get("choices", {}).get(
-                    "source_save_effect"
-                )
-                or {}
-            )
-            description = " ".join(
-                str(dict(activity or {}).get("description") or "").split()
-            )
+            spec = dict(dict(activity or {}).get("choices", {}).get("source_save_effect") or {})
+            description = " ".join(str(dict(activity or {}).get("description") or "").split())
             if (
                 activity is None
                 or not spec
@@ -1971,9 +1885,7 @@ def _source_contest_activities(
     normalized: dict[str, dict[str, Any]] = {}
     for index, raw in enumerate(values):
         if not isinstance(raw, dict):
-            raise ValueError(
-                f"source contest activity {index} must be an object"
-            )
+            raise ValueError(f"source contest activity {index} must be an object")
         unknown = set(raw) - {
             "actor_id",
             "activity_id",
@@ -1987,9 +1899,7 @@ def _source_contest_activities(
             )
         actor_id = str(raw.get("actor_id") or "").strip()
         activity_id = str(raw.get("activity_id") or "").strip()
-        source_excerpt = " ".join(
-            str(raw.get("source_excerpt") or "").split()
-        )
+        source_excerpt = " ".join(str(raw.get("source_excerpt") or "").split())
         if (
             actor_id not in participant_ids
             or actor_id in normalized
@@ -2016,21 +1926,12 @@ def _source_contest_activities(
                 ),
                 None,
             )
-            spec = dict(
-                dict(activity or {}).get("choices", {}).get(
-                    "source_contest_effect"
-                )
-                or {}
-            )
-            description = " ".join(
-                str(dict(activity or {}).get("description") or "").split()
-            )
+            spec = dict(dict(activity or {}).get("choices", {}).get("source_contest_effect") or {})
+            description = " ".join(str(dict(activity or {}).get("description") or "").split())
             if (
                 activity is None
-                or spec.get("kind")
-                != "intellect_devourer_body_thief_2014"
-                or spec.get("target_requirements")
-                != ["incapacitated", "humanoid"]
+                or spec.get("kind") != "intellect_devourer_body_thief_2014"
+                or spec.get("target_requirements") != ["incapacitated", "humanoid"]
                 or source_excerpt not in description
             ):
                 raise ValueError(
@@ -2069,9 +1970,7 @@ async def _roll_hostile_stealth(
     hostile_ids: list[str],
 ) -> tuple[dict[str, bool], dict[str, int], dict[str, Any], int]:
     passive_perception = {
-        actor_id: int(
-            dict(actors[actor_id].get("derived") or {}).get("passive_perception", 10)
-        )
+        actor_id: int(dict(actors[actor_id].get("derived") or {}).get("passive_perception", 10))
         for actor_id in party_ids
     }
     stealth_profiles = {
@@ -2082,19 +1981,16 @@ async def _roll_hostile_stealth(
                 )
             ),
             "disadvantage": bool(
-                dict(actors[actor_id].get("derived") or {}).get(
-                    "stealth_disadvantage", False
-                )
+                dict(actors[actor_id].get("derived") or {}).get("stealth_disadvantage", False)
             ),
         }
         for actor_id in hostile_ids
     }
-    if args.shared_hostile_stealth and len(
-        {(item["bonus"], item["disadvantage"]) for item in stealth_profiles.values()}
-    ) != 1:
-        raise ValueError(
-            "one shared hostile Stealth roll requires identical Stealth profiles"
-        )
+    if (
+        args.shared_hostile_stealth
+        and len({(item["bonus"], item["disadvantage"]) for item in stealth_profiles.values()}) != 1
+    ):
+        raise ValueError("one shared hostile Stealth roll requires identical Stealth profiles")
 
     roll_actor_ids = hostile_ids[:1] if args.shared_hostile_stealth else hostile_ids
     rolls: list[dict[str, Any]] = []
@@ -2105,14 +2001,17 @@ async def _roll_hostile_stealth(
             "character_check",
             {
                 "campaign_id": args.campaign_id,
-                "actor_id": actor_id,
-                "kind": "ability",
-                "ability": "stealth",
-                "dc": 0,
-                "proficient": False,
-                "bonus": 0,
-                "advantage": False,
-                "disadvantage": False,
+                "action": "check",
+                "payload": {
+                    "actor_id": actor_id,
+                    "kind": "ability",
+                    "ability": "stealth",
+                    "dc": 0,
+                    "proficient": False,
+                    "bonus": 0,
+                    "advantage": False,
+                    "disadvantage": False,
+                },
                 "branch_id": branch_id,
                 "expected_revision": campaign["revision"],
                 "idempotency_key": (
@@ -2135,9 +2034,7 @@ async def _roll_hostile_stealth(
                 "actor_id": actor_id,
                 "actor_name": actors[actor_id].get("name"),
                 "derived_stealth_bonus": stealth_profiles[actor_id]["bonus"],
-                "derived_stealth_disadvantage": stealth_profiles[actor_id][
-                    "disadvantage"
-                ],
+                "derived_stealth_disadvantage": stealth_profiles[actor_id]["disadvantage"],
                 "result": result,
                 "random_stream_receipt": settled.get("random_stream_receipt"),
             }
@@ -2253,9 +2150,7 @@ def _validate_hostile_attacks(
         if dict(shortbow.get("range_ft") or {}) != {"normal": 80, "long": 320}:
             raise RuntimeError(f"source hostile {actor_id} has an invalid Shortbow range")
         if str(shortbow.get("on_hit_effect") or ""):
-            raise RuntimeError(
-                f"source hostile {actor_id} has unresolved trailing action prose"
-            )
+            raise RuntimeError(f"source hostile {actor_id} has unresolved trailing action prose")
 
 
 def _preferred_hostile_weapon_id(
@@ -2264,9 +2159,7 @@ def _preferred_hostile_weapon_id(
     hostile_index: int,
 ) -> str:
     weapons = list(
-        dict(dict(actor.get("derived") or {}).get("inventory") or {}).get(
-            "weapon_attacks", []
-        )
+        dict(dict(actor.get("derived") or {}).get("inventory") or {}).get("weapon_attacks", [])
     )
     attack_ids = {str(item.get("item_id") or "") for item in weapons}
     if hostile_index >= 2 and "shortbow" in attack_ids:
@@ -2274,11 +2167,7 @@ def _preferred_hostile_weapon_id(
     if "scimitar" in attack_ids:
         return "scimitar"
     melee = next(
-        (
-            str(item.get("item_id") or "")
-            for item in weapons
-            if item.get("attack_type") == "melee"
-        ),
+        (str(item.get("item_id") or "") for item in weapons if item.get("attack_type") == "melee"),
         "",
     )
     return melee or (str(weapons[0].get("item_id") or "") if weapons else "")
@@ -2292,7 +2181,8 @@ def _preferred_multiattack_option_id(
     options = [
         item
         for item in dict(actor.get("derived") or {}).get("multiattack_options", [])
-        if isinstance(item, dict) and str(item.get("id") or "")
+        if isinstance(item, dict)
+        and str(item.get("id") or "")
         and (
             sum(
                 int(attack.get("count", 0) or 0)
@@ -2337,9 +2227,7 @@ def _has_multiattack_followup(combat: dict[str, Any], actor_id: str) -> bool:
         return False
     budget = dict(combatant.get("turn_budget") or {})
     flags = dict(combatant.get("turn_flags") or {})
-    return int(budget.get("attack_budget", 0) or 0) > 0 and bool(
-        flags.get("multiattack")
-    )
+    return int(budget.get("attack_budget", 0) or 0) > 0 and bool(flags.get("multiattack"))
 
 
 async def _start(
@@ -2406,12 +2294,10 @@ async def _start(
         participant_ids=[*party_ids, *initial_hostile_ids],
         encounter_source_excerpt=str(args.source_excerpt or ""),
     )
-    if source_zero_hp_finisher is not None and set(
-        source_zero_hp_finisher["actor_ids"]
-    ) & set(ally_ids):
-        raise ValueError(
-            "source zero-HP finisher actor_ids must be PCs, not allied NPCs"
-        )
+    if source_zero_hp_finisher is not None and set(source_zero_hp_finisher["actor_ids"]) & set(
+        ally_ids
+    ):
+        raise ValueError("source zero-HP finisher actor_ids must be PCs, not allied NPCs")
     source_zero_hp_stabilization = _source_zero_hp_stabilization(
         args.source_zero_hp_stabilization_json,
         participant_ids=pc_ids,
@@ -2484,10 +2370,7 @@ async def _start(
                 f"source opening weapon {opening['weapon_id']} is absent from {actor_id}"
             )
         for ruling_actor_id, ruling_weapon_id in on_hit_rulings:
-            if (
-                ruling_actor_id == actor_id
-                and ruling_weapon_id not in attack_ids
-            ):
+            if ruling_actor_id == actor_id and ruling_weapon_id not in attack_ids:
                 raise RuntimeError(
                     f"source on-hit weapon {ruling_weapon_id} is absent from {actor_id}"
                 )
@@ -2627,7 +2510,7 @@ async def _start(
             passive_perception,
             surprise_basis,
             expected_revision,
-            ) = await _roll_hostile_stealth(
+        ) = await _roll_hostile_stealth(
             client,
             args,
             branch_id=str(branch["id"]),
@@ -2636,11 +2519,7 @@ async def _start(
             hostile_ids=selected_hidden_ids or initial_hostile_ids,
         )
         surprise.update(
-            {
-                actor_id: False
-                for actor_id in initial_hostile_ids
-                if actor_id not in surprise
-            }
+            {actor_id: False for actor_id in initial_hostile_ids if actor_id not in surprise}
         )
         visible_to_actor_ids_by_hostile = {
             hostile_id: [
@@ -2660,8 +2539,7 @@ async def _start(
             ally_ids=ally_ids,
             surprise_by_actor=surprise,
             hostiles_hidden=(
-                args.hostiles_hidden
-                or (not args.no_surprise and not selected_hidden_ids)
+                args.hostiles_hidden or (not args.no_surprise and not selected_hidden_ids)
             ),
             hidden_actor_ids=selected_hidden_ids,
             visible_to_actor_ids_by_hostile=visible_to_actor_ids_by_hostile,
@@ -2674,14 +2552,10 @@ async def _start(
             source_excerpt=str(args.source_excerpt or ""),
             additional_hostile_ids=additional_hostile_ids,
             additional_label=args.additional_hostile_label,
-            additional_source_excerpt=str(
-                args.additional_hostile_source_excerpt or ""
-            ),
+            additional_source_excerpt=str(args.additional_hostile_source_excerpt or ""),
             reinforcement_hostile_ids=reinforcement_hostile_ids,
             reinforcement_label=args.reinforcement_hostile_label,
-            reinforcement_source_excerpt=str(
-                args.reinforcement_hostile_source_excerpt or ""
-            ),
+            reinforcement_source_excerpt=str(args.reinforcement_hostile_source_excerpt or ""),
         ),
         "name": args.encounter_name,
         "scene_id": args.scene_id,
@@ -2690,9 +2564,7 @@ async def _start(
         "branch_id": branch["id"],
         "expected_revision": expected_revision,
     }
-    start_request["idempotency_key"] = _encounter_start_operation_token(
-        start_request
-    )
+    start_request["idempotency_key"] = _encounter_start_operation_token(start_request)
     started = await client.domain("combat_start", start_request)
     opened_combat = await client.open(args.campaign_id)
     await client.load(
@@ -2716,8 +2588,7 @@ async def _start(
                     "branch_id": branch["id"],
                     "expected_revision": campaign["revision"],
                     "idempotency_key": (
-                        "encounter-queue-reinforcement-"
-                        + _operation_token(args, actor_id)
+                        "encounter-queue-reinforcement-" + _operation_token(args, actor_id)
                     ),
                 },
             )
@@ -2737,10 +2608,7 @@ async def _start(
         "source_zero_hp_finisher": source_zero_hp_finisher,
         "source_zero_hp_stabilization": source_zero_hp_stabilization,
         "source_target_priorities": list(
-            {
-                tuple(value["actor_ids"]): value
-                for value in target_priorities.values()
-            }.values()
+            {tuple(value["actor_ids"]): value for value in target_priorities.values()}.values()
         ),
         "source_precombat_casts": precombat_cast_results,
         "source_opening_weapons": list(opening_weapons.values()),
@@ -2766,26 +2634,16 @@ async def _start(
 
 def _hit_points(actor: dict[str, Any]) -> int:
     return int(
-        dict(dict(actor.get("sheet") or {}).get("combat") or {})
-        .get("hp", {})
-        .get("value", 0)
-        or 0
+        dict(dict(actor.get("sheet") or {}).get("combat") or {}).get("hp", {}).get("value", 0) or 0
     )
 
 
 def _conditions(actor: dict[str, Any]) -> set[str]:
-    return {
-        str(item).casefold()
-        for item in dict(actor.get("sheet") or {}).get("conditions", [])
-    }
+    return {str(item).casefold() for item in dict(actor.get("sheet") or {}).get("conditions", [])}
 
 
 def _should_stand(actor: dict[str, Any], available_actions: set[str]) -> bool:
-    return (
-        _hit_points(actor) > 0
-        and "prone" in _conditions(actor)
-        and "move" in available_actions
-    )
+    return _hit_points(actor) > 0 and "prone" in _conditions(actor) and "move" in available_actions
 
 
 def _choose_party_spell(
@@ -2809,11 +2667,7 @@ def _choose_party_spell(
         for item in dict(sheet.get("content") or {}).get("spells", [])
         if isinstance(item, dict) and str(item.get("id") or "")
     ]
-    selected_ids = {
-        str(item)
-        for item in preparation.get("selected_spell_ids", [])
-        if str(item)
-    }
+    selected_ids = {str(item) for item in preparation.get("selected_spell_ids", []) if str(item)}
     derived_prepared_ids = {
         str(item)
         for item in dict(dict(actor.get("derived") or {}).get("spellcasting") or {}).get(
@@ -2834,9 +2688,7 @@ def _choose_party_spell(
     available_slot_levels = sorted(
         int(level)
         for level, slot in dict(spellcasting.get("spell_slots") or {}).items()
-        if str(level).isdigit()
-        and int(level) >= 1
-        and int(dict(slot).get("value", 0) or 0) > 0
+        if str(level).isdigit() and int(level) >= 1 and int(dict(slot).get("value", 0) or 0) > 0
     )
     if not available_slot_levels:
         return None
@@ -2880,9 +2732,7 @@ def _observable_target_ids(
         if target is None or target.get("inside_host"):
             continue
         visible_to = target.get("visible_to_actor_ids")
-        if not target.get("hidden") or (
-            isinstance(visible_to, list) and observer_id in visible_to
-        ):
+        if not target.get("hidden") or (isinstance(visible_to, list) and observer_id in visible_to):
             observable.append(target_id)
     return observable
 
@@ -2912,9 +2762,7 @@ def _body_thief_sides(
         for actor_id, item in combatants.items()
         if actor_id in hostile_ids and item.get("inside_host")
     }
-    effective_party_ids = [
-        actor_id for actor_id in party_ids if actor_id not in controlled_hosts
-    ]
+    effective_party_ids = [actor_id for actor_id in party_ids if actor_id not in controlled_hosts]
     attackable_hostile_ids = [
         actor_id for actor_id in hostile_ids if actor_id not in inside_sources
     ] + list(controlled_hosts)
@@ -2963,10 +2811,7 @@ def _body_thief_target_ids(
         }
         and _distance(
             source_position,
-            dict(
-                combatants[target_id].get("position")
-                or {"x": 0, "y": 0}
-            ),
+            dict(combatants[target_id].get("position") or {"x": 0, "y": 0}),
         )
         * 5
         <= range_ft
@@ -2974,10 +2819,7 @@ def _body_thief_target_ids(
     eligible.sort(
         key=lambda target_id: _distance(
             source_position,
-            dict(
-                combatants[target_id].get("position")
-                or {"x": 0, "y": 0}
-            ),
+            dict(combatants[target_id].get("position") or {"x": 0, "y": 0}),
         )
     )
     return eligible
@@ -2988,18 +2830,14 @@ def _has_action_budget(combat: dict[str, Any], actor_id: str) -> bool:
         (
             item
             for item in combat.get("combatants", [])
-            if isinstance(item, dict)
-            and str(item.get("actor_id") or "") == actor_id
+            if isinstance(item, dict) and str(item.get("actor_id") or "") == actor_id
         ),
         None,
     )
     if combatant is None:
         return False
     budget = dict(combatant.get("turn_budget") or {})
-    return (
-        int(budget.get("main_action", 0) or 0) > 0
-        or int(budget.get("extra_action", 0) or 0) > 0
-    )
+    return int(budget.get("main_action", 0) or 0) > 0 or int(budget.get("extra_action", 0) or 0) > 0
 
 
 def _wound_priority(actor: dict[str, Any]) -> tuple[bool, float]:
@@ -3023,9 +2861,7 @@ def _choose_destination(
     goal = dict(target.get("position") or {})
     if set(origin) != {"x", "y"} or set(goal) != {"x", "y"}:
         return None
-    conditions = {
-        str(item).casefold() for item in acting.get("conditions", [])
-    }
+    conditions = {str(item).casefold() for item in acting.get("conditions", [])}
     if conditions & {
         "dead",
         "unconscious",
@@ -3045,11 +2881,7 @@ def _choose_destination(
         source_id: str,
     ) -> tuple[bool, dict[str, Any] | None] | None:
         source = next(
-            (
-                item
-                for item in combatants
-                if str(item.get("actor_id") or "") == source_id
-            ),
+            (item for item in combatants if str(item.get("actor_id") or "") == source_id),
             None,
         )
         if source is None:
@@ -3058,18 +2890,14 @@ def _choose_destination(
         if isinstance(visible_to, list):
             visible = actor_id in {str(item) for item in visible_to}
         else:
-            source_conditions = {
-                str(item).casefold() for item in source.get("conditions", [])
-            }
+            source_conditions = {str(item).casefold() for item in source.get("conditions", [])}
             visible = not source.get("hidden", False) and "invisible" not in source_conditions
         position = dict(source.get("position") or {})
         return visible, position if set(position) == {"x", "y"} else None
 
     fear_source_positions: list[dict[str, Any]] = []
     if "frightened" in conditions:
-        raw_fear_sources = dict(acting.get("condition_sources") or {}).get(
-            "frightened"
-        )
+        raw_fear_sources = dict(acting.get("condition_sources") or {}).get("frightened")
         if not isinstance(raw_fear_sources, list) or not raw_fear_sources:
             return None
         for source_id in raw_fear_sources:
@@ -3099,8 +2927,7 @@ def _choose_destination(
         )
         for item in combatants
         if item.get("actor_id") != actor_id
-        and "dead"
-        not in {str(value).casefold() for value in item.get("conditions", [])}
+        and "dead" not in {str(value).casefold() for value in item.get("conditions", [])}
         and isinstance(item.get("position"), dict)
     }
     battle_map = dict(combat.get("battle_map") or {})
@@ -3120,15 +2947,11 @@ def _choose_destination(
     costs: dict[tuple[int, int], int] = {origin_cell: 0}
     steps_by_cell: dict[tuple[int, int], int] = {origin_cell: 0}
     previous: dict[tuple[int, int], tuple[int, int]] = {}
-    queue: list[tuple[int, int, int, int]] = [
-        (0, 0, origin_cell[0], origin_cell[1])
-    ]
+    queue: list[tuple[int, int, int, int]] = [(0, 0, origin_cell[0], origin_cell[1])]
     while queue:
         cost, steps, x, y = heapq.heappop(queue)
         current_cell = (x, y)
-        if cost != costs.get(current_cell) or steps != steps_by_cell.get(
-            current_cell
-        ):
+        if cost != costs.get(current_cell) or steps != steps_by_cell.get(current_cell):
             continue
         for delta_x in (-1, 0, 1):
             for delta_y in (-1, 0, 1):
@@ -3155,11 +2978,7 @@ def _choose_destination(
                 ):
                     continue
                 next_steps = steps + 1
-                next_cost = cost + (
-                    10
-                    if f"{neighbor[0]},{neighbor[1]}" in difficult_cells
-                    else 5
-                )
+                next_cost = cost + (10 if f"{neighbor[0]},{neighbor[1]}" in difficult_cells else 5)
                 if next_cost > budget_ft:
                     continue
                 previous_best = (
@@ -3204,10 +3023,7 @@ def _choose_destination(
     reverse_path = [selected]
     while reverse_path[-1] != origin_cell:
         reverse_path.append(previous[reverse_path[-1]])
-    route = [
-        {"x": point[0], "y": point[1]}
-        for point in reversed(reverse_path[:-1])
-    ]
+    route = [{"x": point[0], "y": point[1]} for point in reversed(reverse_path[:-1])]
     return {"x": x, "y": y}, steps * 5, route
 
 
@@ -3241,10 +3057,7 @@ def _defense_selection(pending: dict[str, Any]) -> dict[str, Any]:
             item
             for item in candidates
             if trigger == "magic_missile_targeted"
-            or (
-                trigger == "attack_hit_defense"
-                and item.get("projected_hit") is False
-            )
+            or (trigger == "attack_hit_defense" and item.get("projected_hit") is False)
         ),
         None,
     )
@@ -3338,10 +3151,7 @@ def _source_flee_ready(
         return False
     if trigger_defeated_actor_id:
         return trigger_defeated_actor_id in defeated_hostile_ids
-    return (
-        flee_after_defeated > 0
-        and len(defeated_hostile_ids) >= flee_after_defeated
-    )
+    return flee_after_defeated > 0 and len(defeated_hostile_ids) >= flee_after_defeated
 
 
 def _source_truce_outcome(
@@ -3375,20 +3185,9 @@ def _source_surrender_outcome(
     no_escape: bool,
     unresolved_party: bool,
 ) -> tuple[str, str] | None:
-    threshold_met = (
-        surrender_at_hp > 0
-        and 0 < actor_hit_points <= surrender_at_hp
-    )
-    casualties_met = (
-        surrender_after_defeated > 0
-        and defeated_hostiles >= surrender_after_defeated
-    )
-    if (
-        (threshold_met or casualties_met)
-        and actor_alive
-        and no_escape
-        and not unresolved_party
-    ):
+    threshold_met = surrender_at_hp > 0 and 0 < actor_hit_points <= surrender_at_hp
+    casualties_met = surrender_after_defeated > 0 and defeated_hostiles >= surrender_after_defeated
+    if (threshold_met or casualties_met) and actor_alive and no_escape and not unresolved_party:
         if casualties_met:
             return (
                 "surrender",
@@ -3435,10 +3234,7 @@ def _source_zero_hp_finisher_stage(
     )
     if doused is None:
         return "douse", None
-    doused_round = int(
-        dict(doused.get("payload") or {}).get("round", 0)
-        or 0
-    )
+    doused_round = int(dict(doused.get("payload") or {}).get("round", 0) or 0)
     current_round = int(combat.get("round", 1) or 1)
     if current_round - doused_round >= int(finisher["oil_duration_rounds"]):
         return "douse", doused
@@ -3452,11 +3248,7 @@ async def _resolve_pending(
     combat: dict[str, Any],
 ) -> dict[str, Any] | None:
     pending = next(
-        (
-            item
-            for item in combat.get("pending", [])
-            if item.get("status", "pending") == "pending"
-        ),
+        (item for item in combat.get("pending", []) if item.get("status", "pending") == "pending"),
         None,
     )
     if pending is None:
@@ -3466,26 +3258,29 @@ async def _resolve_pending(
     identity = f"{pending.get('id')}:{campaign['revision']}"
     if (
         pending.get("trigger") == "attack_on_hit_effect"
-        and str(pending.get("effect") or "").strip().casefold()
-        == GUIDING_BOLT_ON_HIT.casefold()
+        and str(pending.get("effect") or "").strip().casefold() == GUIDING_BOLT_ON_HIT.casefold()
     ):
-        return await client.domain(
-            "combat_on_hit_ruling",
-            {
-                "campaign_id": args.campaign_id,
-                "target_id": str(pending.get("target_id") or actor_id),
-                "choice_id": str(pending["id"]),
-                "selection": {
-                    "id": "next_attack_advantage",
-                    "source_excerpt": GUIDING_BOLT_ON_HIT,
+        return _facade_value(
+            await client.domain(
+                "combat_choice",
+                {
+                    "campaign_id": args.campaign_id,
+                    "action": "on_hit_ruling",
+                    "actor_id": str(pending.get("target_id") or actor_id),
+                    "payload": {
+                        "choice_id": str(pending["id"]),
+                        "selection": {
+                            "id": "next_attack_advantage",
+                            "source_excerpt": GUIDING_BOLT_ON_HIT,
+                        },
+                    },
+                    "branch_id": branch_id,
+                    "expected_revision": campaign["revision"],
+                    "idempotency_key": (
+                        "encounter-guiding-bolt-on-hit-" + _token(identity, length=24)
+                    ),
                 },
-                "branch_id": branch_id,
-                "expected_revision": campaign["revision"],
-                "idempotency_key": (
-                    "encounter-guiding-bolt-on-hit-"
-                    + _token(identity, length=24)
-                ),
-            },
+            )
         )
     if pending.get("trigger") in {
         "attack_on_hit_effect",
@@ -3511,27 +3306,30 @@ async def _resolve_pending(
         )
         if ruling is None:
             raise RuntimeError(
-                "interrupted source attack has no matching on-hit settlement "
-                "declaration"
+                "interrupted source attack has no matching on-hit settlement declaration"
             )
-        return await client.domain(
-            "combat_on_hit_ruling",
-            {
-                "campaign_id": args.campaign_id,
-                "target_id": str(pending.get("target_id") or actor_id),
-                "choice_id": str(pending["id"]),
-                "selection": {
-                    key: value
-                    for key, value in ruling.items()
-                    if key not in {"actor_id", "weapon_id"}
+        return _facade_value(
+            await client.domain(
+                "combat_choice",
+                {
+                    "campaign_id": args.campaign_id,
+                    "action": "on_hit_ruling",
+                    "actor_id": str(pending.get("target_id") or actor_id),
+                    "payload": {
+                        "choice_id": str(pending["id"]),
+                        "selection": {
+                            key: value
+                            for key, value in ruling.items()
+                            if key not in {"actor_id", "weapon_id"}
+                        },
+                    },
+                    "branch_id": branch_id,
+                    "expected_revision": campaign["revision"],
+                    "idempotency_key": (
+                        "encounter-source-on-hit-resume-" + _token(identity, length=24)
+                    ),
                 },
-                "branch_id": branch_id,
-                "expected_revision": campaign["revision"],
-                "idempotency_key": (
-                    "encounter-source-on-hit-resume-"
-                    + _token(identity, length=24)
-                ),
-            },
+            )
         )
     if pending.get("kind") == "concentration":
         return await client.domain(
@@ -3577,19 +3375,24 @@ async def _preflight_attack(
     preferred_weapon_id: str = "",
     multiattack_option_id: str = "",
     action_context: dict[str, Any] | None = None,
+    knock_out_target_ids: set[str] | None = None,
 ) -> tuple[str, dict[str, Any], dict[str, Any]] | None:
+    knock_out_targets = set(knock_out_target_ids or set())
     weapons = list(
-        dict(dict(actor.get("derived") or {}).get("inventory") or {}).get(
-            "weapon_attacks", []
-        )
+        dict(dict(actor.get("derived") or {}).get("inventory") or {}).get("weapon_attacks", [])
     )
     weapons.sort(key=lambda item: item.get("item_id") != preferred_weapon_id)
     for target_id in target_ids:
         for weapon in weapons or [{"item_id": "unarmed-strike", "attack_type": "melee"}]:
+            attack_mode = str(weapon.get("attack_type") or "melee")
+            if target_id in knock_out_targets and attack_mode != "melee":
+                continue
             action = {
                 "weapon_id": weapon.get("item_id"),
-                "attack_mode": weapon.get("attack_type") or "melee",
+                "attack_mode": attack_mode,
             }
+            if target_id in knock_out_targets:
+                action["knock_out"] = True
             if action_context:
                 action["context"] = dict(action_context)
             if multiattack_option_id:
@@ -3662,14 +3465,11 @@ async def _auto_run(
         str(args.flee_on_start_actor_id or ""),
     } - {""}
     triggered_flee_configured = bool(
-        args.flee_actor_id
-        or args.flee_trigger_defeated_actor_id
-        or args.flee_after_defeated
+        args.flee_actor_id or args.flee_trigger_defeated_actor_id or args.flee_after_defeated
     )
     if triggered_flee_configured and (
         not args.flee_actor_id
-        or bool(args.flee_trigger_defeated_actor_id)
-        == bool(args.flee_after_defeated)
+        or bool(args.flee_trigger_defeated_actor_id) == bool(args.flee_after_defeated)
     ):
         raise ValueError(
             "source-specific triggered flee requires --flee-actor-id and exactly one "
@@ -3678,35 +3478,36 @@ async def _auto_run(
     if args.flee_after_defeated < 0:
         raise ValueError("--flee-after-defeated must not be negative")
     if source_flee_ids and (
-        not source_flee_ids <= set(hostile_ids)
-        or not str(args.flee_source_excerpt or "").strip()
+        not source_flee_ids <= set(hostile_ids) or not str(args.flee_source_excerpt or "").strip()
     ):
         raise ValueError(
             "source-specific flee actors must be encounter hostiles and require "
             "--flee-source-excerpt"
         )
     if args.flee_actor_id and (
-        args.flee_trigger_defeated_actor_id in args.flee_actor_id
-        or args.flee_on_start_actor_id
+        args.flee_trigger_defeated_actor_id in args.flee_actor_id or args.flee_on_start_actor_id
     ):
         raise ValueError(
             "triggered and on-start source departures are mutually exclusive, and "
             "triggered actors must be distinct"
         )
     if bool(args.truce_after_defeated) != bool(args.truce_actor_id):
-        raise ValueError(
-            "source truce requires both --truce-after-defeated and --truce-actor-id"
-        )
+        raise ValueError("source truce requires both --truce-after-defeated and --truce-actor-id")
     if args.truce_after_defeated < 0:
         raise ValueError("--truce-after-defeated must not be negative")
     if args.truce_actor_id and (
-        args.truce_actor_id not in hostile_ids
-        or not str(args.truce_source_excerpt or "").strip()
+        args.truce_actor_id not in hostile_ids or not str(args.truce_source_excerpt or "").strip()
     ):
         raise ValueError(
-            "source truce actor must be an encounter hostile and require "
-            "--truce-source-excerpt"
+            "source truce actor must be an encounter hostile and require --truce-source-excerpt"
         )
+    knock_out_hostile_ids = {
+        str(actor_id).strip() for actor_id in args.knock_out_hostile_id if str(actor_id).strip()
+    }
+    if len(knock_out_hostile_ids) != len(args.knock_out_hostile_id) or not (
+        knock_out_hostile_ids <= set(hostile_ids)
+    ):
+        raise ValueError("knockout targets must be distinct encounter hostiles")
     opening_casts = _source_opening_casts(
         args.source_opening_cast_json,
         participant_ids=[*party_ids, *hostile_ids],
@@ -3746,17 +3547,13 @@ async def _auto_run(
         participant_ids=[*party_ids, *hostile_ids],
         encounter_source_excerpt=str(args.source_excerpt or ""),
     )
-    if source_zero_hp_finisher is not None and set(
-        source_zero_hp_finisher["actor_ids"]
-    ) & set(ally_ids):
-        raise ValueError(
-            "source zero-HP finisher actor_ids must be PCs, not allied NPCs"
-        )
+    if source_zero_hp_finisher is not None and set(source_zero_hp_finisher["actor_ids"]) & set(
+        ally_ids
+    ):
+        raise ValueError("source zero-HP finisher actor_ids must be PCs, not allied NPCs")
     source_zero_hp_stabilization = _source_zero_hp_stabilization(
         args.source_zero_hp_stabilization_json,
-        participant_ids=[
-            actor_id for actor_id in party_ids if actor_id not in set(ally_ids)
-        ],
+        participant_ids=[actor_id for actor_id in party_ids if actor_id not in set(ally_ids)],
     )
     surrender_configured = bool(
         args.surrender_actor_id
@@ -3823,9 +3620,7 @@ async def _auto_run(
     revealed_surprised = [
         str(item["actor_id"])
         for item in initial_combat.get("combatants", [])
-        if item.get("actor_id") in hostile_ids
-        and item.get("surprised")
-        and item.get("hidden")
+        if item.get("actor_id") in hostile_ids and item.get("surprised") and item.get("hidden")
     ]
     visibility_patch = None
     if revealed_surprised:
@@ -3850,10 +3645,7 @@ async def _auto_run(
                 ],
                 "branch_id": branch["id"],
                 "expected_revision": campaign["revision"],
-                "idempotency_key": (
-                    "encounter-reveal-surprised-"
-                    f"{_operation_token(args)}"
-                ),
+                "idempotency_key": (f"encounter-reveal-surprised-{_operation_token(args)}"),
             },
         )
     turns: list[dict[str, Any]] = []
@@ -3915,15 +3707,9 @@ async def _auto_run(
             party_ids=party_ids,
             hostile_ids=hostile_ids,
         )
-        effective_party_ids = list(
-            body_thief_sides["effective_party_ids"]
-        )
-        attackable_hostile_ids = list(
-            body_thief_sides["attackable_hostile_ids"]
-        )
-        hostile_turn_actor_ids = set(
-            body_thief_sides["hostile_turn_actor_ids"]
-        )
+        effective_party_ids = list(body_thief_sides["effective_party_ids"])
+        attackable_hostile_ids = list(body_thief_sides["attackable_hostile_ids"])
+        hostile_turn_actor_ids = set(body_thief_sides["hostile_turn_actor_ids"])
         defeated_hostiles = [
             actor_id
             for actor_id in hostile_ids
@@ -3931,9 +3717,7 @@ async def _auto_run(
             or (
                 _hit_points(actors[actor_id]) <= 0
                 and not bool(
-                    dict(combatants_by_actor.get(actor_id) or {}).get(
-                        "zero_hp_recovery", False
-                    )
+                    dict(combatants_by_actor.get(actor_id) or {}).get("zero_hp_recovery", False)
                 )
             )
         ]
@@ -3943,19 +3727,14 @@ async def _auto_run(
             if _hit_points(actors[actor_id]) == 0
             and not _conditions(actors[actor_id]) & {"dead", "stable"}
         ]
-        party_down = all(
-            _hit_points(actors[actor_id]) <= 0
-            for actor_id in effective_party_ids
-        )
+        party_down = all(_hit_points(actors[actor_id]) <= 0 for actor_id in effective_party_ids)
         outcome = (
             _source_surrender_outcome(
                 actor_hit_points=_hit_points(actors[args.surrender_actor_id]),
                 surrender_at_hp=args.surrender_at_hp,
                 defeated_hostiles=len(defeated_hostiles),
                 surrender_after_defeated=args.surrender_after_defeated,
-                actor_alive=(
-                    "dead" not in _conditions(actors[args.surrender_actor_id])
-                ),
+                actor_alive=("dead" not in _conditions(actors[args.surrender_actor_id])),
                 no_escape=args.surrender_no_escape,
                 unresolved_party=bool(unresolved_party),
             )
@@ -4020,11 +3799,7 @@ async def _auto_run(
                     "campaign_id": args.campaign_id,
                     "target_id": stabilization_target_id,
                     "action": "stabilize",
-                    "payload": {
-                        "source_excerpt": source_zero_hp_stabilization[
-                            "source_excerpt"
-                        ]
-                    },
+                    "payload": {"source_excerpt": source_zero_hp_stabilization["source_excerpt"]},
                     "branch_id": branch["id"],
                     "expected_revision": campaign["revision"],
                     "idempotency_key": (
@@ -4038,9 +3813,7 @@ async def _auto_run(
                     "sequence": sequence,
                     "kind": "source_zero_hp_stabilization",
                     "target_id": stabilization_target_id,
-                    "source_excerpt": source_zero_hp_stabilization[
-                        "source_excerpt"
-                    ],
+                    "source_excerpt": source_zero_hp_stabilization["source_excerpt"],
                     "result": stabilized,
                 }
             )
@@ -4054,9 +3827,7 @@ async def _auto_run(
                 flee_actor_ids=set(args.flee_actor_id),
                 defeated_hostile_ids=defeated_hostiles,
                 flee_after_defeated=args.flee_after_defeated,
-                trigger_defeated_actor_id=str(
-                    args.flee_trigger_defeated_actor_id or ""
-                ),
+                trigger_defeated_actor_id=str(args.flee_trigger_defeated_actor_id or ""),
             )
             and _hit_points(actor) > 0
             and actor_id not in fled_hostile_ids
@@ -4071,17 +3842,14 @@ async def _auto_run(
                             **_source_departure_patch(
                                 actor_id,
                                 reason=str(args.flee_source_excerpt),
-                                destination_location_key=(
-                                    args.flee_destination_location_key
-                                ),
+                                destination_location_key=(args.flee_destination_location_key),
                             ),
                         }
                     ],
                     "branch_id": branch["id"],
                     "expected_revision": campaign["revision"],
                     "idempotency_key": (
-                        "encounter-source-flee-"
-                        f"{_operation_token(args, actor_id)}"
+                        f"encounter-source-flee-{_operation_token(args, actor_id)}"
                     ),
                 },
             )
@@ -4098,12 +3866,8 @@ async def _auto_run(
                     "sequence": sequence,
                     "kind": "source_flee",
                     "actor_id": actor_id,
-                    "trigger_actor_id": (
-                        args.flee_trigger_defeated_actor_id or None
-                    ),
-                    "trigger_defeated_count": (
-                        args.flee_after_defeated or None
-                    ),
+                    "trigger_actor_id": (args.flee_trigger_defeated_actor_id or None),
+                    "trigger_defeated_count": (args.flee_after_defeated or None),
                     "source_excerpt": str(args.flee_source_excerpt).strip(),
                     "map_patch": escaped,
                     "end_turn": ended_turn,
@@ -4161,8 +3925,8 @@ async def _auto_run(
             and actor_id in effective_party_ids
             and not actor_conditions
             & {
-            "dead",
-            "stable",
+                "dead",
+                "stable",
             }
         ):
             campaign = await _campaign(client, args.campaign_id)
@@ -4210,8 +3974,7 @@ async def _auto_run(
                     "kind": "body_thief_source_inside_host",
                     "actor_id": actor_id,
                     "host_actor_id": dict(
-                        combatants_by_actor[actor_id].get("inside_host")
-                        or {}
+                        combatants_by_actor[actor_id].get("inside_host") or {}
                     ).get("host_actor_id"),
                     "result": ended_turn,
                 }
@@ -4228,8 +3991,7 @@ async def _auto_run(
                     "branch_id": branch["id"],
                     "expected_revision": campaign["revision"],
                     "idempotency_key": (
-                        "encounter-stand-"
-                        f"{_operation_token(args, sequence, actor_id)}"
+                        f"encounter-stand-{_operation_token(args, sequence, actor_id)}"
                     ),
                 },
             )
@@ -4249,17 +4011,11 @@ async def _auto_run(
             and actor_id not in body_thief_sides["inside_sources"]
             and _has_action_budget(combat, actor_id)
         ):
-            combatants = {
-                str(item["actor_id"]): item
-                for item in combat["combatants"]
-            }
+            combatants = {str(item["actor_id"]): item for item in combat["combatants"]}
             activity_card = next(
                 item
-                for item in dict(actor.get("sheet") or {})
-                .get("content", {})
-                .get("activities", [])
-                if str(item.get("id") or "")
-                == contest_activity["activity_id"]
+                for item in dict(actor.get("sheet") or {}).get("content", {}).get("activities", [])
+                if str(item.get("id") or "") == contest_activity["activity_id"]
             )
             contest_range_ft = int(
                 dict(activity_card.get("choices") or {})
@@ -4290,9 +4046,7 @@ async def _auto_run(
                         "activity_id": contest_activity["activity_id"],
                         "declaration": {
                             "target_id": target_id,
-                            "target_is_humanoid": contest_activity[
-                                "target_is_humanoid"
-                            ],
+                            "target_is_humanoid": contest_activity["target_is_humanoid"],
                         },
                         "branch_id": branch["id"],
                         "expected_revision": campaign["revision"],
@@ -4313,22 +4067,14 @@ async def _auto_run(
                         "through structured settlement"
                     )
                 core_effect = dict(
-                    dict(settled_activity.get("result") or {}).get(
-                        "core_effect"
-                    )
-                    or {}
+                    dict(settled_activity.get("result") or {}).get("core_effect") or {}
                 )
                 if core_effect.get("success") and (
-                    core_effect.get("knowledge_transfer")
-                    != "all_target_knowledge"
-                    or int(
-                        core_effect.get("knowledge_transfer_count", -1)
-                    )
-                    < 0
+                    core_effect.get("knowledge_transfer") != "all_target_knowledge"
+                    or int(core_effect.get("knowledge_transfer_count", -1)) < 0
                 ):
                     raise RuntimeError(
-                        "Body Thief did not attest its complete ActorKnowledge "
-                        "transfer"
+                        "Body Thief did not attest its complete ActorKnowledge transfer"
                     )
                 turn_entry = {
                     "sequence": sequence,
@@ -4336,14 +4082,10 @@ async def _auto_run(
                     "actor_id": actor_id,
                     "activity_id": contest_activity["activity_id"],
                     "target_id": target_id,
-                    "source_excerpt": contest_activity[
-                        "source_excerpt"
-                    ],
+                    "source_excerpt": contest_activity["source_excerpt"],
                     "result": settled_activity,
                 }
-                if _has_blocking_pending(
-                    dict(settled_activity.get("combat") or {})
-                ):
+                if _has_blocking_pending(dict(settled_activity.get("combat") or {})):
                     turns.append(turn_entry)
                     continue
                 turn_entry["end_turn"] = await _end_turn(
@@ -4362,17 +4104,12 @@ async def _auto_run(
                 for item in combat.get("combatants", [])
                 if str(item.get("actor_id") or "") == actor_id
             )
-            active_multiattack = bool(
-                dict(combatant.get("turn_flags") or {}).get("multiattack")
-            )
+            active_multiattack = bool(dict(combatant.get("turn_flags") or {}).get("multiattack"))
             mixed_options = [
                 option
-                for option in dict(actor.get("derived") or {}).get(
-                    "multiattack_options", []
-                )
+                for option in dict(actor.get("derived") or {}).get("multiattack_options", [])
                 if any(
-                    str(item.get("activity_id") or "")
-                    == save_activity["activity_id"]
+                    str(item.get("activity_id") or "") == save_activity["activity_id"]
                     for item in option.get("activities", [])
                     if isinstance(item, dict)
                 )
@@ -4403,17 +4140,13 @@ async def _auto_run(
                     observer_id=actor_id,
                     target_ids=living_targets,
                 )
-                combatants = {
-                    str(item["actor_id"]): item
-                    for item in combat["combatants"]
-                }
+                combatants = {str(item["actor_id"]): item for item in combat["combatants"]}
                 activity_card = next(
                     item
                     for item in dict(actor.get("sheet") or {})
                     .get("content", {})
                     .get("activities", [])
-                    if str(item.get("id") or "")
-                    == save_activity["activity_id"]
+                    if str(item.get("id") or "") == save_activity["activity_id"]
                 )
                 save_range_ft = int(
                     dict(activity_card.get("choices") or {})
@@ -4425,28 +4158,16 @@ async def _auto_run(
                     target_id
                     for target_id in living_targets
                     if _distance(
-                        dict(
-                            combatants[actor_id].get("position")
-                            or {"x": 0, "y": 0}
-                        ),
-                        dict(
-                            combatants[target_id].get("position")
-                            or {"x": 0, "y": 0}
-                        ),
+                        dict(combatants[actor_id].get("position") or {"x": 0, "y": 0}),
+                        dict(combatants[target_id].get("position") or {"x": 0, "y": 0}),
                     )
                     * 5
                     <= save_range_ft
                 ]
                 living_targets.sort(
                     key=lambda target_id: _distance(
-                        dict(
-                            combatants[actor_id].get("position")
-                            or {"x": 0, "y": 0}
-                        ),
-                        dict(
-                            combatants[target_id].get("position")
-                            or {"x": 0, "y": 0}
-                        ),
+                        dict(combatants[actor_id].get("position") or {"x": 0, "y": 0}),
+                        dict(combatants[target_id].get("position") or {"x": 0, "y": 0}),
                     )
                 )
                 living_targets = _prioritize_targets(
@@ -4481,9 +4202,7 @@ async def _auto_run(
                         "activity_id": save_activity["activity_id"],
                         "declaration": {
                             "target_id": living_targets[0],
-                            "target_has_brain": save_activity[
-                                "target_has_brain"
-                            ],
+                            "target_has_brain": save_activity["target_has_brain"],
                         },
                         "branch_id": branch["id"],
                         "expected_revision": campaign["revision"],
@@ -4500,8 +4219,7 @@ async def _auto_run(
                 )
                 if settled_activity.get("status") != "committed":
                     raise RuntimeError(
-                        "source saving-throw activity did not commit through "
-                        "structured settlement"
+                        "source saving-throw activity did not commit through structured settlement"
                     )
                 turn_entry = {
                     "sequence": sequence,
@@ -4512,9 +4230,7 @@ async def _auto_run(
                     "source_excerpt": save_activity["source_excerpt"],
                     "result": settled_activity,
                 }
-                if _has_blocking_pending(
-                    dict(settled_activity.get("combat") or {})
-                ):
+                if _has_blocking_pending(dict(settled_activity.get("combat") or {})):
                     turns.append(turn_entry)
                     continue
                 turn_entry["end_turn"] = await _end_turn(
@@ -4538,28 +4254,18 @@ async def _auto_run(
                 else effective_party_ids
             )
             living_targets = [
-                target_id
-                for target_id in opponents
-                if _hit_points(actors[target_id]) > 0
+                target_id for target_id in opponents if _hit_points(actors[target_id]) > 0
             ]
             living_targets = _observable_target_ids(
                 combat,
                 observer_id=actor_id,
                 target_ids=living_targets,
             )
-            combatants = {
-                str(item["actor_id"]): item for item in combat["combatants"]
-            }
+            combatants = {str(item["actor_id"]): item for item in combat["combatants"]}
             living_targets.sort(
                 key=lambda target_id: _distance(
-                    dict(
-                        combatants[actor_id].get("position")
-                        or {"x": 0, "y": 0}
-                    ),
-                    dict(
-                        combatants[target_id].get("position")
-                        or {"x": 0, "y": 0}
-                    ),
+                    dict(combatants[actor_id].get("position") or {"x": 0, "y": 0}),
+                    dict(combatants[target_id].get("position") or {"x": 0, "y": 0}),
                 )
             )
             living_targets = _prioritize_targets(
@@ -4608,8 +4314,7 @@ async def _auto_run(
             )
             if settled_activity.get("status") != "committed":
                 raise RuntimeError(
-                    "source random activity did not commit through structured "
-                    "settlement"
+                    "source random activity did not commit through structured settlement"
                 )
             turn_entry = {
                 "sequence": sequence,
@@ -4620,9 +4325,7 @@ async def _auto_run(
                 "source_excerpt": random_activity["source_excerpt"],
                 "result": settled_activity,
             }
-            if _has_blocking_pending(
-                dict(settled_activity.get("combat") or {})
-            ):
+            if _has_blocking_pending(dict(settled_activity.get("combat") or {})):
                 turns.append(turn_entry)
                 continue
             turn_entry["end_turn"] = await _end_turn(
@@ -4649,13 +4352,10 @@ async def _auto_run(
                 if isinstance(item, dict)
             }
             actor_position = dict(combatants[actor_id].get("position") or {})
-            target_position = dict(
-                combatants[stabilization_target_id].get("position") or {}
-            )
+            target_position = dict(combatants[stabilization_target_id].get("position") or {})
             distance_ft = (
                 _distance(actor_position, target_position) * 5
-                if set(actor_position) == {"x", "y"}
-                and set(target_position) == {"x", "y"}
+                if set(actor_position) == {"x", "y"} and set(target_position) == {"x", "y"}
                 else 0
             )
             moved = None
@@ -4664,9 +4364,7 @@ async def _auto_run(
                     combat,
                     actor_id,
                     stabilization_target_id,
-                    avoided_cells=avoided_cells_by_actor.get(
-                        actor_id, set()
-                    ),
+                    avoided_cells=avoided_cells_by_actor.get(actor_id, set()),
                 )
                 if destination is None:
                     await _end_turn(
@@ -4692,8 +4390,7 @@ async def _auto_run(
                         "branch_id": branch["id"],
                         "expected_revision": campaign["revision"],
                         "idempotency_key": (
-                            "encounter-stabilize-move-"
-                            + _operation_token(args, sequence, actor_id)
+                            "encounter-stabilize-move-" + _operation_token(args, sequence, actor_id)
                         ),
                     },
                 )
@@ -4705,9 +4402,7 @@ async def _auto_run(
                             "actor_id": actor_id,
                             "target_id": stabilization_target_id,
                             "planned_path": destination[2],
-                            "avoided_cells": sorted(
-                                avoided_cells_by_actor.get(actor_id, set())
-                            ),
+                            "avoided_cells": sorted(avoided_cells_by_actor.get(actor_id, set())),
                             "result": moved,
                         }
                     )
@@ -4759,8 +4454,7 @@ async def _auto_run(
                 if isinstance(item, dict)
                 and item.get("active", True)
                 and str(item.get("target_id") or "") == actor_id
-                and str(item.get("condition") or "").casefold()
-                in actor_conditions
+                and str(item.get("condition") or "").casefold() in actor_conditions
             ),
             None,
         )
@@ -4844,22 +4538,12 @@ async def _auto_run(
                             "action": "use_object",
                             "target_id": finisher_target_id,
                             "payload": {
-                                "source_finisher_id": source_zero_hp_finisher[
-                                    "id"
-                                ],
+                                "source_finisher_id": source_zero_hp_finisher["id"],
                                 "stage": stage,
                                 "round": round_number,
-                                "object": (
-                                    "lamp oil"
-                                    if stage == "douse"
-                                    else "burning lamp oil"
-                                ),
-                                "source_excerpt": source_zero_hp_finisher[
-                                    "source_excerpt"
-                                ],
-                                "oil_rule_excerpt": source_zero_hp_finisher[
-                                    "oil_rule_excerpt"
-                                ],
+                                "object": ("lamp oil" if stage == "douse" else "burning lamp oil"),
+                                "source_excerpt": source_zero_hp_finisher["source_excerpt"],
+                                "oil_rule_excerpt": source_zero_hp_finisher["oil_rule_excerpt"],
                             },
                             "branch_id": branch["id"],
                             "expected_revision": campaign["revision"],
@@ -4887,11 +4571,7 @@ async def _auto_run(
                                 "payload": {
                                     "parts": [
                                         {
-                                            "amount": int(
-                                                source_zero_hp_finisher[
-                                                    "fire_damage"
-                                                ]
-                                            ),
+                                            "amount": int(source_zero_hp_finisher["fire_damage"]),
                                             "damage_type": "fire",
                                             "source": "burning_oil",
                                         }
@@ -4924,12 +4604,8 @@ async def _auto_run(
                             "actor_id": actor_id,
                             "target_id": finisher_target_id,
                             "round": round_number,
-                            "source_excerpt": source_zero_hp_finisher[
-                                "source_excerpt"
-                            ],
-                            "oil_rule_excerpt": source_zero_hp_finisher[
-                                "oil_rule_excerpt"
-                            ],
+                            "source_excerpt": source_zero_hp_finisher["source_excerpt"],
+                            "oil_rule_excerpt": source_zero_hp_finisher["oil_rule_excerpt"],
                             "prior_event": prior_event,
                             "action": source_action,
                             "fire_damage": fire_damage,
@@ -5045,11 +4721,16 @@ async def _auto_run(
             living_targets,
             target_priorities,
         )
+        if actor_id in effective_party_ids and knock_out_hostile_ids:
+            living_targets.sort(key=lambda target_id: target_id in knock_out_hostile_ids)
+        spell_targets = [
+            target_id for target_id in living_targets if target_id not in knock_out_hostile_ids
+        ]
         spell_choice = _choose_party_spell(
             actor_id,
             party_ids=effective_party_ids,
             actors=actors,
-            living_targets=living_targets,
+            living_targets=spell_targets,
             leveled_spell_available=not bool(
                 dict(combatants[actor_id].get("turn_flags") or {}).get("cast_declared")
             ),
@@ -5065,8 +4746,7 @@ async def _auto_run(
                 "branch_id": branch["id"],
                 "expected_revision": campaign["revision"],
                 "idempotency_key": (
-                    "encounter-spell-"
-                    f"{_operation_token(args, sequence, spell_id)}"
+                    f"encounter-spell-{_operation_token(args, sequence, spell_id)}"
                 ),
             }
             if spell_id == MAGIC_MISSILE_ID:
@@ -5090,14 +4770,11 @@ async def _auto_run(
                         "campaign_id": args.campaign_id,
                         "actor_id": actor_id,
                         "target_id": spell_target_id,
-                        "action": {
-                            "spell_resolution_id": str(cast["result"]["resolution_id"])
-                        },
+                        "action": {"spell_resolution_id": str(cast["result"]["resolution_id"])},
                         "branch_id": branch["id"],
                         "expected_revision": campaign["revision"],
                         "idempotency_key": (
-                            "encounter-guiding-bolt-"
-                            f"{_operation_token(args, sequence)}"
+                            f"encounter-guiding-bolt-{_operation_token(args, sequence)}"
                         ),
                     },
                 )
@@ -5105,31 +4782,32 @@ async def _auto_run(
                 pending_reaction = settled.get("status") == "pending_reaction"
                 if settled.get("status") == "pending_ruling":
                     campaign = await _campaign(client, args.campaign_id)
-                    ruling = await client.domain(
-                        "combat_on_hit_ruling",
-                        {
-                            "campaign_id": args.campaign_id,
-                            "target_id": spell_target_id,
-                            "choice_id": str(
-                                settled["result"]["pending_on_hit_ruling_id"]
-                            ),
-                            "selection": {
-                                "id": "next_attack_advantage",
-                                "source_excerpt": GUIDING_BOLT_ON_HIT,
+                    ruling = _facade_value(
+                        await client.domain(
+                            "combat_choice",
+                            {
+                                "campaign_id": args.campaign_id,
+                                "action": "on_hit_ruling",
+                                "actor_id": spell_target_id,
+                                "payload": {
+                                    "choice_id": str(settled["result"]["pending_on_hit_ruling_id"]),
+                                    "selection": {
+                                        "id": "next_attack_advantage",
+                                        "source_excerpt": GUIDING_BOLT_ON_HIT,
+                                    },
+                                },
+                                "branch_id": branch["id"],
+                                "expected_revision": campaign["revision"],
+                                "idempotency_key": (
+                                    "encounter-guiding-bolt-on-hit-"
+                                    + _operation_token(
+                                        args,
+                                        sequence,
+                                        settled["result"]["pending_on_hit_ruling_id"],
+                                    )
+                                ),
                             },
-                            "branch_id": branch["id"],
-                            "expected_revision": campaign["revision"],
-                            "idempotency_key": (
-                                "encounter-guiding-bolt-on-hit-"
-                                + _operation_token(
-                                    args,
-                                    sequence,
-                                    settled["result"][
-                                        "pending_on_hit_ruling_id"
-                                    ],
-                                )
-                            ),
-                        },
+                        )
                     )
                     spell_result["on_hit_ruling"] = ruling
                 elif settled.get("status") not in {
@@ -5141,9 +4819,7 @@ async def _auto_run(
                         "reaction or on-hit ruling"
                     )
             elif cast.get("status") not in {"committed", "pending_reaction"}:
-                raise RuntimeError(
-                    f"{spell_id} did not commit through structured spell settlement"
-                )
+                raise RuntimeError(f"{spell_id} did not commit through structured spell settlement")
             turns.append(
                 {
                     "sequence": sequence,
@@ -5171,8 +4847,7 @@ async def _auto_run(
                         "branch_id": branch["id"],
                         "expected_revision": campaign["revision"],
                         "idempotency_key": (
-                            "encounter-unseen-dodge-"
-                            f"{_operation_token(args, sequence)}"
+                            f"encounter-unseen-dodge-{_operation_token(args, sequence)}"
                         ),
                     },
                 )
@@ -5188,17 +4863,10 @@ async def _auto_run(
             continue
         source_opening_weapon = opening_weapons.get(actor_id)
         preferred_weapon_id = ""
-        if (
-            source_opening_weapon is not None
-            and actor_id not in completed_opening_weapon_actor_ids
-        ):
+        if source_opening_weapon is not None and actor_id not in completed_opening_weapon_actor_ids:
             preferred_weapon_id = source_opening_weapon["weapon_id"]
         elif actor_id in hostile_turn_actor_ids:
-            tactical_source_id = str(
-                body_thief_sides["controlled_hosts"].get(
-                    actor_id, actor_id
-                )
-            )
+            tactical_source_id = str(body_thief_sides["controlled_hosts"].get(actor_id, actor_id))
             preferred_weapon_id = _preferred_hostile_weapon_id(
                 actor,
                 hostile_index=hostile_ids.index(tactical_source_id),
@@ -5215,11 +4883,7 @@ async def _auto_run(
             else ""
         )
         attack_context = (
-            {
-                "direct_sunlight": attack_environments[actor_id][
-                    "direct_sunlight"
-                ]
-            }
+            {"direct_sunlight": attack_environments[actor_id]["direct_sunlight"]}
             if actor_id in attack_environments
             else None
         )
@@ -5231,6 +4895,9 @@ async def _auto_run(
             preferred_weapon_id=preferred_weapon_id,
             multiattack_option_id=multiattack_option_id,
             action_context=attack_context,
+            knock_out_target_ids=(
+                knock_out_hostile_ids if actor_id in effective_party_ids else None
+            ),
         )
         if plan is None and living_targets:
             destination = _choose_destination(
@@ -5254,10 +4921,7 @@ async def _auto_run(
                         },
                         "branch_id": branch["id"],
                         "expected_revision": campaign["revision"],
-                        "idempotency_key": (
-                            "encounter-move-"
-                            f"{_operation_token(args, sequence)}"
-                        ),
+                        "idempotency_key": (f"encounter-move-{_operation_token(args, sequence)}"),
                     },
                 )
                 turns.append(
@@ -5266,9 +4930,7 @@ async def _auto_run(
                         "kind": "move",
                         "actor_id": actor_id,
                         "planned_path": destination[2],
-                        "avoided_cells": sorted(
-                            avoided_cells_by_actor.get(actor_id, set())
-                        ),
+                        "avoided_cells": sorted(avoided_cells_by_actor.get(actor_id, set())),
                         "result": moved,
                     }
                 )
@@ -5282,6 +4944,9 @@ async def _auto_run(
                     preferred_weapon_id=preferred_weapon_id,
                     multiattack_option_id=multiattack_option_id,
                     action_context=attack_context,
+                    knock_out_target_ids=(
+                        knock_out_hostile_ids if actor_id in effective_party_ids else None
+                    ),
                 )
         if plan is not None:
             target_id, action, preflight = plan
@@ -5314,10 +4979,7 @@ async def _auto_run(
             on_hit_settlement = None
             if resolved.get("status") == "pending_ruling":
                 choice_id = str(
-                    dict(resolved.get("result") or {}).get(
-                        "pending_on_hit_ruling_id"
-                    )
-                    or ""
+                    dict(resolved.get("result") or {}).get("pending_on_hit_ruling_id") or ""
                 )
                 ruling = on_hit_rulings.get((actor_id, selected_weapon_id))
                 if not choice_id or ruling is None:
@@ -5326,24 +4988,29 @@ async def _auto_run(
                         "source settlement declaration"
                     )
                 campaign = await _campaign(client, args.campaign_id)
-                on_hit_settlement = await client.domain(
-                    "combat_on_hit_ruling",
-                    {
-                        "campaign_id": args.campaign_id,
-                        "target_id": target_id,
-                        "choice_id": choice_id,
-                        "selection": {
-                            key: value
-                            for key, value in ruling.items()
-                            if key not in {"actor_id", "weapon_id"}
+                on_hit_settlement = _facade_value(
+                    await client.domain(
+                        "combat_choice",
+                        {
+                            "campaign_id": args.campaign_id,
+                            "action": "on_hit_ruling",
+                            "actor_id": target_id,
+                            "payload": {
+                                "choice_id": choice_id,
+                                "selection": {
+                                    key: value
+                                    for key, value in ruling.items()
+                                    if key not in {"actor_id", "weapon_id"}
+                                },
+                            },
+                            "branch_id": branch["id"],
+                            "expected_revision": campaign["revision"],
+                            "idempotency_key": (
+                                "encounter-on-hit-ruling-"
+                                + _operation_token(args, sequence, choice_id)
+                            ),
                         },
-                        "branch_id": branch["id"],
-                        "expected_revision": campaign["revision"],
-                        "idempotency_key": (
-                            "encounter-on-hit-ruling-"
-                            + _operation_token(args, sequence, choice_id)
-                        ),
-                    },
+                    )
                 )
             turns.append(
                 {
@@ -5385,10 +5052,7 @@ async def _auto_run(
             "outcome": {"status": outcome_status, "summary": outcome_summary},
             "branch_id": branch["id"],
             "expected_revision": campaign["revision"],
-            "idempotency_key": (
-                "encounter-end-"
-                f"{_operation_token(args, outcome_status)}"
-            ),
+            "idempotency_key": (f"encounter-end-{_operation_token(args, outcome_status)}"),
         },
     )
     opened_play = await client.open(args.campaign_id)
@@ -5402,6 +5066,15 @@ async def _auto_run(
     )
     final_actor_ids = [*party_ids, *hostile_ids]
     final_actor_values = await _characters(client, args.campaign_id, final_actor_ids)
+    for captured_actor_id in knock_out_hostile_ids:
+        captured_actor = final_actor_values[captured_actor_id]
+        captured_conditions = _conditions(captured_actor)
+        if (
+            _hit_points(captured_actor) > 1
+            or "unconscious" not in captured_conditions
+            or "dead" in captured_conditions
+        ):
+            raise RuntimeError("designated knockout hostile was not captured unconscious and alive")
     final_actors = [
         _character_summary(final_actor_values[actor_id]) for actor_id in final_actor_ids
     ]
@@ -5422,9 +5095,7 @@ async def _auto_run(
         "source_opening_casts": opening_casts,
         "completed_opening_cast_sequences": sorted(completed_opening_casts),
         "source_opening_weapons": list(opening_weapons.values()),
-        "completed_opening_weapon_actor_ids": sorted(
-            completed_opening_weapon_actor_ids
-        ),
+        "completed_opening_weapon_actor_ids": sorted(completed_opening_weapon_actor_ids),
         "source_on_hit_rulings": list(on_hit_rulings.values()),
         "source_delayed_actions": list(delayed_actions.values()),
         "source_passive_allies": list(passive_allies.values()),
@@ -5436,10 +5107,7 @@ async def _auto_run(
         "source_zero_hp_finisher": source_zero_hp_finisher,
         "source_zero_hp_stabilization": source_zero_hp_stabilization,
         "source_target_priorities": list(
-            {
-                tuple(value["actor_ids"]): value
-                for value in target_priorities.values()
-            }.values()
+            {tuple(value["actor_ids"]): value for value in target_priorities.values()}.values()
         ),
         "surrender": (
             {
@@ -5452,6 +5120,7 @@ async def _auto_run(
             if surrender_configured
             else None
         ),
+        "knocked_out_hostile_ids": sorted(knock_out_hostile_ids),
         "outcome": ended,
         "play_exposure": opened_play,
         "checkpoint": checkpoint,
@@ -5484,9 +5153,7 @@ async def _finalize_ended_encounter(
             "interrupted",
         }
     ):
-        raise RuntimeError(
-            "campaign does not retain a completed encounter with a source outcome"
-        )
+        raise RuntimeError("campaign does not retain a completed encounter with a source outcome")
     if args.scene_id and str(combat.get("scene_id") or "") != str(args.scene_id):
         raise RuntimeError("completed encounter scene does not match --scene-id")
     checkpoint = await _checkpoint(
@@ -5503,9 +5170,7 @@ async def _finalize_ended_encounter(
         "combat": combat,
         "outcome": outcome,
         "checkpoint": checkpoint,
-        "actors": [
-            _character_summary(actor_values[actor_id]) for actor_id in actor_ids
-        ],
+        "actors": [_character_summary(actor_values[actor_id]) for actor_id in actor_ids],
     }
 
 
@@ -5579,10 +5244,7 @@ async def _status(
         "exposure": opened,
         "phase": phase,
         "combat": combat,
-        "actors": [
-            _character_summary(actor_values[actor_id])
-            for actor_id in actor_ids
-        ],
+        "actors": [_character_summary(actor_values[actor_id]) for actor_id in actor_ids],
     }
 
 
