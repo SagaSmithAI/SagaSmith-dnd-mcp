@@ -3086,8 +3086,23 @@ def test_module_revision_remaps_exact_ending_source_and_scene_check() -> None:
                     "fact_key": "",
                     "operator": "equals",
                     "value": "ending-v1",
+                },
+                {
+                    "kind": "actor_value",
+                    "path": "sheet.progression.level",
+                    "actor_id": "predecessor",
+                    "fact_key": "",
+                    "operator": "at_least",
+                    "value": 5,
                 }
             ],
+        }
+    ]
+    manifest["party"]["replacements"] = [
+        {
+            "predecessor_actor_id": "predecessor",
+            "replacement_actor_id": "replacement",
+            "handoff_event_id": "event-1",
         }
     ]
 
@@ -3127,6 +3142,7 @@ def test_module_revision_remaps_exact_ending_source_and_scene_check() -> None:
     assert condition["source_ref"]["scene_id"] == "ending-v2"
     assert condition["source_ref"]["chunk_id"] == "chunk-v2"
     assert condition["all_of"][0]["value"] == "ending-v2"
+    assert condition["all_of"][1]["actor_id"] == "replacement"
 
 
 def test_module_refresh_validates_ingested_scene_mapping_before_activation(

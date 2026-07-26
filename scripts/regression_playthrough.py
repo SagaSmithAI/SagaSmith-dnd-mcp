@@ -752,6 +752,16 @@ async def _remap_ending_sources_for_module_revision(
                 and str(dict(check).get("value") or "") == previous_scene_id
             ):
                 check["value"] = replacement_scene_id
+    for replacement in list(dict(value.get("party") or {}).get("replacements") or []):
+        _remap_replacement_level_endings(
+            value,
+            predecessor_actor_id=str(
+                dict(replacement).get("predecessor_actor_id") or ""
+            ),
+            replacement_actor_id=str(
+                dict(replacement).get("replacement_actor_id") or ""
+            ),
+        )
     return value
 
 
