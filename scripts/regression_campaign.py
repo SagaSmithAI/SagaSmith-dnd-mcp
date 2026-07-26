@@ -326,6 +326,55 @@ def _statblock_creation_key(
     return f"{_idempotency_token(run_id)}-create-statblock-{identity_token}"
 
 
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for block in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _rule_statblock_operation_token(
+    *,
+    run_id: str,
+    source_identity: dict[str, Any],
+    actor_name: str,
+    actor_type: str,
+    actor_count: int,
+    replace_actor_id: str | None,
+    chunk_ids: list[str],
+    source_query: str,
+    source_page: int | None,
+    reviewed_content: str | None,
+    review_observation: str | None,
+    variant: dict[str, Any] | None,
+) -> str:
+    identity = json.dumps(
+        {
+            "source": source_identity,
+            "actor_name": actor_name,
+            "actor_type": actor_type,
+            "actor_count": actor_count,
+            "replace_actor_id": replace_actor_id or "",
+            "chunk_ids": chunk_ids,
+            "source_query": source_query,
+            "source_page": source_page,
+            "reviewed_content_sha256": (
+                hashlib.sha256(reviewed_content.encode("utf-8")).hexdigest()
+                if reviewed_content is not None
+                else ""
+            ),
+            "review_observation": review_observation or "",
+            "variant": variant,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    identity_token = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
+    return f"{_idempotency_token(run_id)}-rule-statblock-{identity_token}"
+
+
 async def _statblock_replacement_fields(
     client: CampaignMcp,
     actor_id: str | None,
@@ -2577,7 +2626,31 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
             args.statblock_variant,
             "statblock variant",
         )
-    token = _idempotency_token(args.run_id)
+    resolved_source_path = (
+        args.source_path.expanduser().resolve() if args.source_path else None
+    )
+    source_identity = (
+        {
+            "source_path": str(resolved_source_path),
+            "source_sha256": _file_sha256(resolved_source_path),
+        }
+        if resolved_source_path is not None
+        else {"source_id": str(args.source_id)}
+    )
+    token = _rule_statblock_operation_token(
+        run_id=args.run_id,
+        source_identity=source_identity,
+        actor_name=args.actor_name,
+        actor_type=args.actor_type,
+        actor_count=args.actor_count,
+        replace_actor_id=args.replace_actor_id,
+        chunk_ids=explicit_chunk_ids,
+        source_query=source_query,
+        source_page=source_page,
+        reviewed_content=reviewed_content,
+        review_observation=review_observation,
+        variant=variant,
+    )
     async with stdio_client(_server_parameters(args)) as (read, write):
         async with ClientSession(read, write) as session:
             await session.initialize()
@@ -2623,7 +2696,8 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
 
             import_report: dict[str, Any] | None = None
             if args.source_path:
-                source_path = args.source_path.expanduser().resolve()
+                source_path = resolved_source_path
+                assert source_path is not None
                 source_key = f"regression/statblock/{_idempotency_token(source_path.stem).lower()}"
                 staged = _facade_value(
                     await client.domain(

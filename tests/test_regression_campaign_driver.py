@@ -25,10 +25,46 @@ from scripts.regression_campaign import (
     _prepare_statblock,
     _restore_statblock_preparation_context,
     _review_override_page,
+    _rule_statblock_operation_token,
     _statblock_creation_key,
     _statblock_replacement_fields,
     _validate_noncombat_scene,
 )
+
+
+def test_rule_statblock_idempotency_is_bound_to_source_and_actor_batch() -> None:
+    base = {
+        "run_id": "campaign-run",
+        "actor_name": "Encounter creature",
+        "actor_type": "monster",
+        "actor_count": 2,
+        "replace_actor_id": None,
+        "chunk_ids": [],
+        "source_query": "",
+        "source_page": None,
+        "reviewed_content": None,
+        "review_observation": None,
+        "variant": None,
+    }
+
+    kobold = _rule_statblock_operation_token(
+        source_identity={"source_id": "srd-kobold"},
+        **base,
+    )
+    commoner = _rule_statblock_operation_token(
+        source_identity={"source_id": "srd-commoner"},
+        **base,
+    )
+
+    assert kobold == _rule_statblock_operation_token(
+        source_identity={"source_id": "srd-kobold"},
+        **base,
+    )
+    assert kobold != commoner
+    assert kobold != _rule_statblock_operation_token(
+        source_identity={"source_id": "srd-kobold"},
+        **{**base, "actor_name": "Linan Swift", "actor_count": 1},
+    )
 
 
 def test_blocked_candidate_override_requires_nonempty_visual_evidence(tmp_path: Path) -> None:
