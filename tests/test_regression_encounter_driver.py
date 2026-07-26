@@ -234,7 +234,9 @@ def test_preflight_tries_a_recorded_thrown_weapon_at_range() -> None:
                         "item_id": "dagger",
                         "attack_type": "melee",
                         "properties": ["finesse", "light", "thrown"],
-                        "thrown_range_ft": {"normal": 20, "long": 60},
+                        # PC inventory-derived weapon cards expose their authored
+                        # thrown distance through the canonical range field.
+                        "range_ft": {"normal": 20, "long": 60},
                     }
                 ]
             }

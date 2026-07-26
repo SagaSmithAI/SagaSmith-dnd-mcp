@@ -4145,9 +4145,14 @@ async def _preflight_attack(
             properties = {
                 str(item).strip().casefold() for item in weapon.get("properties", [])
             }
+            thrown_range = dict(
+                weapon.get("thrown_range_ft")
+                or weapon.get("range_ft")
+                or {}
+            )
             if (
                 "thrown" in properties
-                and int(dict(weapon.get("thrown_range_ft") or {}).get("normal", 0) or 0) > 0
+                and int(thrown_range.get("normal", 0) or 0) > 0
                 and "ranged" not in attack_modes
             ):
                 attack_modes.append("ranged")
