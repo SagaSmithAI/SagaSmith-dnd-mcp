@@ -11,6 +11,7 @@ from scripts.regression_encounter import (
     HEALING_WORD_ID,
     MAGIC_MISSILE_ID,
     EncounterRulingRequiredError,
+    _agent_party_absences,
     _agent_positions,
     _apply_agent_positions,
     _apply_party_loadouts,
@@ -519,6 +520,83 @@ def test_prepared_actor_reports_support_batched_rule_actors_and_module_actors(
         [rule_report, module_report],
         report_kind="encounter",
     ) == ["stirge-1", "stirge-2", "durnan"]
+
+
+def test_agent_party_absence_selects_encounter_participants_without_relabeling_party(
+    tmp_path,
+) -> None:
+    report = tmp_path / "party.json"
+    report.write_text(
+        json.dumps(
+            {
+                "characters": [
+                    {"actor_id": "cleric"},
+                    {"actor_id": "bard"},
+                    {"actor_id": "rogue"},
+                    {"actor_id": "wizard"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    args = SimpleNamespace(
+        party_report=[report],
+        agent_party_absence_json=[
+            {
+                "actor_id": "cleric",
+                "ruling_reason": (
+                    "The stable unconscious cleric remains at the keep and cannot "
+                    "participate in the mill mission."
+                ),
+            }
+        ],
+        ally_report=[],
+        ally_actor_id=[],
+        hostile_report=[],
+        hostile_actor_id=[],
+        additional_hostile_report=[],
+        additional_hostile_actor_id=[],
+        reinforcement_hostile_report=[],
+        reinforcement_hostile_actor_id=[],
+        required_hostile_count=None,
+        hostile_count_basis="",
+    )
+
+    groups = _encounter_actor_groups(args)
+
+    assert groups["party_ids"] == ["bard", "rogue", "wizard"]
+    assert groups["agent_party_absences"] == args.agent_party_absence_json
+    manifest_result = {
+        "manifest": {
+            "party": {
+                "members": [
+                    {"actor_id": "cleric", "status": "active"},
+                    {"actor_id": "bard", "status": "active"},
+                    {"actor_id": "rogue", "status": "active"},
+                    {"actor_id": "wizard", "status": "active"},
+                ]
+            }
+        }
+    }
+    assert _require_live_active_party(
+        groups["party_ids"],
+        manifest_result,
+        agent_party_absences=groups["agent_party_absences"],
+    ) == ["cleric", "bard", "rogue", "wizard"]
+
+    with pytest.raises(ValueError, match="active party reports"):
+        _agent_party_absences(
+            [{"actor_id": "guard", "ruling_reason": "The guard stays outside."}],
+            reported_party_ids=["cleric", "bard"],
+        )
+    with pytest.raises(ValueError, match="at least one participating"):
+        _agent_party_absences(
+            [
+                {"actor_id": "cleric", "ruling_reason": "The cleric stays outside."},
+                {"actor_id": "bard", "ruling_reason": "The bard stays outside."},
+            ],
+            reported_party_ids=["cleric", "bard"],
+        )
 
 
 def test_prepared_actor_reports_support_exact_source_group_selection(tmp_path) -> None:

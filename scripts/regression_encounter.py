@@ -132,6 +132,16 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--run-id", default="full-playthrough-encounter-v1")
     parser.add_argument("--party-report", type=Path, action="append", required=True)
     parser.add_argument(
+        "--agent-party-absence-json",
+        action="append",
+        type=json.loads,
+        default=[],
+        help=(
+            "Agent-as-DM decision excluding one still-active PC from this encounter; "
+            "requires actor_id and ruling_reason and preserves that actor outside combat"
+        ),
+    )
+    parser.add_argument(
         "--party-loadout-json",
         action="append",
         type=json.loads,
@@ -622,9 +632,53 @@ def _selected_prepared_actor_ids(
     return requested
 
 
-def _encounter_actor_groups(args: argparse.Namespace) -> dict[str, list[str]]:
+def _agent_party_absences(
+    values: list[dict[str, Any]],
+    *,
+    reported_party_ids: list[str],
+) -> list[dict[str, str]]:
+    allowed = {"actor_id", "ruling_reason"}
+    absences: list[dict[str, str]] = []
+    for value in values:
+        if not isinstance(value, dict):
+            raise ValueError("Agent party absence entries must be JSON objects")
+        unsupported = set(value) - allowed
+        if unsupported:
+            raise ValueError(
+                "Agent party absence entries contain unsupported fields: "
+                + ", ".join(sorted(unsupported))
+            )
+        actor_id = str(value.get("actor_id") or "").strip()
+        ruling_reason = " ".join(str(value.get("ruling_reason") or "").split()).strip()
+        if actor_id not in reported_party_ids:
+            raise ValueError(
+                "Agent party absence requires one actor from the active party reports"
+            )
+        if len(ruling_reason) < 10:
+            raise ValueError("Agent party absence requires a concrete ruling_reason")
+        absences.append({"actor_id": actor_id, "ruling_reason": ruling_reason})
+    actor_ids = [item["actor_id"] for item in absences]
+    if len(actor_ids) != len(set(actor_ids)):
+        raise ValueError("Agent party absence actor ids must be unique")
+    if len(absences) >= len(reported_party_ids):
+        raise ValueError("an encounter requires at least one participating active PC")
+    return absences
+
+
+def _encounter_actor_groups(args: argparse.Namespace) -> dict[str, Any]:
+    reported_party_ids = _party_ids(args.party_report)
+    agent_party_absences = _agent_party_absences(
+        getattr(args, "agent_party_absence_json", []),
+        reported_party_ids=reported_party_ids,
+    )
+    absent_party_ids = {item["actor_id"] for item in agent_party_absences}
     groups = {
-        "party_ids": _party_ids(args.party_report),
+        "party_ids": [
+            actor_id
+            for actor_id in reported_party_ids
+            if actor_id not in absent_party_ids
+        ],
+        "agent_party_absences": agent_party_absences,
         "ally_ids": _selected_prepared_actor_ids(
             args.ally_report,
             getattr(args, "ally_actor_id", []),
@@ -663,7 +717,16 @@ def _encounter_actor_groups(args: argparse.Namespace) -> dict[str, list[str]]:
             f"source-grounded count ({len(groups['hostile_ids'])} != "
             f"{required_hostile_count}): {hostile_count_basis}"
         )
-    actor_sets = [(name, set(values)) for name, values in groups.items()]
+    actor_sets = [
+        (name, set(groups[name]))
+        for name in (
+            "party_ids",
+            "ally_ids",
+            "hostile_ids",
+            "additional_hostile_ids",
+            "reinforcement_hostile_ids",
+        )
+    ]
     overlaps = [
         (left_name, right_name, sorted(left & right))
         for index, (left_name, left) in enumerate(actor_sets)
@@ -678,6 +741,8 @@ def _encounter_actor_groups(args: argparse.Namespace) -> dict[str, list[str]]:
 def _require_live_active_party(
     reported_party_ids: list[str],
     manifest_result: dict[str, Any],
+    *,
+    agent_party_absences: list[dict[str, str]] | None = None,
 ) -> list[str]:
     """Reject stale reports that reintroduce departed PCs or omit replacements."""
 
@@ -699,11 +764,17 @@ def _require_live_active_party(
         or len(active_ids) != len(set(active_ids))
     ):
         raise RuntimeError("playthrough manifest active party is invalid")
-    if set(reported_party_ids) != set(active_ids) or len(reported_party_ids) != len(active_ids):
-        missing = sorted(set(active_ids) - set(reported_party_ids))
-        unexpected = sorted(set(reported_party_ids) - set(active_ids))
+    absent_ids = {
+        str(item.get("actor_id") or "")
+        for item in agent_party_absences or []
+        if isinstance(item, dict)
+    }
+    represented_ids = [*reported_party_ids, *absent_ids]
+    if set(represented_ids) != set(active_ids) or len(represented_ids) != len(active_ids):
+        missing = sorted(set(active_ids) - set(represented_ids))
+        unexpected = sorted(set(represented_ids) - set(active_ids))
         raise ValueError(
-            "party reports do not match the live active manifest party "
+            "encounter participants and Agent absences do not match the live active party "
             f"(missing={missing}, unexpected={unexpected})"
         )
     return active_ids
@@ -2731,6 +2802,7 @@ async def _start(
     _require_live_active_party(
         pc_ids,
         await _manifest_get(client, args.campaign_id),
+        agent_party_absences=getattr(args, "agent_party_absence_json", []),
     )
     initial_hostile_ids = [*hostile_ids, *additional_hostile_ids]
     all_hostile_ids = [*initial_hostile_ids, *reinforcement_hostile_ids]
@@ -6450,6 +6522,7 @@ async def _status(
 async def _run(args: argparse.Namespace) -> dict[str, Any]:
     actor_groups = _encounter_actor_groups(args)
     party_ids = actor_groups["party_ids"]
+    agent_party_absences = actor_groups["agent_party_absences"]
     ally_ids = actor_groups["ally_ids"]
     friendly_ids = [*party_ids, *ally_ids]
     hostile_ids = actor_groups["hostile_ids"]
@@ -6466,6 +6539,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
         "campaign_id": args.campaign_id,
         "run_id": args.run_id,
         "party_ids": party_ids,
+        "agent_party_absences": agent_party_absences,
         "ally_ids": ally_ids,
         "friendly_ids": friendly_ids,
         "hostile_ids": hostile_ids,
