@@ -15,6 +15,7 @@ from sagasmith_dnd.playthrough import (
 )
 
 import scripts.regression_playthrough as regression_playthrough
+from scripts.regression_modules import PRINCIPAL_ID
 from scripts.regression_playthrough import (
     _acquire_source_loot,
     _advance_level,
@@ -1921,6 +1922,15 @@ def test_source_object_attack_uses_public_character_action() -> None:
         def __init__(self) -> None:
             self.action_arguments: dict | None = None
 
+        async def core(self, tool_id: str, arguments: dict):
+            assert tool_id == "campaign_query"
+            assert arguments == {
+                "view": "get",
+                "payload": {"campaign_id": "campaign-1"},
+                "principal_id": PRINCIPAL_ID,
+            }
+            return {"id": "campaign-1", "revision": 12}
+
         async def domain(self, tool_id: str, arguments: dict):
             if tool_id == "module_query":
                 return {
@@ -1938,8 +1948,6 @@ def test_source_object_attack_uses_public_character_action() -> None:
                     "revision": 7,
                     "sheet": default_character_sheet(),
                 }
-            if tool_id == "campaign_query":
-                return {"id": "campaign-1", "revision": 12}
             if tool_id == "character_action":
                 self.action_arguments = deepcopy(arguments)
                 return {

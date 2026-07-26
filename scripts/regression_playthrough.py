@@ -6003,14 +6003,7 @@ async def _attack_source_object(
     )
     if str(actor.get("campaign_id") or "") != campaign_id:
         raise ValueError("attack-source-object actor does not belong to the campaign")
-    campaign = dict(
-        _facade_value(
-            await client.domain(
-                "campaign_query",
-                {"view": "get", "payload": {"campaign_id": campaign_id}},
-            )
-        )
-    )
+    campaign = await _campaign(client, campaign_id)
     attacked = dict(
         _facade_value(
             await client.domain(
