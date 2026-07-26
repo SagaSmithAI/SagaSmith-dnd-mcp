@@ -1615,7 +1615,9 @@ async def _apply_artifact(
     value = _facade_value(result)
     if value.get("status") == "pending_ruling":
         raise RuntimeError(
-            f"catalog artifact needs review: {artifact['name']}: {value['reason']}"
+            "catalog artifact returns to the Agent adjudicator "
+            f"({value.get('ruling_kind', 'agent_dm_adjudication')}): "
+            f"{artifact['name']}: {value['reason']}"
         )
     return dict(value)
 

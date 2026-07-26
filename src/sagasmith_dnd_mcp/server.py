@@ -322,12 +322,9 @@ def _agent_ruling_policy() -> dict[str, Any]:
     }
 
 
-def _agent_ruling_resolution(result: Any) -> dict[str, Any] | None:
-    """Annotate a live pending ruling without pretending that it is settled."""
+def _ruling_resolution_for_kind(ruling_kind: str) -> dict[str, Any]:
+    """Return the resolver contract for one explicitly classified boundary."""
 
-    if not isinstance(result, dict) or result.get("status") != "pending_ruling":
-        return None
-    ruling_kind = str(result.get("ruling_kind") or "agent_dm_adjudication")
     if ruling_kind in EXTERNAL_RULING_INPUT_KINDS:
         return {
             "default_resolver": "external_input",
@@ -340,6 +337,33 @@ def _agent_ruling_resolution(result: Any) -> dict[str, Any] | None:
         "policy_ref": "server_capabilities.ruling_policy",
         "requires_external_input_only_for": list(EXTERNAL_RULING_INPUT_KINDS),
     }
+
+
+def _agent_ruling_resolution(result: Any) -> dict[str, Any] | None:
+    """Annotate a live pending ruling without pretending that it is settled."""
+
+    if not isinstance(result, dict) or result.get("status") != "pending_ruling":
+        return None
+    ruling_kind = str(result.get("ruling_kind") or "agent_dm_adjudication")
+    return _ruling_resolution_for_kind(ruling_kind)
+
+
+def _ruling_requirement(reason: str, ruling_kind: str) -> dict[str, Any]:
+    """Describe a readiness boundary without collapsing it into free-form prose."""
+
+    return {
+        "reason": reason,
+        **_ruling_resolution_for_kind(ruling_kind),
+    }
+
+
+def _ruling_status(status: str, ruling_kind: str) -> dict[str, str]:
+    """Attach an explicit kind whenever a domain result pauses for adjudication."""
+
+    result = {"status": status}
+    if status == "pending_ruling":
+        result["ruling_kind"] = ruling_kind
+    return result
 
 
 SUPPORTED_FEATURE_SELECTION_KINDS = frozenset(
@@ -1220,6 +1244,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             for item in dict(sheet.get("inventory") or {}).get("items", [])
         }
         unavailable_attack_ids: list[str] = []
+        missing_attack_range_reasons: list[str] = []
         for attack in attacks:
             attack_id = str(attack.get("item_id") or "")
             attack_name = str(attack.get("name") or attack_id or "Weapon")
@@ -1228,12 +1253,16 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 str(attack.get("attack_type") or "melee").casefold() == "ranged"
                 and int(dict(attack.get("range_ft") or {}).get("normal", 0) or 0) <= 0
             ):
-                manual_rulings.append(f"{attack_name}: ranged weapon range is missing")
+                reason = f"{attack_name}: ranged weapon range is missing"
+                manual_rulings.append(reason)
+                missing_attack_range_reasons.append(reason)
             if (
                 "thrown" in properties
                 and int(dict(attack.get("thrown_range_ft") or {}).get("normal", 0) or 0) <= 0
             ):
-                manual_rulings.append(f"{attack_name}: thrown weapon range is missing")
+                reason = f"{attack_name}: thrown weapon range is missing"
+                manual_rulings.append(reason)
+                missing_attack_range_reasons.append(reason)
             ammunition_id = str(attack.get("ammunition_item_id") or "")
             if (
                 ammunition_id
@@ -1266,6 +1295,43 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "Prepared spells require DM effect settlement: " + ", ".join(ruling_spell_ids)
             )
         manual_rulings = list(dict.fromkeys(manual_rulings))
+        if missing_attack_range_reasons:
+            blockers.append("missing_attack_range")
+        character_type = str(view.get("character_type") or "")
+        ruling_requirements = [
+            *[
+                _ruling_requirement(
+                    str(rule),
+                    "missing_or_conflicting_source_review",
+                )
+                for rule in unresolved
+            ],
+            *[
+                _ruling_requirement(
+                    reason,
+                    (
+                        "missing_or_conflicting_source_review"
+                        if reason in missing_attack_range_reasons
+                        or reason.endswith(
+                            "no active spell artifact or complete statblock action exists"
+                        )
+                        or (
+                            reason.startswith("Spellcasting:")
+                            and reason.endswith(
+                                "descriptive passive is not automatically settled"
+                            )
+                        )
+                        else (
+                            "player_owned_choice"
+                            if character_type == "pc"
+                            and reason.endswith("requires a reaction decision")
+                            else "agent_dm_adjudication"
+                        )
+                    ),
+                )
+                for reason in manual_rulings
+            ],
+        ]
         settlement = (
             "dm_ruling_required" if unresolved else "mixed" if manual_rulings else "automatic"
         )
@@ -1275,6 +1341,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "blocking_reasons": sorted(set(blockers)),
             "unresolved_rules": unresolved,
             "manual_rulings": manual_rulings,
+            "ruling_requirements": ruling_requirements,
             "hit_points": hit_points,
             "maximum_hit_points": int(dict(derived.get("hit_points") or {}).get("max", 0) or 0),
             "armor_class": int(derived.get("armor_class", 10) or 10),
@@ -6279,7 +6346,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             rule_receipts=list(result.get("rule_receipts") or []),
         )
         response = {
-            "status": "pending_ruling" if pending_on_hit_ruling else "committed",
+            **_ruling_status(
+                "pending_ruling" if pending_on_hit_ruling else "committed",
+                "source_or_scene_fact",
+            ),
             "result": result,
             "combat": next_encounter,
             "campaign_revision": mutation_revision(campaign_id),
@@ -7868,10 +7938,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             ],
         )
         response = {
-            "status": (
-                "pending_ruling"
-                if on_hit_window is not None or critical_followup_window is not None
-                else "committed"
+            **_ruling_status(
+                (
+                    "pending_ruling"
+                    if on_hit_window is not None or critical_followup_window is not None
+                    else "committed"
+                ),
+                "source_or_scene_fact",
             ),
             "result": result,
             "combat": next_encounter,
@@ -8157,10 +8230,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             ],
         )
         response = {
-            "status": (
-                "pending_ruling"
-                if on_hit_window is not None or critical_followup_window is not None
-                else "committed"
+            **_ruling_status(
+                (
+                    "pending_ruling"
+                    if on_hit_window is not None or critical_followup_window is not None
+                    else "committed"
+                ),
+                "source_or_scene_fact",
             ),
             "result": result,
             "combat": next_encounter,
@@ -8876,7 +8952,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         if applied.get("status") in {"pending_choice", "pending_ruling"}:
             return {
-                "status": applied["status"],
+                **_ruling_status(applied["status"], "agent_dm_adjudication"),
                 "result": {key: value for key, value in applied.items() if key != "sheet"},
                 "campaign_revision": campaign.revision,
             }
@@ -9256,6 +9332,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         {
                             "target_id": target_id,
                             "effect": str(save_spec["on_failed_save_ruling"]),
+                            **_ruling_resolution_for_kind("generic_spell_effect"),
                         }
                     )
                 target_results.append(
@@ -9303,7 +9380,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 rule_receipts=resolution_receipts,
             )
             response = {
-                "status": "pending_ruling" if pending_rulings else "committed",
+                **_ruling_status(
+                    "pending_ruling" if pending_rulings else "committed",
+                    "generic_spell_effect",
+                ),
                 "result": result,
                 "combat": next_encounter,
                 "campaign_revision": mutation_revision(campaign_id),
@@ -9499,7 +9579,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             ],
         )
         response = {
-            "status": ("committed" if applied.get("automatic_effect") else "pending_ruling"),
+            **_ruling_status(
+                "committed" if applied.get("automatic_effect") else "pending_ruling",
+                "generic_spell_effect",
+            ),
             "result": {key: value for key, value in applied.items() if key != "sheet"},
             "combat": next_encounter,
             "campaign_revision": mutation_revision(campaign_id),
@@ -9849,7 +9932,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             idempotency_key=idempotency_key,
         )
         response = {
-            "status": "pending_ruling" if release else "armed",
+            **_ruling_status(
+                "pending_ruling" if release else "armed",
+                "ready_release_effect",
+            ),
             "released": release,
             "spell_id": resolved.get("spell_id"),
             "declaration": declaration or {},
@@ -9873,7 +9959,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         branch_id: str | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
-        """DM-confirm a generic Ready trigger and open its owning actor's reaction window."""
+        """Confirm a generic Ready trigger in the DM role and open its reaction window."""
         access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
         require_write_contract(expected_revision, idempotency_key)
         resolved_branch_id = require_current_branch(campaign_id, branch_id)
@@ -9971,7 +10057,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             idempotency_key=idempotency_key,
         )
         response = {
-            "status": "pending_ruling" if release else "armed",
+            **_ruling_status(
+                "pending_ruling" if release else "armed",
+                "ready_release_effect",
+            ),
             "released": release,
             "declaration": declaration or {},
             "combat": next_encounter,
@@ -10436,7 +10525,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             raise CombatEngineError(str(exc)) from exc
         if applied.get("status") in {"pending_choice", "pending_ruling"}:
             return {
-                "status": applied["status"],
+                **_ruling_status(applied["status"], "agent_dm_adjudication"),
                 "result": {key: value for key, value in applied.items() if key != "sheet"},
                 "campaign_revision": campaign.revision,
             }
@@ -10807,7 +10896,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         result = {key: value for key, value in applied.items() if key != "sheet"}
         result["declaration"] = declaration or {}
         response = {
-            "status": "pending_ruling" if applied["requires_ruling"] else "committed",
+            **_ruling_status(
+                "pending_ruling" if applied["requires_ruling"] else "committed",
+                "descriptive_activity",
+            ),
             "result": result,
             "combat": next_encounter,
             "campaign_revision": mutation_revision(campaign_id),
@@ -12005,7 +12097,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         knock_out: bool = False,
         melee: bool = False,
     ) -> dict[str, Any]:
-        """Apply DM-approved damage parts; automatic trait and HP settlement is deterministic."""
+        """Apply adjudicator-approved damage; automatic trait and HP settlement is deterministic."""
         access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
         require_write_contract(expected_revision, idempotency_key)
         resolved_branch_id = require_current_branch(campaign_id, branch_id)
@@ -13499,7 +13591,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         if applied.get("status") in {"pending_choice", "pending_ruling"}:
             response = {
-                "status": applied["status"],
+                **_ruling_status(applied["status"], "environmental_consequence"),
                 "result": {
                     key: value
                     for key, value in applied.items()
@@ -14343,7 +14435,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         if applied.get("status") in {"pending_choice", "pending_ruling"}:
             return {
-                "status": applied["status"],
+                **_ruling_status(applied["status"], "agent_dm_adjudication"),
                 "result": {key: value for key, value in applied.items() if key != "sheet"},
                 "character": character_view(current),
             }
@@ -14366,7 +14458,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             rule_receipts=list(applied.get("rule_receipts") or []),
         )
         response = {
-            "status": ("committed" if applied.get("automatic_effect") else "pending_ruling"),
+            **_ruling_status(
+                "committed" if applied.get("automatic_effect") else "pending_ruling",
+                "generic_spell_effect",
+            ),
             "result": {key: value for key, value in applied.items() if key != "sheet"},
             "character": character_view(characters.get(character_id)),
         }
@@ -14725,7 +14820,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 target_id = str(allocation.get("target_id") or "")
                 if allocation.get("within_30_ft") is not True:
                     raise CombatEngineError(
-                        "Preserve Life requires a DM-confirmed target within 30 feet"
+                        "Preserve Life requires DM-role confirmation that the target "
+                        "is within 30 feet"
                     )
                 target = characters.get(target_id)
                 if target.campaign_id != current.campaign_id:
@@ -14851,7 +14947,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             raise ValueError(str(exc)) from exc
         if applied.get("status") in {"pending_choice", "pending_ruling"}:
             return {
-                "status": applied["status"],
+                **_ruling_status(applied["status"], "agent_dm_adjudication"),
                 "result": {key: value for key, value in applied.items() if key != "sheet"},
                 "character": character_view(current),
             }
@@ -14896,7 +14992,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         result = {key: value for key, value in applied.items() if key != "sheet"}
         result["declaration"] = declaration or {}
         response = {
-            "status": "pending_ruling" if applied["requires_ruling"] else "committed",
+            **_ruling_status(
+                "pending_ruling" if applied["requires_ruling"] else "committed",
+                "descriptive_activity",
+            ),
             "result": result,
             "character": character_view(characters.get(character_id)),
         }
@@ -16300,7 +16399,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         branch_id: str | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
-        """Record DM-confirmed world changes from an active temporary battle map."""
+        """Record DM-role-confirmed world changes from an active temporary battle map."""
         access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
         require_write_contract(expected_revision, idempotency_key)
         resolved_branch_id = require_current_branch(campaign_id, branch_id)
@@ -20027,6 +20126,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 if prerequisite.get("kind") != "ability_minimum":
                     return {
                         "status": "pending_ruling",
+                        "ruling_kind": "source_or_scene_fact",
                         "reason": "feat has a prerequisite that needs DM review",
                     }
                 ability = str(prerequisite.get("ability") or "")
@@ -21332,6 +21432,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         else:
             return {
                 "status": "pending_ruling",
+                "ruling_kind": "agent_dm_adjudication",
                 "reason": f"{kind} is catalogued but needs a DM-reviewed application",
             }
         if kind in {"subclass", "background", "species"}:

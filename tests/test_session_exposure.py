@@ -16,11 +16,22 @@ from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 
 from sagasmith_dnd_mcp.config import McpConfig
 from sagasmith_dnd_mcp.exposure import ExposureError, ExposureRegistry
-from sagasmith_dnd_mcp.server import _agent_ruling_resolution, create_server
+from sagasmith_dnd_mcp.server import (
+    _agent_ruling_resolution,
+    _ruling_status,
+    create_server,
+)
 from sagasmith_dnd_mcp.tool_profiles import CORE_TOOLS, GROUP_BY_ID
 
 
 def test_pending_ruling_envelope_defaults_to_agent_reasoning() -> None:
+    assert _ruling_status("committed", "generic_spell_effect") == {
+        "status": "committed"
+    }
+    assert _ruling_status("pending_ruling", "generic_spell_effect") == {
+        "status": "pending_ruling",
+        "ruling_kind": "generic_spell_effect",
+    }
     assert _agent_ruling_resolution({"status": "committed"}) is None
     assert _agent_ruling_resolution({"status": "pending_choice"}) is None
     assert _agent_ruling_resolution({"status": "pending_ruling"}) == {

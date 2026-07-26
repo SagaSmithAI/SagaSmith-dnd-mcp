@@ -8363,7 +8363,11 @@ async def _advance_level(
             )
         )
         if applied.get("status") == "pending_ruling":
-            raise RuntimeError(f"subclass selection needs DM review: {applied['reason']}")
+            raise RuntimeError(
+                "subclass selection returns to the Agent adjudicator "
+                f"({applied.get('ruling_kind', 'agent_dm_adjudication')}): "
+                f"{applied['reason']}"
+            )
         actor = dict(applied.get("character") or applied)
     elif subclass_artifact_id:
         raise ValueError("this level advancement does not offer a subclass selection")
@@ -8435,7 +8439,11 @@ async def _advance_level(
             )
         )
         if applied.get("status") == "pending_ruling":
-            raise RuntimeError(f"level feature needs DM review: {artifact_id}: {applied['reason']}")
+            raise RuntimeError(
+                "level feature returns to the Agent adjudicator "
+                f"({applied.get('ruling_kind', 'agent_dm_adjudication')}): "
+                f"{artifact_id}: {applied['reason']}"
+            )
         feature_spell_grants.extend(deepcopy(list(applied.get("feature_spell_grants") or [])))
         actor = dict(applied.get("character") or applied)
         applied_features.append({"artifact_id": artifact_id, "selection": deepcopy(selection)})
@@ -8512,7 +8520,11 @@ async def _advance_level(
             )
         )
         if applied.get("status") == "pending_ruling":
-            raise RuntimeError(f"level spell needs DM review: {artifact_id}: {applied['reason']}")
+            raise RuntimeError(
+                "level spell returns to the Agent adjudicator "
+                f"({applied.get('ruling_kind', 'agent_dm_adjudication')}): "
+                f"{artifact_id}: {applied['reason']}"
+            )
         actor = dict(applied.get("character") or applied)
         applied_spells.append(artifact_id)
 

@@ -263,13 +263,29 @@ def test_scene_readiness_blocks_missing_combatants_and_reserves(tmp_path: Path) 
                 },
             },
         )
-        assert ready["ready"] is True
+        assert ready["ready"] is False
         captain_group = next(item for item in ready["groups"] if item["key"] == "captain-rusk")
         assert captain_group["actors"][0]["combat_card"]["settlement"] == "mixed"
-        assert captain_group["actors"][0]["combat_card"]["manual_rulings"] == [
+        captain_card = captain_group["actors"][0]["combat_card"]
+        assert captain_card["manual_rulings"] == [
             "Parry requires a reaction decision",
             "Multiattack: Multiattack composition requires a DM ruling",
         ]
+        assert {
+            (item["reason"], item["default_resolver"], item["ruling_kind"])
+            for item in captain_card["ruling_requirements"]
+        } == {
+            (
+                "Parry requires a reaction decision",
+                "agent",
+                "agent_dm_adjudication",
+            ),
+            (
+                "Multiattack: Multiattack composition requires a DM ruling",
+                "agent",
+                "agent_dm_adjudication",
+            ),
+        }
         bandit_group = next(item for item in ready["groups"] if item["key"] == "rusk-bandits")
         mixed_card = bandit_group["actors"][0]["combat_card"]
         assert mixed_card["settlement"] == "mixed"
@@ -281,6 +297,14 @@ def test_scene_readiness_blocks_missing_combatants_and_reserves(tmp_path: Path) 
             "Mystery Bow: ranged weapon range is missing",
             "Prepared spells require DM effect settlement: module-spell",
         ]
+        assert mixed_card["blocking_reasons"] == ["missing_attack_range"]
+        assert [
+            (item["default_resolver"], item["ruling_kind"])
+            for item in mixed_card["ruling_requirements"]
+        ] == [
+            ("external_input", "missing_or_conflicting_source_review"),
+            ("agent", "agent_dm_adjudication"),
+        ]
         assert ready["initial_actor_ids"] == [
             actors["captain"]["id"],
             actors["bandit1"]["id"],
@@ -288,6 +312,44 @@ def test_scene_readiness_blocks_missing_combatants_and_reserves(tmp_path: Path) 
         ]
         assert ready["reinforcement_actor_ids"] == [actors["guard"]["id"]]
         assert ready["checksum"]
+
+        repaired_sheet = deepcopy(actors["bandit1"]["sheet"])
+        repaired_sheet["inventory"]["items"][0]["mechanics"].update(
+            {"normal_range_ft": 80, "long_range_ft": 320}
+        )
+        actors["bandit1"] = await _call(
+            server,
+            "character_sheet_replace",
+            {
+                "character_id": actors["bandit1"]["id"],
+                "sheet": repaired_sheet,
+                "expected_revision": actors["bandit1"]["revision"],
+                "idempotency_key": "repair-mystery-bow-range",
+            },
+        )
+        ready = await _call(
+            server,
+            "module_query",
+            {
+                "campaign_id": campaign["id"],
+                "view": "readiness",
+                "payload": {
+                    "scene_id": scene["scene_id"],
+                    "participant_manifest": complete_manifest,
+                },
+            },
+        )
+        assert ready["ready"] is True
+        repaired_bandit_group = next(
+            item for item in ready["groups"] if item["key"] == "rusk-bandits"
+        )
+        assert repaired_bandit_group["actors"][0]["combat_card"]["manual_rulings"] == [
+            "Prepared spells require DM effect settlement: module-spell"
+        ]
+        assert repaired_bandit_group["actors"][0]["combat_card"]["ruling_requirements"][0][
+            "default_resolver"
+        ] == "agent"
+
         long_manifest = deepcopy(complete_manifest)
         long_manifest["groups"][0]["source_excerpt"] = long_evidence.strip()
         long_ready = await _call(
