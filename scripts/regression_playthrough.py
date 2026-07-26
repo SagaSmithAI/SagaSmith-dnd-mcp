@@ -1179,15 +1179,10 @@ async def _checkpoint(
     )
     if not verification.get("valid"):
         raise RuntimeError(f"checkpoint slot {snapshot['slot']} failed integrity verification")
-    post_sync = await _manifest_mutation(
-        client,
-        campaign_id=campaign_id,
-        action="sync",
-        run_id=run_id,
-        identity=(
-            f"checkpoint-post-sync:{checkpoint_identity}:{str(snapshot['id'])}"
-        ),
-    )
+    # Manifest reads project the authoritative Snapshot DAG from Core tables. A
+    # second persisted sync here would only copy the new head id into campaign
+    # state after the snapshot was created, immediately making the branch dirty
+    # again and forcing another checkpoint before a safe branch checkout.
     manifest_view = await _manifest_get(client, campaign_id)
     manifest = dict(manifest_view.get("manifest") or {})
     if "snapshot_dag" in manifest:
@@ -1208,7 +1203,11 @@ async def _checkpoint(
         "sync": synced,
         "snapshot": snapshot,
         "verification": verification,
-        "post_sync": post_sync,
+        "post_sync": {
+            "persisted": False,
+            "reason": "Snapshot DAG is projected on public manifest reads",
+            "campaign_revision": manifest_view.get("campaign_revision"),
+        },
         "reused": reused,
         "manifest": manifest_view,
     }
@@ -1767,8 +1766,6 @@ async def _branch_from_snapshot(
     checkpoint_label: str,
     core_conversion_reason: str = "",
 ) -> dict[str, Any]:
-    if initial_phase == "combat":
-        raise RuntimeError("branch-from-snapshot cannot run during active combat")
     if snapshot_slot is None or snapshot_slot < 1 or not branch_name.strip():
         raise ValueError(
             "branch-from-snapshot requires a positive --snapshot-slot and --branch-name"
@@ -1818,7 +1815,7 @@ async def _branch_from_snapshot(
         raise RuntimeError("campaign has no current branch")
     phase_changes = []
     campaign = await _campaign(client, campaign_id)
-    if initial_phase != "lobby":
+    if initial_phase not in {"lobby", "combat"}:
         phase_changes.append(
             _facade_value(
                 await client.core(

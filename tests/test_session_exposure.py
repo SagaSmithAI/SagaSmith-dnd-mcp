@@ -122,6 +122,8 @@ def test_phase_groups_separate_player_reads_from_dm_control() -> None:
     assert "branch_query" in GROUP_BY_ID["combat.observe"].tools
     assert GROUP_BY_ID["combat.control"].roles == frozenset({"owner", "dm"})
     assert GROUP_BY_ID["combat.save"].roles == frozenset({"owner", "dm"})
+    assert "branch_change" in GROUP_BY_ID["combat.save"].tools
+    assert "snapshot_restore" in GROUP_BY_ID["combat.save"].tools
     assert GROUP_BY_ID["combat.maintenance"].roles == frozenset({"owner", "dm"})
     assert GROUP_BY_ID["combat.maintenance"].tools == frozenset(
         {"campaign_core_relock", "campaign_rules"}

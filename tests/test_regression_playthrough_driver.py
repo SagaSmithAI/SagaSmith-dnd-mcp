@@ -4197,8 +4197,8 @@ def test_checkpoint_uses_only_public_manifest_branch_and_snapshot_tools() -> Non
         "snapshot_create",
         "snapshot_query",
         "playthrough_manifest",
-        "playthrough_manifest",
     ]
+    assert result["post_sync"]["persisted"] is False
 
 
 def test_checkpoint_recovers_verified_same_branch_snapshot_after_retry_revision_change() -> None:
@@ -4297,14 +4297,17 @@ def test_checkpoint_recovers_verified_same_branch_snapshot_after_retry_revision_
         "snapshot_query",
         "snapshot_query",
         "playthrough_manifest",
-        "playthrough_manifest",
     ]
+    assert result["post_sync"]["persisted"] is False
 
 
-def test_failed_route_is_preserved_when_branching_from_verified_snapshot() -> None:
+@pytest.mark.parametrize("initial_phase", ["play", "combat"])
+def test_failed_route_is_preserved_when_branching_from_verified_snapshot(
+    initial_phase: str,
+) -> None:
     class Client:
         def __init__(self) -> None:
-            self.phase = "play"
+            self.phase = initial_phase
             self.revision = 30
             self.current_branch = "failed-branch"
             self.source_saved = False
@@ -4384,12 +4387,13 @@ def test_failed_route_is_preserved_when_branching_from_verified_snapshot() -> No
                 return {"manifest": {"status": "in_progress"}}
             raise AssertionError((tool_id, arguments))
 
+    result_client = Client()
     result = asyncio.run(
         _branch_from_snapshot(
-            Client(),
+            result_client,
             campaign_id="campaign-1",
             run_id="run-1",
-            initial_phase="play",
+            initial_phase=initial_phase,
             snapshot_slot=58,
             branch_name="main-after-klarg-defeat",
             checkpoint_label="Continue from pre-combat state",
@@ -4401,6 +4405,8 @@ def test_failed_route_is_preserved_when_branching_from_verified_snapshot() -> No
     assert result["source_checkpoint"]["snapshot"]["slot"] == 60
     assert result["created_branch"]["id"] == "recovery-branch"
     assert result["checkpoint"]["snapshot"]["slot"] == 61
+    assert bool(result["phase_changes"]) is (initial_phase == "play")
+    assert (("lobby.campaign",) in result_client.loads) is (initial_phase == "play")
 
 
 @pytest.mark.parametrize("defer_checkpoint", [False, True])
