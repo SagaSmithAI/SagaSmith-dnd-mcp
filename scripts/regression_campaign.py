@@ -21,6 +21,7 @@ from mcp import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
 
 PRINCIPAL_ID = "system:local"
+RULE_STATBLOCK_OCR_PROFILE = "layout-ocr-v1"
 
 
 def _load_review_override(path: Path, observation: str) -> tuple[str, str, Path]:
@@ -126,6 +127,13 @@ def _arguments() -> argparse.Namespace:
         "--actor-name",
         default="Structured regression actor",
         help="Canonical actor name for actor preparation actions",
+    )
+    parser.add_argument(
+        "--source-statblock-name",
+        help=(
+            "Exact printed creature heading for OCR recovery when the campaign actor "
+            "uses a different instance name"
+        ),
     )
     parser.add_argument(
         "--actor-type",
@@ -346,11 +354,14 @@ def _rule_statblock_operation_token(
     reviewed_content: str | None,
     review_observation: str | None,
     variant: dict[str, Any] | None,
+    source_statblock_name: str | None = None,
 ) -> str:
     identity = json.dumps(
         {
             "source": source_identity,
+            "ocr_recovery_profile": RULE_STATBLOCK_OCR_PROFILE,
             "actor_name": actor_name,
+            "source_statblock_name": source_statblock_name or "",
             "actor_type": actor_type,
             "actor_count": actor_count,
             "replace_actor_id": replace_actor_id or "",
@@ -2619,6 +2630,11 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
     )
     source_query = str(getattr(args, "source_query", "") or "").strip()
     source_page = getattr(args, "source_page", None)
+    source_statblock_name = str(
+        getattr(args, "source_statblock_name", "") or args.actor_name
+    ).strip()
+    if not 2 <= len(source_statblock_name) <= 200:
+        raise ValueError("--source-statblock-name must contain 2 to 200 characters")
     if source_page is not None and source_page < 1:
         raise ValueError("--source-page must be positive")
     if explicit_chunk_ids and (source_query or source_page is not None):
@@ -2668,6 +2684,7 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
         reviewed_content=reviewed_content,
         review_observation=review_observation,
         variant=variant,
+        source_statblock_name=source_statblock_name,
     )
     async with stdio_client(_server_parameters(args)) as (read, write):
         async with ClientSession(read, write) as session:
@@ -2857,16 +2874,67 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
                         payload["chunk_ids"] = selected_chunk_ids
                 if variant is not None:
                     payload["variant"] = variant
-                created = _facade_value(
-                    await client.domain(
-                        "character_create_from",
-                        {
-                            "mode": creation_mode,
-                            "payload": payload,
-                            "idempotency_key": (f"{branch_token}-create-rule-statblock-{index}"),
-                        },
+                creation_key = f"{branch_token}-create-rule-statblock-{index}"
+                try:
+                    created = _facade_value(
+                        await client.domain(
+                            "character_create_from",
+                            {
+                                "mode": creation_mode,
+                                "payload": payload,
+                                "idempotency_key": creation_key,
+                            },
+                        )
                     )
-                )
+                except RuntimeError as error:
+                    recoverable = any(
+                        marker in str(error)
+                        for marker in (
+                            "missing a creature heading",
+                            "missing size, type, and alignment",
+                            "missing Armor Class",
+                            "missing Hit Points",
+                            "missing Speed",
+                            "missing the STR/DEX/CON/INT/WIS/CHA table",
+                        )
+                    )
+                    if (
+                        not recoverable
+                        or rule_review is not None
+                        or import_report is None
+                        or resolved_source_path is None
+                        or resolved_source_path.suffix.casefold() != ".pdf"
+                    ):
+                        raise
+                    recovered = _facade_value(
+                        await client.domain(
+                            "rule_import",
+                            {
+                                "campaign_id": args.campaign_id,
+                                "action": "recover_statblock",
+                                "payload": {
+                                    "job_id": import_report["job_id"],
+                                    "name": source_statblock_name,
+                                },
+                                "idempotency_key": f"{token}-recover-rule-statblock",
+                            },
+                        )
+                    )
+                    rule_review = dict(recovered["review"])
+                    payload.pop("source_id", None)
+                    payload.pop("chunk_ids", None)
+                    payload["job_id"] = import_report["job_id"]
+                    payload["review_id"] = rule_review["id"]
+                    created = _facade_value(
+                        await client.domain(
+                            "character_create_from",
+                            {
+                                "mode": "reviewed_rule_statblock",
+                                "payload": payload,
+                                "idempotency_key": f"{creation_key}-ocr-recovered",
+                            },
+                        )
+                    )
                 actor = dict(created["character"])
                 summary = _character_summary(actor)
                 if not summary["source_bound"] or summary["attack_count"] < 1:
@@ -2942,6 +3010,7 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
                 "source": source_report,
                 "selected_source_chunks": selected_source_chunks,
                 "rule_review": rule_review,
+                "source_statblock_name": source_statblock_name,
                 "review_override_path": (
                     str(review_override_path) if review_override_path is not None else None
                 ),

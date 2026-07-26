@@ -272,6 +272,20 @@ def test_compact_public_tool_and_schema_budgets_are_locked(tmp_path: Path) -> No
             "check",
             "contest",
         ]
+        assert by_name["rule_import"].inputSchema["properties"]["action"]["enum"] == [
+            "discover",
+            "stage",
+            "inspect",
+            "render_page",
+            "recover_statblock",
+            "ingest",
+            "review_statblock",
+            "extract_candidates",
+            "review",
+            "compile",
+            "install",
+            "activate",
+        ]
         assert by_name["module_review"].inputSchema["properties"]["action"]["enum"] == [
             "render_page",
             "submit_content",

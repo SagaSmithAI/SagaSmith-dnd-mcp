@@ -65,6 +65,10 @@ def test_rule_statblock_idempotency_is_bound_to_source_and_actor_batch() -> None
         source_identity={"source_id": "srd-kobold"},
         **{**base, "actor_name": "Linan Swift", "actor_count": 1},
     )
+    assert kobold != _rule_statblock_operation_token(
+        source_identity={"source_id": "srd-kobold"},
+        **{**base, "source_statblock_name": "Kobold"},
+    )
 
 
 def test_blocked_candidate_override_requires_nonempty_visual_evidence(tmp_path: Path) -> None:
@@ -592,6 +596,82 @@ def test_prepare_rule_statblock_uses_checksum_bound_visual_review(
     assert create_call["payload"]["review_id"] == "rule-statblock-review:kenku"
     assert report["rule_review"]["source_id"] == "source-1"
     assert report["review_override_path"] == str(override.resolve())
+
+
+def test_prepare_rule_statblock_recovers_layout_ocr_without_image_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class OcrFallbackClient(_RuleStatblockClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.failed_creation = False
+
+        async def domain(self, tool_id: str, arguments: dict):
+            if (
+                tool_id == "character_create_from"
+                and arguments["mode"] == "statblock"
+                and not self.failed_creation
+            ):
+                self.calls.append(("domain", tool_id, arguments))
+                self.failed_creation = True
+                raise RuntimeError(
+                    "character_create_from: statblock is missing size, type, and alignment"
+                )
+            if (
+                tool_id == "rule_import"
+                and arguments["action"] == "recover_statblock"
+            ):
+                self.calls.append(("domain", tool_id, arguments))
+                return {
+                    "review": {
+                        "id": "rule-statblock-review:adult-blue-dragon",
+                        "source_id": "source-1",
+                        "page_number": 92,
+                    }
+                }
+            return await super().domain(tool_id, arguments)
+
+    client = OcrFallbackClient()
+    _patch_rule_statblock_transport(monkeypatch, client)
+    source = tmp_path / "monster-manual.pdf"
+    source.write_bytes(b"test fixture")
+    args = _rule_statblock_args(tmp_path, defer_checkpoint=True)
+    args.source_id = None
+    args.source_path = source
+    args.chunk_id = []
+    args.source_query = "Adult Blue Dragon"
+    args.actor_name = "Lennithon"
+    args.source_statblock_name = "Adult Blue Dragon"
+
+    report = asyncio.run(_prepare_rule_statblock(args))
+
+    recovery_call = next(
+        arguments
+        for scope, tool_id, arguments in client.calls
+        if scope == "domain"
+        and tool_id == "rule_import"
+        and arguments["action"] == "recover_statblock"
+    )
+    assert recovery_call["payload"] == {
+        "job_id": "job-1",
+        "name": "Adult Blue Dragon",
+    }
+    create_calls = [
+        arguments
+        for scope, tool_id, arguments in client.calls
+        if scope == "domain" and tool_id == "character_create_from"
+    ]
+    assert [call["mode"] for call in create_calls] == [
+        "statblock",
+        "reviewed_rule_statblock",
+    ]
+    assert (
+        create_calls[1]["payload"]["review_id"]
+        == "rule-statblock-review:adult-blue-dragon"
+    )
+    assert report["rule_review"]["page_number"] == 92
+    assert report["source_statblock_name"] == "Adult Blue Dragon"
 
 
 def test_failed_rule_statblock_preparation_uses_shared_phase_recovery(

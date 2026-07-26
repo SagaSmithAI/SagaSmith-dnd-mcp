@@ -11,12 +11,13 @@ from copy import deepcopy
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 from uuid import uuid4
 from weakref import WeakValueDictionary
 
 from mcp.server.fastmcp import FastMCP, Image
 from mcp.types import CallToolResult, TextContent
+from pydantic import Field
 from sagasmith_core import (
     DOCUMENT_NORMALIZER_VERSION,
     AccessService,
@@ -33,6 +34,7 @@ from sagasmith_core import (
     ImportJobService,
     MemoryService,
     ModuleService,
+    RapidOcrProvider,
     RevisionService,
     RulePackService,
     RuleProfileService,
@@ -40,6 +42,7 @@ from sagasmith_core import (
     RuleService,
     SnapshotService,
     default_local_principal,
+    extract_pdf_page_text,
     normalize_document,
     render_pdf_page,
 )
@@ -234,6 +237,7 @@ from sagasmith_dnd.statblocks import (
     effective_statblock_rating,
     gazer_eye_ray_spec,
     parse_2014_statblock,
+    recover_2014_statblock_from_ocr,
     source_contest_effect_spec,
     source_save_effect_spec,
 )
@@ -3221,6 +3225,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "core_pdf_module_normalization": True,
                 "module_document_cache": True,
                 "module_selective_ocr": True,
+                "text_only_layout_ocr_recovery": True,
                 "player_safe_scene_scopes": True,
                 "player_safe_combat_maps": True,
                 "rule_aware_noncombat_checks": True,
@@ -3245,6 +3250,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "rule_import(stage)",
                     "rule_import(inspect)",
                     "rule_import(render_page)",
+                    "rule_import(recover_statblock)",
                     "rule_import(ingest)",
                     "rule_import(review_statblock)",
                     "rule_import(extract_candidates)",
@@ -17680,6 +17686,213 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             Image(data=rendered.content, format="png"),
         ]
 
+    def rule_statblock_ocr_recover(
+        campaign_id: str,
+        job_id: str,
+        name: str,
+        page_number: int | None = None,
+        principal_id: str = "system:local",
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Recover and review one statblock through layout OCR for text-only agents."""
+
+        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        if not idempotency_key:
+            raise ValueError("idempotency_key is required for OCR statblock recovery")
+        job = require_import_job(campaign_id, job_id, "rulebook")
+        if not job.source_id:
+            raise ValueError("rule import job must be indexed before OCR recovery")
+        source_path = storage.artifact_rulebook_path(job.artifact)
+        if source_path.suffix.casefold() != ".pdf":
+            raise ValueError("OCR statblock recovery requires a staged PDF")
+        target_name = str(name or "").strip()
+        if not 2 <= len(target_name) <= 200:
+            raise ValueError("name must contain 2 to 200 characters")
+        if page_number is not None and (
+            isinstance(page_number, bool)
+            or not isinstance(page_number, int)
+            or page_number < 1
+        ):
+            raise ValueError("page_number must be a positive integer")
+        provider = storage.rule_ocr_provider()
+        if provider is None or not hasattr(provider, "extract_layout"):
+            raise RuntimeError("layout OCR recovery requires the configured RapidOCR provider")
+
+        chunks = rules.source_chunks(job.source_id)
+        page_count = int(dict(job.inspection or {}).get("page_count", 0) or 0)
+        if page_count < 1:
+            raise RuntimeError("rule import inspection has no page count")
+        candidate_pages: list[int] = []
+        if page_number is not None:
+            candidate_pages.append(page_number)
+        else:
+            target_pattern = re.compile(
+                rf"(?i)\b{re.escape(target_name)}\s*,\s*(\d{{1,4}})\b"
+            )
+            printed_hints = [
+                int(match.group(1))
+                for chunk in chunks
+                for match in target_pattern.finditer(str(chunk.get("content") or ""))
+            ]
+            if not printed_hints:
+                raise ValueError(
+                    "OCR recovery could not infer a printed page; provide payload.page_number"
+                )
+            for hint in printed_hints:
+                for offset in (0, 1, -1, 2, -2, 3, -3, 4, -4):
+                    candidate = hint + offset
+                    if 1 <= candidate <= page_count and candidate not in candidate_pages:
+                        candidate_pages.append(candidate)
+
+        target_key = re.sub(r"[^a-z0-9]+", "", target_name.casefold())
+        selected_layout = None
+        attempted_pages: list[int] = []
+        for candidate in candidate_pages:
+            attempted_pages.append(candidate)
+            layout = provider.extract_layout(source_path, page_numbers=[candidate])[0]
+            heading_matches = [
+                block
+                for block in layout.blocks
+                if re.sub(r"[^a-z0-9]+", "", block.text.casefold()) == target_key
+            ]
+            if len(heading_matches) == 1:
+                selected_layout = layout
+                break
+        if selected_layout is None:
+            raise RuntimeError(
+                "layout OCR did not find one unambiguous target heading on candidate pages "
+                + ", ".join(str(value) for value in attempted_pages)
+            )
+
+        recovered = recover_2014_statblock_from_ocr(
+            selected_layout.as_dict(),
+            name=target_name,
+        )
+        evidence = dict(recovered["evidence"])
+        recovered_page = int(evidence["page_number"])
+        page_text = extract_pdf_page_text(source_path, recovered_page)
+        content = str(recovered["normalized_content"])
+        critical_facts = dict(recovered["critical_facts"])
+        identity_key = re.sub(
+            r"[^a-z0-9]+",
+            "",
+            str(critical_facts["identity"]).casefold(),
+        )
+        page_lines = [
+            line.strip(" \t#>*_-")
+            for line in page_text.splitlines()
+            if line.strip(" \t#>*_-")
+        ]
+        identity_indexes = [
+            index
+            for index, line in enumerate(page_lines)
+            if re.sub(r"[^a-z0-9]+", "", line.casefold()) == identity_key
+        ]
+        corroboration_pairs = [
+            ("Identity", str(critical_facts["identity"])),
+            ("Armor Class", f"Armor Class {critical_facts['armor_class']}"),
+            ("Hit Points", f"Hit Points {critical_facts['hit_points']}"),
+            ("Speed", f"Speed {critical_facts['speed']}"),
+            ("Challenge", f"Challenge {critical_facts['challenge']}"),
+            *[
+                (label, f"{label} {value}")
+                for label, value in dict(critical_facts["fields"]).items()
+            ],
+            *[
+                (
+                    ability.upper(),
+                    f"{ability.upper()} {score}",
+                )
+                for ability, score in dict(critical_facts["abilities"]).items()
+            ],
+        ]
+        corroboration_mode = "dual_layout_ocr"
+        corroborated = [
+            {"field": label, "value": fact} for label, fact in corroboration_pairs
+        ]
+        if len(identity_indexes) == 1:
+            segment_start = identity_indexes[0]
+            segment_end = len(page_lines)
+            identity_pattern = re.compile(
+                r"(?i)^(Tiny|Small|Medium|Large|Huge|Gargantuan)\s+[^,]+,\s*.+$"
+            )
+            for index in range(segment_start + 1, len(page_lines)):
+                if identity_pattern.fullmatch(page_lines[index]):
+                    segment_end = index
+                    break
+            normalized_segment = re.sub(
+                r"[^a-z0-9]+",
+                "",
+                "\n".join(page_lines[segment_start:segment_end]).casefold(),
+            )
+            for label, fact in corroboration_pairs:
+                if (
+                    re.sub(r"[^a-z0-9]+", "", fact.casefold())
+                    not in normalized_segment
+                ):
+                    raise RuntimeError(
+                        f"OCR-recovered {label} is not corroborated by the target "
+                        "embedded-text segment"
+                    )
+            corroboration_mode = "embedded_text"
+        else:
+            primary_scale = float(getattr(provider, "scale", 2.0))
+            secondary_scale = 3.0 if abs(primary_scale - 3.0) >= 0.25 else 2.0
+            secondary_provider = RapidOcrProvider(scale=secondary_scale)
+            secondary_layout = secondary_provider.extract_layout(
+                source_path,
+                page_numbers=[recovered_page],
+            )[0]
+            secondary = recover_2014_statblock_from_ocr(
+                secondary_layout.as_dict(),
+                name=target_name,
+            )
+
+            def critical_fingerprint(value: Any) -> Any:
+                if isinstance(value, dict):
+                    return {
+                        str(key): critical_fingerprint(item)
+                        for key, item in value.items()
+                    }
+                return re.sub(r"[^a-z0-9]+", "", str(value).casefold())
+
+            if critical_fingerprint(critical_facts) != critical_fingerprint(
+                dict(secondary["critical_facts"])
+            ):
+                raise RuntimeError(
+                    "independent layout OCR passes disagree on critical statblock facts"
+                )
+        observation = (
+            f"Text-only layout OCR v{int(evidence['recovery_version'])} recovered "
+            f"{target_name} from PDF page "
+            f"{recovered_page}; heading confidence "
+            f"{float(evidence['heading_confidence']):.5f}, minimum core confidence "
+            f"{float(evidence['minimum_core_confidence']):.5f}. Independent "
+            f"{corroboration_mode.replace('_', ' ')} corroborated identity, Armor Class, "
+            "Hit Points, Speed, all six ability scores, and Challenge."
+        )
+        reviewed = rule_statblock_review(
+            campaign_id,
+            job_id,
+            recovered_page,
+            content,
+            observation,
+            principal_id,
+            idempotency_key,
+        )
+        return {
+            "campaign_id": campaign_id,
+            "job_id": job_id,
+            "name": target_name,
+            "attempted_pages": attempted_pages,
+            "page_number": recovered_page,
+            "provider": provider.name,
+            "corroboration_mode": corroboration_mode,
+            "corroborated_facts": corroborated,
+            "recovery": recovered,
+            **reviewed,
+        }
+
     @mcp.tool()
     def rule_statblock_review(
         campaign_id: str,
@@ -17690,7 +17903,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         principal_id: str = "system:local",
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
-        """Retain a DM transcription bound to one rendered rulebook PDF page."""
+        """Retain a DM transcription bound to checksum-verified rulebook page evidence."""
         access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
         if not idempotency_key:
             raise ValueError("idempotency_key is required for a rule statblock review")
@@ -17722,7 +17935,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             return replay
         source_path = storage.artifact_rulebook_path(job.artifact)
         if source_path.suffix.casefold() != ".pdf":
-            raise ValueError("visual rule statblock review requires a staged PDF")
+            raise ValueError("rule statblock review requires a staged PDF")
         rendered = render_pdf_page(source_path, page_number, scale=1.5)
         if rendered.source_checksum != job.artifact_checksum:
             raise RuntimeError("rulebook PDF no longer matches its staged checksum")
@@ -21609,12 +21822,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
 
     @mcp.tool()
     def rule_import(
-        campaign_id: str,
+        campaign_id: Annotated[str, Field(title="Campaign")],
         action: Literal[
             "discover",
             "stage",
             "inspect",
             "render_page",
+            "recover_statblock",
             "ingest",
             "review_statblock",
             "extract_candidates",
@@ -21624,12 +21838,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "activate",
         ],
         payload: dict[str, Any] | None = None,
-        principal_id: str = "system:local",
-        expected_revision: int | None = None,
-        branch_id: str | None = None,
-        idempotency_key: str | None = None,
+        principal_id: Annotated[str, Field(title="Principal")] = "system:local",
+        expected_revision: Annotated[int | None, Field(title="Revision")] = None,
+        branch_id: Annotated[str | None, Field(title="BranchID")] = None,
+        idempotency_key: Annotated[str | None, Field(title="Request Key")] = None,
     ) -> dict[str, Any]:
-        """Run the reviewed rulebook-import state machine; direct rule ingestion is not public."""
+        """Run reviewed rule imports; direct rule ingestion stays internal."""
         data = facade_payload(payload)
         if action == "discover":
             access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
@@ -21675,6 +21889,29 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     data.get("scale", 1.5),
                     principal_id,
                 )
+            )
+        if action == "recover_statblock":
+            require_facade_phase(
+                campaign_id,
+                "rule_import(recover_statblock)",
+                PROFILE_LOBBY,
+            )
+            data = strict_facade_payload(
+                payload,
+                action="rule_import(recover_statblock)",
+                allowed={"job_id", "name", "page_number"},
+                required_names=("job_id", "name"),
+            )
+            return facade_result(
+                action,
+                rule_statblock_ocr_recover(
+                    campaign_id,
+                    data["job_id"],
+                    data["name"],
+                    data.get("page_number"),
+                    principal_id,
+                    idempotency_key,
+                ),
             )
         job_id = required(data, "job_id")
         if action == "inspect":

@@ -6,6 +6,7 @@ import pytest
 from mcp.types import ImageContent, TextContent
 from pypdf import PdfWriter
 from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
+from sagasmith_core import OcrPageLayout, OcrTextBlock, RapidOcrProvider
 
 from sagasmith_dnd_mcp.config import McpConfig
 from sagasmith_dnd_mcp.server import create_server
@@ -200,6 +201,240 @@ def test_rule_import_renders_a_checksum_bound_review_page(tmp_path: Path) -> Non
             "Reviewed rule statblock: rule-source:"
             in (created["character"]["notes"]["profile"]["dm_notes"])
         )
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("embedded_text", [True, False])
+def test_rule_import_recovers_statblock_for_text_only_agent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    embedded_text: bool,
+) -> None:
+    import_root = tmp_path / "imports"
+    import_root.mkdir()
+    source = import_root / "ocr-review.pdf"
+    writer = PdfWriter()
+    page = writer.add_blank_page(width=300, height=400)
+    font = DictionaryObject(
+        {
+            NameObject("/Type"): NameObject("/Font"),
+            NameObject("/Subtype"): NameObject("/Type1"),
+            NameObject("/BaseFont"): NameObject("/Helvetica"),
+        }
+    )
+    font_ref = writer._add_object(font)
+    page[NameObject("/Resources")] = DictionaryObject(
+        {NameObject("/Font"): DictionaryObject({NameObject("/F1"): font_ref})}
+    )
+    if embedded_text:
+        content = DecodedStreamObject()
+        content.set_data(
+            b"BT /F1 8 Tf 10 370 Td 10 TL "
+            b"(Medium humanoid, any alignment) Tj T* "
+            b"(Armor Class 10) Tj T* "
+            b"(Hit Points 4 [1d8]) Tj T* "
+            b"(Speed 30 ft.) Tj T* "
+            b"(STR) Tj T* (10 [+0]) Tj T* "
+            b"(DEX) Tj T* (10 [+0]) Tj T* "
+            b"(CON) Tj T* (10 [+0]) Tj T* "
+            b"(INT) Tj T* (10 [+0]) Tj T* "
+            b"(WIS) Tj T* (10 [+0]) Tj T* "
+            b"(CHA) Tj T* (10 [+0]) Tj T* "
+            b"(Senses passive Perception 10) Tj T* "
+            b"(Languages Common) Tj T* "
+            b"(Challenge 0 [10 XP]) Tj ET"
+        )
+        page[NameObject("/Contents")] = writer._add_object(content)
+    with source.open("wb") as stream:
+        writer.write(stream)
+
+    def ocr_block(text: str, x0: int, y0: int, x1: int, y1: int) -> OcrTextBlock:
+        return OcrTextBlock(text, 0.99, x0, y0, x1, y1)
+
+    layout = OcrPageLayout(
+        page_number=1,
+        width=600,
+        height=400,
+        blocks=(
+            ocr_block("COMMONER", 30, 20, 180, 45),
+            ocr_block("Medium humanoid, any alignment", 30, 45, 250, 65),
+            ocr_block("Armor Class 10", 30, 75, 160, 95),
+            ocr_block("Hit Points 4 (1d8)", 30, 95, 190, 115),
+            ocr_block("Speed 30 ft.", 30, 115, 150, 135),
+            *tuple(
+                ocr_block(label, 30 + index * 70, 145, 70 + index * 70, 165)
+                for index, label in enumerate(("STR", "DEX", "CON", "INT", "WIS", "CHA"))
+            ),
+            *tuple(
+                ocr_block("10 (+0)", 25 + index * 70, 165, 80 + index * 70, 185)
+                for index in range(6)
+            ),
+            ocr_block("Senses passive Perception 10", 30, 200, 250, 220),
+            ocr_block("Languages Common", 30, 220, 180, 240),
+            ocr_block("Challenge 0 (10 XP)", 30, 240, 200, 260),
+            ocr_block("ACTIONS", 30, 275, 130, 295),
+            ocr_block(
+                "Club. Melee Weapon Attack: +2 to hit, reach 5 ft., one target.",
+                30,
+                305,
+                480,
+                325,
+            ),
+            ocr_block("Hit: 2 (1d4) bludgeoning damage.", 30, 325, 310, 345),
+        ),
+    )
+    monkeypatch.setattr(
+        RapidOcrProvider,
+        "extract_layout",
+        lambda self, path, *, page_numbers=None: [layout],
+    )
+    monkeypatch.setattr(
+        RapidOcrProvider,
+        "extract",
+        lambda self, path, *, page_numbers=None: [
+            "Medium humanoid, any alignment\nArmor Class 10\n"
+            "Hit Points 4 (1d8)\nSpeed 30 ft.\nChallenge 0 (10 XP)"
+        ],
+    )
+    config = McpConfig(
+        home=tmp_path / "home",
+        database_url=None,
+        chroma_url=None,
+        chroma_path_override=None,
+        dnd_skills_dir=tmp_path / "dnd",
+        modulegen_skills_dir=tmp_path / "modulegen",
+        rule_import_roots=(import_root,),
+    )
+
+    async def exercise() -> None:
+        server = create_server(config)
+        _, campaign = await server.call_tool(
+            "campaign_create",
+            {"name": "OCR recovery", "edition": "2014", "idempotency_key": "campaign"},
+        )
+        _, staged = await server.call_tool(
+            "rule_import",
+            {
+                "campaign_id": campaign["id"],
+                "action": "stage",
+                "payload": {
+                    "source_path": str(source),
+                    "source_key": "ocr-review",
+                    "title": "OCR Review",
+                    "edition": "2014",
+                },
+                "idempotency_key": "stage",
+            },
+        )
+        job_id = staged["result"]["job"]["id"]
+        _, inspected = await server.call_tool(
+            "rule_import",
+            {
+                "campaign_id": campaign["id"],
+                "action": "inspect",
+                "payload": {"job_id": job_id},
+                "idempotency_key": "inspect",
+            },
+        )
+        await server.call_tool(
+            "rule_import",
+            {
+                "campaign_id": campaign["id"],
+                "action": "ingest",
+                "payload": {
+                    "job_id": job_id,
+                    "acknowledge_warnings": bool(
+                        inspected["result"]["inspection"]["warnings"]
+                    ),
+                },
+                "idempotency_key": "ingest",
+            },
+        )
+        arguments = {
+            "campaign_id": campaign["id"],
+            "action": "recover_statblock",
+            "payload": {
+                "job_id": job_id,
+                "name": "Commoner",
+                "page_number": 1,
+            },
+            "idempotency_key": "recover",
+        }
+        _, recovered = await server.call_tool("rule_import", arguments)
+        _, replayed = await server.call_tool("rule_import", arguments)
+
+        assert replayed == recovered
+        result = recovered["result"]
+        assert result["page_number"] == 1
+        assert result["provider"] == "rapidocr"
+        assert result["corroboration_mode"] == (
+            "embedded_text" if embedded_text else "dual_layout_ocr"
+        )
+        assert result["recovery"]["evidence"]["text_only"] is True
+        assert result["review"]["page_number"] == 1
+        assert result["validation"]["experience_points"] == 10
+        assert [item["field"] for item in result["corroborated_facts"]] == [
+            "Identity",
+            "Armor Class",
+            "Hit Points",
+            "Speed",
+            "Challenge",
+            "Senses",
+            "Languages",
+            "STR",
+            "DEX",
+            "CON",
+            "INT",
+            "WIS",
+            "CHA",
+        ]
+        if embedded_text:
+            with pytest.raises(Exception, match="unsupported .* payload fields"):
+                await server.call_tool(
+                    "rule_import",
+                    {
+                        **arguments,
+                        "payload": {**arguments["payload"], "unreviewed_text": "no"},
+                        "idempotency_key": "invalid-payload",
+                    },
+                )
+            await server.call_tool(
+                "access_grant",
+                {
+                    "scope": "campaign",
+                    "campaign_id": campaign["id"],
+                    "principal_id": "player:ocr",
+                    "payload": {"role": "player"},
+                },
+            )
+            with pytest.raises(Exception, match="cannot access"):
+                await server.call_tool(
+                    "rule_import",
+                    {
+                        **arguments,
+                        "principal_id": "player:ocr",
+                        "idempotency_key": "player-recovery",
+                    },
+                )
+            await server.call_tool(
+                "campaign_change",
+                {
+                    "campaign_id": campaign["id"],
+                    "action": "update",
+                    "payload": {"state": {"game_phase": "play"}},
+                    "expected_revision": campaign["revision"],
+                    "idempotency_key": "enter-play",
+                },
+            )
+            with pytest.raises(Exception, match="only available during lobby"):
+                await server.call_tool(
+                    "rule_import",
+                    {
+                        **arguments,
+                        "idempotency_key": "wrong-phase-recovery",
+                    },
+                )
 
     asyncio.run(exercise())
 
