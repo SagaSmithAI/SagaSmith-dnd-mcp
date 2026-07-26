@@ -41,6 +41,7 @@ from scripts.regression_encounter import (
     _source_opening_casts,
     _source_opening_weapons,
     _source_outcome,
+    _source_passive_allies,
     _source_precombat_casts,
     _source_surrender_outcome,
     _source_target_priorities,
@@ -227,6 +228,43 @@ def test_prepared_actor_reports_support_exact_source_group_selection(tmp_path) -
             [report],
             ["kenku-1", "kenku-1"],
             report_kind="hostile",
+        )
+
+
+def test_source_passive_allies_require_unique_allies_and_exact_evidence() -> None:
+    passive = _source_passive_allies(
+        [
+            {
+                "actor_id": "losser",
+                "source_excerpt": "The characters find Losser cowering in one corner.",
+            }
+        ],
+        ally_ids=["losser", "skeleton-1"],
+    )
+
+    assert passive == {
+        "losser": {
+            "actor_id": "losser",
+            "source_excerpt": (
+                "The characters find Losser cowering in one corner."
+            ),
+        }
+    }
+    with pytest.raises(ValueError, match="requires one unique allied actor"):
+        _source_passive_allies(
+            [{"actor_id": "kenku", "source_excerpt": "cowering"}],
+            ally_ids=["losser"],
+        )
+    with pytest.raises(ValueError, match="unsupported fields"):
+        _source_passive_allies(
+            [
+                {
+                    "actor_id": "losser",
+                    "source_excerpt": "cowering",
+                    "until_round": 99,
+                }
+            ],
+            ally_ids=["losser"],
         )
 
 

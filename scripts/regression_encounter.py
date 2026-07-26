@@ -251,6 +251,17 @@ def _arguments() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--source-passive-ally-json",
+        action="append",
+        type=json.loads,
+        default=[],
+        help=(
+            "Source-cited noncombat behavior with an allied actor_id and exact "
+            "source_excerpt; the ally remains targetable but ends each turn "
+            "without taking an action"
+        ),
+    )
+    parser.add_argument(
         "--source-zero-hp-finisher-json",
         type=json.loads,
         default=None,
@@ -1494,6 +1505,39 @@ def _source_delayed_actions(
     return normalized
 
 
+def _source_passive_allies(
+    values: list[dict[str, Any]],
+    *,
+    ally_ids: list[str],
+) -> dict[str, dict[str, str]]:
+    normalized: dict[str, dict[str, str]] = {}
+    for index, raw in enumerate(values):
+        if not isinstance(raw, dict):
+            raise ValueError(f"source passive ally {index} must be an object")
+        unknown = set(raw) - {"actor_id", "source_excerpt"}
+        if unknown:
+            raise ValueError(
+                f"source passive ally {index} has unsupported fields: "
+                f"{', '.join(sorted(unknown))}"
+            )
+        actor_id = str(raw.get("actor_id") or "").strip()
+        source_excerpt = str(raw.get("source_excerpt") or "").strip()
+        if (
+            actor_id not in ally_ids
+            or actor_id in normalized
+            or not source_excerpt
+        ):
+            raise ValueError(
+                f"source passive ally {index} requires one unique allied actor "
+                "and an exact excerpt"
+            )
+        normalized[actor_id] = {
+            "actor_id": actor_id,
+            "source_excerpt": source_excerpt,
+        }
+    return normalized
+
+
 async def _campaign(client: ExposureClient, campaign_id: str) -> dict[str, Any]:
     return _facade_value(
         await client.core(
@@ -1865,6 +1909,10 @@ async def _start(
         args.source_delayed_action_json,
         participant_ids=initial_hostile_ids,
     )
+    passive_allies = _source_passive_allies(
+        args.source_passive_ally_json,
+        ally_ids=ally_ids,
+    )
     for actor_id in set(all_hostile_ids) | {
         ruling_actor_id for ruling_actor_id, _ in on_hit_rulings
     }:
@@ -2143,6 +2191,7 @@ async def _start(
         "source_opening_weapons": list(opening_weapons.values()),
         "source_on_hit_rulings": list(on_hit_rulings.values()),
         "source_delayed_actions": list(delayed_actions.values()),
+        "source_passive_allies": list(passive_allies.values()),
         "source_opening_casts": _source_opening_casts(
             args.source_opening_cast_json,
             participant_ids=[*party_ids, *all_hostile_ids],
@@ -2849,6 +2898,10 @@ async def _auto_run(
         getattr(args, "ally_actor_id", []),
         report_kind="ally",
     )
+    passive_allies = _source_passive_allies(
+        args.source_passive_ally_json,
+        ally_ids=ally_ids,
+    )
     source_zero_hp_finisher = _source_zero_hp_finisher(
         args.source_zero_hp_finisher_json,
         participant_ids=[*party_ids, *hostile_ids],
@@ -3187,6 +3240,26 @@ async def _auto_run(
                     "round": round_number,
                     "until_round": delayed["until_round"],
                     "source_excerpt": delayed["source_excerpt"],
+                    "result": ended_turn,
+                }
+            )
+            continue
+        passive_ally = passive_allies.get(actor_id)
+        if passive_ally is not None and _hit_points(actor) > 0:
+            ended_turn = await _end_turn(
+                client,
+                args,
+                str(branch["id"]),
+                actor_id,
+                sequence,
+            )
+            turns.append(
+                {
+                    "sequence": sequence,
+                    "kind": "source_passive_ally",
+                    "actor_id": actor_id,
+                    "round": round_number,
+                    "source_excerpt": passive_ally["source_excerpt"],
                     "result": ended_turn,
                 }
             )
@@ -4000,6 +4073,7 @@ async def _auto_run(
         ),
         "source_on_hit_rulings": list(on_hit_rulings.values()),
         "source_delayed_actions": list(delayed_actions.values()),
+        "source_passive_allies": list(passive_allies.values()),
         "source_zero_hp_finisher": source_zero_hp_finisher,
         "source_zero_hp_stabilization": source_zero_hp_stabilization,
         "source_target_priorities": list(
