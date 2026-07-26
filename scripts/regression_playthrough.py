@@ -2456,6 +2456,43 @@ async def _record_outcome(
         if actor.get("campaign_id") != campaign_id:
             raise ValueError("every tracked outcome NPC must belong to the campaign")
 
+    current_fact_rows = _facade_value(
+        await client.domain(
+            "memory_query",
+            {
+                "campaign_id": campaign_id,
+                "view": "list",
+                "payload": {"include_inactive": False},
+            },
+        )
+    )
+    if not isinstance(current_fact_rows, list) or any(
+        not isinstance(item, dict) for item in current_fact_rows
+    ):
+        raise RuntimeError("memory_query returned an invalid fact collection")
+    current_facts = {
+        str(item.get("fact_key") or ""): item
+        for item in current_fact_rows
+        if str(item.get("fact_key") or "")
+    }
+    for fact in normalized_facts:
+        if str(fact.get("action", "upsert")) != "upsert":
+            continue
+        current_fact = current_facts.get(str(fact["fact_key"]))
+        if current_fact is None:
+            continue
+        current_revision_id = str(current_fact.get("revision_id") or "")
+        if not current_revision_id:
+            raise RuntimeError("memory_query returned an existing fact without revision_id")
+        supplied_revision_id = str(fact.get("expected_revision_id") or "")
+        if supplied_revision_id and supplied_revision_id != current_revision_id:
+            raise ValueError(
+                "fact expected_revision_id is stale: "
+                f"{fact['fact_key']} expected {supplied_revision_id}, "
+                f"current {current_revision_id}"
+            )
+        fact["expected_revision_id"] = current_revision_id
+
     progress_rows = await client.domain(
         "module_query",
         {"campaign_id": campaign_id, "view": "progress"},

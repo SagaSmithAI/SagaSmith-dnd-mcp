@@ -4773,6 +4773,17 @@ def test_record_outcome_commits_facts_then_syncs_manifest_and_checkpoint(
                     "campaign_id": "campaign-1",
                     "name": actor_id,
                 }
+            if tool_id == "memory_query":
+                assert arguments["view"] == "list"
+                assert arguments["payload"] == {"include_inactive": False}
+                return {
+                    "result": [
+                        {
+                            "fact_key": "quest:hostage:status",
+                            "revision_id": "fact-revision-7",
+                        }
+                    ]
+                }
             if tool_id == "module_set_progress":
                 outcomes = arguments["state"]["full_playthrough_outcomes"]
                 assert set(outcomes) == {"prior", "hostage-released"}
@@ -4793,6 +4804,9 @@ def test_record_outcome_commits_facts_then_syncs_manifest_and_checkpoint(
                     "witnessed"
                 }
                 assert self.continuity_payload["facts"][0]["fact_key"] == ("quest:hostage:status")
+                assert self.continuity_payload["facts"][0]["expected_revision_id"] == (
+                    "fact-revision-7"
+                )
                 self.revision += 1
                 return {
                     "event": {"id": "event-1"},
@@ -5028,6 +5042,8 @@ def test_record_outcome_resumes_after_matching_progress_was_already_saved() -> N
                         },
                     }
                 ]
+            if tool_id == "memory_query":
+                return {"result": []}
             if tool_id == "module_set_progress":
                 self.progress_writes += 1
                 raise AssertionError("matching progress must be resumed without rewriting")
