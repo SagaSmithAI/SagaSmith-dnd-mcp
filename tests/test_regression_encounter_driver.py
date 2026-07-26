@@ -30,6 +30,7 @@ from scripts.regression_encounter import (
     _require_live_active_party,
     _resolve_pending,
     _roll_total,
+    _selected_prepared_actor_ids,
     _should_stand,
     _source_declared_conditions,
     _source_declared_surprise,
@@ -188,6 +189,47 @@ def test_prepared_actor_reports_support_batched_rule_actors_and_module_actors(
     ) == ["stirge-1", "stirge-2", "durnan"]
 
 
+def test_prepared_actor_reports_support_exact_source_group_selection(tmp_path) -> None:
+    report = tmp_path / "kenku.json"
+    report.write_text(
+        json.dumps(
+            {
+                "actors": [
+                    {"id": "kenku-1"},
+                    {"id": "kenku-2"},
+                    {"id": "kenku-3"},
+                    {"id": "kenku-4"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert _selected_prepared_actor_ids(
+        [report],
+        ["kenku-3", "kenku-1"],
+        report_kind="hostile",
+    ) == ["kenku-3", "kenku-1"]
+    assert _selected_prepared_actor_ids(
+        [report],
+        [],
+        report_kind="hostile",
+    ) == ["kenku-1", "kenku-2", "kenku-3", "kenku-4"]
+
+    with pytest.raises(ValueError, match="absent from prepared reports.*kenku-5"):
+        _selected_prepared_actor_ids(
+            [report],
+            ["kenku-5"],
+            report_kind="hostile",
+        )
+    with pytest.raises(ValueError, match="non-empty and unique"):
+        _selected_prepared_actor_ids(
+            [report],
+            ["kenku-1", "kenku-1"],
+            report_kind="hostile",
+        )
+
+
 def test_encounter_actor_groups_keep_allies_out_of_registered_party_and_reject_overlap(
     tmp_path,
 ) -> None:
@@ -217,8 +259,12 @@ def test_encounter_actor_groups_keep_allies_out_of_registered_party_and_reject_o
         party_report=[party_report],
         ally_report=[ally_report],
         hostile_report=[hostile_report],
+        hostile_actor_id=[],
         additional_hostile_report=[],
+        additional_hostile_actor_id=[],
         reinforcement_hostile_report=[],
+        reinforcement_hostile_actor_id=[],
+        ally_actor_id=[],
     )
 
     groups = _encounter_actor_groups(args)

@@ -49,13 +49,40 @@ def _arguments() -> argparse.Namespace:
             "without becoming registered party members"
         ),
     )
+    parser.add_argument(
+        "--ally-actor-id",
+        action="append",
+        default=[],
+        help=(
+            "Select an exact actor from the prepared ally reports; repeat as needed. "
+            "When omitted, every actor in those reports is selected."
+        ),
+    )
     parser.add_argument("--hostile-report", type=Path, action="append", default=[])
+    parser.add_argument(
+        "--hostile-actor-id",
+        action="append",
+        default=[],
+        help=(
+            "Select an exact actor from the prepared hostile reports; repeat as "
+            "needed. When omitted, every actor in those reports is selected."
+        ),
+    )
     parser.add_argument(
         "--additional-hostile-report",
         type=Path,
         action="append",
         default=[],
         help="Already-arrived source combatants tracked as a separate manifest group",
+    )
+    parser.add_argument(
+        "--additional-hostile-actor-id",
+        action="append",
+        default=[],
+        help=(
+            "Select an exact actor from the additional-hostile reports; repeat as "
+            "needed. When omitted, every actor in those reports is selected."
+        ),
     )
     parser.add_argument(
         "--reinforcement-hostile-report",
@@ -65,6 +92,15 @@ def _arguments() -> argparse.Namespace:
         help=(
             "Source-cited reinforcements queued through public combat_join after "
             "the encounter starts; they enter at the next round boundary"
+        ),
+    )
+    parser.add_argument(
+        "--reinforcement-hostile-actor-id",
+        action="append",
+        default=[],
+        help=(
+            "Select an exact actor from the reinforcement reports; repeat as needed. "
+            "When omitted, every actor in those reports is selected."
         ),
     )
     parser.add_argument(
@@ -342,33 +378,58 @@ def _prepared_actor_ids(paths: list[Path], *, report_kind: str) -> list[str]:
     return values
 
 
+def _selected_prepared_actor_ids(
+    paths: list[Path],
+    requested_actor_ids: list[str],
+    *,
+    report_kind: str,
+) -> list[str]:
+    available = (
+        _prepared_actor_ids(paths, report_kind=report_kind)
+        if paths
+        else []
+    )
+    requested = [str(actor_id).strip() for actor_id in requested_actor_ids]
+    if not requested:
+        return available
+    if (
+        any(not actor_id for actor_id in requested)
+        or len(requested) != len(set(requested))
+    ):
+        raise ValueError(
+            f"selected {report_kind} actor ids must be non-empty and unique"
+        )
+    unknown = sorted(set(requested) - set(available))
+    if unknown:
+        raise ValueError(
+            f"selected {report_kind} actor ids are absent from prepared reports: "
+            f"{unknown}"
+        )
+    return requested
+
+
 def _encounter_actor_groups(args: argparse.Namespace) -> dict[str, list[str]]:
     groups = {
         "party_ids": _party_ids(args.party_report),
-        "ally_ids": (
-            _prepared_actor_ids(args.ally_report, report_kind="ally")
-            if args.ally_report
-            else []
+        "ally_ids": _selected_prepared_actor_ids(
+            args.ally_report,
+            getattr(args, "ally_actor_id", []),
+            report_kind="ally",
         ),
-        "hostile_ids": _prepared_actor_ids(
+        "hostile_ids": _selected_prepared_actor_ids(
             args.hostile_report,
+            getattr(args, "hostile_actor_id", []),
             report_kind="hostile",
         ),
-        "additional_hostile_ids": (
-            _prepared_actor_ids(
-                args.additional_hostile_report,
-                report_kind="additional hostile",
-            )
-            if args.additional_hostile_report
-            else []
+        "additional_hostile_ids": _selected_prepared_actor_ids(
+            args.additional_hostile_report,
+            getattr(args, "additional_hostile_actor_id", []),
+            report_kind="additional hostile",
         ),
-        "reinforcement_hostile_ids": (
-            _prepared_actor_ids(
-                args.reinforcement_hostile_report,
-                report_kind="reinforcement hostile",
-            )
-            if args.reinforcement_hostile_report
-            else []
+        "reinforcement_hostile_ids": _selected_prepared_actor_ids(
+            args.reinforcement_hostile_report,
+            getattr(args, "reinforcement_hostile_actor_id", []),
+            report_kind="reinforcement hostile",
         ),
     }
     actor_sets = [(name, set(values)) for name, values in groups.items()]
@@ -1743,20 +1804,20 @@ async def _start(
     phase = str(dict(campaign.get("state") or {}).get("game_phase") or "")
     if phase != "play":
         raise RuntimeError("encounter start requires the play phase")
-    _require_live_active_party(
-        party_ids,
-        await _manifest_get(client, args.campaign_id),
-    )
     branch = await _current_branch(client, args.campaign_id)
-    ally_ids = (
-        _prepared_actor_ids(args.ally_report, report_kind="ally")
-        if args.ally_report
-        else []
+    ally_ids = _selected_prepared_actor_ids(
+        args.ally_report,
+        getattr(args, "ally_actor_id", []),
+        report_kind="ally",
     )
     ally_id_set = set(ally_ids)
     pc_ids = [actor_id for actor_id in party_ids if actor_id not in ally_id_set]
     if len(pc_ids) + len(ally_ids) != len(party_ids):
         raise ValueError("friendly participant reports contain duplicate actor ids")
+    _require_live_active_party(
+        pc_ids,
+        await _manifest_get(client, args.campaign_id),
+    )
     initial_hostile_ids = [*hostile_ids, *additional_hostile_ids]
     all_hostile_ids = [*initial_hostile_ids, *reinforcement_hostile_ids]
     target_priorities = _source_target_priorities(
@@ -2783,10 +2844,10 @@ async def _auto_run(
         participant_ids=[*party_ids, *hostile_ids],
         encounter_source_excerpt=str(args.source_excerpt or ""),
     )
-    ally_ids = (
-        _prepared_actor_ids(args.ally_report, report_kind="ally")
-        if args.ally_report
-        else []
+    ally_ids = _selected_prepared_actor_ids(
+        args.ally_report,
+        getattr(args, "ally_actor_id", []),
+        report_kind="ally",
     )
     source_zero_hp_finisher = _source_zero_hp_finisher(
         args.source_zero_hp_finisher_json,
