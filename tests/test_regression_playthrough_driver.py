@@ -958,6 +958,61 @@ def test_source_loot_driver_rejects_implicit_empty_spellbook() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    "mechanics",
+    [
+        {
+            "attack_type": "melee",
+            "attack_ability": "dexterity",
+            "damage_formula": "1d6",
+            "damage_type": "slashing",
+        },
+        {
+            "attack_type": "melee",
+            "attack_ability": "dexterity",
+            "damage_formula": "1d6",
+            "damage_type": "slashing",
+            "proficient": "false",
+        },
+    ],
+)
+def test_source_loot_driver_requires_explicit_boolean_weapon_proficiency(
+    mechanics: dict,
+) -> None:
+    class Client:
+        async def domain(self, tool_id: str, arguments: dict):
+            raise AssertionError((tool_id, arguments))
+
+    with pytest.raises(
+        ValueError,
+        match=r"weapon item 0 requires explicit boolean mechanics\.proficient",
+    ):
+        asyncio.run(
+            _acquire_source_loot(
+                Client(),
+                campaign_id="campaign-1",
+                run_id="run-1",
+                scene_id="scene-1",
+                location_key="barracks",
+                source_excerpt="The defeated cultists carried scimitars.",
+                source_ref={},
+                acquisition_id="cultist-weapons",
+                coins={},
+                items=[
+                    {
+                        "id": "cultist-scimitar",
+                        "name": "Cultist scimitar",
+                        "kind": "weapon",
+                        "quantity": 1,
+                        "mechanics": mechanics,
+                    }
+                ],
+                reason="The party recovered an intact scimitar.",
+                knowledge_actor_ids=["actor-1"],
+            )
+        )
+
+
 def test_source_loot_driver_accepts_explicit_spellbook_contents() -> None:
     source_ref = {
         "module_id": "module-1",

@@ -6960,7 +6960,17 @@ async def _acquire_source_loot(
     if any(not item_id for item_id in item_ids) or len(item_ids) != len(set(item_ids)):
         raise ValueError("acquire-loot items require unique non-empty ids")
     for index, item in enumerate(items):
-        if str(item.get("kind") or "").strip() != "spellbook":
+        item_kind = str(item.get("kind") or "").strip()
+        if item_kind == "weapon":
+            mechanics = item.get("mechanics")
+            if not isinstance(mechanics, dict) or not isinstance(
+                mechanics.get("proficient"), bool
+            ):
+                raise ValueError(
+                    f"acquire-loot weapon item {index} requires explicit boolean "
+                    "mechanics.proficient"
+                )
+        if item_kind != "spellbook":
             continue
         mechanics = item.get("mechanics")
         if not isinstance(mechanics, dict):
