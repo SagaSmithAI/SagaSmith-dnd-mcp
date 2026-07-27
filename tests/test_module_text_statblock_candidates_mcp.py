@@ -142,6 +142,8 @@ def test_text_module_statblock_candidate_can_create_a_source_bound_actor(
         assert candidate["execution_state"] == "review_ready", candidate.get("review_error")
         assert [item["chunk_id"] for item in source_chunks] == candidate["source_chunk_ids"]
         assert candidate["validation"]["name"] == "GOBLIN"
+        assert candidate["ruling_requirement"]["default_resolver"] == "agent"
+        assert candidate["ruling_requirement"]["ruling_kind"] == "source_or_scene_fact"
         reviewed = await _call(
             server,
             "module_review",

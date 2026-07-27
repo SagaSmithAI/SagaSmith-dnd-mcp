@@ -160,6 +160,8 @@ def test_rule_import_renders_a_checksum_bound_review_page(tmp_path: Path) -> Non
 
 ***Club***. *Melee Weapon Attack:* +2 to hit, reach 5 ft., one target.
 *Hit:* 2 (1d4) bludgeoning damage.
+
+***Shout***. The commoner calls loudly for help.
 """
         review_arguments = {
             "campaign_id": campaign["id"],
@@ -179,6 +181,23 @@ def test_rule_import_renders_a_checksum_bound_review_page(tmp_path: Path) -> Non
         assert review["source_id"] == ingested["result"]["source_id"]
         assert review["asset_checksum"] == metadata["source_checksum"]
         assert review["image_checksum"] == metadata["image_checksum"]
+        validation = reviewed["result"]["validation"]
+        assert validation["default_dm_resolver"] == "agent"
+        assert validation["settlement"] == "mixed"
+        assert validation["ruling_requirements"] == [
+            {
+                "reason": "Shout: descriptive action is not automatically settled",
+                "default_resolver": "agent",
+                "ruling_kind": "agent_dm_adjudication",
+                "policy_ref": "server_capabilities.ruling_policy",
+                "requires_external_input_only_for": [
+                    "player_owned_choice",
+                    "owner_approval",
+                    "permission_escalation",
+                    "missing_or_conflicting_source_review",
+                ],
+            }
+        ]
 
         _, created = await server.call_tool(
             "character_create_from",
@@ -596,36 +615,45 @@ def test_rule_and_module_import_jobs_are_reviewable_and_activation_safe(tmp_path
         assert indexed["source"]["edition"] == "2014"
         extracted = await call(
             server,
-            "rule_content_candidates_extract",
+            "rule_import",
             {
                 "campaign_id": campaign["id"],
-                "job_id": rule_job_id,
+                "action": "extract_candidates",
+                "payload": {"job_id": rule_job_id},
                 "idempotency_key": "rule-job-extract",
             },
         )
         spark = next(item for item in extracted["candidates"] if item["name"] == "Spark")
+        assert spark["ruling_requirement"]["default_resolver"] == "agent"
+        assert spark["ruling_requirement"]["ruling_kind"] == "source_or_scene_fact"
+        assert extracted["job"]["review_resolution"]["default_resolver"] == "agent"
+        assert extracted["job"]["review_resolution"]["ruling_kind"] == "source_or_scene_fact"
+        assert extracted["job"]["review_requirements"]
         reviewed = await call(
             server,
-            "import_job_review_candidates",
+            "rule_import",
             {
                 "campaign_id": campaign["id"],
-                "job_id": rule_job_id,
-                "decisions": [
-                    {
-                        "id": spark["id"],
-                        "review_status": "accepted",
-                        "artifact": {
-                            "kind": "spell",
-                            "application_state": "selection_ready",
-                            "card": {
-                                "name": "Spark",
-                                "level": 1,
-                                "classes": ["wizard"],
-                                "definition": {},
+                "action": "review",
+                "payload": {
+                    "job_id": rule_job_id,
+                    "decisions": [
+                        {
+                            "id": spark["id"],
+                            "review_status": "accepted",
+                            "artifact": {
+                                "kind": "spell",
+                                "application_state": "selection_ready",
+                                "card": {
+                                    "name": "Spark",
+                                    "level": 1,
+                                    "classes": ["wizard"],
+                                    "definition": {},
+                                },
                             },
-                        },
-                    }
-                ],
+                        }
+                    ],
+                },
                 "idempotency_key": "rule-job-review",
             },
         )

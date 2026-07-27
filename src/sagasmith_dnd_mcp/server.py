@@ -1884,6 +1884,49 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             raise ValueError(f"import job is not a {kind} job")
         return job
 
+    def import_candidate_view(candidate: dict[str, Any]) -> dict[str, Any]:
+        """Name the resolver for a live candidate review without changing stored evidence."""
+
+        value = deepcopy(dict(candidate))
+        if str(value.get("review_status") or "") not in {"pending", "needs_revision"}:
+            return value
+        requirement = value.get("ruling_requirement")
+        if not isinstance(requirement, dict):
+            requirement = _ruling_requirement(
+                "Review the extracted candidate against its exact source evidence.",
+                "source_or_scene_fact",
+            )
+            value["ruling_requirement"] = requirement
+        return value
+
+    def import_job_view(job: Any) -> dict[str, Any]:
+        """Expose ordinary import review as Agent-owned and preserve source exceptions."""
+
+        value = asdict(job)
+        candidates = [
+            import_candidate_view(item)
+            for item in value.get("candidates", [])
+            if isinstance(item, dict)
+        ]
+        value["candidates"] = candidates
+        if str(value.get("state") or "") != "review_required":
+            return value
+        requirements = [
+            deepcopy(item["ruling_requirement"])
+            for item in candidates
+            if isinstance(item.get("ruling_requirement"), dict)
+        ]
+        ruling_kind = _pending_result_ruling_kind(
+            {
+                "status": "pending_ruling",
+                "ruling_requirements": requirements,
+            },
+            fallback="source_or_scene_fact",
+        )
+        value["review_resolution"] = _ruling_resolution_for_kind(ruling_kind)
+        value["review_requirements"] = requirements
+        return value
+
     def require_write_contract(expected_revision: int | None, idempotency_key: str | None) -> None:
         if expected_revision is None:
             raise ValueError("expected_revision is required for this mutation")
@@ -3877,7 +3920,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     ) -> dict[str, Any]:
         """Read the durable evidence, review state, and result for one lobby import."""
         access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
-        return asdict(require_import_job(campaign_id, job_id))
+        return import_job_view(require_import_job(campaign_id, job_id))
 
     @mcp.tool()
     def import_job_list(
@@ -3887,7 +3930,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     ) -> list[dict[str, Any]]:
         """List rulebook or module imports, newest first, without reading local files."""
         access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
-        return [asdict(item) for item in import_jobs.list(campaign_id, kind=kind)]
+        return [import_job_view(item) for item in import_jobs.list(campaign_id, kind=kind)]
 
     @mcp.tool()
     def rule_import_job_create(
@@ -3931,7 +3974,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             artifact_checksum=storage.rulebook_checksum(artifact),
             payload=payload,
         )
-        response = {"job": asdict(job)}
+        response = {"job": import_job_view(job)}
         return remember_idempotent(
             scope, idempotency_key, payload, response, campaign_id=campaign_id
         )
@@ -3958,7 +4001,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             **rule_document_options(job.artifact_checksum),
         )
         updated = import_jobs.record_inspection(job_id, inspection)
-        response = {"job": asdict(updated), "inspection": inspection}
+        response = {"job": import_job_view(updated), "inspection": inspection}
         return remember_idempotent(
             scope, idempotency_key, payload, response, campaign_id=campaign_id
         )
@@ -4019,7 +4062,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             state="extracted",
             source_id=result.source_id,
         )
-        response = {"job": asdict(updated), "source": source, **asdict(result)}
+        response = {"job": import_job_view(updated), "source": source, **asdict(result)}
         return remember_idempotent(
             scope, idempotency_key, payload, response, campaign_id=campaign_id
         )
@@ -4054,7 +4097,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 for chunk_id in candidate["source_chunk_ids"]
             ]
         updated = import_jobs.set_candidates(job_id, candidates)
-        response = {"job": asdict(updated), "candidates": updated.candidates}
+        candidate_views = [import_candidate_view(item) for item in updated.candidates]
+        response = {"job": import_job_view(updated), "candidates": candidate_views}
         return remember_idempotent(
             scope, idempotency_key, payload, response, campaign_id=campaign_id
         )
@@ -4078,7 +4122,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if replay is not None:
             return replay
         updated = import_jobs.review_candidates(job_id, decisions)
-        response = {"job": asdict(updated), "candidates": updated.candidates}
+        candidate_views = [import_candidate_view(item) for item in updated.candidates]
+        response = {"job": import_job_view(updated), "candidates": candidate_views}
         return remember_idempotent(
             scope, idempotency_key, payload, response, campaign_id=campaign_id
         )
@@ -17173,7 +17218,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             artifact_checksum=str(preview.get("checksum") or ""),
             payload=payload,
         )
-        response = {"job": asdict(job)}
+        response = {"job": import_job_view(job)}
         return remember_idempotent(
             scope, idempotency_key, payload, response, campaign_id=campaign_id
         )
@@ -17201,7 +17246,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             **module_document_options(job.artifact_checksum),
         )
         updated = import_jobs.record_inspection(job_id, preview)
-        response = {"job": asdict(updated), "preview": preview}
+        response = {"job": import_job_view(updated), "preview": preview}
         return remember_idempotent(
             scope, idempotency_key, payload, response, campaign_id=campaign_id
         )
@@ -17261,7 +17306,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             validation,
             state="validated" if validation["valid"] else "failed",
         )
-        response = {"job": asdict(updated), "validation": validation}
+        response = {"job": import_job_view(updated), "validation": validation}
         return remember_idempotent(
             scope, idempotency_key, payload, response, campaign_id=campaign_id
         )
@@ -17305,7 +17350,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             state="imported",
             module_id=result.module_id,
         )
-        response = {"job": asdict(updated), **asdict(result)}
+        response = {"job": import_job_view(updated), **asdict(result)}
         return remember_idempotent(
             scope, idempotency_key, payload, response, campaign_id=campaign_id
         )
@@ -17363,7 +17408,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             module_id=job.module_id,
         )
         response = {
-            "job": asdict(updated),
+            "job": import_job_view(updated),
             "activation": activation,
             "campaign_revision": after.revision,
         }
@@ -17718,6 +17763,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 candidate["ruling_requirement"] = _ruling_requirement(
                     str(candidate.get("review_error") or "statblock source needs review"),
                     "missing_or_conflicting_source_review",
+                )
+            elif candidate.get("execution_state") == "review_ready":
+                candidate["ruling_requirement"] = _ruling_requirement(
+                    "Review the normalized statblock against its exact module chunks.",
+                    "source_or_scene_fact",
                 )
             if len(candidate.get("source_scene_ids") or []) != 1:
                 candidate["execution_state"] = "blocked"
@@ -18427,13 +18477,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             source_id=job.source_id,
         )
         response = {
-            "job": asdict(updated),
+            "job": import_job_view(updated),
             "review": review,
             "validation": {
                 "challenge_rating": parsed.challenge_rating,
                 "experience_points": parsed.experience_points,
-                "warnings": list(parsed.warnings),
-                "settlement": "automatic" if not parsed.warnings else "mixed",
+                **statblock_settlement(list(parsed.warnings)),
             },
         }
         return remember_idempotent(
@@ -18667,7 +18716,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             {"draft": draft, "accepted_artifact_count": len(artifacts)},
             state=state,
         )
-        response = {"job": asdict(updated), "draft": draft}
+        response = {"job": import_job_view(updated), "draft": draft}
         return remember_idempotent(
             scope, idempotency_key, payload, response, campaign_id=campaign_id
         )
@@ -18701,7 +18750,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             state="installed",
             source_id=job.source_id,
         )
-        response = {"job": asdict(updated), "installed": installed}
+        response = {"job": import_job_view(updated), "installed": installed}
         return remember_idempotent(
             scope, idempotency_key, payload, response, campaign_id=campaign_id
         )
@@ -18750,7 +18799,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             state="activated",
             source_id=job.source_id,
         )
-        response = {"job": asdict(updated), "activation": activation}
+        response = {"job": import_job_view(updated), "activation": activation}
         return remember_idempotent(
             scope, idempotency_key, payload, response, campaign_id=campaign_id
         )
