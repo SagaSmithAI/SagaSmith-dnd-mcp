@@ -294,8 +294,41 @@ def _arguments() -> argparse.Namespace:
             "reference when the Agent converts narrative timing into an exact count."
         ),
     )
+    parser.add_argument(
+        "--prerequisite-scene-id",
+        default="",
+        help=(
+            "Scene whose public progress must contain --prerequisite-outcome-id "
+            "before advance-time or a rest may mutate campaign state"
+        ),
+    )
+    parser.add_argument(
+        "--prerequisite-outcome-id",
+        default="",
+        help=(
+            "Previously recorded full-playthrough outcome required before "
+            "advance-time or a rest may mutate campaign state"
+        ),
+    )
+    parser.add_argument(
+        "--prerequisite-actor-id",
+        action="append",
+        default=[],
+        help=(
+            "Campaign actor that must already exist before advance-time or a rest "
+            "may mutate campaign state; repeat for multiple narrative prerequisites"
+        ),
+    )
     parser.add_argument("--rest-member-json", action="append", type=json.loads, default=[])
     parser.add_argument("--rest-start-clock-json", type=json.loads)
+    parser.add_argument(
+        "--rest-expected-start-clock-json",
+        type=json.loads,
+        help=(
+            "Exact current world clock required before short-rest or long-rest; "
+            "validated through public campaign state before any rest mutation"
+        ),
+    )
     parser.add_argument("--rest-duration-minutes", type=int, default=60)
     parser.add_argument("--rest-reason", default="")
     parser.add_argument("--recovery-actor-id", action="append", default=[])
@@ -913,6 +946,109 @@ async def _manifest_get(
         "playthrough_manifest",
         {"campaign_id": campaign_id, "action": "get"},
     )
+
+
+async def _validate_narrative_preconditions(
+    client: ExposureClient,
+    *,
+    campaign_id: str,
+    scene_id: str = "",
+    outcome_id: str = "",
+    actor_ids: list[str] | None = None,
+) -> dict[str, Any]:
+    normalized_scene_id = scene_id.strip()
+    normalized_outcome_id = outcome_id.strip()
+    normalized_actor_ids = [str(actor_id).strip() for actor_id in (actor_ids or [])]
+    if bool(normalized_scene_id) != bool(normalized_outcome_id):
+        raise ValueError(
+            "narrative outcome precondition requires both scene id and outcome id"
+        )
+    if any(not actor_id for actor_id in normalized_actor_ids):
+        raise ValueError("narrative actor precondition ids must not be empty")
+    if len(normalized_actor_ids) != len(set(normalized_actor_ids)):
+        raise ValueError("narrative actor precondition ids must be unique")
+
+    outcome_evidence = None
+    if normalized_outcome_id:
+        progress_rows = await client.domain(
+            "module_query",
+            {"campaign_id": campaign_id, "view": "progress"},
+        )
+        if not isinstance(progress_rows, list) or any(
+            not isinstance(item, dict) for item in progress_rows
+        ):
+            raise RuntimeError("module progress precondition query returned invalid rows")
+        progress = next(
+            (
+                item
+                for item in progress_rows
+                if str(item.get("scene_id") or "") == normalized_scene_id
+            ),
+            None,
+        )
+        outcomes = dict(
+            dict((progress or {}).get("state") or {}).get("full_playthrough_outcomes")
+            or {}
+        )
+        outcome = outcomes.get(normalized_outcome_id)
+        if not isinstance(outcome, dict):
+            raise ValueError(
+                "required playthrough outcome is not recorded in the current branch: "
+                f"{normalized_outcome_id}"
+            )
+        outcome_evidence = {
+            "scene_id": normalized_scene_id,
+            "outcome_id": normalized_outcome_id,
+            "state_version": int((progress or {}).get("state_version", 0) or 0),
+            "event_type": str(outcome.get("event_type") or ""),
+            "fact_keys": [str(item) for item in list(outcome.get("fact_keys") or [])],
+        }
+
+    actor_evidence = []
+    for actor_id in normalized_actor_ids:
+        actor = await client.domain(
+            "character_query",
+            {"view": "get", "payload": {"character_id": actor_id}},
+        )
+        if actor.get("campaign_id") != campaign_id:
+            raise ValueError(
+                "narrative actor precondition does not belong to the campaign: "
+                f"{actor_id}"
+            )
+        actor_evidence.append(
+            {
+                "actor_id": actor_id,
+                "revision": actor.get("revision"),
+                "character_type": str(actor.get("character_type") or ""),
+            }
+        )
+    return {
+        "outcome": outcome_evidence,
+        "actors": actor_evidence,
+    }
+
+
+def _validate_world_time_precondition(
+    campaign: dict[str, Any],
+    expected: Any,
+) -> dict[str, int] | None:
+    normalized_expected = _normalize_expected_world_time(expected)
+    if normalized_expected is None:
+        return None
+    world_time = dict(dict(campaign.get("state") or {}).get("world_time") or {})
+    actual = {
+        key: world_time.get(key)
+        for key in ("day", "hour", "minute", "elapsed_minutes")
+    }
+    if actual != normalized_expected:
+        raise ValueError(
+            "campaign world time does not match the required precondition: "
+            f"expected day {normalized_expected['day']} "
+            f"{normalized_expected['hour']:02}:{normalized_expected['minute']:02}, "
+            f"elapsed {normalized_expected['elapsed_minutes']}; "
+            f"actual {actual}"
+        )
+    return normalized_expected
 
 
 def _mutation_key(run_id: str, action: str, identity: str) -> str:
@@ -4507,6 +4643,10 @@ async def _short_rest(
     start_clock: dict[str, Any] | None,
     duration_minutes: int,
     reason: str,
+    prerequisite_scene_id: str = "",
+    prerequisite_outcome_id: str = "",
+    prerequisite_actor_ids: list[str] | None = None,
+    expected_start_clock: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     rest_identity = _occurrence_identity(occurrence_id, "short-rest")
     if duration_minutes < 60:
@@ -4622,6 +4762,13 @@ async def _short_rest(
         for item in normalized
     ):
         raise ValueError("Song of Rest applies only to members who spend one or more Hit Dice")
+    preconditions = await _validate_narrative_preconditions(
+        client,
+        campaign_id=campaign_id,
+        scene_id=prerequisite_scene_id,
+        outcome_id=prerequisite_outcome_id,
+        actor_ids=prerequisite_actor_ids,
+    )
     actors = []
     for actor_id in actor_ids:
         actor = await client.domain(
@@ -4667,6 +4814,10 @@ async def _short_rest(
     if branch is None:
         raise RuntimeError("campaign has no current branch")
     campaign = await _campaign(client, campaign_id)
+    required_start_clock = _validate_world_time_precondition(
+        campaign,
+        expected_start_clock,
+    )
     clock_set = None
     if not dict(dict(campaign.get("state") or {}).get("world_time") or {}):
         if not isinstance(start_clock, dict):
@@ -4797,6 +4948,10 @@ async def _short_rest(
     return {
         "occurrence_id": rest_identity,
         "member_ids": actor_ids,
+        "preconditions": {
+            **preconditions,
+            "world_time": required_start_clock,
+        },
         "clock_set": clock_set,
         "clock_advanced": clock_advanced,
         "rests": rested,
@@ -5457,6 +5612,10 @@ async def _long_rest(
     start_clock: dict[str, Any] | None,
     duration_minutes: int,
     reason: str,
+    prerequisite_scene_id: str = "",
+    prerequisite_outcome_id: str = "",
+    prerequisite_actor_ids: list[str] | None = None,
+    expected_start_clock: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     rest_identity = _occurrence_identity(occurrence_id, "long-rest")
     if duration_minutes < 240:
@@ -5539,6 +5698,13 @@ async def _long_rest(
     actor_ids = [item["actor_id"] for item in normalized]
     if len(actor_ids) != len(set(actor_ids)):
         raise ValueError("long-rest member actor ids must be unique")
+    preconditions = await _validate_narrative_preconditions(
+        client,
+        campaign_id=campaign_id,
+        scene_id=prerequisite_scene_id,
+        outcome_id=prerequisite_outcome_id,
+        actor_ids=prerequisite_actor_ids,
+    )
     branches = await client.domain(
         "branch_query",
         {"campaign_id": campaign_id, "view": "list"},
@@ -5547,6 +5713,10 @@ async def _long_rest(
     if branch is None:
         raise RuntimeError("campaign has no current branch")
     campaign = await _campaign(client, campaign_id)
+    required_start_clock = _validate_world_time_precondition(
+        campaign,
+        expected_start_clock,
+    )
     clock_set = None
     if not dict(dict(campaign.get("state") or {}).get("world_time") or {}):
         if not isinstance(start_clock, dict):
@@ -5726,6 +5896,10 @@ async def _long_rest(
     return {
         "occurrence_id": rest_identity,
         "member_ids": actor_ids,
+        "preconditions": {
+            **preconditions,
+            "world_time": required_start_clock,
+        },
         "clock_set": clock_set,
         "rest": rested,
         "rest_recovered": rest_recovered,
@@ -5751,6 +5925,9 @@ async def _advance_time(
     knowledge_actor_ids: list[str],
     defer_checkpoint: bool = False,
     expected_after: dict[str, Any] | None = None,
+    prerequisite_scene_id: str = "",
+    prerequisite_outcome_id: str = "",
+    prerequisite_actor_ids: list[str] | None = None,
 ) -> dict[str, Any]:
     identity = _occurrence_identity(occurrence_id, "advance-time")
     normalized_reason = reason.strip()
@@ -5781,6 +5958,13 @@ async def _advance_time(
         )
     if len(knowledge_actor_ids) != len(set(knowledge_actor_ids)):
         raise ValueError("advance-time knowledge actor ids must be unique")
+    preconditions = await _validate_narrative_preconditions(
+        client,
+        campaign_id=campaign_id,
+        scene_id=prerequisite_scene_id,
+        outcome_id=prerequisite_outcome_id,
+        actor_ids=prerequisite_actor_ids,
+    )
     scene = await client.domain(
         "module_query",
         {
@@ -5966,6 +6150,7 @@ async def _advance_time(
         "scene_id": scene_id,
         "source_ref": exact_ref,
         "agent_ruling": normalized_agent_ruling,
+        "preconditions": preconditions,
         "clock_set": clock_set,
         "before": before,
         "advance": advanced,
@@ -10076,6 +10261,9 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     knowledge_actor_ids=args.knowledge_actor_id,
                     defer_checkpoint=args.defer_checkpoint,
                     expected_after=args.time_expected_after_json,
+                    prerequisite_scene_id=args.prerequisite_scene_id,
+                    prerequisite_outcome_id=args.prerequisite_outcome_id,
+                    prerequisite_actor_ids=args.prerequisite_actor_id,
                 )
             elif args.action == "initialize-clock":
                 if phase != "play":
@@ -10297,6 +10485,10 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     start_clock=args.rest_start_clock_json,
                     duration_minutes=args.rest_duration_minutes,
                     reason=args.rest_reason,
+                    prerequisite_scene_id=args.prerequisite_scene_id,
+                    prerequisite_outcome_id=args.prerequisite_outcome_id,
+                    prerequisite_actor_ids=args.prerequisite_actor_id,
+                    expected_start_clock=args.rest_expected_start_clock_json,
                 )
             elif args.action == "use-activity":
                 if phase != "play":
@@ -10374,6 +10566,10 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     start_clock=args.rest_start_clock_json,
                     duration_minutes=args.rest_duration_minutes,
                     reason=args.rest_reason,
+                    prerequisite_scene_id=args.prerequisite_scene_id,
+                    prerequisite_outcome_id=args.prerequisite_outcome_id,
+                    prerequisite_actor_ids=args.prerequisite_actor_id,
+                    expected_start_clock=args.rest_expected_start_clock_json,
                 )
             elif args.action == "recover-stable":
                 if phase != "play":

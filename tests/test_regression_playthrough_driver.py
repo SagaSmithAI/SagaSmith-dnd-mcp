@@ -6269,6 +6269,241 @@ def test_time_advance_rejects_missing_or_partial_evidence_before_public_calls(
         )
 
 
+def test_narrative_preconditions_require_a_complete_outcome_reference_before_calls() -> None:
+    class Client:
+        async def domain(self, tool_id: str, arguments: dict):
+            raise AssertionError((tool_id, arguments))
+
+    with pytest.raises(ValueError, match="both scene id and outcome id"):
+        asyncio.run(
+            regression_playthrough._validate_narrative_preconditions(
+                Client(),
+                campaign_id="campaign-1",
+                scene_id="scene-1",
+            )
+        )
+
+
+def test_narrative_preconditions_return_public_outcome_and_actor_evidence() -> None:
+    class Client:
+        async def domain(self, tool_id: str, arguments: dict):
+            if tool_id == "module_query":
+                assert arguments == {
+                    "campaign_id": "campaign-1",
+                    "view": "progress",
+                }
+                return [
+                    {
+                        "scene_id": "scene-1",
+                        "state_version": 7,
+                        "state": {
+                            "full_playthrough_outcomes": {
+                                "event-1-resolved": {
+                                    "event_type": "road_event_resolved",
+                                    "fact_keys": ["world.event.1"],
+                                }
+                            }
+                        },
+                    }
+                ]
+            if tool_id == "character_query":
+                assert arguments == {
+                    "view": "get",
+                    "payload": {"character_id": "npc-1"},
+                }
+                return {
+                    "id": "npc-1",
+                    "campaign_id": "campaign-1",
+                    "revision": 3,
+                    "character_type": "npc",
+                }
+            raise AssertionError((tool_id, arguments))
+
+    result = asyncio.run(
+        regression_playthrough._validate_narrative_preconditions(
+            Client(),
+            campaign_id="campaign-1",
+            scene_id="scene-1",
+            outcome_id="event-1-resolved",
+            actor_ids=["npc-1"],
+        )
+    )
+
+    assert result == {
+        "outcome": {
+            "scene_id": "scene-1",
+            "outcome_id": "event-1-resolved",
+            "state_version": 7,
+            "event_type": "road_event_resolved",
+            "fact_keys": ["world.event.1"],
+        },
+        "actors": [
+            {
+                "actor_id": "npc-1",
+                "revision": 3,
+                "character_type": "npc",
+            }
+        ],
+    }
+
+
+def test_long_rest_rejects_missing_narrative_outcome_before_any_mutation() -> None:
+    class Client:
+        calls: list[tuple[str, dict]] = []
+
+        async def domain(self, tool_id: str, arguments: dict):
+            self.calls.append((tool_id, arguments))
+            if tool_id == "character_query":
+                return {
+                    "id": "actor-1",
+                    "campaign_id": "campaign-1",
+                    "revision": 2,
+                    "sheet": default_character_sheet(),
+                }
+            if tool_id == "module_query":
+                return [
+                    {
+                        "scene_id": "scene-1",
+                        "state_version": 6,
+                        "state": {"full_playthrough_outcomes": {}},
+                    }
+                ]
+            raise AssertionError((tool_id, arguments))
+
+    client = Client()
+    with pytest.raises(ValueError, match="required playthrough outcome is not recorded"):
+        asyncio.run(
+            _long_rest(
+                client,
+                campaign_id="campaign-1",
+                run_id="run-1",
+                occurrence_id="event-1-rest",
+                members=[{"actor_id": "actor-1", "food_and_drink": True}],
+                start_clock=None,
+                duration_minutes=480,
+                reason="Rest after resolving event 1.",
+                prerequisite_scene_id="scene-1",
+                prerequisite_outcome_id="event-1-resolved",
+            )
+        )
+    assert [tool_id for tool_id, _arguments in client.calls] == [
+        "character_query",
+        "module_query",
+    ]
+
+
+def test_long_rest_rejects_wrong_start_clock_before_campaign_mutation() -> None:
+    class Client:
+        mutated = False
+
+        async def core(self, tool_id: str, arguments: dict):
+            assert tool_id == "campaign_query"
+            return {
+                "result": {
+                    "id": "campaign-1",
+                    "revision": 4,
+                    "state": {
+                        "game_phase": "play",
+                        "world_time": {
+                            "day": 2,
+                            "hour": 0,
+                            "minute": 0,
+                            "elapsed_minutes": 1440,
+                        },
+                    },
+                }
+            }
+
+        async def domain(self, tool_id: str, arguments: dict):
+            if tool_id == "character_query":
+                return {
+                    "id": "actor-1",
+                    "campaign_id": "campaign-1",
+                    "revision": 2,
+                    "sheet": default_character_sheet(),
+                }
+            if tool_id == "module_query":
+                return [
+                    {
+                        "scene_id": "scene-1",
+                        "state_version": 7,
+                        "state": {
+                            "full_playthrough_outcomes": {
+                                "event-1-resolved": {
+                                    "event_type": "road_event_resolved",
+                                    "fact_keys": ["world.event.1"],
+                                }
+                            }
+                        },
+                    }
+                ]
+            if tool_id == "branch_query":
+                return [{"id": "branch-1", "is_current": True}]
+            if tool_id == "campaign_change":
+                self.mutated = True
+                raise AssertionError("wrong-clock rest must not mutate campaign state")
+            raise AssertionError((tool_id, arguments))
+
+    client = Client()
+    with pytest.raises(ValueError, match="does not match the required precondition"):
+        asyncio.run(
+            _long_rest(
+                client,
+                campaign_id="campaign-1",
+                run_id="run-1",
+                occurrence_id="event-1-rest",
+                members=[{"actor_id": "actor-1", "food_and_drink": True}],
+                start_clock=None,
+                duration_minutes=480,
+                reason="Rest after resolving event 1.",
+                prerequisite_scene_id="scene-1",
+                prerequisite_outcome_id="event-1-resolved",
+                expected_start_clock={
+                    "day": 1,
+                    "hour": 16,
+                    "minute": 0,
+                    "elapsed_minutes": 960,
+                },
+            )
+        )
+    assert client.mutated is False
+
+
+def test_rest_world_time_precondition_ignores_labels_but_rejects_wrong_time() -> None:
+    campaign = {
+        "state": {
+            "world_time": {
+                "schema_version": 1,
+                "day": 3,
+                "hour": 17,
+                "minute": 0,
+                "elapsed_minutes": 3900,
+                "label": "Campaign anchor",
+            }
+        }
+    }
+    expected = {
+        "day": 3,
+        "hour": 17,
+        "minute": 0,
+        "elapsed_minutes": 3900,
+    }
+    assert (
+        regression_playthrough._validate_world_time_precondition(campaign, expected)
+        == expected
+    )
+    with pytest.raises(ValueError, match="does not match the required precondition"):
+        regression_playthrough._validate_world_time_precondition(
+            campaign,
+            {
+                "day": 3,
+                "hour": 18,
+                "minute": 0,
+                "elapsed_minutes": 3960,
+            },
+        )
+
+
 def test_time_advance_rejects_wrong_road_calendar_delta_before_clock_write() -> None:
     class Client:
         clock_changes = 0
