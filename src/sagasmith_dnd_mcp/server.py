@@ -1619,6 +1619,88 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             not in removed_subjects
         ]
 
+    def module_statblock_agent_fill_requirements(
+        sheet: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Describe semantic module fields that the Agent must review.
+
+        The text parser may propose a Multiattack composition, but module-authored
+        creatures are not allowed to make that lexical proposal authoritative.
+        The Agent receives the exact activity prose plus the already-transcribed
+        weapon ids and must submit the canonical composition explicitly.
+        """
+
+        activities = [
+            activity
+            for activity in dict(sheet.get("content") or {}).get("activities", [])
+            if str(activity.get("name") or "").strip().casefold() == "multiattack"
+        ]
+        weapons = []
+        for item in dict(sheet.get("inventory") or {}).get("items", []):
+            if str(item.get("kind") or "") != "weapon":
+                continue
+            mechanics = dict(item.get("mechanics") or {})
+            weapons.append(
+                {
+                    "weapon_id": str(item.get("id") or ""),
+                    "name": str(item.get("name") or ""),
+                    "attack_type": str(mechanics.get("attack_type") or "melee"),
+                    "properties": sorted(
+                        str(value) for value in mechanics.get("properties") or []
+                    ),
+                }
+            )
+        return {
+            "required": bool(activities),
+            "default_resolver": "agent",
+            "ruling_kind": "module_specific_procedure",
+            "parser_authoritative": False,
+            "allowed_resolutions": ["structured", "agent_ruling"],
+            "multiattack_options": [
+                {
+                    "activity_id": str(activity.get("id") or ""),
+                    "source_excerpt": " ".join(
+                        str(activity.get("description") or "").split()
+                    ),
+                }
+                for activity in activities
+            ],
+            "available_weapons": weapons,
+        }
+
+    def require_complete_module_statblock_agent_fill(
+        sheet: dict[str, Any],
+        agent_fill: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        requirements = module_statblock_agent_fill_requirements(sheet)
+        if not requirements["required"]:
+            return requirements
+        if not isinstance(agent_fill, dict):
+            raise ValueError(
+                "module statblock Multiattack requires an Agent statblock fill; "
+                "the text parser is not authoritative for module-authored composition"
+            )
+        declarations = agent_fill.get("multiattack_options")
+        if not isinstance(declarations, list):
+            raise ValueError(
+                "module statblock Agent fill must contain multiattack_options"
+            )
+        expected_ids = {
+            str(item["activity_id"])
+            for item in requirements["multiattack_options"]
+        }
+        submitted_ids = {
+            str(item.get("activity_id") or "")
+            for item in declarations
+            if isinstance(item, dict)
+        }
+        if submitted_ids != expected_ids or len(declarations) != len(expected_ids):
+            raise ValueError(
+                "module statblock Agent fill must cover every source Multiattack "
+                "activity exactly once"
+            )
+        return requirements
+
     def statblock_ruling_kind(reason: str, *, character_type: str = "") -> str:
         """Classify a card boundary without treating absent source facts as DM fiat."""
 
@@ -17755,6 +17837,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             source_key=f"module-review:{module_id}:{content_key}",
             name=None,
         )
+        agent_fill_requirements = require_complete_module_statblock_agent_fill(
+            parsed.sheet,
+            agent_fill,
+        )
         metadata_value = deepcopy(dict(metadata or {}))
         if "agent_statblock_fill" in metadata_value:
             raise ValueError(
@@ -17771,6 +17857,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         retained_warnings = [
             warning for warning in parsed.warnings if warning not in resolved_warnings
         ]
+        retained_warnings = list(
+            dict.fromkeys(
+                [
+                    *retained_warnings,
+                    *((filled or {}).get("added_warnings") or []),
+                ]
+            )
+        )
         payload = {
             "module_id": module_id,
             "scene_id": scene_id,
@@ -17811,6 +17905,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 **statblock_settlement(retained_warnings),
                 "agent_fill": (filled or {}).get("fill"),
                 "resolved_warnings": sorted(resolved_warnings),
+                "agent_fill_requirements": agent_fill_requirements,
             },
         }
         return remember_idempotent(
@@ -17850,6 +17945,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             candidate["review_tool"] = "module_review"
             candidate["review_action"] = "submit_content"
             candidate["module_id"] = module_id
+            if candidate.get("execution_state") == "review_ready":
+                parsed_candidate = parse_2014_statblock(
+                    str(candidate.get("normalized_content") or ""),
+                    source_key=f"module-candidate:{candidate['id']}",
+                    name=None,
+                )
+                candidate["agent_fill_requirements"] = (
+                    module_statblock_agent_fill_requirements(parsed_candidate.sheet)
+                )
             if candidate.get("review_status") == "manual_review_required":
                 candidate["ruling_requirement"] = _ruling_requirement(
                     str(candidate.get("review_error") or "statblock source needs review"),
@@ -23613,6 +23717,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             reviewed_fill = dict(review.get("metadata") or {}).get(
                 "agent_statblock_fill"
             )
+            require_complete_module_statblock_agent_fill(
+                hydrated_sheet,
+                reviewed_fill,
+            )
             filled = (
                 apply_reviewed_statblock_fill(hydrated_sheet, reviewed_fill)
                 if reviewed_fill is not None
@@ -23639,6 +23747,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 for warning in statblock_warnings
                 if warning not in resolved_fill_warnings
             ]
+            statblock_warnings = list(
+                dict.fromkeys(
+                    [
+                        *statblock_warnings,
+                        *((filled or {}).get("added_warnings") or []),
+                    ]
+                )
+            )
             sheet = (
                 apply_statblock_variant(hydrated_sheet, variant)
                 if variant is not None

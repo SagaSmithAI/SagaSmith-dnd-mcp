@@ -1,6 +1,7 @@
 import asyncio
 from pathlib import Path
 
+import pytest
 from sagasmith_dnd.character_schema import derive_character_sheet
 from sagasmith_dnd.statblocks import parse_2014_statblock
 
@@ -58,8 +59,8 @@ AGENT_FILLED_GOBLIN_MODULE = GOBLIN_MODULE.replace(
     "##### ACTIONS\n\n",
     (
         "##### ACTIONS\n\n"
-        "Multiattack. In one coordinated assault, the goblin slashes with its "
-        "scimitar and follows with its shortbow. "
+        "Multiattack. The goblin attacks twice, once with its scimitar and once "
+        "with its shortbow. "
     ),
 )
 
@@ -290,7 +291,40 @@ def test_agent_can_fill_custom_monster_multiattack_from_exact_module_source(
             for item in parsed.sheet["content"]["activities"]
             if item["name"] == "Multiattack"
         )
-        assert derive_character_sheet(parsed.sheet)["multiattack_options"] == []
+        assert derive_character_sheet(parsed.sheet)["multiattack_options"]
+        requirements = candidate["agent_fill_requirements"]
+        assert requirements["required"] is True
+        assert requirements["parser_authoritative"] is False
+        assert requirements["allowed_resolutions"] == ["structured", "agent_ruling"]
+        assert requirements["multiattack_options"] == [
+            {
+                "activity_id": activity["id"],
+                "source_excerpt": activity["description"],
+            }
+        ]
+        assert {item["weapon_id"] for item in requirements["available_weapons"]} == {
+            "scimitar",
+            "shortbow",
+        }
+
+        with pytest.raises(Exception, match="requires an Agent statblock fill"):
+            await _call(
+                server,
+                "module_review",
+                {
+                    "campaign_id": campaign["id"],
+                    "action": "submit_content",
+                    "payload": {
+                        "module_id": ingested["module_id"],
+                        "scene_id": candidate["scene_id"],
+                        "content_key": "parser-only-goblin",
+                        "normalized_content": candidate["normalized_content"],
+                        "source_chunk_ids": candidate["source_chunk_ids"],
+                        "observation": "Attempted to trust the parser proposal.",
+                    },
+                    "idempotency_key": "reject-parser-only-goblin",
+                },
+            )
 
         reviewed = await _call(
             server,
@@ -344,10 +378,7 @@ def test_agent_can_fill_custom_monster_multiattack_from_exact_module_source(
         assert reviewed["validation"]["agent_fill"]["multiattack_options"][0][
             "default_resolver"
         ] == "agent"
-        assert (
-            "Multiattack: Multiattack composition requires a DM ruling"
-            in reviewed["validation"]["resolved_warnings"]
-        )
+        assert reviewed["validation"]["resolved_warnings"] == []
         assert (
             "Multiattack: Multiattack composition requires a DM ruling"
             not in reviewed["validation"]["warnings"]
@@ -383,9 +414,67 @@ def test_agent_can_fill_custom_monster_multiattack_from_exact_module_source(
         assert created["statblock"]["agent_fill"]["multiattack_options"][0][
             "ruling_kind"
         ] == "module_specific_procedure"
-        assert "Agent statblock fill: multiattack-action." in created["character"]["notes"][
-            "profile"
-        ]["dm_notes"]
+        assert (
+            f"Agent statblock fill: {activity['id']}."
+            in created["character"]["notes"]["profile"]["dm_notes"]
+        )
+
+        ruled_review = await _call(
+            server,
+            "module_review",
+            {
+                "campaign_id": campaign["id"],
+                "action": "submit_content",
+                "payload": {
+                    "module_id": ingested["module_id"],
+                    "scene_id": candidate["scene_id"],
+                    "content_key": "agent-ruled-goblin",
+                    "normalized_content": candidate["normalized_content"],
+                    "source_chunk_ids": candidate["source_chunk_ids"],
+                    "observation": (
+                        "The Agent retained this custom procedure as a DM ruling "
+                        "instead of trusting the parser proposal."
+                    ),
+                    "agent_fill": {
+                        "multiattack_options": [
+                            {
+                                "activity_id": activity["id"],
+                                "source_excerpt": activity["description"],
+                                "reason": (
+                                    "This regression exercises the explicit "
+                                    "Agent-ruling route."
+                                ),
+                                "resolution": "agent_ruling",
+                            }
+                        ]
+                    },
+                },
+                "idempotency_key": "review-agent-ruled-goblin",
+            },
+        )
+        assert ruled_review["validation"]["settlement"] == "mixed"
+        assert ruled_review["validation"]["ruling_requirements"][0][
+            "default_resolver"
+        ] == "agent"
+        ruled_actor = await _call(
+            server,
+            "character_create_from",
+            {
+                "mode": "module_statblock",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "review_id": ruled_review["review"]["id"],
+                    "name": "Custom Goblin Agent-Ruled",
+                    "character_type": "monster",
+                },
+                "idempotency_key": "create-agent-ruled-goblin",
+            },
+        )
+        assert ruled_actor["character"]["derived"]["multiattack_options"] == []
+        assert ruled_actor["statblock"]["settlement"] == "mixed"
+        assert ruled_actor["statblock"]["ruling_requirements"][0][
+            "default_resolver"
+        ] == "agent"
 
     asyncio.run(exercise())
 

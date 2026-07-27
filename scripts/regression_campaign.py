@@ -128,8 +128,8 @@ def _arguments() -> argparse.Namespace:
         "--agent-statblock-fill",
         type=Path,
         help=(
-            "Source-reviewed semantic JSON fill for unresolved module Multiattack prose; "
-            "submitted through module_review rather than expanding parser heuristics"
+            "Agent-reviewed semantic JSON fill for every module Multiattack; submitted "
+            "through module_review so parser phrase matching is never authoritative"
         ),
     )
     parser.add_argument(
@@ -2100,6 +2100,18 @@ async def _prepare_statblock(args: argparse.Namespace) -> dict[str, Any]:
                 ):
                     raise RuntimeError(
                         str(candidate.get("review_error") or "candidate is not review-ready")
+                    )
+                fill_requirements = dict(
+                    candidate.get("agent_fill_requirements") or {}
+                )
+                if fill_requirements.get("required") and agent_fill is None:
+                    required_ids = ", ".join(
+                        str(item.get("activity_id") or "")
+                        for item in fill_requirements.get("multiattack_options", [])
+                    )
+                    raise RuntimeError(
+                        "module statblock requires --agent-statblock-fill for "
+                        f"Multiattack activities: {required_ids}"
                     )
                 normalized_content = str(candidate.get("normalized_content") or "")
                 source_asset_id = None
