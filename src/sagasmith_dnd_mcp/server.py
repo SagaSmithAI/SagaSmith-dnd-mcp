@@ -349,7 +349,7 @@ def _agent_ruling_resolution(result: Any) -> dict[str, Any] | None:
 
     if not isinstance(result, dict) or result.get("status") != "pending_ruling":
         return None
-    ruling_kind = str(result.get("ruling_kind") or "agent_dm_adjudication")
+    ruling_kind = _pending_result_ruling_kind(result)
     return _ruling_resolution_for_kind(ruling_kind)
 
 
@@ -381,6 +381,9 @@ def _pending_result_ruling_kind(
     if result.get("status") == "pending_choice":
         return "player_owned_choice"
     requirements: list[dict[str, Any]] = []
+    direct_kind = str(result.get("ruling_kind") or "")
+    if direct_kind:
+        requirements.append({"ruling_kind": direct_kind})
     requirements.extend(
         item for item in result.get("pending", []) if isinstance(item, dict)
     )
@@ -410,7 +413,7 @@ def _facade_result(action: str, result: Any) -> dict[str, Any]:
     status = result.get("status", "ok") if isinstance(result, dict) else "ok"
     response = {"status": status, "action": action, "result": result}
     if status == "pending_ruling" and isinstance(result, dict):
-        ruling_kind = str(result.get("ruling_kind") or "agent_dm_adjudication")
+        ruling_kind = _pending_result_ruling_kind(result)
         response.update(_ruling_resolution_for_kind(ruling_kind))
     return response
 

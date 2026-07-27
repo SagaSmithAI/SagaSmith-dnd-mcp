@@ -88,6 +88,27 @@ def test_facade_preserves_external_ruling_ownership() -> None:
     assert result["result"]["reason"] == "source card is incomplete"
 
 
+def test_facade_preserves_nested_external_ruling_ownership() -> None:
+    nested = {
+        "status": "pending_ruling",
+        "ruling_requirements": [
+            {
+                "default_resolver": "agent",
+                "ruling_kind": "module_specific_procedure",
+            },
+            {
+                "default_resolver": "external_input",
+                "ruling_kind": "missing_or_conflicting_source_review",
+            },
+        ],
+    }
+
+    assert _agent_ruling_resolution(nested)["default_resolver"] == "external_input"
+    result = _facade_result("apply", nested)
+    assert result["default_resolver"] == "external_input"
+    assert result["ruling_kind"] == "missing_or_conflicting_source_review"
+
+
 def test_needs_ruling_boundary_returns_to_agent_without_committing() -> None:
     @_agent_ruling_boundary
     def operation() -> None:
@@ -233,6 +254,15 @@ def test_nested_pending_results_default_to_agent_and_preserve_exceptions() -> No
     )
     assert _pending_result_ruling_kind({"status": "pending_ruling"}) == (
         "agent_dm_adjudication"
+    )
+    assert (
+        _pending_result_ruling_kind(
+            {
+                "status": "pending_ruling",
+                "ruling_kind": "missing_or_conflicting_source_review",
+            }
+        )
+        == "missing_or_conflicting_source_review"
     )
 
 

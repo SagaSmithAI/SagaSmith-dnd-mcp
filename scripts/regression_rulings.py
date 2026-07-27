@@ -13,6 +13,40 @@ EXTERNAL_RULING_KINDS = frozenset(
         "missing_or_conflicting_source_review",
     }
 )
+AGENT_RULING_KINDS = (
+    "agent_dm_adjudication",
+    "source_or_scene_fact",
+    "descriptive_activity",
+    "generic_spell_effect",
+    "ready_release_effect",
+    "environmental_consequence",
+    "module_specific_procedure",
+)
+
+
+def pending_ruling_kind(ruling: dict[str, Any]) -> str:
+    """Classify every nested requirement, with true external boundaries taking priority."""
+
+    kinds: list[str] = []
+    direct_kind = str(ruling.get("ruling_kind") or "")
+    if direct_kind:
+        kinds.append(direct_kind)
+    for field in ("pending", "ruling_requirements"):
+        kinds.extend(
+            str(item.get("ruling_kind") or "")
+            for item in ruling.get(field, [])
+            if isinstance(item, dict) and str(item.get("ruling_kind") or "")
+        )
+    requirement = ruling.get("ruling_requirement")
+    if isinstance(requirement, dict) and str(requirement.get("ruling_kind") or ""):
+        kinds.append(str(requirement["ruling_kind"]))
+    external = next((kind for kind in kinds if kind in EXTERNAL_RULING_KINDS), "")
+    if external:
+        return external
+    return next(
+        (kind for kind in kinds if kind in AGENT_RULING_KINDS),
+        direct_kind or "agent_dm_adjudication",
+    )
 
 
 def normalize_pending_ruling(ruling: dict[str, Any]) -> dict[str, Any]:
@@ -20,14 +54,11 @@ def normalize_pending_ruling(ruling: dict[str, Any]) -> dict[str, Any]:
 
     normalized = deepcopy(dict(ruling))
     normalized.setdefault("status", "pending_ruling")
-    normalized.setdefault("ruling_kind", "agent_dm_adjudication")
-    normalized.setdefault(
-        "default_resolver",
-        (
-            "external_input"
-            if normalized["ruling_kind"] in EXTERNAL_RULING_KINDS
-            else "agent"
-        ),
+    normalized["ruling_kind"] = pending_ruling_kind(normalized)
+    normalized["default_resolver"] = (
+        "external_input"
+        if normalized["ruling_kind"] in EXTERNAL_RULING_KINDS
+        else "agent"
     )
     return normalized
 

@@ -79,6 +79,54 @@ def test_external_kind_alone_recovers_its_external_resolver() -> None:
     assert fields["default_resolver"] == "external_input"
 
 
+def test_nested_external_requirement_overrides_an_inconsistent_agent_envelope() -> None:
+    try:
+        raise_for_pending_ruling(
+            {
+                "status": "pending_ruling",
+                "default_resolver": "agent",
+                "ruling_kind": "module_specific_procedure",
+                "ruling_requirements": [
+                    {
+                        "default_resolver": "external_input",
+                        "ruling_kind": "missing_or_conflicting_source_review",
+                    }
+                ],
+                "reason": "the procedure depends on an incomplete source card",
+            },
+            operation="module_procedure",
+        )
+    except RegressionRulingRequiredError as error:
+        fields = ruling_failure_fields(error)
+    else:
+        raise AssertionError("nested source review did not stop the driver")
+
+    ruling = fields["ruling_requirements"][0]["ruling"]
+    assert ruling["default_resolver"] == "external_input"
+    assert ruling["ruling_kind"] == "missing_or_conflicting_source_review"
+
+
+def test_inconsistent_agent_kind_is_normalized_back_to_agent() -> None:
+    try:
+        raise_for_pending_ruling(
+            {
+                "status": "pending_ruling",
+                "default_resolver": "external_input",
+                "ruling_kind": "environmental_consequence",
+                "reason": "weather affects the attempted crossing",
+            },
+            operation="module_procedure",
+        )
+    except RegressionRulingRequiredError as error:
+        fields = ruling_failure_fields(error)
+    else:
+        raise AssertionError("environmental ruling did not return to the Agent")
+
+    ruling = fields["ruling_requirements"][0]["ruling"]
+    assert ruling["default_resolver"] == "agent"
+    assert ruling["ruling_kind"] == "environmental_consequence"
+
+
 def test_party_driver_writes_structured_agent_handoff(
     tmp_path: Path,
     monkeypatch,
