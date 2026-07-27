@@ -70,6 +70,10 @@ def test_rule_statblock_idempotency_is_bound_to_source_and_actor_batch() -> None
         source_identity={"source_id": "srd-kobold"},
         **{**base, "source_statblock_name": "Kobold"},
     )
+    assert kobold != _rule_statblock_operation_token(
+        source_identity={"source_id": "srd-kobold"},
+        **{**base, "source_job_id": "retained-job-2"},
+    )
 
 
 def test_rule_statblock_idempotency_is_bound_to_card_profile(
@@ -719,10 +723,13 @@ def test_prepare_rule_statblock_uses_contiguous_agent_text_evidence(
                 self.calls.append(("domain", tool_id, arguments))
                 return [
                     {
-                        "id": "job-source-1",
+                        "id": job_id,
                         "kind": "rulebook",
                         "source_id": "source-1",
+                        "artifact": "rules.pdf",
+                        "artifact_checksum": "same-checksum",
                     }
+                    for job_id in ("job-source-2", "job-source-1")
                 ]
             if (
                 tool_id == "rule_pack_query"
@@ -781,12 +788,17 @@ def test_prepare_rule_statblock_uses_contiguous_agent_text_evidence(
         and arguments["action"] == "review_statblock"
     )
     assert review_call["payload"]["review_mode"] == "agent_text"
+    assert review_call["payload"]["job_id"] == "job-source-1"
     assert review_call["payload"]["evidence_chunk_ids"] == [
         "evidence-0",
         "evidence-1",
         "evidence-2",
     ]
     assert report["review_mode"] == "agent_text"
+    assert report["equivalent_source_import_jobs"] == [
+        "job-source-1",
+        "job-source-2",
+    ]
     assert [item["ordinal"] for item in report["review_evidence_chunks"]] == [
         0,
         1,
@@ -804,8 +816,18 @@ def test_prepare_rule_statblock_rejects_ambiguous_agent_text_import_job(
             if tool_id == "import_query":
                 self.calls.append(("domain", tool_id, arguments))
                 return [
-                    {"id": "job-1", "source_id": "source-1"},
-                    {"id": "job-2", "source_id": "source-1"},
+                    {
+                        "id": "job-1",
+                        "source_id": "source-1",
+                        "artifact": "first.pdf",
+                        "artifact_checksum": "first-checksum",
+                    },
+                    {
+                        "id": "job-2",
+                        "source_id": "source-1",
+                        "artifact": "second.pdf",
+                        "artifact_checksum": "second-checksum",
+                    },
                 ]
             return await super().domain(tool_id, arguments)
 
@@ -818,7 +840,7 @@ def test_prepare_rule_statblock_rejects_ambiguous_agent_text_import_job(
     args.agent_rule_statblock_review = review
     args.review_observation = "Exact indexed text evidence was normalized by the Agent."
 
-    with pytest.raises(RuntimeError, match="exactly one indexed rule import job"):
+    with pytest.raises(RuntimeError, match="unambiguous retained artifact identity"):
         asyncio.run(_prepare_rule_statblock(args))
 
     assert not any(
@@ -827,6 +849,29 @@ def test_prepare_rule_statblock_rejects_ambiguous_agent_text_import_job(
         and arguments["action"] == "review_statblock"
         for scope, tool_id, arguments in client.calls
     )
+
+    resolved_client = AmbiguousImportClient()
+    _patch_rule_statblock_transport(monkeypatch, resolved_client)
+    resolved_args = _rule_statblock_args(tmp_path, defer_checkpoint=True)
+    resolved_args.chunk_id = ["kenku-chunk"]
+    resolved_args.source_page = 195
+    resolved_args.agent_rule_statblock_review = review
+    resolved_args.review_observation = (
+        "Exact indexed text evidence was normalized by the Agent."
+    )
+    resolved_args.source_job_id = "job-2"
+
+    report = asyncio.run(_prepare_rule_statblock(resolved_args))
+
+    review_call = next(
+        arguments
+        for scope, tool_id, arguments in resolved_client.calls
+        if scope == "domain"
+        and tool_id == "rule_import"
+        and arguments["action"] == "review_statblock"
+    )
+    assert review_call["payload"]["job_id"] == "job-2"
+    assert report["source_import_job"]["id"] == "job-2"
 
 
 def test_prepare_rule_statblock_rejects_noncontiguous_agent_text_evidence(

@@ -263,7 +263,8 @@ def test_rule_import_renders_a_checksum_bound_review_page(
                 "content": (
                     "Club. Melee Weapon Attack: +2 to hit, reach 5 ft., one target. "
                     "Hit: 2 (1d4) bludgeoning damage. "
-                    "Shout. The commoner calls loudly for help."
+                    "Shout. The commoner calls loudly for help. "
+                    "Commoners include laborers, servants, and ordinary travelers."
                 ),
                 "page_start": 1,
                 "page_end": 1,
@@ -274,10 +275,16 @@ def test_rule_import_renders_a_checksum_bound_review_page(
             "source_chunks",
             lambda _service, _source_id: evidence_chunks,
         )
+        agent_commoner = (
+            commoner
+            + "\n###### Commoner\n\n"
+            + "Commoners include laborers, servants, and ordinary travelers.\n"
+        )
         agent_arguments = {
             **review_arguments,
             "payload": {
                 **review_arguments["payload"],
+                "normalized_content": agent_commoner,
                 "observation": (
                     "Agent normalized only the selected contiguous indexed text evidence."
                 ),
@@ -302,7 +309,7 @@ def test_rule_import_renders_a_checksum_bound_review_page(
                     **agent_arguments,
                     "payload": {
                         **agent_arguments["payload"],
-                        "normalized_content": commoner.replace(
+                        "normalized_content": agent_commoner.replace(
                             "*Hit:* 2 (1d4)",
                             "*Hit:* 99 (1d4)",
                         ),
@@ -317,7 +324,7 @@ def test_rule_import_renders_a_checksum_bound_review_page(
                     **agent_arguments,
                     "payload": {
                         **agent_arguments["payload"],
-                        "normalized_content": commoner.replace(
+                        "normalized_content": agent_commoner.replace(
                             "10 (+0) | 10 (+0)",
                             "10 (+9) | 10 (+0)",
                             1,

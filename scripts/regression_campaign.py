@@ -86,6 +86,27 @@ def _load_json_object(path: Path, label: str) -> tuple[dict[str, Any], Path]:
     return value, resolved
 
 
+def _import_job_summary(job: dict[str, Any]) -> dict[str, Any]:
+    """Keep discovery reports bounded; use import_query(get) for full diagnostics."""
+
+    return {
+        key: job.get(key)
+        for key in (
+            "id",
+            "campaign_id",
+            "system_id",
+            "kind",
+            "state",
+            "artifact",
+            "artifact_checksum",
+            "source_id",
+            "module_id",
+            "parser_profile",
+            "parser_version",
+        )
+    }
+
+
 def _arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--home", type=Path, required=True, help="Existing D&D MCP home")
@@ -156,6 +177,13 @@ def _arguments() -> argparse.Namespace:
         help=(
             "Agent-reviewed semantic JSON fill for every module Multiattack; submitted "
             "through module_review so parser phrase matching is never authoritative"
+        ),
+    )
+    parser.add_argument(
+        "--source-job-id",
+        help=(
+            "Explicit retained rule import job for --source-id when historical "
+            "jobs do not share one artifact identity"
         ),
     )
     parser.add_argument(
@@ -391,6 +419,7 @@ def _rule_statblock_operation_token(
     review_observation: str | None,
     variant: dict[str, Any] | None,
     source_statblock_name: str | None = None,
+    source_job_id: str | None = None,
 ) -> str:
     identity = json.dumps(
         {
@@ -399,6 +428,7 @@ def _rule_statblock_operation_token(
             "card_profile": RULE_STATBLOCK_CARD_PROFILE,
             "actor_name": actor_name,
             "source_statblock_name": source_statblock_name or "",
+            "source_job_id": source_job_id or "",
             "actor_type": actor_type,
             "actor_count": actor_count,
             "replace_actor_id": replace_actor_id or "",
@@ -2733,12 +2763,17 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
     source_statblock_name = str(
         getattr(args, "source_statblock_name", "") or args.actor_name
     ).strip()
+    requested_source_job_id = str(
+        getattr(args, "source_job_id", "") or ""
+    ).strip()
     if not 2 <= len(source_statblock_name) <= 200:
         raise ValueError("--source-statblock-name must contain 2 to 200 characters")
     if source_page is not None and source_page < 1:
         raise ValueError("--source-page must be positive")
     if explicit_chunk_ids and source_query:
         raise ValueError("--chunk-id cannot be combined with --source-query")
+    if requested_source_job_id and args.source_path:
+        raise ValueError("--source-job-id cannot be combined with --source-path")
     reviewed_content = None
     review_observation = None
     review_override_path = None
@@ -2810,6 +2845,7 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
         review_observation=review_observation,
         variant=variant,
         source_statblock_name=source_statblock_name,
+        source_job_id=requested_source_job_id,
     )
     async with stdio_client(_server_parameters(args)) as (read, write):
         async with ClientSession(read, write) as session:
@@ -2857,6 +2893,7 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
 
             import_report: dict[str, Any] | None = None
             source_import_job: dict[str, Any] | None = None
+            equivalent_source_import_jobs: list[str] = []
             if args.source_path:
                 source_path = resolved_source_path
                 assert source_path is not None
@@ -2937,15 +2974,44 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
                     for item in indexed_jobs
                     if str(item.get("source_id") or "") == source_id
                 ]
-                source_import_job = (
-                    matching_source_jobs[0]
-                    if len(matching_source_jobs) == 1
-                    else None
-                )
-                if reviewed_content is not None and len(matching_source_jobs) != 1:
+                if requested_source_job_id:
+                    source_import_job = next(
+                        (
+                            item
+                            for item in matching_source_jobs
+                            if str(item.get("id") or "") == requested_source_job_id
+                        ),
+                        None,
+                    )
+                    if source_import_job is None:
+                        raise RuntimeError(
+                            "--source-job-id is not a retained rule import job "
+                            "for the requested source_id"
+                        )
+                elif len(matching_source_jobs) == 1:
+                    source_import_job = matching_source_jobs[0]
+                elif len(matching_source_jobs) > 1:
+                    fingerprints = {
+                        (
+                            str(item.get("artifact") or ""),
+                            str(item.get("artifact_checksum") or ""),
+                        )
+                        for item in matching_source_jobs
+                    }
+                    if (
+                        len(fingerprints) == 1
+                        and all(fingerprint for fingerprint in next(iter(fingerprints)))
+                    ):
+                        matching_source_jobs.sort(key=lambda item: str(item["id"]))
+                        source_import_job = matching_source_jobs[0]
+                        equivalent_source_import_jobs = [
+                            str(item["id"]) for item in matching_source_jobs
+                        ]
+                if reviewed_content is not None and source_import_job is None:
                     raise RuntimeError(
-                        "Agent rule statblock review requires exactly one indexed "
-                        "rule import job for the requested source_id"
+                        "Agent rule statblock review requires one unambiguous retained "
+                        "artifact identity for the requested source_id; pass "
+                        "--source-job-id after explicit review when historical jobs differ"
                     )
 
             rule_review: dict[str, Any] | None = None
@@ -3234,7 +3300,12 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
                 "campaign_id": args.campaign_id,
                 "source_id": source_id,
                 "import": import_report,
-                "source_import_job": source_import_job,
+                "source_import_job": (
+                    _import_job_summary(source_import_job)
+                    if source_import_job is not None
+                    else None
+                ),
+                "equivalent_source_import_jobs": equivalent_source_import_jobs,
                 "source": source_report,
                 "selected_source_chunks": selected_source_chunks,
                 "rule_review": rule_review,
@@ -3483,7 +3554,7 @@ async def _discover_rule_sources(args: argparse.Namespace) -> dict[str, Any]:
                 "initial_phase": initial_phase,
                 "query": query_payload,
                 "sources": sources,
-                "import_jobs": import_jobs,
+                "import_jobs": [_import_job_summary(item) for item in import_jobs],
                 "phase_changes": phase_changes,
             }
 

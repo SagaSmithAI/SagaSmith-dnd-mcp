@@ -19125,7 +19125,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             )
             evidence_parts.append(str(chunk.get("content") or ""))
         compact_evidence = compact("\n".join(evidence_parts))
-        compact_review = compact(content)
+        compact_review_body = compact(
+            "\n".join(
+                line
+                for line in content.splitlines()
+                if not re.match(r"^\s*#{1,6}\s+", line)
+            )
+        )
         unsupported_lines: list[str] = []
         for raw_line in content.splitlines():
             line = raw_line.strip()
@@ -19242,7 +19248,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             if final_heading in ability_labels:
                 source_fact = ability_prefix.sub("", source_fact, count=1).strip()
             required_fact = compact(source_fact)
-            if required_fact and required_fact not in compact_review:
+            if required_fact and required_fact not in compact_review_body:
                 raise ValueError(
                     "agent_text normalized_content omits selected evidence from "
                     f"chunk {chunk['id']}"
