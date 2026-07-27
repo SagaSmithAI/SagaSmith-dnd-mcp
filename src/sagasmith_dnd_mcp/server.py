@@ -19469,6 +19469,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         review_mode: Literal["visual", "agent_text"] = "visual",
         evidence_chunk_ids: list[str] | None = None,
         agent_fill: dict[str, Any] | None = None,
+        derived_from_review_id: str | None = None,
     ) -> dict[str, Any]:
         """Retain a reviewed transcription and Agent fill bound to rulebook evidence."""
         access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
@@ -19505,6 +19506,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             payload["evidence_chunk_ids"] = evidence_chunk_ids
         if agent_fill is not None:
             payload["agent_fill"] = agent_fill
+        if derived_from_review_id is not None:
+            payload["derived_from_review_id"] = derived_from_review_id
         scope = f"import-job:{campaign_id}:{job_id}:{principal_id}"
         replay = replay_idempotent(scope, idempotency_key, payload)
         if replay is not None:
@@ -19530,6 +19533,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 separators=(",", ":"),
             )
             review_identity = f"{review_identity}:agent-fill:{fill_identity}"
+        if derived_from_review_id is not None:
+            review_identity = (
+                f"{review_identity}:derived-from:{derived_from_review_id}"
+            )
         review_digest = hashlib.sha256(review_identity.encode()).hexdigest()
         review_id = f"rule-statblock-review:{review_digest[:24]}"
         parsed = parse_2014_statblock(
@@ -19581,6 +19588,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "evidence_chunk_ids": [item["id"] for item in text_evidence],
             "text_evidence": text_evidence,
             "agent_statblock_fill": (filled or {}).get("fill"),
+            "derived_from_review_id": derived_from_review_id,
         }
         reviews = list(dict(job.result or {}).get("statblock_reviews") or [])
         reviews = [item for item in reviews if str(item.get("id") or "") != review_id]
@@ -19617,6 +19625,60 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         }
         return remember_idempotent(
             scope, idempotency_key, payload, response, campaign_id=campaign_id
+        )
+
+    def rule_statblock_review_from_base(
+        campaign_id: str,
+        job_id: str,
+        base_review_id: str,
+        observation: str,
+        agent_fill: dict[str, Any],
+        principal_id: str = "system:local",
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Add Agent semantic fill without retranscribing immutable reviewed text."""
+
+        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        job = require_import_job(campaign_id, job_id, "rulebook")
+        review_id = str(base_review_id or "").strip()
+        reviews = list(dict(job.result or {}).get("statblock_reviews") or [])
+        matches = [item for item in reviews if str(item.get("id") or "") == review_id]
+        if len(matches) != 1:
+            raise ValueError("base rule statblock review does not belong to the import job")
+        base_review = dict(matches[0])
+        if str(base_review.get("source_id") or "") != str(job.source_id or ""):
+            raise ValueError("base rule statblock review source no longer matches its import job")
+        if str(base_review.get("asset_checksum") or "") != str(
+            job.artifact_checksum or ""
+        ):
+            raise ValueError("base rule statblock review artifact checksum is stale")
+        content = str(base_review.get("normalized_content") or "")
+        if hashlib.sha256(content.encode("utf-8")).hexdigest() != str(
+            base_review.get("normalized_content_sha256") or ""
+        ):
+            raise ValueError("base rule statblock review content checksum is invalid")
+        if not isinstance(agent_fill, dict) or not agent_fill:
+            raise ValueError("agent_fill must be a non-empty object")
+        review_mode = str(base_review.get("review_mode") or "visual")
+        if review_mode not in {"visual", "agent_text"}:
+            raise ValueError("base rule statblock review mode is unsupported")
+        evidence_chunk_ids = (
+            [str(item) for item in base_review.get("evidence_chunk_ids") or []]
+            if review_mode == "agent_text"
+            else None
+        )
+        return rule_statblock_review(
+            campaign_id,
+            job_id,
+            base_review.get("page_number"),
+            content,
+            observation,
+            principal_id,
+            idempotency_key,
+            review_mode,
+            evidence_chunk_ids,
+            agent_fill,
+            review_id,
         )
 
     @mcp.tool()
@@ -23600,6 +23662,36 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 ),
             )
         if action == "review_statblock":
+            review_data = facade_payload(payload)
+            if "base_review_id" in review_data:
+                data = strict_facade_payload(
+                    payload,
+                    action="rule_import(review_statblock)",
+                    allowed={
+                        "job_id",
+                        "base_review_id",
+                        "observation",
+                        "agent_fill",
+                    },
+                    required_names=(
+                        "job_id",
+                        "base_review_id",
+                        "observation",
+                        "agent_fill",
+                    ),
+                )
+                return facade_result(
+                    action,
+                    rule_statblock_review_from_base(
+                        campaign_id,
+                        str(data["job_id"]),
+                        str(data["base_review_id"]),
+                        data["observation"],
+                        data["agent_fill"],
+                        principal_id,
+                        idempotency_key,
+                    ),
+                )
             data = strict_facade_payload(
                 payload,
                 action="rule_import(review_statblock)",

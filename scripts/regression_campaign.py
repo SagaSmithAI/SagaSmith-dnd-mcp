@@ -234,6 +234,13 @@ def _arguments() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--base-rule-review-id",
+        help=(
+            "Checksum-bound retained rule-statblock review whose immutable text "
+            "the Agent augments with --agent-statblock-fill"
+        ),
+    )
+    parser.add_argument(
         "--source-job-id",
         help=(
             "Explicit retained rule import job for --source-id when historical "
@@ -475,6 +482,7 @@ def _rule_statblock_operation_token(
     agent_fill: dict[str, Any] | None = None,
     source_statblock_name: str | None = None,
     source_job_id: str | None = None,
+    base_rule_review_id: str | None = None,
 ) -> str:
     identity = json.dumps(
         {
@@ -484,6 +492,7 @@ def _rule_statblock_operation_token(
             "actor_name": actor_name,
             "source_statblock_name": source_statblock_name or "",
             "source_job_id": source_job_id or "",
+            "base_rule_review_id": base_rule_review_id or "",
             "actor_type": actor_type,
             "actor_count": actor_count,
             "replace_actor_id": replace_actor_id or "",
@@ -2836,9 +2845,18 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
     review_override_path = None
     review_mode = None
     agent_rule_review_path = getattr(args, "agent_rule_statblock_review", None)
+    base_rule_review_id = str(
+        getattr(args, "base_rule_review_id", "") or ""
+    ).strip()
     if args.review_override is not None and agent_rule_review_path is not None:
         raise ValueError(
             "--review-override and --agent-rule-statblock-review are mutually exclusive"
+        )
+    if base_rule_review_id and (
+        args.review_override is not None or agent_rule_review_path is not None
+    ):
+        raise ValueError(
+            "--base-rule-review-id cannot be combined with a new statblock review"
         )
     if args.review_override is not None:
         reviewed_content, review_observation, review_override_path = _load_review_override(
@@ -2872,6 +2890,20 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
                 "Agent rule statblock review requires exact --chunk-id evidence "
                 "and cannot use --source-query"
             )
+    elif base_rule_review_id:
+        review_mode = "base_review"
+        if not args.source_id or args.source_path:
+            raise ValueError(
+                "base rule statblock review requires --source-id without --source-path"
+            )
+        if explicit_chunk_ids or source_query or source_page is not None:
+            raise ValueError(
+                "base rule statblock review cannot select new chunks or a source page"
+            )
+        if not str(args.review_observation or "").strip():
+            raise ValueError(
+                "base rule statblock review requires --review-observation"
+            )
     variant = None
     variant_path = None
     if args.statblock_variant is not None:
@@ -2883,10 +2915,10 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
     agent_fill_path = None
     agent_fill_argument = getattr(args, "agent_statblock_fill", None)
     if agent_fill_argument is not None:
-        if reviewed_content is None:
+        if reviewed_content is None and not base_rule_review_id:
             raise ValueError(
                 "--agent-statblock-fill requires --review-override or "
-                "--agent-rule-statblock-review"
+                "--agent-rule-statblock-review, or --base-rule-review-id"
             )
         agent_fill, agent_fill_path = _load_json_object(
             agent_fill_argument,
@@ -2914,10 +2946,11 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
         reviewed_content=reviewed_content,
         review_observation=review_observation,
         variant=variant,
-        agent_fill=agent_fill,
-        source_statblock_name=source_statblock_name,
-        source_job_id=requested_source_job_id,
-    )
+            agent_fill=agent_fill,
+            source_statblock_name=source_statblock_name,
+            source_job_id=requested_source_job_id,
+            base_rule_review_id=base_rule_review_id,
+        )
     async with stdio_client(_server_parameters(args)) as (read, write):
         async with ClientSession(read, write) as session:
             await session.initialize()
@@ -3084,6 +3117,12 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
                         "artifact identity for the requested source_id; pass "
                         "--source-job-id after explicit review when historical jobs differ"
                     )
+                if base_rule_review_id and source_import_job is None:
+                    raise RuntimeError(
+                        "base rule statblock review requires one unambiguous retained "
+                        "artifact identity for the requested source_id; pass "
+                        "--source-job-id after explicit review when historical jobs differ"
+                    )
 
             rule_review: dict[str, Any] | None = None
             review_evidence_chunks: list[dict[str, Any]] = []
@@ -3167,6 +3206,32 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
                             "action": "review_statblock",
                             "payload": review_payload,
                             "idempotency_key": f"{token}-review-rule-statblock",
+                        },
+                    )
+                )
+                rule_review = dict(reviewed["review"])
+            elif base_rule_review_id:
+                if review_job_id is None:
+                    raise RuntimeError("base rule statblock review requires an import job")
+                if agent_fill is None:
+                    raise ValueError(
+                        "--base-rule-review-id requires --agent-statblock-fill"
+                    )
+                reviewed = _facade_value(
+                    await client.domain(
+                        "rule_import",
+                        {
+                            "campaign_id": args.campaign_id,
+                            "action": "review_statblock",
+                            "payload": {
+                                "job_id": review_job_id,
+                                "base_review_id": base_rule_review_id,
+                                "observation": args.review_observation,
+                                "agent_fill": agent_fill,
+                            },
+                            "idempotency_key": (
+                                f"{token}-augment-rule-statblock-review"
+                            ),
                         },
                     )
                 )
@@ -3385,6 +3450,7 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
                 "ocr_recovery": ocr_recovery,
                 "source_statblock_name": source_statblock_name,
                 "review_mode": review_mode,
+                "base_rule_review_id": base_rule_review_id or None,
                 "review_evidence_chunks": review_evidence_chunks,
                 "review_override_path": (
                     str(review_override_path) if review_override_path is not None else None

@@ -338,7 +338,7 @@ class _RuleStatblockClient:
                     "review": {
                         "id": "rule-statblock-review:kenku",
                         "source_id": "source-1",
-                        "page_number": arguments["payload"]["page_number"],
+                        "page_number": arguments["payload"].get("page_number", 1),
                     }
                 }
             raise AssertionError(arguments)
@@ -804,6 +804,58 @@ def test_prepare_rule_statblock_submits_agent_fill_with_durable_review(
     )
     assert review_call["payload"]["agent_fill"] == fill
     assert report["agent_fill_path"] == str(fill_path.resolve())
+
+
+def test_prepare_rule_statblock_augments_retained_review_without_retranscription(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class RetainedReviewClient(_RuleStatblockClient):
+        async def domain(self, tool_id: str, arguments: dict):
+            if tool_id == "import_query":
+                self.calls.append(("domain", tool_id, arguments))
+                return [
+                    {
+                        "id": "job-source-1",
+                        "kind": "rulebook",
+                        "source_id": "source-1",
+                        "artifact": "rules.pdf",
+                        "artifact_checksum": "same-checksum",
+                    }
+                ]
+            return await super().domain(tool_id, arguments)
+
+    client = RetainedReviewClient()
+    _patch_rule_statblock_transport(monkeypatch, client)
+    fill_path = tmp_path / "agent-fill.json"
+    fill = {"multiattack_options": []}
+    fill_path.write_text(json.dumps(fill), encoding="utf-8")
+    args = _rule_statblock_args(tmp_path, defer_checkpoint=True)
+    args.chunk_id = []
+    args.base_rule_review_id = "rule-statblock-review:retained"
+    args.review_observation = (
+        "Agent reused the checksum-bound OCR review and supplied semantic fill."
+    )
+    args.agent_statblock_fill = fill_path
+
+    report = asyncio.run(_prepare_rule_statblock(args))
+
+    review_call = next(
+        arguments
+        for scope, tool_id, arguments in client.calls
+        if scope == "domain"
+        and tool_id == "rule_import"
+        and arguments["action"] == "review_statblock"
+    )
+    assert review_call["payload"] == {
+        "job_id": "job-source-1",
+        "base_review_id": "rule-statblock-review:retained",
+        "observation": args.review_observation,
+        "agent_fill": fill,
+    }
+    assert report["base_rule_review_id"] == "rule-statblock-review:retained"
+    assert report["review_mode"] == "base_review"
+    assert report["review_override_path"] is None
 
 
 def test_prepare_rule_statblock_uses_contiguous_agent_text_evidence(

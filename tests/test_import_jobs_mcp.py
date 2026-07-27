@@ -317,6 +317,49 @@ def test_rule_import_renders_a_checksum_bound_review_page(
         assert filled_validation["warnings"] == []
         assert filled_validation["agent_fill_requirements"]["required"] is True
 
+        _, augmented_review_response = await server.call_tool(
+            "rule_import",
+            {
+                "campaign_id": campaign["id"],
+                "action": "review_statblock",
+                "payload": {
+                    "job_id": job_id,
+                    "base_review_id": filled_review["id"],
+                    "observation": (
+                        "Agent reused the checksum-bound transcription and "
+                        "confirmed the exact Multiattack composition."
+                    ),
+                    "agent_fill": agent_fill,
+                },
+                "idempotency_key": "augment-reviewed-monster-fill",
+            },
+        )
+        augmented_review = augmented_review_response["result"]["review"]
+        assert augmented_review["derived_from_review_id"] == filled_review["id"]
+        assert (
+            augmented_review["normalized_content_sha256"]
+            == filled_review["normalized_content_sha256"]
+        )
+        assert (
+            augmented_review["agent_statblock_fill"]
+            == filled_review["agent_statblock_fill"]
+        )
+        with pytest.raises(Exception, match="does not belong"):
+            await server.call_tool(
+                "rule_import",
+                {
+                    "campaign_id": campaign["id"],
+                    "action": "review_statblock",
+                    "payload": {
+                        "job_id": job_id,
+                        "base_review_id": "rule-statblock-review:unknown",
+                        "observation": "Agent checked the retained transcription.",
+                        "agent_fill": agent_fill,
+                    },
+                    "idempotency_key": "augment-unknown-reviewed-monster",
+                },
+            )
+
         _, filled_actor_response = await server.call_tool(
             "character_create_from",
             {
