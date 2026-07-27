@@ -22,7 +22,7 @@ from mcp.client.stdio import StdioServerParameters, stdio_client
 
 PRINCIPAL_ID = "system:local"
 RULE_STATBLOCK_OCR_PROFILE = "layout-ocr-v1"
-RULE_STATBLOCK_CARD_PROFILE = "agent-ruling-v1"
+RULE_STATBLOCK_CARD_PROFILE = "agent-ruling-v2"
 
 
 def _load_review_override(path: Path, observation: str) -> tuple[str, str, Path]:
@@ -33,6 +33,20 @@ def _load_review_override(path: Path, observation: str) -> tuple[str, str, Path]
     evidence = observation.strip()
     if not evidence:
         raise ValueError("review override requires visual evidence")
+    return content, evidence, resolved
+
+
+def _load_agent_rule_statblock_review(
+    path: Path,
+    observation: str,
+) -> tuple[str, str, Path]:
+    resolved = path.expanduser().resolve()
+    content = resolved.read_text(encoding="utf-8").strip()
+    if not content:
+        raise ValueError("Agent rule statblock review must not be empty")
+    evidence = observation.strip()
+    if not evidence:
+        raise ValueError("Agent rule statblock review requires text evidence")
     return content, evidence, resolved
 
 
@@ -115,7 +129,18 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument(
         "--review-observation",
         default="",
-        help="Visual review evidence for --review-override",
+        help=(
+            "Review evidence for --review-override or "
+            "--agent-rule-statblock-review"
+        ),
+    )
+    parser.add_argument(
+        "--agent-rule-statblock-review",
+        type=Path,
+        help=(
+            "Agent-normalized full 2014 statblock transcribed from exact indexed "
+            "--chunk-id evidence on one page of an already-ingested --source-id"
+        ),
     )
     parser.add_argument(
         "--statblock-variant",
@@ -2717,11 +2742,18 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
     reviewed_content = None
     review_observation = None
     review_override_path = None
+    review_mode = None
+    agent_rule_review_path = getattr(args, "agent_rule_statblock_review", None)
+    if args.review_override is not None and agent_rule_review_path is not None:
+        raise ValueError(
+            "--review-override and --agent-rule-statblock-review are mutually exclusive"
+        )
     if args.review_override is not None:
         reviewed_content, review_observation, review_override_path = _load_review_override(
             args.review_override,
             args.review_observation,
         )
+        review_mode = "visual"
         if not args.source_path or source_page is None:
             raise ValueError(
                 "rule statblock review override requires --source-path and --source-page"
@@ -2729,6 +2761,24 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
         if explicit_chunk_ids or source_query:
             raise ValueError(
                 "rule statblock review override cannot be combined with chunk text filters"
+            )
+    elif agent_rule_review_path is not None:
+        reviewed_content, review_observation, review_override_path = (
+            _load_agent_rule_statblock_review(
+                agent_rule_review_path,
+                args.review_observation,
+            )
+        )
+        review_mode = "agent_text"
+        if not args.source_id or args.source_path or source_page is None:
+            raise ValueError(
+                "Agent rule statblock review requires --source-id and --source-page "
+                "without --source-path"
+            )
+        if not explicit_chunk_ids or source_query:
+            raise ValueError(
+                "Agent rule statblock review requires exact --chunk-id evidence "
+                "and cannot use --source-query"
             )
     variant = None
     variant_path = None
@@ -2882,31 +2932,101 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
                         )
                     )
                 )
-                source_import_job = next(
-                    (
-                        dict(item)
-                        for item in indexed_jobs
-                        if str(item.get("source_id") or "") == source_id
-                    ),
-                    None,
+                matching_source_jobs = [
+                    dict(item)
+                    for item in indexed_jobs
+                    if str(item.get("source_id") or "") == source_id
+                ]
+                source_import_job = (
+                    matching_source_jobs[0]
+                    if len(matching_source_jobs) == 1
+                    else None
                 )
+                if reviewed_content is not None and len(matching_source_jobs) != 1:
+                    raise RuntimeError(
+                        "Agent rule statblock review requires exactly one indexed "
+                        "rule import job for the requested source_id"
+                    )
 
             rule_review: dict[str, Any] | None = None
+            review_evidence_chunks: list[dict[str, Any]] = []
+            review_job_id = (
+                str(import_report["job_id"])
+                if import_report is not None
+                else (
+                    str(source_import_job["id"])
+                    if source_import_job is not None
+                    else None
+                )
+            )
             if reviewed_content is not None:
-                if import_report is None:
+                if review_job_id is None:
                     raise RuntimeError("rule statblock review requires an import job")
+                review_payload: dict[str, Any] = {
+                    "job_id": review_job_id,
+                    "page_number": source_page,
+                    "normalized_content": reviewed_content,
+                    "observation": review_observation,
+                    "review_mode": review_mode,
+                }
+                if review_mode == "agent_text":
+                    page_chunks = list(
+                        _facade_value(
+                            await client.domain(
+                                "rule_pack_query",
+                                {
+                                    "view": "source_chunks",
+                                    "payload": {
+                                        "source_id": source_id,
+                                        "query": "",
+                                        "page": source_page,
+                                        "limit": 200,
+                                    },
+                                },
+                            )
+                        )
+                    )
+                    chunks_by_id = {
+                        str(item["id"]): dict(item)
+                        for item in page_chunks
+                    }
+                    missing_evidence = [
+                        chunk_id
+                        for chunk_id in explicit_chunk_ids
+                        if chunk_id not in chunks_by_id
+                    ]
+                    if missing_evidence:
+                        raise RuntimeError(
+                            "Agent rule statblock evidence chunks do not all belong "
+                            "to the requested source page"
+                        )
+                    review_evidence_chunks = [
+                        chunks_by_id[chunk_id] for chunk_id in explicit_chunk_ids
+                    ]
+                    ordinals = [
+                        int(item.get("ordinal", 0))
+                        for item in review_evidence_chunks
+                    ]
+                    if (
+                        any(value < 0 for value in ordinals)
+                        or ordinals != sorted(ordinals)
+                        or any(
+                            right != left + 1
+                            for left, right in zip(ordinals, ordinals[1:])
+                        )
+                    ):
+                        raise RuntimeError(
+                            "Agent rule statblock evidence chunks must be one "
+                            "ordered contiguous page segment"
+                        )
+                    review_payload["evidence_chunk_ids"] = explicit_chunk_ids
                 reviewed = _facade_value(
                     await client.domain(
                         "rule_import",
                         {
                             "campaign_id": args.campaign_id,
                             "action": "review_statblock",
-                            "payload": {
-                                "job_id": import_report["job_id"],
-                                "page_number": source_page,
-                                "normalized_content": reviewed_content,
-                                "observation": review_observation,
-                            },
+                            "payload": review_payload,
                             "idempotency_key": f"{token}-review-rule-statblock",
                         },
                     )
@@ -2946,15 +3066,6 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
             statblock_report: dict[str, Any] | None = None
             source_report: dict[str, Any] | None = None
             ocr_recovery: dict[str, Any] | None = None
-            review_job_id = (
-                str(import_report["job_id"])
-                if import_report is not None
-                else (
-                    str(source_import_job["id"])
-                    if source_import_job is not None
-                    else None
-                )
-            )
             for index in range(1, args.actor_count + 1):
                 actor_name = (
                     args.actor_name if args.actor_count == 1 else f"{args.actor_name} {index}"
@@ -3129,6 +3240,8 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
                 "rule_review": rule_review,
                 "ocr_recovery": ocr_recovery,
                 "source_statblock_name": source_statblock_name,
+                "review_mode": review_mode,
+                "review_evidence_chunks": review_evidence_chunks,
                 "review_override_path": (
                     str(review_override_path) if review_override_path is not None else None
                 ),

@@ -7,6 +7,7 @@ from mcp.types import ImageContent, TextContent
 from pypdf import PdfWriter
 from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 from sagasmith_core import OcrPageLayout, OcrTextBlock, RapidOcrProvider
+from sagasmith_core.rules import RuleService
 
 from sagasmith_dnd_mcp.config import McpConfig
 from sagasmith_dnd_mcp.server import create_server
@@ -49,7 +50,10 @@ def test_rule_import_discovers_nested_allowlisted_rulebooks(tmp_path: Path) -> N
     asyncio.run(exercise())
 
 
-def test_rule_import_renders_a_checksum_bound_review_page(tmp_path: Path) -> None:
+def test_rule_import_renders_a_checksum_bound_review_page(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     import_root = tmp_path / "imports"
     import_root.mkdir()
     source = import_root / "review.pdf"
@@ -220,6 +224,124 @@ def test_rule_import_renders_a_checksum_bound_review_page(tmp_path: Path) -> Non
             "Reviewed rule statblock: rule-source:"
             in (created["character"]["notes"]["profile"]["dm_notes"])
         )
+
+        evidence_chunks = [
+            {
+                "id": "commoner-core",
+                "ordinal": 0,
+                "heading_path": ["COMMONER"],
+                "content": (
+                    "Medium humanoid (any race), any alignment Armor Class 10 "
+                    "Hit Points 4 (1d8) Speed 30 ft."
+                ),
+                "page_start": 1,
+                "page_end": 1,
+            },
+            *[
+                {
+                    "id": f"commoner-{ability.casefold()}",
+                    "ordinal": index,
+                    "heading_path": [ability],
+                    "content": (
+                        "10 (+0) Senses passive Perception 10 Languages Common "
+                        "Challenge 0 (10 XP)"
+                        if ability == "WIS"
+                        else "10 (+0)"
+                    ),
+                    "page_start": 1,
+                    "page_end": 1,
+                }
+                for index, ability in enumerate(
+                    ("STR", "DEX", "CON", "INT", "WIS", "CHA"),
+                    start=1,
+                )
+            ],
+            {
+                "id": "commoner-actions",
+                "ordinal": 7,
+                "heading_path": ["ACTIONS"],
+                "content": (
+                    "Club. Melee Weapon Attack: +2 to hit, reach 5 ft., one target. "
+                    "Hit: 2 (1d4) bludgeoning damage. "
+                    "Shout. The commoner calls loudly for help."
+                ),
+                "page_start": 1,
+                "page_end": 1,
+            },
+        ]
+        monkeypatch.setattr(
+            RuleService,
+            "source_chunks",
+            lambda _service, _source_id: evidence_chunks,
+        )
+        agent_arguments = {
+            **review_arguments,
+            "payload": {
+                **review_arguments["payload"],
+                "observation": (
+                    "Agent normalized only the selected contiguous indexed text evidence."
+                ),
+                "review_mode": "agent_text",
+                "evidence_chunk_ids": [item["id"] for item in evidence_chunks],
+            },
+            "idempotency_key": "review-statblock-agent-text",
+        }
+        _, agent_reviewed = await server.call_tool("rule_import", agent_arguments)
+        agent_review = agent_reviewed["result"]["review"]
+        assert agent_review["review_mode"] == "agent_text"
+        assert agent_review["confidence"] == "reviewed_text"
+        assert agent_review["evidence_chunk_ids"] == [
+            item["id"] for item in evidence_chunks
+        ]
+        assert agent_review["text_evidence"][0]["ordinal"] == 0
+
+        with pytest.raises(Exception, match="facts absent"):
+            await server.call_tool(
+                "rule_import",
+                {
+                    **agent_arguments,
+                    "payload": {
+                        **agent_arguments["payload"],
+                        "normalized_content": commoner.replace(
+                            "*Hit:* 2 (1d4)",
+                            "*Hit:* 99 (1d4)",
+                        ),
+                    },
+                    "idempotency_key": "review-statblock-agent-invented",
+                },
+            )
+        with pytest.raises(Exception, match="exactly preserve STR"):
+            await server.call_tool(
+                "rule_import",
+                {
+                    **agent_arguments,
+                    "payload": {
+                        **agent_arguments["payload"],
+                        "normalized_content": commoner.replace(
+                            "10 (+0) | 10 (+0)",
+                            "10 (+9) | 10 (+0)",
+                            1,
+                        ),
+                    },
+                    "idempotency_key": "review-statblock-agent-wrong-modifier",
+                },
+            )
+        with pytest.raises(Exception, match="ordered contiguous"):
+            await server.call_tool(
+                "rule_import",
+                {
+                    **agent_arguments,
+                    "payload": {
+                        **agent_arguments["payload"],
+                        "evidence_chunk_ids": [
+                            item["id"]
+                            for item in evidence_chunks
+                            if item["ordinal"] != 3
+                        ],
+                    },
+                    "idempotency_key": "review-statblock-agent-gap",
+                },
+            )
 
     asyncio.run(exercise())
 

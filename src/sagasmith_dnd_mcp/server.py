@@ -3767,6 +3767,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "module_document_cache": True,
                 "module_selective_ocr": True,
                 "text_only_layout_ocr_recovery": True,
+                "indexed_text_statblock_review": True,
                 "player_safe_scene_scopes": True,
                 "player_safe_combat_maps": True,
                 "rule_aware_noncombat_checks": True,
@@ -19049,6 +19050,217 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             **reviewed,
         }
 
+    def validate_agent_text_statblock_review(
+        *,
+        source_id: str,
+        page_number: int,
+        content: str,
+        parsed: Any,
+        evidence_chunk_ids: list[str] | None,
+    ) -> list[dict[str, Any]]:
+        """Bind an Agent transcription to one contiguous indexed page segment."""
+
+        if not isinstance(evidence_chunk_ids, list):
+            raise ValueError(
+                "evidence_chunk_ids must be a list for an agent_text statblock review"
+            )
+        chunk_ids = [str(item).strip() for item in evidence_chunk_ids]
+        if (
+            not chunk_ids
+            or len(chunk_ids) > 200
+            or any(not item for item in chunk_ids)
+            or len(chunk_ids) != len(set(chunk_ids))
+        ):
+            raise ValueError(
+                "evidence_chunk_ids must contain 1 to 200 unique non-empty ids"
+            )
+        available = rules.source_chunks(source_id)
+        by_id = {str(item.get("id") or ""): item for item in available}
+        missing = [chunk_id for chunk_id in chunk_ids if chunk_id not in by_id]
+        if missing:
+            raise ValueError(
+                "agent_text statblock evidence chunks do not belong to the rule source"
+            )
+        selected = [by_id[chunk_id] for chunk_id in chunk_ids]
+        for chunk in selected:
+            page_start = chunk.get("page_start")
+            page_end = chunk.get("page_end")
+            if (
+                isinstance(page_start, bool)
+                or not isinstance(page_start, int)
+                or isinstance(page_end, bool)
+                or not isinstance(page_end, int)
+                or not page_start <= page_number <= page_end
+            ):
+                raise ValueError(
+                    "agent_text statblock evidence chunks must all cover page_number"
+                )
+        ordinals = [item.get("ordinal") for item in selected]
+        if (
+            any(
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or value < 0
+                for value in ordinals
+            )
+            or ordinals != sorted(ordinals)
+            or any(
+                int(right) != int(left) + 1
+                for left, right in zip(ordinals, ordinals[1:])
+            )
+        ):
+            raise ValueError(
+                "agent_text statblock evidence chunks must be one ordered contiguous segment"
+            )
+
+        def compact(value: str) -> str:
+            return re.sub(r"[^a-z0-9]+", "", value.casefold())
+
+        evidence_parts: list[str] = []
+        for chunk in selected:
+            evidence_parts.extend(
+                str(value)
+                for value in chunk.get("heading_path", [])
+                if str(value).strip()
+            )
+            evidence_parts.append(str(chunk.get("content") or ""))
+        compact_evidence = compact("\n".join(evidence_parts))
+        compact_review = compact(content)
+        unsupported_lines: list[str] = []
+        for raw_line in content.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            fact = compact(line)
+            if line.startswith("|"):
+                if fact == "strdexconintwischa" or not fact:
+                    continue
+                ability_cells = re.findall(
+                    r"\|\s*(\d+)\s*\(\s*([+-])\s*(\d+)\s*\)",
+                    line,
+                )
+                if len(ability_cells) == 6:
+                    continue
+                unsupported_lines.append(line)
+                continue
+            if not fact and any(character.isalnum() for character in line):
+                unsupported_lines.append(line)
+                continue
+            if fact and fact not in compact_evidence:
+                unsupported_lines.append(line)
+        if unsupported_lines:
+            raise ValueError(
+                "agent_text normalized_content contains facts absent from the selected "
+                f"evidence: {unsupported_lines[0][:160]}"
+            )
+
+        ability_scores = dict(parsed.sheet.get("abilities") or {})
+        ability_labels = {
+            "STR": "strength",
+            "DEX": "dexterity",
+            "CON": "constitution",
+            "INT": "intelligence",
+            "WIS": "wisdom",
+            "CHA": "charisma",
+        }
+        ability_value_line = next(
+            (
+                line
+                for line in content.splitlines()
+                if len(
+                    re.findall(
+                        r"\|\s*(\d+)\s*\(\s*([+-])\s*(\d+)\s*\)",
+                        line,
+                    )
+                )
+                == 6
+            ),
+            "",
+        )
+        reviewed_ability_cells = re.findall(
+            r"\|\s*(\d+)\s*\(\s*([+-])\s*(\d+)\s*\)",
+            ability_value_line,
+        )
+        if len(reviewed_ability_cells) != 6:
+            raise ValueError(
+                "agent_text normalized_content must preserve six explicit "
+                "ability score modifiers"
+            )
+        for abbreviation, ability in ability_labels.items():
+            score = int(dict(ability_scores.get(ability) or {}).get("score", 0))
+            source_ability = next(
+                (
+                    re.match(
+                        r"^\s*(\d+)\s*\(\s*([+-])\s*(\d+)\s*\)",
+                        str(chunk.get("content") or ""),
+                    )
+                    for chunk in selected
+                    if str(list(chunk.get("heading_path") or [""])[-1])
+                    .strip()
+                    .upper()
+                    == abbreviation
+                ),
+                None,
+            )
+            if source_ability is None:
+                raise ValueError(
+                    f"agent_text evidence does not support {abbreviation} {score}"
+                )
+            ability_index = list(ability_labels).index(abbreviation)
+            if (
+                int(source_ability.group(1)) != score
+                or reviewed_ability_cells[ability_index]
+                != (
+                    source_ability.group(1),
+                    source_ability.group(2),
+                    source_ability.group(3),
+                )
+            ):
+                raise ValueError(
+                    f"agent_text normalized_content does not exactly preserve "
+                    f"{abbreviation} score and modifier"
+                )
+
+        identity_pattern = re.compile(
+            r"(?i)(Tiny|Small|Medium|Large|Huge|Gargantuan)\s+[^,]+,\s*[^.]+"
+        )
+        ability_prefix = re.compile(r"^\s*\d+\s*\([^)]+\)\s*")
+        for chunk in selected:
+            source_fact = str(chunk.get("content") or "").strip()
+            if not source_fact:
+                continue
+            final_heading = str(list(chunk.get("heading_path") or [""])[-1]).upper()
+            identity_matches = list(identity_pattern.finditer(source_fact))
+            if identity_matches:
+                if final_heading == "ACTIONS" and identity_matches[0].start() > 0:
+                    source_fact = source_fact[: identity_matches[0].start()]
+                else:
+                    source_fact = source_fact[identity_matches[0].start() :]
+                    following = list(identity_pattern.finditer(source_fact))
+                    if len(following) > 1:
+                        source_fact = source_fact[: following[1].start()]
+            if final_heading in ability_labels:
+                source_fact = ability_prefix.sub("", source_fact, count=1).strip()
+            required_fact = compact(source_fact)
+            if required_fact and required_fact not in compact_review:
+                raise ValueError(
+                    "agent_text normalized_content omits selected evidence from "
+                    f"chunk {chunk['id']}"
+                )
+
+        return [
+            {
+                "id": str(item["id"]),
+                "ordinal": int(item["ordinal"]),
+                "page_start": int(item["page_start"]),
+                "page_end": int(item["page_end"]),
+                "content_sha256": hashlib.sha256(
+                    str(item.get("content") or "").encode("utf-8")
+                ).hexdigest(),
+            }
+            for item in selected
+        ]
+
     @mcp.tool()
     def rule_statblock_review(
         campaign_id: str,
@@ -19058,6 +19270,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         observation: str,
         principal_id: str = "system:local",
         idempotency_key: str | None = None,
+        review_mode: Literal["visual", "agent_text"] = "visual",
+        evidence_chunk_ids: list[str] | None = None,
     ) -> dict[str, Any]:
         """Retain a DM transcription bound to checksum-verified rulebook page evidence."""
         access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
@@ -19078,6 +19292,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         reviewed_observation = str(observation or "").strip()
         if not 8 <= len(reviewed_observation) <= 2_000:
             raise ValueError("observation must contain 8 to 2000 characters")
+        if review_mode not in {"visual", "agent_text"}:
+            raise ValueError("review_mode must be visual or agent_text")
+        if review_mode == "visual" and evidence_chunk_ids not in (None, []):
+            raise ValueError("visual statblock review does not accept evidence_chunk_ids")
         payload = {
             "job_id": job_id,
             "operation": "review_statblock",
@@ -19085,6 +19303,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "normalized_content": content,
             "observation": reviewed_observation,
         }
+        if review_mode == "agent_text":
+            payload["review_mode"] = review_mode
+            payload["evidence_chunk_ids"] = evidence_chunk_ids
         scope = f"import-job:{campaign_id}:{job_id}:{principal_id}"
         replay = replay_idempotent(scope, idempotency_key, payload)
         if replay is not None:
@@ -19095,9 +19316,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         rendered = render_pdf_page(source_path, page_number, scale=1.5)
         if rendered.source_checksum != job.artifact_checksum:
             raise RuntimeError("rulebook PDF no longer matches its staged checksum")
-        review_digest = hashlib.sha256(
-            f"{job.id}:{page_number}:{hashlib.sha256(content.encode('utf-8')).hexdigest()}".encode()
-        ).hexdigest()
+        review_identity = (
+            f"{job.id}:{page_number}:"
+            f"{hashlib.sha256(content.encode('utf-8')).hexdigest()}"
+        )
+        if review_mode == "agent_text":
+            evidence_identity = ",".join(str(item) for item in evidence_chunk_ids or [])
+            review_identity = f"{review_identity}:{review_mode}:{evidence_identity}"
+        review_digest = hashlib.sha256(review_identity.encode()).hexdigest()
         review_id = f"rule-statblock-review:{review_digest[:24]}"
         parsed = parse_2014_statblock(
             content,
@@ -19107,6 +19333,17 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 f"rule-source-page:{job.source_id}:{page_number}",
                 f"rule-review:{review_id}",
             ],
+        )
+        text_evidence = (
+            validate_agent_text_statblock_review(
+                source_id=job.source_id,
+                page_number=page_number,
+                content=content,
+                parsed=parsed,
+                evidence_chunk_ids=evidence_chunk_ids,
+            )
+            if review_mode == "agent_text"
+            else []
         )
         review = {
             "id": review_id,
@@ -19123,6 +19360,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "normalized_content": content,
             "normalized_content_sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
             "observation": reviewed_observation,
+            "review_mode": review_mode,
+            "confidence": "reviewed_text" if review_mode == "agent_text" else "reviewed_image",
+            "evidence_chunk_ids": [item["id"] for item in text_evidence],
+            "text_evidence": text_evidence,
         }
         reviews = list(dict(job.result or {}).get("statblock_reviews") or [])
         reviews = [item for item in reviews if str(item.get("id") or "") != review_id]
@@ -23127,16 +23368,36 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 ),
             )
         if action == "review_statblock":
+            data = strict_facade_payload(
+                payload,
+                action="rule_import(review_statblock)",
+                allowed={
+                    "job_id",
+                    "page_number",
+                    "normalized_content",
+                    "observation",
+                    "review_mode",
+                    "evidence_chunk_ids",
+                },
+                required_names=(
+                    "job_id",
+                    "page_number",
+                    "normalized_content",
+                    "observation",
+                ),
+            )
             return facade_result(
                 action,
                 rule_statblock_review(
                     campaign_id,
-                    job_id,
-                    required(data, "page_number"),
-                    required(data, "normalized_content"),
-                    required(data, "observation"),
+                    str(data["job_id"]),
+                    data["page_number"],
+                    data["normalized_content"],
+                    data["observation"],
                     principal_id,
                     idempotency_key,
+                    data.get("review_mode", "visual"),
+                    data.get("evidence_chunk_ids"),
                 ),
             )
         if action == "extract_candidates":

@@ -94,7 +94,7 @@ def test_rule_statblock_idempotency_is_bound_to_card_profile(
     monkeypatch.setattr(
         campaign_driver,
         "RULE_STATBLOCK_CARD_PROFILE",
-        "agent-ruling-v2",
+        "agent-ruling-v3",
     )
 
     assert current != _rule_statblock_operation_token(**base)
@@ -707,6 +707,174 @@ def test_prepare_rule_statblock_uses_checksum_bound_visual_review(
     assert create_call["payload"]["review_id"] == "rule-statblock-review:kenku"
     assert report["rule_review"]["source_id"] == "source-1"
     assert report["review_override_path"] == str(override.resolve())
+
+
+def test_prepare_rule_statblock_uses_contiguous_agent_text_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class AgentTextClient(_RuleStatblockClient):
+        async def domain(self, tool_id: str, arguments: dict):
+            if tool_id == "import_query":
+                self.calls.append(("domain", tool_id, arguments))
+                return [
+                    {
+                        "id": "job-source-1",
+                        "kind": "rulebook",
+                        "source_id": "source-1",
+                    }
+                ]
+            if (
+                tool_id == "rule_pack_query"
+                and arguments["view"] == "source_chunks"
+            ):
+                self.calls.append(("domain", tool_id, arguments))
+                return [
+                    {
+                        "id": f"evidence-{ordinal}",
+                        "ordinal": ordinal,
+                        "heading_path": ["COMMONER"],
+                        "content": f"evidence {ordinal}",
+                        "page_start": 1,
+                        "page_end": 1,
+                    }
+                    for ordinal in range(3)
+                ]
+            return await super().domain(tool_id, arguments)
+
+    client = AgentTextClient()
+    _patch_rule_statblock_transport(monkeypatch, client)
+    review = tmp_path / "commoner.md"
+    review.write_text(
+        """### Commoner
+
+*Medium humanoid (any race), any alignment*
+
+**Armor Class** 10
+**Hit Points** 4 (1d8)
+**Speed** 30 ft.
+
+| STR | DEX | CON | INT | WIS | CHA |
+|:---:|:---:|:---:|:---:|:---:|:---:|
+| 10 (+0) | 10 (+0) | 10 (+0) | 10 (+0) | 10 (+0) | 10 (+0) |
+
+**Challenge** 0 (10 XP)
+""",
+        encoding="utf-8",
+    )
+    args = _rule_statblock_args(tmp_path, defer_checkpoint=True)
+    args.actor_name = "Commoner"
+    args.chunk_id = ["evidence-0", "evidence-1", "evidence-2"]
+    args.source_page = 1
+    args.agent_rule_statblock_review = review
+    args.review_observation = (
+        "Agent normalized only exact contiguous indexed rule text on page 1."
+    )
+
+    report = asyncio.run(_prepare_rule_statblock(args))
+
+    review_call = next(
+        arguments
+        for scope, tool_id, arguments in client.calls
+        if scope == "domain"
+        and tool_id == "rule_import"
+        and arguments["action"] == "review_statblock"
+    )
+    assert review_call["payload"]["review_mode"] == "agent_text"
+    assert review_call["payload"]["evidence_chunk_ids"] == [
+        "evidence-0",
+        "evidence-1",
+        "evidence-2",
+    ]
+    assert report["review_mode"] == "agent_text"
+    assert [item["ordinal"] for item in report["review_evidence_chunks"]] == [
+        0,
+        1,
+        2,
+    ]
+    assert report["review_override_path"] == str(review.resolve())
+
+
+def test_prepare_rule_statblock_rejects_ambiguous_agent_text_import_job(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class AmbiguousImportClient(_RuleStatblockClient):
+        async def domain(self, tool_id: str, arguments: dict):
+            if tool_id == "import_query":
+                self.calls.append(("domain", tool_id, arguments))
+                return [
+                    {"id": "job-1", "source_id": "source-1"},
+                    {"id": "job-2", "source_id": "source-1"},
+                ]
+            return await super().domain(tool_id, arguments)
+
+    client = AmbiguousImportClient()
+    _patch_rule_statblock_transport(monkeypatch, client)
+    review = tmp_path / "commoner.md"
+    review.write_text("### Commoner\n", encoding="utf-8")
+    args = _rule_statblock_args(tmp_path, defer_checkpoint=True)
+    args.source_page = 1
+    args.agent_rule_statblock_review = review
+    args.review_observation = "Exact indexed text evidence was normalized by the Agent."
+
+    with pytest.raises(RuntimeError, match="exactly one indexed rule import job"):
+        asyncio.run(_prepare_rule_statblock(args))
+
+    assert not any(
+        scope == "domain"
+        and tool_id == "rule_import"
+        and arguments["action"] == "review_statblock"
+        for scope, tool_id, arguments in client.calls
+    )
+
+
+def test_prepare_rule_statblock_rejects_noncontiguous_agent_text_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class GappedEvidenceClient(_RuleStatblockClient):
+        async def domain(self, tool_id: str, arguments: dict):
+            if tool_id == "import_query":
+                self.calls.append(("domain", tool_id, arguments))
+                return [{"id": "job-1", "source_id": "source-1"}]
+            if (
+                tool_id == "rule_pack_query"
+                and arguments["view"] == "source_chunks"
+            ):
+                self.calls.append(("domain", tool_id, arguments))
+                return [
+                    {
+                        "id": f"evidence-{ordinal}",
+                        "ordinal": ordinal,
+                        "heading_path": ["COMMONER"],
+                        "content": "evidence",
+                        "page_start": 1,
+                        "page_end": 1,
+                    }
+                    for ordinal in (0, 2)
+                ]
+            return await super().domain(tool_id, arguments)
+
+    client = GappedEvidenceClient()
+    _patch_rule_statblock_transport(monkeypatch, client)
+    review = tmp_path / "commoner.md"
+    review.write_text("### Commoner\n", encoding="utf-8")
+    args = _rule_statblock_args(tmp_path, defer_checkpoint=True)
+    args.chunk_id = ["evidence-0", "evidence-2"]
+    args.source_page = 1
+    args.agent_rule_statblock_review = review
+    args.review_observation = "Exact indexed text evidence was normalized by the Agent."
+
+    with pytest.raises(RuntimeError, match="ordered contiguous page segment"):
+        asyncio.run(_prepare_rule_statblock(args))
+
+    assert not any(
+        scope == "domain"
+        and tool_id == "rule_import"
+        and arguments["action"] == "review_statblock"
+        for scope, tool_id, arguments in client.calls
+    )
 
 
 def test_prepare_rule_statblock_recovers_layout_ocr_without_image_model(
