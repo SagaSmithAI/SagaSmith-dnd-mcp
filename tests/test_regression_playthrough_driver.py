@@ -5312,6 +5312,15 @@ def test_source_cited_check_persists_result_and_explicit_knowledge(
     )
 
     assert result["check"] == {"success": True, "total": 14}
+    assert result["check_request"] == {
+        "actor_id": "actor-1",
+        "kind": "ability",
+        "ability": "survival",
+        "dc": 10,
+        "proficient": True,
+        "advantage": False,
+        "disadvantage": True,
+    }
     assert result["scene"]["source_scene_id"] == source_scene_id
     assert result["knowledge_actor_ids"] == ["actor-1", "actor-2"]
     assert result["sync"]["campaign_revision"] == 7
