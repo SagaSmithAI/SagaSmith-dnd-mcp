@@ -564,6 +564,13 @@ def _character_summary(character: dict[str, Any]) -> dict[str, Any]:
     notes = character.get("notes") if isinstance(character.get("notes"), dict) else {}
     profile = notes.get("profile") if isinstance(notes.get("profile"), dict) else {}
     provenance = str(profile.get("dm_notes") or "")
+    status_tags = [
+        str(item)
+        for item in dict(sheet.get("adventure_state") or {}).get(
+            "status_tags",
+            [],
+        )
+    ]
     source_bound = source_bound or any(
         marker in provenance
         for marker in (
@@ -575,8 +582,31 @@ def _character_summary(character: dict[str, Any]) -> dict[str, Any]:
     return {
         "id": character.get("id"),
         "name": character.get("name"),
+        "summary": character.get("summary"),
         "character_type": character.get("character_type"),
         "revision": character.get("revision"),
+        "notes_sha256": hashlib.sha256(
+            json.dumps(
+                notes,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest(),
+        "narrative_source_preserved": (
+            "sagasmith:narrative-npc-source:" in provenance
+        ),
+        "statblock_source_preserved": any(
+            marker in provenance
+            for marker in (
+                "Reviewed module statblock:",
+                "Reviewed rule statblock:",
+                "Statblock import:",
+                "Imported strict statblock:",
+                "rule-source:",
+            )
+        ),
+        "status_tags": status_tags,
         "hp": derived.get("hit_points"),
         "armor_class": derived.get("armor_class"),
         "spell_count": len(active_spell_ids),

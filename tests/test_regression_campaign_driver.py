@@ -906,6 +906,45 @@ def test_character_summary_keeps_provenance_for_a_disarmed_module_npc() -> None:
     )
 
     assert summary["source_bound"] is True
+    assert summary["statblock_source_preserved"] is True
+    assert summary["narrative_source_preserved"] is False
+    assert len(summary["notes_sha256"]) == 64
+
+
+def test_character_summary_audits_in_place_narrative_materialization() -> None:
+    summary = _character_summary(
+        {
+            "id": "actor-1",
+            "name": "Caldan Voss",
+            "summary": "A source-authored actor-troupe member.",
+            "character_type": "npc",
+            "revision": 2,
+            "sheet": {
+                "adventure_state": {"status_tags": []},
+                "inventory": {"items": []},
+                "content": {},
+            },
+            "derived": {
+                "hit_points": {"value": 4, "max": 4, "temp": 0},
+                "armor_class": 10,
+                "inventory": {"weapon_attacks": [{"item_id": "club"}]},
+            },
+            "notes": {
+                "profile": {
+                    "dm_notes": (
+                        'sagasmith:narrative-npc-source:{"source_identity":'
+                        '"troop of actors"}\n'
+                        "Statblock import: rule-source:commoner."
+                    )
+                }
+            },
+        }
+    )
+
+    assert summary["summary"] == "A source-authored actor-troupe member."
+    assert summary["narrative_source_preserved"] is True
+    assert summary["statblock_source_preserved"] is True
+    assert summary["attack_count"] == 1
 
 
 def test_character_summary_counts_known_and_prepared_spells_without_conflation() -> None:
