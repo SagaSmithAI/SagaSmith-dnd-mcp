@@ -6366,6 +6366,11 @@ async def _auto_run(
             )
             if pending_reaction:
                 continue
+            if _has_action_budget(dict(cast.get("combat") or {}), actor_id):
+                # The server budget is authoritative: a bonus-action spell such as
+                # Healing Word leaves a main action available. The cast-declared
+                # guard above still prevents a second leveled spell this turn.
+                continue
             await _end_turn(client, args, str(branch["id"]), actor_id, sequence)
             continue
         if actor_id in effective_party_ids and not living_targets:

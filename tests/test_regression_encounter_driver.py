@@ -1065,6 +1065,36 @@ def test_body_thief_requires_unspent_action_budget() -> None:
     assert _has_action_budget(combat, "devourer")
 
 
+def test_action_budget_preserves_bonus_action_spell_followup() -> None:
+    healing_word_combat = {
+        "combatants": [
+            {
+                "actor_id": "bard",
+                "turn_budget": {
+                    "main_action": 1,
+                    "bonus_action": 0,
+                    "extra_action": 0,
+                },
+            }
+        ]
+    }
+    main_action_spell_combat = {
+        "combatants": [
+            {
+                "actor_id": "wizard",
+                "turn_budget": {
+                    "main_action": 0,
+                    "bonus_action": 1,
+                    "extra_action": 0,
+                },
+            }
+        ]
+    }
+
+    assert _has_action_budget(healing_word_combat, "bard")
+    assert not _has_action_budget(main_action_spell_combat, "wizard")
+
+
 def test_encounter_actor_groups_keep_allies_out_of_registered_party_and_reject_overlap(
     tmp_path,
 ) -> None:
