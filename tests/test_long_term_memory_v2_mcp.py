@@ -175,7 +175,19 @@ def test_memory_commit_is_atomic_idempotent_and_pins_skill_manifest(tmp_path: Pa
             "idempotency_key": "scene-commit",
         }
         committed = await _call(server, "memory_change", arguments)
-        replayed = await _call(server, "memory_change", arguments)
+        current_after_commit = await _call(
+            server,
+            "campaign_query",
+            {"view": "get", "payload": {"campaign_id": campaign["id"]}},
+        )
+        replayed = await _call(
+            server,
+            "memory_change",
+            {
+                **arguments,
+                "expected_revision": current_after_commit["revision"],
+            },
+        )
 
         assert replayed["event"]["id"] == committed["event"]["id"]
         assert committed["snapshot"] is not None

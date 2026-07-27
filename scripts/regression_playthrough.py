@@ -886,6 +886,128 @@ def _idempotency_request_hash(payload: dict[str, Any]) -> str:
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
+def _validate_recovered_continuity(
+    receipt: dict[str, Any],
+    *,
+    payload: dict[str, Any],
+    branch_id: str,
+) -> dict[str, Any]:
+    response = receipt.get("response")
+    if receipt.get("replayed") is not True or not isinstance(response, dict):
+        raise RuntimeError("continuity recovery receipt has no response")
+    receipt_branch_id = str(receipt.get("branch_id") or "")
+    if receipt_branch_id and receipt_branch_id != branch_id:
+        raise RuntimeError(
+            "continuity recovery receipt is from another branch: "
+            f"{receipt_branch_id}"
+        )
+    if payload.get("facts"):
+        raise RuntimeError("continuity recovery with fact writes requires explicit review")
+    expected_event = dict(payload.get("event") or {})
+    recovered_event = dict(response.get("event") or {})
+    recovered_payload = dict(recovered_event.get("payload") or {})
+    recovered_payload.pop("_sagasmith_skill_manifest", None)
+    if (
+        recovered_event.get("summary") != expected_event.get("summary")
+        or recovered_event.get("event_type") != expected_event.get("event_type")
+        or recovered_event.get("audience_scope") != expected_event.get("audience_scope")
+        or recovered_payload != dict(expected_event.get("payload") or {})
+    ):
+        raise RuntimeError("continuity recovery receipt event does not match")
+    expected_knowledge = [
+        {
+            "actor_id": str(item.get("actor_id") or ""),
+            "knowledge_key": str(item.get("knowledge_key") or ""),
+            "proposition": str(item.get("proposition") or ""),
+            "disclosure_scope": str(item.get("disclosure_scope") or ""),
+        }
+        for item in list(payload.get("actor_knowledge") or [])
+    ]
+    recovered_knowledge = [
+        {
+            "actor_id": str(item.get("actor_id") or ""),
+            "knowledge_key": str(item.get("knowledge_key") or ""),
+            "proposition": str(item.get("proposition") or ""),
+            "disclosure_scope": str(item.get("disclosure_scope") or ""),
+        }
+        for item in list(response.get("actor_knowledge") or [])
+    ]
+    if recovered_knowledge != expected_knowledge:
+        raise RuntimeError("continuity recovery receipt actor knowledge does not match")
+    expected_snapshot = payload.get("snapshot")
+    recovered_snapshot = response.get("snapshot")
+    if expected_snapshot is None:
+        if recovered_snapshot is not None:
+            raise RuntimeError("continuity recovery receipt has an unexpected snapshot")
+    elif (
+        not isinstance(recovered_snapshot, dict)
+        or recovered_snapshot.get("label") != dict(expected_snapshot).get("label")
+    ):
+        raise RuntimeError("continuity recovery receipt snapshot does not match")
+    return deepcopy(response)
+
+
+async def _commit_roll_continuity(
+    client: ExposureClient,
+    *,
+    campaign_id: str,
+    payload: dict[str, Any],
+    expected_revision: int,
+    idempotency_key: str,
+) -> dict[str, Any]:
+    try:
+        return await client.domain(
+            "memory_change",
+            {
+                "campaign_id": campaign_id,
+                "action": "commit",
+                "payload": payload,
+                "expected_revision": expected_revision,
+                "idempotency_key": idempotency_key,
+            },
+        )
+    except Exception as exc:
+        if "idempotency key reused with a different request" not in str(exc):
+            raise
+        await client.load("play.scene_control")
+        receipt = await client.domain(
+            "state_revision",
+            {
+                "campaign_id": campaign_id,
+                "action": "receipt",
+                "payload": {"idempotency_key": idempotency_key},
+            },
+        )
+        if not str(receipt.get("branch_id") or ""):
+            await client.load("play.scene")
+            visible_events = await client.domain(
+                "campaign_event",
+                {
+                    "campaign_id": campaign_id,
+                    "action": "list",
+                    "payload": {
+                        "limit": 500,
+                        "branch_id": str(payload.get("branch_id") or ""),
+                    },
+                },
+            )
+            response_event_id = str(
+                dict(dict(receipt.get("response") or {}).get("event") or {}).get("id")
+                or ""
+            )
+            if not response_event_id or response_event_id not in {
+                str(item.get("id") or "") for item in list(visible_events or [])
+            }:
+                raise RuntimeError(
+                    "continuity recovery receipt event is not visible on the current branch"
+                )
+        return _validate_recovered_continuity(
+            receipt,
+            payload=payload,
+            branch_id=str(payload.get("branch_id") or ""),
+        )
+
+
 def _file_sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as source:
@@ -2305,15 +2427,12 @@ async def _resolve_check(
         continuity_payload["snapshot"] = {
             "label": f"Full playthrough check: {kind} at {location_key}"
         }
-    committed = await client.domain(
-        "memory_change",
-        {
-            "campaign_id": campaign_id,
-            "action": "commit",
-            "payload": continuity_payload,
-            "expected_revision": campaign["revision"],
-            "idempotency_key": _mutation_key(run_id, "continuity", check_identity),
-        },
+    committed = await _commit_roll_continuity(
+        client,
+        campaign_id=campaign_id,
+        payload=continuity_payload,
+        expected_revision=campaign["revision"],
+        idempotency_key=_mutation_key(run_id, "continuity", check_identity),
     )
     synced = await _manifest_mutation(
         client,
@@ -2574,19 +2693,16 @@ async def _resolve_contest(
         continuity_payload["snapshot"] = {
             "label": f"Full playthrough ability contest at {location_key}"
         }
-    committed = await client.domain(
-        "memory_change",
-        {
-            "campaign_id": campaign_id,
-            "action": "commit",
-            "payload": continuity_payload,
-            "expected_revision": campaign["revision"],
-            "idempotency_key": _mutation_key(
-                run_id,
-                "continuity",
-                contest_identity,
-            ),
-        },
+    committed = await _commit_roll_continuity(
+        client,
+        campaign_id=campaign_id,
+        payload=continuity_payload,
+        expected_revision=campaign["revision"],
+        idempotency_key=_mutation_key(
+            run_id,
+            "continuity",
+            contest_identity,
+        ),
     )
     synced = await _manifest_mutation(
         client,

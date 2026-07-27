@@ -33,6 +33,7 @@ from scripts.regression_playthrough import (
     _check_knowledge_key,
     _checkpoint,
     _claim_party_item_for_character,
+    _commit_roll_continuity,
     _committed_check_result,
     _committed_contest_result,
     _configure_advancement,
@@ -6623,6 +6624,123 @@ def test_partially_committed_check_is_recovered_without_reroll() -> None:
         )
         is None
     )
+
+
+def test_roll_continuity_recovers_a_response_lost_commit_receipt() -> None:
+    payload = {
+        "event": {
+            "summary": "The save failed.",
+            "event_type": "ability_check",
+            "audience_scope": "party",
+            "payload": {
+                "occurrence_id": "save-1",
+                "success": False,
+            },
+        },
+        "actor_knowledge": [
+            {
+                "actor_id": "actor-1",
+                "knowledge_key": "save-1",
+                "proposition": "The save failed.",
+                "disclosure_scope": "owner",
+            }
+        ],
+        "branch_id": "branch-1",
+    }
+    response = {
+        "event": {
+            "id": "event-1",
+            "summary": "The save failed.",
+            "event_type": "ability_check",
+            "audience_scope": "party",
+            "payload": {
+                "occurrence_id": "save-1",
+                "success": False,
+                "_sagasmith_skill_manifest": [{"id": "dnd.full"}],
+            },
+        },
+        "facts": [],
+        "actor_knowledge": [
+            {
+                "id": "knowledge-1",
+                "actor_id": "actor-1",
+                "knowledge_key": "save-1",
+                "proposition": "The save failed.",
+                "disclosure_scope": "owner",
+            }
+        ],
+        "snapshot": None,
+    }
+
+    class Client:
+        def __init__(self) -> None:
+            self.loaded: list[str] = []
+
+        async def load(self, *group_ids: str):
+            self.loaded.extend(group_ids)
+
+        async def domain(self, tool_id: str, arguments: dict):
+            if tool_id == "memory_change":
+                raise RuntimeError(
+                    "idempotency key reused with a different request: continuity-key"
+                )
+            if tool_id == "state_revision":
+                assert arguments == {
+                    "campaign_id": "campaign-1",
+                    "action": "receipt",
+                    "payload": {"idempotency_key": "continuity-key"},
+                }
+                return {
+                    "replayed": True,
+                    "branch_id": "branch-1",
+                    "response": response,
+                }
+            raise AssertionError((tool_id, arguments))
+
+    client = Client()
+    recovered = asyncio.run(
+        _commit_roll_continuity(
+            client,
+            campaign_id="campaign-1",
+            payload=payload,
+            expected_revision=8,
+            idempotency_key="continuity-key",
+        )
+    )
+
+    assert recovered == response
+    assert client.loaded == ["play.scene_control"]
+
+
+def test_roll_continuity_rejects_a_different_receipt_event() -> None:
+    with pytest.raises(RuntimeError, match="event does not match"):
+        regression_playthrough._validate_recovered_continuity(
+            {
+                "replayed": True,
+                "branch_id": "branch-1",
+                "response": {
+                    "event": {
+                        "summary": "A different event.",
+                        "event_type": "ability_check",
+                        "audience_scope": "party",
+                        "payload": {},
+                    },
+                    "actor_knowledge": [],
+                    "snapshot": None,
+                },
+            },
+            payload={
+                "event": {
+                    "summary": "Expected event.",
+                    "event_type": "ability_check",
+                    "audience_scope": "party",
+                    "payload": {},
+                },
+                "actor_knowledge": [],
+                "branch_id": "branch-1",
+            },
+            branch_id="branch-1",
+        )
 
 
 def test_partially_committed_contest_is_recovered_without_reroll() -> None:

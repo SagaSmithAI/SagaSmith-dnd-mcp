@@ -181,7 +181,14 @@ def test_source_bound_loot_is_atomic_idempotent_and_branch_audited(tmp_path: Pat
                 },
             )
         acquired = await _call(server, "campaign_change", arguments)
-        replay = await _call(server, "campaign_change", arguments)
+        replay = await _call(
+            server,
+            "campaign_change",
+            {
+                **arguments,
+                "expected_revision": acquired["campaign"]["revision"],
+            },
+        )
 
         assert replay == acquired
         assert acquired["status"] == "committed"
@@ -237,7 +244,14 @@ def test_source_bound_loot_is_atomic_idempotent_and_branch_audited(tmp_path: Pat
         )
         assert unchanged["inventory"]["wallet"]["cp"] == 60
         spent = await _call(server, "campaign_change", spend_arguments)
-        spend_replay = await _call(server, "campaign_change", spend_arguments)
+        spend_replay = await _call(
+            server,
+            "campaign_change",
+            {
+                **spend_arguments,
+                "expected_revision": spent["campaign"]["revision"],
+            },
+        )
 
         assert spend_replay == spent
         assert spent["status"] == "committed"
@@ -294,7 +308,14 @@ def test_source_bound_loot_is_atomic_idempotent_and_branch_audited(tmp_path: Pat
             item["id"] == "jade-frog" for item in unchanged["inventory"]["items"]
         )
         item_spent = await _call(server, "campaign_change", item_spend_arguments)
-        item_spend_replay = await _call(server, "campaign_change", item_spend_arguments)
+        item_spend_replay = await _call(
+            server,
+            "campaign_change",
+            {
+                **item_spend_arguments,
+                "expected_revision": item_spent["campaign"]["revision"],
+            },
+        )
 
         assert item_spend_replay == item_spent
         assert item_spent["status"] == "committed"

@@ -114,7 +114,18 @@ def test_shared_healing_potion_use_is_atomic_rolled_and_idempotent(
             "idempotency_key": "drink",
         }
         used = await _call(server, "campaign_change", arguments)
-        replay = await _call(server, "campaign_change", arguments)
+        replay = await _call(
+            server,
+            "campaign_change",
+            {
+                **arguments,
+                "payload": {
+                    **arguments["payload"],
+                    "expected_character_revision": used["character"]["revision"],
+                },
+                "expected_revision": used["campaign"]["revision"],
+            },
+        )
 
         assert replay == used
         assert used["status"] == "committed"

@@ -4569,13 +4569,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if not normalized_coins and not items:
             raise ValueError("loot acquisition requires coins or items")
 
+        # The idempotency identity describes the logical acquisition. A retry
+        # after a lost response is expected to observe the post-commit revision.
         request_payload = {
             "acquisition_id": normalized_acquisition_id,
             "coins": normalized_coins,
             "items": deepcopy(items),
             "reason": normalized_reason,
             "source_ref": normalized_source_ref,
-            "expected_revision": expected_revision,
             "branch_id": resolved_branch_id,
         }
         scope = f"campaign-loot:{campaign_id}:{resolved_branch_id}:{principal_id}"
@@ -4722,13 +4723,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if not normalized_coins:
             raise ValueError("currency spend requires at least one coin denomination")
 
+        # Optimistic revisions guard the first attempt but are not part of the
+        # logical idempotency identity; a recovered retry sees newer revisions.
         request_payload = {
             "spend_id": normalized_spend_id,
             "coins": normalized_coins,
             "reason": normalized_reason,
             "source_ref": normalized_source_ref,
             "rule_ref": normalized_rule_ref,
-            "expected_revision": expected_revision,
             "branch_id": resolved_branch_id,
         }
         scope = f"campaign-currency-spend:{campaign_id}:{resolved_branch_id}:{principal_id}"
@@ -4857,7 +4859,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "quantity": quantity,
             "reason": normalized_reason,
             "source_ref": normalized_source_ref,
-            "expected_revision": expected_revision,
             "branch_id": resolved_branch_id,
         }
         scope = f"campaign-item-spend:{campaign_id}:{resolved_branch_id}:{principal_id}"
@@ -4955,9 +4956,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "use_id": normalized_use_id,
             "item_id": normalized_item_id,
             "target_character_id": normalized_target_id,
-            "expected_character_revision": expected_character_revision,
             "reason": normalized_reason,
-            "expected_revision": expected_revision,
             "branch_id": resolved_branch_id,
         }
         scope = f"campaign-consumable:{campaign_id}:{resolved_branch_id}:{principal_id}"
@@ -17165,13 +17164,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         event_payload = dict(event_data.get("payload") or {})
         event_payload["_sagasmith_skill_manifest"] = manifest
         event_data["payload"] = event_payload
+        # A response-lost retry normally carries the current post-commit
+        # revision. Keep concurrency tokens out of the logical request hash so
+        # the original atomic response can be replayed without duplicating it.
         request_payload = {
             "event": event_data,
             "facts": facts_data,
             "actor_knowledge": knowledge_data,
             "snapshot": snapshot_data,
             "branch_id": branch_id,
-            "expected_revision": expected_revision,
             "skill_manifest": manifest,
         }
         scope = f"continuity-commit:{campaign_id}:{branch_id}:{principal_id}"
