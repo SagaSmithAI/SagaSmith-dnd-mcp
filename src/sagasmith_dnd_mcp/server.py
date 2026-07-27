@@ -1794,17 +1794,69 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             raise ValueError("replacement statblock actor requires a positive expected_revision")
         if not idempotency_key:
             raise ValueError("replacement statblock actor requires idempotency_key")
-        return character_update(
-            replace_character_id,
-            name,
-            data.get("player_name"),
-            summary,
-            sheet,
-            notes,
-            principal_id,
-            expected_revision,
-            f"{idempotency_key}:replace-statblock",
+        if name != existing.name:
+            raise ValueError(
+                "replacement statblock must preserve the existing actor name"
+            )
+        if summary != str(existing.summary or ""):
+            raise ValueError(
+                "replacement statblock must preserve the existing actor summary"
+            )
+        return update_character(
+            existing,
+            operation="character.statblock.replace",
+            sheet=sheet,
+            notes=notes,
+            principal_id=principal_id,
+            expected_revision=expected_revision,
+            idempotency_key=f"{idempotency_key}:replace-statblock",
+            payload={
+                "mode": "source_bound_statblock",
+                "request": deepcopy(data),
+            },
         )
+
+    def source_bound_statblock_notes(
+        *,
+        data: dict[str, Any],
+        campaign_id: str,
+        character_type: str,
+    ) -> dict[str, Any]:
+        """Preserve an in-place actor's provenance unless notes are explicit."""
+
+        if data.get("notes") is not None:
+            return deepcopy(data["notes"])
+        replace_character_id = str(data.get("replace_character_id") or "").strip()
+        if not replace_character_id:
+            return default_character_notes()
+        existing = characters.get(replace_character_id)
+        if existing.campaign_id != campaign_id:
+            raise ValueError("replacement statblock actor belongs to another campaign")
+        if existing.character_type != character_type:
+            raise ValueError("replacement statblock actor type must remain unchanged")
+        return deepcopy(existing.notes)
+
+    def source_bound_statblock_summary(
+        *,
+        data: dict[str, Any],
+        campaign_id: str,
+        character_type: str,
+        fallback: str,
+    ) -> str:
+        """Keep narrative identity text while attaching authoritative mechanics."""
+
+        explicit = str(data.get("summary") or "").strip()
+        if explicit:
+            return explicit
+        replace_character_id = str(data.get("replace_character_id") or "").strip()
+        if not replace_character_id:
+            return fallback
+        existing = characters.get(replace_character_id)
+        if existing.campaign_id != campaign_id:
+            raise ValueError("replacement statblock actor belongs to another campaign")
+        if existing.character_type != character_type:
+            raise ValueError("replacement statblock actor type must remain unchanged")
+        return str(existing.summary or "").strip() or fallback
 
     def combat_view(campaign_id: str, principal_id: str) -> dict[str, Any] | None:
         campaign = campaigns.get(campaign_id)
@@ -23738,7 +23790,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 raise ValueError(
                     "reviewed rule statblock import creates only npc or monster actors"
                 )
-            notes = deepcopy(data.get("notes") or default_character_notes())
+            notes = source_bound_statblock_notes(
+                data=data,
+                campaign_id=campaign_id,
+                character_type=character_type,
+            )
             profile = notes.setdefault("profile", {})
             if not str(profile.get("summary") or "").strip():
                 profile["summary"] = parsed.summary
@@ -23767,7 +23823,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 campaign_id=campaign_id,
                 character_type=character_type,
                 name=parsed.name,
-                summary=str(data.get("summary") or parsed.summary),
+                summary=source_bound_statblock_summary(
+                    data=data,
+                    campaign_id=campaign_id,
+                    character_type=character_type,
+                    fallback=parsed.summary,
+                ),
                 sheet=sheet,
                 notes=notes,
                 principal_id=principal_id,
@@ -23868,7 +23929,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             character_type = str(data.get("character_type") or "monster")
             if character_type not in {"npc", "monster"}:
                 raise ValueError("module statblock import creates only npc or monster actors")
-            notes = deepcopy(data.get("notes") or default_character_notes())
+            notes = source_bound_statblock_notes(
+                data=data,
+                campaign_id=campaign_id,
+                character_type=character_type,
+            )
             profile = notes.setdefault("profile", {})
             if not str(profile.get("summary") or "").strip():
                 profile["summary"] = parsed.summary
@@ -23907,7 +23972,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 campaign_id=campaign_id,
                 character_type=character_type,
                 name=parsed.name,
-                summary=str(data.get("summary") or parsed.summary),
+                summary=source_bound_statblock_summary(
+                    data=data,
+                    campaign_id=campaign_id,
+                    character_type=character_type,
+                    fallback=parsed.summary,
+                ),
                 sheet=sheet,
                 notes=notes,
                 principal_id=principal_id,
@@ -24048,7 +24118,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             character_type = str(data.get("character_type") or "npc")
             if character_type not in {"npc", "monster"}:
                 raise ValueError("statblock import creates only npc or monster actors")
-            notes = deepcopy(data.get("notes") or default_character_notes())
+            notes = source_bound_statblock_notes(
+                data=data,
+                campaign_id=campaign_id,
+                character_type=character_type,
+            )
             profile = notes.setdefault("profile", {})
             if not str(profile.get("summary") or "").strip():
                 profile["summary"] = parsed.summary
@@ -24082,7 +24156,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 campaign_id=campaign_id,
                 character_type=character_type,
                 name=parsed.name,
-                summary=str(data.get("summary") or parsed.summary),
+                summary=source_bound_statblock_summary(
+                    data=data,
+                    campaign_id=campaign_id,
+                    character_type=character_type,
+                    fallback=parsed.summary,
+                ),
                 sheet=sheet,
                 notes=notes,
                 principal_id=principal_id,

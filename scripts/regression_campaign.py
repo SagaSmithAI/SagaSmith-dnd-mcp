@@ -412,6 +412,11 @@ async def _statblock_replacement_fields(
     return {
         "replace_character_id": str(actor_id),
         "expected_revision": int(current_actor["revision"]),
+        **(
+            {"summary": str(current_actor["summary"])}
+            if str(current_actor.get("summary") or "").strip()
+            else {}
+        ),
     }
 
 

@@ -320,7 +320,11 @@ class _RuleStatblockClient:
                 "view": "get",
                 "payload": {"character_id": "actor-1"},
             }
-            return {"id": "actor-1", "revision": 4}
+            return {
+                "id": "actor-1",
+                "revision": 4,
+                "summary": "Prior narrative summary.",
+            }
         if tool_id == "character_create_from":
             self.revision += 1
             result = {
@@ -531,6 +535,7 @@ def test_prepare_rule_statblock_can_rebuild_an_existing_actor(
     )
     assert create_call["payload"]["replace_character_id"] == "actor-1"
     assert create_call["payload"]["expected_revision"] == 4
+    assert create_call["payload"]["summary"] == "Prior narrative summary."
 
 
 def test_statblock_replacement_fields_are_shared_by_module_and_rule_preparation() -> None:
@@ -540,6 +545,7 @@ def test_statblock_replacement_fields_are_shared_by_module_and_rule_preparation(
     assert asyncio.run(_statblock_replacement_fields(client, "actor-1")) == {
         "replace_character_id": "actor-1",
         "expected_revision": 4,
+        "summary": "Prior narrative summary.",
     }
 
 

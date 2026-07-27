@@ -287,6 +287,13 @@ def test_imported_rule_source_creates_a_source_bound_combat_actor(tmp_path: Path
         assert replaced["character"]["id"] == actor["id"]
         assert replaced["character"]["revision"] == actor["revision"] + 1
         assert replaced["character"]["sheet"]["combat"]["hp"]["value"] == 1
+        assert replaced["character"]["summary"].startswith("A tavern patron")
+        assert (
+            replaced["character"]["notes"]["profile"]["dm_notes"].count(
+                "Statblock import:"
+            )
+            == 2
+        )
 
         variant = await _call(
             server,
