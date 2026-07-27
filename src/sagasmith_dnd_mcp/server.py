@@ -541,6 +541,19 @@ def _normalize_source_evidence_text(value: Any) -> str:
     return " ".join(text.translate(_SOURCE_EVIDENCE_TRANSLATION).split()).casefold()
 
 
+def _has_source_defined_positional_targeting(value: Any) -> bool:
+    """Recognize attacks whose source replaces a numeric range with a position."""
+
+    text = _normalize_source_evidence_text(value)
+    return bool(
+        re.search(
+            r"\b(?:target|creature)\b.{0,80}\bdirectly\s+"
+            r"(?:below|beneath|above)\b",
+            text,
+        )
+    )
+
+
 def _source_contains_narrative_name(*, name: str, content: str) -> bool:
     """Match an exact name or a two-part name split by a short source appositive."""
 
@@ -1360,14 +1373,21 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         for attack in attacks:
             attack_id = str(attack.get("item_id") or "")
             attack_name = str(attack.get("name") or attack_id or "Weapon")
+            attack_item = dict(inventory_items.get(attack_id) or {})
             properties = {str(item).strip().casefold() for item in attack.get("properties", [])}
             if (
                 str(attack.get("attack_type") or "melee").casefold() == "ranged"
                 and int(dict(attack.get("range_ft") or {}).get("normal", 0) or 0) <= 0
             ):
-                reason = f"{attack_name}: ranged weapon range is missing"
+                if _has_source_defined_positional_targeting(attack_item.get("description")):
+                    reason = (
+                        f"{attack_name}: source-defined positional targeting "
+                        "requires a DM ruling"
+                    )
+                else:
+                    reason = f"{attack_name}: ranged weapon range is missing"
+                    missing_attack_range_reasons.append(reason)
                 manual_rulings.append(reason)
-                missing_attack_range_reasons.append(reason)
             if (
                 "thrown" in properties
                 and int(dict(attack.get("thrown_range_ft") or {}).get("normal", 0) or 0) <= 0

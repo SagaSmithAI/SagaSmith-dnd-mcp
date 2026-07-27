@@ -359,6 +359,77 @@ def test_scene_readiness_blocks_missing_combatants_and_reserves(tmp_path: Path) 
             "default_resolver"
         ] == "agent"
 
+        positional_sheet = deepcopy(original_bandit_sheet)
+        positional_sheet["inventory"]["items"] = [
+            {
+                "id": "dagger",
+                "name": "Dagger",
+                "kind": "weapon",
+                "equipped": True,
+                "equipped_slot": "main_hand",
+                "description": (
+                    "Melee Weapon Attack: +5 to hit, reach 5 ft., one target. "
+                    "Hit: 5 (1d4 + 3) piercing damage."
+                ),
+                "mechanics": {
+                    "attack_type": "melee",
+                    "attack_ability": "strength",
+                    "damage_formula": "1d4",
+                    "damage_type": "piercing",
+                    "reach_ft": 5,
+                },
+            },
+            {
+                "id": "dropped-rock",
+                "name": "Dropped Rock",
+                "kind": "weapon",
+                "description": (
+                    "Ranged Weapon Attack: +5 to hit, one target directly below "
+                    "the attacker. Hit: 6 (1d6 + 3) bludgeoning damage."
+                ),
+                    "mechanics": {
+                        "attack_type": "ranged",
+                        "attack_ability": "dexterity",
+                        "damage_formula": "1d6",
+                        "damage_type": "bludgeoning",
+                        "always_available": True,
+                    },
+                },
+        ]
+        positional_sheet["inventory"]["equipment_slots"]["main_hand"] = "dagger"
+        actors["bandit1"] = await _call(
+            server,
+            "character_sheet_replace",
+            {
+                "character_id": actors["bandit1"]["id"],
+                "sheet": positional_sheet,
+                "expected_revision": actors["bandit1"]["revision"],
+                "idempotency_key": "source-positional-targeting",
+            },
+        )
+        ready = await _call(
+            server,
+            "module_query",
+            {
+                "campaign_id": campaign["id"],
+                "view": "readiness",
+                "payload": {
+                    "scene_id": scene["scene_id"],
+                    "participant_manifest": complete_manifest,
+                },
+            },
+        )
+        positional_card = next(
+            item for item in ready["groups"] if item["key"] == "rusk-bandits"
+        )["actors"][0]["combat_card"]
+        assert ready["ready"] is True
+        assert positional_card["blocking_reasons"] == []
+        assert positional_card["manual_rulings"] == [
+            "Dropped Rock: source-defined positional targeting requires a DM ruling"
+        ]
+        assert positional_card["agent_rulings"] == positional_card["manual_rulings"]
+        assert positional_card["external_input_requirements"] == []
+
         long_manifest = deepcopy(complete_manifest)
         long_manifest["groups"][0]["source_excerpt"] = long_evidence.strip()
         long_ready = await _call(
