@@ -6264,7 +6264,19 @@ async def _advance_time(
         raise RuntimeError("campaign has no current branch")
     branch_id = str(branch["id"])
     campaign = await _campaign(client, campaign_id)
-    before = deepcopy(dict(dict(campaign.get("state") or {}).get("world_time") or {}))
+    campaign_state = dict(campaign.get("state") or {})
+    before = deepcopy(dict(campaign_state.get("world_time") or {}))
+    before_game_time = deepcopy(dict(campaign_state.get("game_time") or {}))
+    migrated_legacy_game_time = not before_game_time
+    if not before_game_time and before:
+        legacy_elapsed = before.get("elapsed_minutes")
+        if isinstance(legacy_elapsed, bool) or not isinstance(legacy_elapsed, int):
+            raise RuntimeError("legacy campaign clock has no canonical elapsed position")
+        before_game_time = {
+            "schema_version": 1,
+            "tick_seconds": 6,
+            "elapsed_ticks": legacy_elapsed * 10,
+        }
     expected_minutes = count * {"minute": 1, "hour": 60, "day": 1440}[period]
     projected_before = before
     clock_recovery = False
@@ -6310,6 +6322,15 @@ async def _advance_time(
             "elapsed_minutes": original_elapsed,
             "label": str(projected_before.get("label") or ""),
         }
+        current_ticks = before_game_time.get("elapsed_ticks")
+        if isinstance(current_ticks, bool) or not isinstance(current_ticks, int):
+            raise RuntimeError("advance-time recovery has no canonical game-time position")
+        before_game_time = {
+            **before_game_time,
+            "elapsed_ticks": current_ticks - expected_minutes * 10,
+        }
+        if before_game_time["elapsed_ticks"] < 0:
+            raise RuntimeError("advance-time recovery predates canonical game-time zero")
     else:
         projected_after = _project_world_time(projected_before, expected_minutes)
         if projected_after != normalized_expected_after:
@@ -6420,6 +6441,9 @@ async def _advance_time(
             raise RuntimeError("clock recovery current state does not match the exact target")
         advanced = {
             **advanced,
+            "game_time": deepcopy(
+                dict(dict(campaign.get("state") or {}).get("game_time") or {})
+            ),
             "world_time": current_clock,
             "campaign_revision": after_revision,
             "recovery_receipt": receipt,
@@ -6429,6 +6453,13 @@ async def _advance_time(
     if isinstance(advanced_revision, bool) or not isinstance(advanced_revision, int):
         raise RuntimeError("campaign clock response has no integer campaign revision")
     after = deepcopy(dict(advanced.get("world_time") or {}))
+    after_game_time = deepcopy(dict(advanced.get("game_time") or {}))
+    if not after_game_time and migrated_legacy_game_time:
+        after_game_time = {
+            **before_game_time,
+            "elapsed_ticks": int(before_game_time["elapsed_ticks"])
+            + expected_minutes * 10,
+        }
     if (
         not before
         or not after
@@ -6436,6 +6467,16 @@ async def _advance_time(
         != expected_minutes
     ):
         raise RuntimeError("campaign clock did not advance by the requested duration")
+    before_ticks = before_game_time.get("elapsed_ticks")
+    after_ticks = after_game_time.get("elapsed_ticks")
+    if (
+        isinstance(before_ticks, bool)
+        or not isinstance(before_ticks, int)
+        or isinstance(after_ticks, bool)
+        or not isinstance(after_ticks, int)
+        or after_ticks - before_ticks != expected_minutes * 10
+    ):
+        raise RuntimeError("canonical game time did not advance by the requested duration")
     if {
         key: int(after.get(key, -1))
         for key in ("day", "hour", "minute", "elapsed_minutes")
@@ -6452,7 +6493,10 @@ async def _advance_time(
                 "period": period,
                 "count": count,
                 "elapsed_minutes": expected_minutes,
+                "elapsed_ticks": expected_minutes * 10,
                 "expected_world_time": normalized_expected_after,
+                "game_time_before": before_game_time,
+                "game_time_after": after_game_time,
                 "world_time_before": before,
                 "world_time_after": after,
                 "source_excerpt": source_excerpt.strip() if has_source_ref else "",

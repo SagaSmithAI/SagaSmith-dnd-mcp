@@ -299,11 +299,13 @@ def test_stable_recovery_rejects_a_healthy_actor(tmp_path: Path) -> None:
     asyncio.run(exercise())
 
 
-def test_stable_recovery_validates_clock_before_rolling(tmp_path: Path, monkeypatch) -> None:
-    def unexpected_roll(_expression: str):
-        raise AssertionError("RNG must not be consumed before clock validation")
+def test_stable_recovery_advances_unanchored_game_time(tmp_path: Path, monkeypatch) -> None:
+    original_roll = server_module.roll
 
-    monkeypatch.setattr(server_module, "roll", unexpected_roll)
+    def deterministic_roll(expression: str):
+        return original_roll(expression, rng=random.Random(0))
+
+    monkeypatch.setattr(server_module, "roll", deterministic_roll)
     config = McpConfig(
         home=tmp_path / "home",
         database_url=None,
@@ -338,18 +340,27 @@ def test_stable_recovery_validates_clock_before_rolling(tmp_path: Path, monkeypa
             },
         )
 
-        with pytest.raises(Exception, match="set the campaign clock"):
-            await _call(
-                server,
-                "character_state_change",
-                {
-                    "character_id": actor["id"],
-                    "action": "stable_recovery",
-                    "payload": {},
-                    "expected_revision": actor["revision"],
-                    "idempotency_key": "recover",
-                },
-            )
+        recovered = await _call(
+            server,
+            "character_state_change",
+            {
+                "character_id": actor["id"],
+                "action": "stable_recovery",
+                "payload": {},
+                "expected_revision": actor["revision"],
+                "idempotency_key": "recover",
+            },
+        )
+        assert recovered["recovery_hours"] == 4
+        assert recovered["game_time"]["elapsed_ticks"] == 2400
+        assert recovered["world_time"] is None
+        persisted = await _call(
+            server,
+            "campaign_query",
+            {"view": "get", "payload": {"campaign_id": campaign["id"]}},
+        )
+        assert persisted["state"]["game_time"]["elapsed_ticks"] == 2400
+        assert "world_time" not in persisted["state"]
 
     asyncio.run(exercise())
 

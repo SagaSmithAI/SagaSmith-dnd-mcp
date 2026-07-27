@@ -171,11 +171,15 @@ def test_party_long_rest_advances_once_and_settles_members_atomically(tmp_path: 
         rested = await _call(server, "campaign_change", arguments)
         assert await _call(server, "campaign_change", arguments) == rested
         assert rested["world_time"] == {
-            "schema_version": 1,
+            "schema_version": 2,
+            "tick_seconds": 6,
+            "calendar_offset_ticks": 12600,
             "day": 2,
             "hour": 5,
             "minute": 0,
+            "second": 0,
             "elapsed_minutes": 1740,
+            "round_remainder": 0,
             "label": "Baldur's Gate",
         }
         assert set(rested["member_ids"]) == {first["id"], second["id"]}
@@ -347,11 +351,15 @@ def test_party_short_rest_advances_and_settles_every_member_atomically(
         assert len(rested["recovered"][first["id"]]["hit_dice_rolls"]) == 1
         assert rested["random_stream_receipt"]["draw_count"] == 1
         assert rested["world_time"] == {
-            "schema_version": 1,
+            "schema_version": 2,
+            "tick_seconds": 6,
+            "calendar_offset_ticks": 34800,
             "day": 3,
             "hour": 11,
             "minute": 0,
+            "second": 0,
             "elapsed_minutes": 3540,
+            "round_remainder": 0,
             "label": "Roadside",
         }
         updated = []

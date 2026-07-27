@@ -155,6 +155,11 @@ from sagasmith_dnd.core_content import PACK_VERSION as CORE_CONTENT_PACK_VERSION
 from sagasmith_dnd.core_content import build_srd2014_content
 from sagasmith_dnd.core_rule_pack import get_core_rule_pack
 from sagasmith_dnd.engine import resolve_attack, resolve_check, roll
+from sagasmith_dnd.game_time import (
+    advance_game_time,
+    anchor_world_time,
+    game_time_ticks,
+)
 from sagasmith_dnd.lifecycle import (
     advance_effect_durations,
     advance_elapsed_effect_durations,
@@ -3815,6 +3820,63 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         value["party"]["inventory"] = sheet["inventory"]
         return validate_party_state(value)
 
+    def advance_state_game_time(
+        state: dict[str, Any],
+        *,
+        period: str | None = None,
+        count: int = 1,
+        elapsed_ticks: int | None = None,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Advance the campaign's sole chronology and optional calendar view."""
+
+        next_state = validate_party_state(deepcopy(state))
+        transition = advance_game_time(
+            next_state["game_time"],
+            world_time=next_state.get("world_time"),
+            period=period,
+            count=count,
+            elapsed_ticks=elapsed_ticks,
+        )
+        next_state["game_time"] = transition["after"]
+        if transition["world_time_after"] is not None:
+            next_state["world_time"] = transition["world_time_after"]
+        return next_state, transition
+
+    def completed_spell_cast_ticks(
+        spell: dict[str, Any],
+        *,
+        ritual: bool,
+    ) -> int:
+        """Resolve common source casting times onto the canonical 6-second scale."""
+
+        casting_time = str(
+            dict(spell.get("definition") or {}).get("casting_time") or "1 action"
+        ).strip()
+        normalized = casting_time.casefold()
+        if normalized in {
+            "action",
+            "1 action",
+            "bonus action",
+            "1 bonus action",
+            "reaction",
+            "1 reaction",
+        }:
+            ticks = 1
+        else:
+            match = re.fullmatch(r"(\d+)\s+(minute|minutes|hour|hours)", normalized)
+            if match is None:
+                raise NeedsRulingError(
+                    "this spell's casting time needs an Agent ruling before time can advance",
+                    missing=("casting_time",),
+                    ruling_kind="source_or_scene_fact",
+                )
+            amount = int(match.group(1))
+            unit = "minute" if match.group(2).startswith("minute") else "hour"
+            ticks = game_time_ticks(unit, amount)
+        if ritual:
+            ticks += game_time_ticks("minute", 10)
+        return ticks
+
     def inventory_item_for_receipt(
         target_sheet: dict[str, Any],
         item: dict[str, Any],
@@ -4172,6 +4234,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         state = dict(value.get("state") or {})
         safe_state: dict[str, Any] = {
             "game_phase": str(state.get("game_phase") or PROFILE_LOBBY),
+            "game_time": deepcopy(dict(state.get("game_time") or {})),
             "party": deepcopy(dict(state.get("party") or {})),
             "world_time": deepcopy(dict(state.get("world_time") or {})),
             "world_effects": [
@@ -4564,6 +4627,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         system_owned_state_fields = {
             "combat",
             "game_phase",
+            "game_time",
             "playthrough_manifest",
             "random_stream",
             "world_effects",
@@ -5728,25 +5792,105 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             death_saves=current_actor.character_type == "pc",
             rules=rules_context,
         )
-        next_state = deepcopy(campaign.state)
+        next_state = validate_party_state(deepcopy(campaign.state))
         next_state["chase"] = settled["chase"]
-        character_updates = []
-        if settled["sheet"] != current_actor.sheet:
-            character_updates.append(
-                CharacterStateUpdate(
-                    character_id=current_actor.id,
-                    sheet=validate_character_sheet(settled["sheet"], rules=rules_context),
-                    notes=validate_character_notes(
-                        current_actor.notes,
-                        character_type=current_actor.character_type,
-                    ),
-                    expected_revision=expected_actor_revision,
-                )
+        round_changed = int(settled["chase"].get("round", 1) or 1) > int(
+            chase.get("round", 1) or 1
+        )
+        time_transition: dict[str, Any] | None = None
+        elapsed_minutes = 0
+        world_advanced: list[str] = []
+        world_expired: list[str] = []
+        if round_changed:
+            next_state, time_transition = advance_state_game_time(
+                next_state,
+                period="round",
             )
-        receipts = core_receipts(
-            rules_context,
-            list(CHASE_BOUNDARY_IDS),
-            "chase.turn",
+            elapsed_minutes = int(time_transition["elapsed_minutes"])
+            world_round = advance_world_effect_durations(
+                next_state,
+                period="round",
+                amount=1,
+            )
+            next_state = world_round["state"]
+            world_advanced.extend(world_round["advanced"])
+            world_expired.extend(world_round["expired"])
+            if elapsed_minutes:
+                world_elapsed = advance_elapsed_world_effect_durations(
+                    next_state,
+                    elapsed_minutes=elapsed_minutes,
+                )
+                next_state = world_elapsed["state"]
+                world_advanced.extend(world_elapsed["advanced"])
+                world_expired.extend(world_elapsed["expired"])
+        character_updates: list[CharacterStateUpdate] = []
+        expired: dict[str, list[str]] = {}
+        advanced: dict[str, list[str]] = {}
+        receipts: list[dict[str, Any]] = []
+        all_characters = characters.list(campaign_id=campaign_id)
+        for character in all_characters:
+            sheet = (
+                settled["sheet"]
+                if character.id == current_actor.id
+                else character.sheet
+            )
+            actor_advanced: list[str] = []
+            actor_expired: list[str] = []
+            if round_changed:
+                round_duration = advance_effect_durations(
+                    sheet,
+                    period="round",
+                )
+                sheet = round_duration["sheet"]
+                actor_advanced.extend(round_duration["advanced"])
+                actor_expired.extend(round_duration["expired"])
+                if elapsed_minutes:
+                    elapsed_duration = advance_elapsed_effect_durations(
+                        sheet,
+                        elapsed_minutes=elapsed_minutes,
+                    )
+                    sheet = elapsed_duration["sheet"]
+                    actor_advanced.extend(elapsed_duration["advanced"])
+                    actor_expired.extend(elapsed_duration["expired"])
+                duration_extension = apply_rule_event(
+                    sheet,
+                    "duration.advance",
+                    context_with_facts(
+                        rules_context,
+                        actor_id=character.id,
+                        period="round",
+                        amount=1,
+                        elapsed_minutes=elapsed_minutes,
+                    ),
+                )
+                sheet = duration_extension.sheet
+                receipts.extend(duration_extension.receipts)
+            if sheet != character.sheet:
+                character_updates.append(
+                    CharacterStateUpdate(
+                        character_id=character.id,
+                        sheet=validate_character_sheet(sheet, rules=rules_context),
+                        notes=validate_character_notes(
+                            character.notes,
+                            character_type=character.character_type,
+                        ),
+                        expected_revision=(
+                            expected_actor_revision
+                            if character.id == current_actor.id
+                            else character.revision
+                        ),
+                    )
+                )
+            if actor_advanced:
+                advanced[character.id] = list(dict.fromkeys(actor_advanced))
+            if actor_expired:
+                expired[character.id] = list(dict.fromkeys(actor_expired))
+        receipts.extend(
+            core_receipts(
+                rules_context,
+                list(CHASE_BOUNDARY_IDS),
+                "chase.turn",
+            )
         )
         StateMutationService(storage.database).replace(
             campaign_id,
@@ -5764,6 +5908,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "chase": settled["chase"],
             "turn": settled["turn"],
             "character": character_view(characters.get(actor_id)),
+            "game_time": (
+                time_transition["after"] if time_transition is not None else next_state["game_time"]
+            ),
+            "world_time": deepcopy(next_state.get("world_time")),
+            "advanced": advanced,
+            "expired": expired,
+            "world_advanced": list(dict.fromkeys(world_advanced)),
+            "world_expired": list(dict.fromkeys(world_expired)),
             "campaign_revision": campaigns.get(campaign_id).revision,
             "rule_receipts": receipts,
         }
@@ -8368,33 +8520,29 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         ]
         next_combatant = current_combatant(next_state["combat"])
         round_changed = int(next_state["combat"].get("round", 1)) > int(encounter.get("round", 1))
-        minute_changed = False
+        time_transition: dict[str, Any] | None = None
         if round_changed:
-            elapsed_rounds = int(next_state["combat"].get("rounds_until_minute", 0) or 0) + 1
-            minute_changed = elapsed_rounds >= 10
-            next_state["combat"]["rounds_until_minute"] = 0 if minute_changed else elapsed_rounds
+            next_state, time_transition = advance_state_game_time(
+                next_state,
+                period="round",
+            )
+        elapsed_minutes = (
+            int(time_transition["elapsed_minutes"])
+            if time_transition is not None
+            else 0
+        )
+        minute_changed = elapsed_minutes > 0
         world_advanced: list[str] = []
         world_expired: list[str] = []
         world_time = deepcopy(dict(next_state.get("world_time") or {}))
         if minute_changed:
             world_result = advance_elapsed_world_effect_durations(
                 next_state,
-                elapsed_minutes=1,
+                elapsed_minutes=elapsed_minutes,
             )
             next_state = world_result["state"]
             world_advanced.extend(world_result["advanced"])
             world_expired.extend(world_result["expired"])
-            if world_time:
-                elapsed = int(world_time.get("elapsed_minutes", 0) or 0) + 1
-                world_time = {
-                    "schema_version": 1,
-                    "day": elapsed // 1440 + 1,
-                    "hour": (elapsed % 1440) // 60,
-                    "minute": elapsed % 60,
-                    "elapsed_minutes": elapsed,
-                    "label": str(world_time.get("label") or ""),
-                }
-                next_state["world_time"] = world_time
         source_sheets = {
             str(item.get("actor_id")): deepcopy(
                 duration["sheet"]
@@ -8469,7 +8617,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 sheet = rounded["sheet"]
                 expired.extend(rounded["expired"])
             if minute_changed:
-                minutes = advance_elapsed_effect_durations(sheet, elapsed_minutes=1)
+                minutes = advance_elapsed_effect_durations(
+                    sheet,
+                    elapsed_minutes=elapsed_minutes,
+                )
                 sheet = minutes["sheet"]
                 expired.extend(minutes["expired"])
             extension = apply_rule_event(
@@ -8513,7 +8664,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     continue
                 minutes = advance_elapsed_effect_durations(
                     target.sheet,
-                    elapsed_minutes=1,
+                    elapsed_minutes=elapsed_minutes,
                 )
                 extension = apply_rule_event(
                     minutes["sheet"],
@@ -8556,6 +8707,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "status": "committed",
                 "combat": next_state["combat"],
                 "effects_expired": sorted(expired_effects),
+                "game_time": deepcopy(next_state.get("game_time")),
                 "world_time": world_time or None,
                 "world_advanced": list(dict.fromkeys(world_advanced)),
                 "world_expired": list(dict.fromkeys(world_expired)),
@@ -8633,15 +8785,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         effects = list(state.get("world_effects") or [])
         if action == "effect_add":
             raw_effect = deepcopy(required(payload, "effect"))
-            clock = dict(state.get("world_time") or {})
+            elapsed_ticks = int(state["game_time"]["elapsed_ticks"])
+            raw_effect.setdefault("created_at_elapsed_ticks", elapsed_ticks)
             raw_effect.setdefault(
-                "created_at_elapsed_minutes", int(clock.get("elapsed_minutes", 0) or 0)
+                "created_at_elapsed_minutes",
+                elapsed_ticks // game_time_ticks("minute"),
             )
             effect = validate_world_effect(raw_effect)
             if any(item["id"] == effect["id"] for item in effects):
                 raise ValueError("world effect id is already present")
-            if effect["duration"]["period"] in {"minute", "hour", "day"} and not clock:
-                raise ValueError("set the campaign clock before adding a timed world effect")
             effects.append(effect)
         else:
             effect_id = str(required(payload, "effect_id"))
@@ -8722,24 +8874,22 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         state = validate_party_state(deepcopy(campaign.state or {}))
         if bool(dict(state.get("combat") or {}).get("active")):
             raise CombatEngineError("campaign clock cannot be set during active combat")
-        requested_elapsed = (day - 1) * 1440 + hour * 60 + minute
         existing_clock = dict(state.get("world_time") or {})
-        if (
-            existing_clock
-            and int(existing_clock.get("elapsed_minutes", 0) or 0) != requested_elapsed
+        world_time = anchor_world_time(
+            state["game_time"],
+            day=day,
+            hour=hour,
+            minute=minute,
+            label=str(label).strip(),
+        )
+        if existing_clock and any(
+            int(existing_clock.get(key, 0) or 0) != int(world_time[key])
+            for key in ("day", "hour", "minute", "second")
         ):
             raise ValueError(
                 "campaign clock is already set; use clock_advance so timed effects "
                 "stay synchronized"
             )
-        world_time = {
-            "schema_version": 1,
-            "day": day,
-            "hour": hour,
-            "minute": minute,
-            "elapsed_minutes": requested_elapsed,
-            "label": str(label).strip(),
-        }
         state["world_time"] = world_time
         def clock_set_response(revisions: list[Any]) -> dict[str, Any]:
             return {
@@ -8870,22 +9020,19 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             raise CombatEngineError("campaign time cannot advance during active combat")
         time_minutes = {"minute": 1, "hour": 60, "day": 1440}
         world_time: dict[str, Any] | None = None
-        if normalized_period in time_minutes:
-            current_clock = dict(next_state.get("world_time") or {})
-            if not current_clock:
+        time_transition: dict[str, Any] | None = None
+        if normalized_period in {*time_minutes, "round"}:
+            if normalized_period in time_minutes and not next_state.get("world_time"):
                 raise ValueError("set the campaign clock before advancing narrative time")
-            elapsed = int(current_clock.get("elapsed_minutes", 0) or 0)
-            elapsed += time_minutes[normalized_period] * count
-            world_time = {
-                "schema_version": 1,
-                "day": elapsed // 1440 + 1,
-                "hour": (elapsed % 1440) // 60,
-                "minute": elapsed % 60,
-                "elapsed_minutes": elapsed,
-                "label": str(current_clock.get("label") or ""),
-            }
+            next_state, time_transition = advance_state_game_time(
+                next_state,
+                period=normalized_period,
+                count=count,
+            )
+            world_time = time_transition["world_time_after"]
             if (
                 normalized_expected_world_time is not None
+                and world_time is not None
                 and {
                     key: int(world_time[key])
                     for key in ("day", "hour", "minute", "elapsed_minutes")
@@ -8898,15 +9045,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     f"{world_time['hour']:02}:{world_time['minute']:02}, "
                     f"elapsed {world_time['elapsed_minutes']}"
                 )
-            next_state["world_time"] = world_time
-        elapsed_minutes = time_minutes.get(normalized_period, 0) * count
+        elapsed_minutes = (
+            int(time_transition["elapsed_minutes"])
+            if time_transition is not None
+            else 0
+        )
         effect_steps = (
-            {}
-            if elapsed_minutes
-            else {
-                "round": {"round": count},
-                "encounter": {"encounter": count},
-            }[normalized_period]
+            {"round": int(time_transition["elapsed_ticks"])}
+            if time_transition is not None
+            else {"encounter": count}
         )
         world_advanced: list[str] = []
         world_expired: list[str] = []
@@ -8918,14 +9065,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             next_state = world_result["state"]
             world_advanced.extend(world_result["advanced"])
             world_expired.extend(world_result["expired"])
-        else:
-            for effect_period, amount in effect_steps.items():
-                world_result = advance_world_effect_durations(
-                    next_state, period=effect_period, amount=amount
-                )
-                next_state = world_result["state"]
-                world_advanced.extend(world_result["advanced"])
-                world_expired.extend(world_result["expired"])
+        for effect_period, amount in effect_steps.items():
+            world_result = advance_world_effect_durations(
+                next_state, period=effect_period, amount=amount
+            )
+            next_state = world_result["state"]
+            world_advanced.extend(world_result["advanced"])
+            world_expired.extend(world_result["expired"])
         world_state_changed = bool(world_advanced or world_expired)
         updates: list[CharacterStateUpdate] = []
         advanced: dict[str, list[str]] = {}
@@ -8955,23 +9101,26 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 sheet = extension.sheet
                 character_advanced.extend(result["advanced"])
                 character_expired.extend(result["expired"])
-            else:
-                for effect_period, amount in effect_steps.items():
-                    result = advance_effect_durations(sheet, period=effect_period, amount=amount)
-                    extension = apply_rule_event(
-                        result["sheet"],
-                        "duration.advance",
-                        context_with_facts(
-                            rule_context,
-                            actor_id=character.id,
-                            period=effect_period,
-                            amount=amount,
-                        ),
-                    )
-                    rule_receipts.extend(extension.receipts)
-                    sheet = extension.sheet
-                    character_advanced.extend(result["advanced"])
-                    character_expired.extend(result["expired"])
+            for effect_period, amount in effect_steps.items():
+                result = advance_effect_durations(
+                    sheet,
+                    period=effect_period,
+                    amount=amount,
+                )
+                extension = apply_rule_event(
+                    result["sheet"],
+                    "duration.advance",
+                    context_with_facts(
+                        rule_context,
+                        actor_id=character.id,
+                        period=effect_period,
+                        amount=amount,
+                    ),
+                )
+                rule_receipts.extend(extension.receipts)
+                sheet = extension.sheet
+                character_advanced.extend(result["advanced"])
+                character_expired.extend(result["expired"])
             if not character_advanced and not character_expired and sheet == character.sheet:
                 continue
             updates.append(
@@ -8984,13 +9133,20 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             )
             advanced[character.id] = list(dict.fromkeys(character_advanced))
             expired[character.id] = list(dict.fromkeys(character_expired))
-        mutation_required = bool(updates or world_time is not None or world_state_changed)
+        mutation_required = bool(
+            updates
+            or time_transition is not None
+            or world_state_changed
+        )
 
         def clock_advance_response(revisions: list[Any]) -> dict[str, Any]:
             return {
                 "status": "committed" if mutation_required else "no_change",
                 "period": normalized_period,
                 "count": count,
+                "game_time": (
+                    time_transition["after"] if time_transition is not None else None
+                ),
                 "world_time": world_time,
                 "advanced": advanced,
                 "expired": expired,
@@ -9007,7 +9163,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             revisions_result = StateMutationService(storage.database).replace(
                 campaign_id,
                 campaign_state=(
-                    next_state if world_time is not None or world_state_changed else None
+                    next_state
+                    if time_transition is not None or world_state_changed
+                    else None
                 ),
                 character_updates=updates,
                 expected_campaign_revision=campaign.revision,
@@ -15194,21 +15352,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         recover_stable_creature(current.sheet, recovery_hours=1)
         campaign = campaigns.get(current.campaign_id)
         next_state = validate_party_state(deepcopy(campaign.state or {}))
-        world_time = dict(next_state.get("world_time") or {})
-        if not world_time:
-            raise ValueError("set the campaign clock before resolving stable recovery")
         recovery_roll = asdict(roll("1d4"))
         recovery_hours = int(recovery_roll["total"])
-        elapsed = int(world_time.get("elapsed_minutes", 0) or 0) + recovery_hours * 60
-        next_world_time = {
-            "schema_version": 1,
-            "day": elapsed // 1440 + 1,
-            "hour": (elapsed % 1440) // 60,
-            "minute": elapsed % 60,
-            "elapsed_minutes": elapsed,
-            "label": str(world_time.get("label") or ""),
-        }
-        next_state["world_time"] = next_world_time
+        next_state, time_transition = advance_state_game_time(
+            next_state,
+            period="hour",
+            count=recovery_hours,
+        )
+        next_world_time = time_transition["world_time_after"]
         world_advanced: list[str] = []
         world_expired: list[str] = []
         elapsed_minutes = recovery_hours * 60
@@ -15219,6 +15370,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         next_state = world_result["state"]
         world_advanced.extend(world_result["advanced"])
         world_expired.extend(world_result["expired"])
+        world_rounds = advance_world_effect_durations(
+            next_state,
+            period="round",
+            amount=int(time_transition["elapsed_ticks"]),
+        )
+        next_state = world_rounds["state"]
+        world_advanced.extend(world_rounds["advanced"])
+        world_expired.extend(world_rounds["expired"])
         rules = effective_rule_context(
             current.campaign_id,
             facts={"actor_id": character_id, "recovery_hours": recovery_hours},
@@ -15236,8 +15395,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 sheet,
                 elapsed_minutes=elapsed_minutes,
             )
-            extension = apply_rule_event(
+            round_result = advance_effect_durations(
                 duration_result["sheet"],
+                period="round",
+                amount=int(time_transition["elapsed_ticks"]),
+            )
+            extension = apply_rule_event(
+                round_result["sheet"],
                 "duration.advance",
                 context_with_facts(
                     rules,
@@ -15250,6 +15414,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             sheet = extension.sheet
             character_advanced.extend(duration_result["advanced"])
             character_expired.extend(duration_result["expired"])
+            character_advanced.extend(round_result["advanced"])
+            character_expired.extend(round_result["expired"])
             if character.id == character_id:
                 applied = recover_stable_creature(sheet, recovery_hours=recovery_hours)
                 sheet = applied["sheet"]
@@ -15295,6 +15461,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "recovery_hours": applied["recovery_hours"],
             "before_hp": applied["before_hp"],
             "after_hp": applied["after_hp"],
+            "game_time": time_transition["after"],
             "world_time": next_world_time,
             "advanced": advanced,
             "expired": expired,
@@ -15428,9 +15595,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         next_state = validate_party_state(deepcopy(campaign.state or {}))
         if bool(dict(next_state.get("combat") or {}).get("active")):
             raise CombatEngineError("stable recovery is not allowed while combat is active")
-        current_clock = dict(next_state.get("world_time") or {})
-        if not current_clock:
-            raise ValueError("set the campaign clock before resolving stable recovery")
         all_characters = {item.id: item for item in characters.list(campaign_id=campaign_id)}
         member_by_id = {item["character_id"]: item for item in normalized_members}
         for member in normalized_members:
@@ -15449,16 +15613,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             character_id: int(recovery_rolls[character_id]["total"]) for character_id in member_ids
         }
         elapsed_hours = max(recovery_hours.values())
-        elapsed = int(current_clock.get("elapsed_minutes", 0) or 0) + elapsed_hours * 60
-        next_world_time = {
-            "schema_version": 1,
-            "day": elapsed // 1440 + 1,
-            "hour": (elapsed % 1440) // 60,
-            "minute": elapsed % 60,
-            "elapsed_minutes": elapsed,
-            "label": str(current_clock.get("label") or ""),
-        }
-        next_state["world_time"] = next_world_time
+        next_state, time_transition = advance_state_game_time(
+            next_state,
+            period="hour",
+            count=elapsed_hours,
+        )
+        next_world_time = time_transition["world_time_after"]
         world_advanced: list[str] = []
         world_expired: list[str] = []
         elapsed_minutes = elapsed_hours * 60
@@ -15469,6 +15629,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         next_state = world_result["state"]
         world_advanced.extend(world_result["advanced"])
         world_expired.extend(world_result["expired"])
+        world_rounds = advance_world_effect_durations(
+            next_state,
+            period="round",
+            amount=int(time_transition["elapsed_ticks"]),
+        )
+        next_state = world_rounds["state"]
+        world_advanced.extend(world_rounds["advanced"])
+        world_expired.extend(world_rounds["expired"])
 
         rules = effective_rule_context(campaign_id)
         receipts: list[dict[str, Any]] = []
@@ -15484,8 +15652,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 sheet,
                 elapsed_minutes=elapsed_minutes,
             )
-            extension = apply_rule_event(
+            round_result = advance_effect_durations(
                 duration_result["sheet"],
+                period="round",
+                amount=int(time_transition["elapsed_ticks"]),
+            )
+            extension = apply_rule_event(
+                round_result["sheet"],
                 "duration.advance",
                 context_with_facts(
                     rules,
@@ -15498,6 +15671,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             sheet = extension.sheet
             character_advanced.extend(duration_result["advanced"])
             character_expired.extend(duration_result["expired"])
+            character_advanced.extend(round_result["advanced"])
+            character_expired.extend(round_result["expired"])
             member = member_by_id.get(current.id)
             if member is not None:
                 applied = recover_stable_creature(sheet, recovery_hours=recovery_hours[current.id])
@@ -15555,6 +15730,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 )
                 for character_id in member_ids
             },
+            "game_time": time_transition["after"],
             "world_time": next_world_time,
             "advanced": advanced,
             "expired": expired,
@@ -15907,8 +16083,52 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         replay = replay_idempotent(scope, idempotency_key, payload)
         if replay is not None:
             return replay
+        if current.revision != expected_revision:
+            raise ValueError(
+                f"character revision conflict: expected {expected_revision}, "
+                f"found {current.revision}"
+            )
         if source_item_id and signature_free_cast:
             raise CombatEngineError("a magic item spell cannot use a Signature Spell free cast")
+        campaign = campaigns.get(current.campaign_id)
+        next_state = validate_party_state(deepcopy(campaign.state or {}))
+        spell_entry = (
+            magic_item_spell_card(
+                current.sheet,
+                source_item_id=source_item_id,
+                spell_id=spell_id,
+            )
+            if source_item_id
+            else next(
+                item
+                for item in current.sheet.get("content", {}).get("spells", [])
+                if item.get("id") == spell_id
+            )
+        )
+        elapsed_ticks = completed_spell_cast_ticks(spell_entry, ritual=ritual)
+        next_state, time_transition = advance_state_game_time(
+            next_state,
+            elapsed_ticks=elapsed_ticks,
+        )
+        elapsed_minutes = int(time_transition["elapsed_minutes"])
+        world_advanced: list[str] = []
+        world_expired: list[str] = []
+        world_rounds = advance_world_effect_durations(
+            next_state,
+            period="round",
+            amount=elapsed_ticks,
+        )
+        next_state = world_rounds["state"]
+        world_advanced.extend(world_rounds["advanced"])
+        world_expired.extend(world_rounds["expired"])
+        if elapsed_minutes:
+            world_elapsed = advance_elapsed_world_effect_durations(
+                next_state,
+                elapsed_minutes=elapsed_minutes,
+            )
+            next_state = world_elapsed["state"]
+            world_advanced.extend(world_elapsed["advanced"])
+            world_expired.extend(world_elapsed["expired"])
         rules = effective_rule_context(
             current.campaign_id,
             facts={
@@ -15918,9 +16138,48 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "source_item_id": source_item_id,
             },
         )
+        timed_sheets: dict[str, dict[str, Any]] = {}
+        advanced: dict[str, list[str]] = {}
+        expired: dict[str, list[str]] = {}
+        rule_receipts: list[dict[str, Any]] = []
+        all_characters = characters.list(campaign_id=current.campaign_id)
+        for character in all_characters:
+            round_duration = advance_effect_durations(
+                character.sheet,
+                period="round",
+                amount=elapsed_ticks,
+            )
+            sheet = round_duration["sheet"]
+            actor_advanced = list(round_duration["advanced"])
+            actor_expired = list(round_duration["expired"])
+            if elapsed_minutes:
+                elapsed_duration = advance_elapsed_effect_durations(
+                    sheet,
+                    elapsed_minutes=elapsed_minutes,
+                )
+                sheet = elapsed_duration["sheet"]
+                actor_advanced.extend(elapsed_duration["advanced"])
+                actor_expired.extend(elapsed_duration["expired"])
+            duration_extension = apply_rule_event(
+                sheet,
+                "duration.advance",
+                context_with_facts(
+                    rules,
+                    actor_id=character.id,
+                    period="round",
+                    amount=elapsed_ticks,
+                    elapsed_minutes=elapsed_minutes,
+                ),
+            )
+            timed_sheets[character.id] = duration_extension.sheet
+            rule_receipts.extend(duration_extension.receipts)
+            if actor_advanced:
+                advanced[character.id] = list(dict.fromkeys(actor_advanced))
+            if actor_expired:
+                expired[character.id] = list(dict.fromkeys(actor_expired))
         applied = (
             consume_magic_item_spell_cast(
-                current.sheet,
+                timed_sheets[current.id],
                 source_item_id=source_item_id,
                 spell_id=spell_id,
                 cast_level=cast_level,
@@ -15929,7 +16188,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             )
             if source_item_id
             else consume_spell_cast(
-                current.sheet,
+                timed_sheets[current.id],
                 spell_id=spell_id,
                 cast_level=cast_level,
                 ritual=ritual,
@@ -15952,39 +16211,68 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "result": {key: value for key, value in applied.items() if key != "sheet"},
                 "character": character_view(current),
             }
-        StateMutationService(storage.database).replace(
+        timed_sheets[current.id] = applied["sheet"]
+        rule_receipts.extend(applied.get("rule_receipts") or [])
+        updates = [
+            CharacterStateUpdate(
+                character_id=character.id,
+                sheet=validate_character_sheet(timed_sheets[character.id]),
+                notes=validate_character_notes(character.notes),
+                expected_revision=(
+                    expected_revision
+                    if character.id == current.id
+                    else character.revision
+                ),
+            )
+            for character in all_characters
+            if timed_sheets[character.id] != character.sheet
+        ]
+        current_after = replace(
+            current,
+            sheet=validate_character_sheet(timed_sheets[current.id]),
+            notes=validate_character_notes(current.notes),
+            revision=current.revision + 1,
+        )
+
+        def cast_response(revisions: list[Any]) -> dict[str, Any]:
+            return {
+                **_ruling_status(
+                    "committed" if applied.get("automatic_effect") else "pending_ruling",
+                    "generic_spell_effect",
+                ),
+                "result": {key: value for key, value in applied.items() if key != "sheet"},
+                "character": character_view(current_after),
+                "game_time": time_transition["after"],
+                "world_time": time_transition["world_time_after"],
+                "elapsed_ticks": elapsed_ticks,
+                "elapsed_minutes": elapsed_minutes,
+                "advanced": advanced,
+                "expired": expired,
+                "world_advanced": list(dict.fromkeys(world_advanced)),
+                "world_expired": list(dict.fromkeys(world_expired)),
+                "campaign_revision": campaign.revision + 1,
+                "revisions": [asdict(item) for item in revisions],
+            }
+
+        revisions_result = StateMutationService(storage.database).replace(
             current.campaign_id,
-            character_updates=[
-                CharacterStateUpdate(
-                    character_id=current.id,
-                    sheet=validate_character_sheet(applied["sheet"]),
-                    notes=validate_character_notes(current.notes),
-                    expected_revision=expected_revision,
-                )
-            ],
+            campaign_state=next_state,
+            character_updates=updates,
+            expected_campaign_revision=campaign.revision,
             operation=(
                 "character.magic_item.spell.cast" if source_item_id else "character.spell.cast"
             ),
             actor=principal_id,
             branch_id=branch_id,
             idempotency_key=idempotency_key,
-            rule_receipts=list(applied.get("rule_receipts") or []),
-        )
-        response = {
-            **_ruling_status(
-                "committed" if applied.get("automatic_effect") else "pending_ruling",
-                "generic_spell_effect",
+            idempotency_write=IdempotencyWrite(
+                scope=scope,
+                payload=payload,
+                response=cast_response,
             ),
-            "result": {key: value for key, value in applied.items() if key != "sheet"},
-            "character": character_view(characters.get(character_id)),
-        }
-        return remember_idempotent(
-            scope,
-            idempotency_key,
-            payload,
-            response,
-            campaign_id=current.campaign_id,
+            rule_receipts=rule_receipts,
         )
+        return cast_response(list(revisions_result or []))
 
     @_agent_ruling_boundary
     def campaign_party_rest(
@@ -16184,15 +16472,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if not current_clock:
             raise ValueError("set the campaign clock before resolving a party rest")
         started_elapsed = int(current_clock.get("elapsed_minutes", 0) or 0)
-        completed_elapsed = started_elapsed + duration_minutes
-        completed_clock = {
-            "schema_version": 1,
-            "day": completed_elapsed // 1440 + 1,
-            "hour": (completed_elapsed % 1440) // 60,
-            "minute": completed_elapsed % 60,
-            "elapsed_minutes": completed_elapsed,
-            "label": str(current_clock.get("label") or ""),
-        }
+        next_state, time_transition = advance_state_game_time(
+            next_state,
+            period="minute",
+            count=duration_minutes,
+        )
+        completed_clock = time_transition["world_time_after"]
+        assert completed_clock is not None
+        completed_elapsed = int(completed_clock["elapsed_minutes"])
         all_characters = {item.id: item for item in characters.list(campaign_id=campaign_id)}
         for member in normalized_members:
             current = all_characters.get(member["character_id"])
@@ -16260,7 +16547,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         next_state = world_result["state"]
         world_advanced.extend(world_result["advanced"])
         world_expired.extend(world_result["expired"])
-        next_state["world_time"] = completed_clock
+        world_rounds = advance_world_effect_durations(
+            next_state,
+            period="round",
+            amount=int(time_transition["elapsed_ticks"]),
+        )
+        next_state = world_rounds["state"]
+        world_advanced.extend(world_rounds["advanced"])
+        world_expired.extend(world_rounds["expired"])
 
         member_by_id = {item["character_id"]: item for item in normalized_members}
         updates: list[CharacterStateUpdate] = []
@@ -16278,8 +16572,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 sheet,
                 elapsed_minutes=duration_minutes,
             )
-            extension = apply_rule_event(
+            round_duration = advance_effect_durations(
                 duration["sheet"],
+                period="round",
+                amount=int(time_transition["elapsed_ticks"]),
+            )
+            extension = apply_rule_event(
+                round_duration["sheet"],
                 "duration.advance",
                 context_with_facts(
                     rule_context,
@@ -16295,6 +16594,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             sheet = extension.sheet
             actor_advanced.extend(duration["advanced"])
             actor_expired.extend(duration["expired"])
+            actor_advanced.extend(round_duration["advanced"])
+            actor_expired.extend(round_duration["expired"])
             rule_receipts.extend(extension.receipts)
             member = member_by_id.get(current.id)
             if member is not None:
@@ -16408,6 +16709,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "rest_type": normalized_rest_type,
             "duration_minutes": duration_minutes,
             "member_ids": member_ids,
+            "game_time": time_transition["after"],
             "world_time": completed_clock,
             "recovered": recovered,
             "preparations": preparations,
@@ -21905,16 +22207,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         world_time = dict(next_state.get("world_time") or {})
         if not world_time:
             raise ValueError("set the campaign clock before copying a spell")
-        elapsed = int(world_time.get("elapsed_minutes", 0) or 0) + minutes
-        next_world_time = {
-            "schema_version": 1,
-            "day": elapsed // 1440 + 1,
-            "hour": (elapsed % 1440) // 60,
-            "minute": elapsed % 60,
-            "elapsed_minutes": elapsed,
-            "label": str(world_time.get("label") or ""),
-        }
-        next_state["world_time"] = next_world_time
+        next_state, time_transition = advance_state_game_time(
+            next_state,
+            period="minute",
+            count=minutes,
+        )
+        next_world_time = time_transition["world_time_after"]
+        assert next_world_time is not None
 
         world_advanced: list[str] = []
         world_expired: list[str] = []
@@ -21925,6 +22224,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         next_state = world_result["state"]
         world_advanced.extend(world_result["advanced"])
         world_expired.extend(world_result["expired"])
+        world_rounds = advance_world_effect_durations(
+            next_state,
+            period="round",
+            amount=int(time_transition["elapsed_ticks"]),
+        )
+        next_state = world_rounds["state"]
+        world_advanced.extend(world_rounds["advanced"])
+        world_expired.extend(world_rounds["expired"])
 
         branch_id = require_current_branch(campaign_id, None)
         request_payload = {
@@ -21960,8 +22267,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 updated_sheet,
                 elapsed_minutes=minutes,
             )
-            extension = apply_rule_event(
+            round_duration = advance_effect_durations(
                 duration["sheet"],
+                period="round",
+                amount=int(time_transition["elapsed_ticks"]),
+            )
+            extension = apply_rule_event(
+                round_duration["sheet"],
                 "duration.advance",
                 context_with_facts(
                     rule_context,
@@ -21974,6 +22286,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             updated_sheet = extension.sheet
             character_advanced.extend(duration["advanced"])
             character_expired.extend(duration["expired"])
+            character_advanced.extend(round_duration["advanced"])
+            character_expired.extend(round_duration["expired"])
             if updated_sheet != character.sheet:
                 updates.append(
                     CharacterStateUpdate(
@@ -22021,6 +22335,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "hours": hours,
             "base_minutes": base_minutes,
             "time_percent": time_percent,
+            "game_time": time_transition["after"],
             "world_time": next_world_time,
             "advanced": advanced,
             "expired": expired,
@@ -26553,6 +26868,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             },
             "world_state": {
                 "game_phase": str(campaign.state.get("game_phase") or PROFILE_LOBBY),
+                "game_time": deepcopy(dict(campaign.state.get("game_time") or {})),
                 "world_time": deepcopy(dict(campaign.state.get("world_time") or {})),
                 "world_effects": deepcopy(list(campaign.state.get("world_effects") or [])),
                 "combat_active": bool(

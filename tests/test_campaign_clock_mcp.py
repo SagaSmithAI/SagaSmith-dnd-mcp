@@ -50,12 +50,18 @@ def test_campaign_clock_and_elapsed_effects_advance_atomically(tmp_path: Path) -
                 "active": True,
                 "duration": {"period": "hour", "remaining": 3},
             },
-            {
-                "id": "days",
-                "name": "Days",
-                "active": True,
-                "duration": {"period": "day", "remaining": 2},
-            },
+                {
+                    "id": "days",
+                    "name": "Days",
+                    "active": True,
+                    "duration": {"period": "day", "remaining": 2},
+                },
+                {
+                    "id": "rounds",
+                    "name": "Rounds",
+                    "active": True,
+                    "duration": {"period": "round", "remaining": 1},
+                },
         ]
         actor = await _call(
             server,
@@ -149,11 +155,15 @@ def test_campaign_clock_and_elapsed_effects_advance_atomically(tmp_path: Path) -
         )
         assert advance_receipt["response"] == advanced
         assert advanced["world_time"] == {
-            "schema_version": 1,
+            "schema_version": 2,
+            "tick_seconds": 6,
+            "calendar_offset_ticks": 20100,
             "day": 2,
             "hour": 11,
             "minute": 30,
+            "second": 0,
             "elapsed_minutes": 2130,
+            "round_remainder": 0,
             "label": "Baldur's Gate",
         }
         assert advanced["world_expired"] == ["mace-light"]
@@ -166,6 +176,7 @@ def test_campaign_clock_and_elapsed_effects_advance_atomically(tmp_path: Path) -
         assert effects["minutes"]["active"] is False
         assert effects["hours"]["duration"]["remaining"] == 1
         assert effects["days"]["duration"]["remaining"] == 2
+        assert effects["rounds"]["active"] is False
         persisted = await _call(
             server,
             "campaign_query",
@@ -539,7 +550,7 @@ def test_generic_campaign_update_cannot_bypass_the_clock_owner(tmp_path: Path) -
     asyncio.run(exercise())
 
 
-def test_ten_combat_rounds_advance_the_shared_clock_and_all_elapsed_effects(
+def test_two_five_round_combats_share_one_minute_clock_and_elapsed_effects(
     tmp_path: Path,
 ) -> None:
     async def exercise() -> None:
@@ -630,7 +641,7 @@ def test_ten_combat_rounds_advance_the_shared_clock_and_all_elapsed_effects(
         )
 
         final_arguments = None
-        for turn in range(20):
+        for turn in range(10):
             current_combatant = state["combat"]["combatants"][
                 state["combat"]["turn_index"]
             ]
@@ -642,13 +653,66 @@ def test_ten_combat_rounds_advance_the_shared_clock_and_all_elapsed_effects(
             }
             state = await _call(server, "combat_end_turn", final_arguments)
 
+        assert state["game_time"]["elapsed_ticks"] == 5
+        assert state["world_time"]["minute"] == 0
+        assert state["world_time"]["second"] == 30
+        midway = await _call(
+            server,
+            "character_query",
+            {"view": "get", "payload": {"character_id": actors[0]["id"]}},
+        )
+        assert midway["sheet"]["effects"][0]["active"] is True
+        ended = await _call(
+            server,
+            "combat_end",
+            {
+                "campaign_id": campaign["id"],
+                "outcome": {
+                    "status": "victory",
+                    "summary": "The first skirmish ends after five rounds.",
+                },
+                "expected_revision": state["campaign_revision"],
+                "idempotency_key": "first-combat-end",
+            },
+        )
+        state = await _call(
+            server,
+            "combat_start",
+            {
+                "campaign_id": campaign["id"],
+                "participant_ids": [actors[0]["id"], actors[1]["id"]],
+                "participant_config": [
+                    {"actor_id": actors[0]["id"], "initiative": 20},
+                    {"actor_id": actors[1]["id"], "initiative": 10},
+                ],
+                "expected_revision": ended["campaign_revision"],
+                "idempotency_key": "second-combat-start",
+            },
+        )
+        for turn in range(10):
+            current_combatant = state["combat"]["combatants"][
+                state["combat"]["turn_index"]
+            ]
+            final_arguments = {
+                "campaign_id": campaign["id"],
+                "actor_id": current_combatant["actor_id"],
+                "expected_revision": state["campaign_revision"],
+                "idempotency_key": f"second-turn-{turn}",
+            }
+            state = await _call(server, "combat_end_turn", final_arguments)
+
         assert final_arguments is not None
+        assert state["game_time"]["elapsed_ticks"] == 10
         assert state["world_time"] == {
-            "schema_version": 1,
+            "schema_version": 2,
+            "tick_seconds": 6,
+            "calendar_offset_ticks": 6000,
             "day": 1,
             "hour": 10,
             "minute": 1,
+            "second": 0,
             "elapsed_minutes": 601,
+            "round_remainder": 0,
             "label": "Round test",
         }
         assert state["world_expired"] == ["one-minute-light"]
@@ -686,7 +750,7 @@ def test_ten_combat_rounds_advance_the_shared_clock_and_all_elapsed_effects(
             {
                 "campaign_id": campaign["id"],
                 "action": "receipt",
-                "payload": {"idempotency_key": "turn-19"},
+                "payload": {"idempotency_key": "second-turn-9"},
             },
         )
         assert receipt["response"]["world_time"] == minute_boundary["world_time"]

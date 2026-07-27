@@ -818,6 +818,12 @@ def test_statblock_spellcasting_binds_slots_and_active_content(tmp_path: Path) -
         )
         assert pending_components["committed"] is False
         assert pending_components["missing"] == ["source_components"]
+        after_pending = await _call(
+            server,
+            "campaign_query",
+            {"view": "get", "payload": {"campaign_id": campaign["id"]}},
+        )
+        assert after_pending["state"]["game_time"]["elapsed_ticks"] == 0
         cast = await _call(
             server,
             "character_cast_spell",
@@ -836,6 +842,12 @@ def test_statblock_spellcasting_binds_slots_and_active_content(tmp_path: Path) -
             "ritual": False,
         }
         assert "source_components" in cast["ruling_required"]
+        after_cast = await _call(
+            server,
+            "campaign_query",
+            {"view": "get", "payload": {"campaign_id": campaign["id"]}},
+        )
+        assert after_cast["state"]["game_time"]["elapsed_ticks"] == 1
         updated_actor = await _call(
             server,
             "character_query",
