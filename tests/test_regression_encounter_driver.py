@@ -20,6 +20,7 @@ from scripts.regression_encounter import (
     _apply_source_separations,
     _body_thief_sides,
     _body_thief_target_ids,
+    _character_summary,
     _characters,
     _choose_destination,
     _choose_party_spell,
@@ -157,6 +158,47 @@ def test_encounter_operation_scope_separates_consecutive_encounters() -> None:
         1,
         "attack",
     )
+
+
+def test_character_summary_surfaces_only_agent_owned_ruling_features() -> None:
+    actor = {
+        "id": "peryton-1",
+        "name": "Peryton",
+        "derived": {"hit_points": {"value": 33, "max": 33}},
+        "sheet": {
+            "conditions": [],
+            "content": {
+                "features": [
+                    {
+                        "id": "dive-attack",
+                        "name": "Dive Attack",
+                        "description": "Printed passive.",
+                        "choices": {
+                            "manual_ruling": {
+                                "kind": "descriptive_passive",
+                                "default_resolver": "agent",
+                                "source_excerpt": "Printed passive.",
+                            }
+                        },
+                    },
+                    {"id": "automatic", "name": "Automatic feature"},
+                ]
+            },
+        },
+    }
+
+    assert _character_summary(actor)["agent_ruling_features"] == [
+        {
+            "id": "dive-attack",
+            "name": "Dive Attack",
+            "description": "Printed passive.",
+            "manual_ruling": {
+                "kind": "descriptive_passive",
+                "default_resolver": "agent",
+                "source_excerpt": "Printed passive.",
+            },
+        }
+    ]
 
 
 def test_encounter_start_token_binds_the_complete_public_request() -> None:

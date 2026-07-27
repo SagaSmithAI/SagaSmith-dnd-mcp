@@ -2514,14 +2514,30 @@ def _source_extra_damage_rulings(
         def compact(value: Any) -> str:
             return " ".join(str(value).split()).casefold()
 
+        if feature is None:
+            raise ValueError(
+                f"source extra-damage ruling {index} feature {feature_id!r} "
+                "is absent from the actor card"
+            )
         if (
-            feature is None
-            or manual_ruling.get("default_resolver") != "agent"
+            manual_ruling.get("default_resolver") != "agent"
             or manual_ruling.get("kind") != "descriptive_passive"
-            or compact(source_excerpt)
+        ):
+            raise ValueError(
+                f"source extra-damage ruling {index} feature {feature_id!r} "
+                "is not an Agent-owned descriptive passive"
+            )
+        if (
+            compact(source_excerpt)
             != compact(manual_ruling.get("source_excerpt") or "")
             or compact(source_excerpt) != compact(feature.get("description") or "")
-            or re.search(
+        ):
+            raise ValueError(
+                f"source extra-damage ruling {index} is not bound to the exact "
+                "Agent-owned passive excerpt"
+            )
+        if (
+            re.search(
                 (
                     r"(?<![a-z0-9_])"
                     + re.escape("".join(expression.split()).casefold())
@@ -2532,8 +2548,8 @@ def _source_extra_damage_rulings(
             is None
         ):
             raise ValueError(
-                f"source extra-damage ruling {index} is not bound to the exact "
-                "Agent-owned passive and printed dice expression"
+                f"source extra-damage ruling {index} is not bound to the "
+                "printed dice expression"
             )
         attacks = list(
             dict(dict(actor.get("derived") or {}).get("inventory") or {}).get(
@@ -3051,6 +3067,22 @@ def _character_summary(actor: dict[str, Any]) -> dict[str, Any]:
         "prepared_spell_ids": list(
             dict(derived.get("spellcasting") or {}).get("prepared_spell_ids") or []
         ),
+        "agent_ruling_features": [
+            {
+                "id": item.get("id"),
+                "name": item.get("name"),
+                "description": item.get("description"),
+                "manual_ruling": deepcopy(
+                    dict(dict(item.get("choices") or {}).get("manual_ruling") or {})
+                ),
+            }
+            for item in dict(sheet.get("content") or {}).get("features", [])
+            if isinstance(item, dict)
+            and dict(dict(item.get("choices") or {}).get("manual_ruling") or {}).get(
+                "default_resolver"
+            )
+            == "agent"
+        ],
         "weapons": [
             {
                 "item_id": item.get("item_id"),
