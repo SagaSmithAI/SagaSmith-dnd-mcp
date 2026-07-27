@@ -2326,6 +2326,7 @@ async def _resolve_check(
     knowledge_actor_ids: list[str],
     success_knowledge: str,
     failure_knowledge: str,
+    source_scene_id: str = "",
     defer_checkpoint: bool = False,
 ) -> dict[str, Any]:
     check_identity = _check_identity(occurrence_id)
@@ -2339,7 +2340,7 @@ async def _resolve_check(
         raise ValueError("resolve-check kind is not supported by character_check")
     if advantage and disadvantage:
         raise ValueError("resolve-check cannot apply advantage and disadvantage together")
-    scene = await client.domain(
+    occurrence_scene = await client.domain(
         "module_query",
         {
             "campaign_id": campaign_id,
@@ -2347,8 +2348,25 @@ async def _resolve_check(
             "payload": {"scene_id": scene_id},
         },
     )
-    exact_ref = _validate_source_ref(scene, source_ref, excerpt=source_excerpt)
-    location_keys = {str(item.get("key") or "") for item in _scene_locations(scene)}
+    cited_scene_id = source_scene_id.strip() or scene_id
+    cited_scene = occurrence_scene
+    if cited_scene_id != scene_id:
+        cited_scene = await client.domain(
+            "module_query",
+            {
+                "campaign_id": campaign_id,
+                "view": "scene",
+                "payload": {"scene_id": cited_scene_id},
+            },
+        )
+    exact_ref = _validate_source_ref(
+        cited_scene,
+        source_ref,
+        excerpt=source_excerpt,
+    )
+    location_keys = {
+        str(item.get("key") or "") for item in _scene_locations(occurrence_scene)
+    }
     if location_key not in location_keys:
         raise ValueError("resolve-check location is not present in the scene atlas")
     actor = await client.domain(
@@ -2516,6 +2534,7 @@ async def _resolve_check(
     return {
         "scene": {
             "scene_id": scene_id,
+            "source_scene_id": cited_scene_id,
             "location_key": location_key,
             "source_ref": exact_ref,
         },
@@ -2554,6 +2573,7 @@ async def _resolve_contest(
     source_win_knowledge: str,
     target_win_knowledge: str,
     tie_knowledge: str,
+    source_scene_id: str = "",
     defer_checkpoint: bool = False,
 ) -> dict[str, Any]:
     contest_identity = _contest_identity(occurrence_id)
@@ -2577,7 +2597,7 @@ async def _resolve_contest(
         raise ValueError("resolve-contest source cannot have advantage and disadvantage together")
     if target_advantage and target_disadvantage:
         raise ValueError("resolve-contest target cannot have advantage and disadvantage together")
-    scene = await client.domain(
+    occurrence_scene = await client.domain(
         "module_query",
         {
             "campaign_id": campaign_id,
@@ -2585,8 +2605,25 @@ async def _resolve_contest(
             "payload": {"scene_id": scene_id},
         },
     )
-    exact_ref = _validate_source_ref(scene, source_ref, excerpt=source_excerpt)
-    location_keys = {str(item.get("key") or "") for item in _scene_locations(scene)}
+    cited_scene_id = source_scene_id.strip() or scene_id
+    cited_scene = occurrence_scene
+    if cited_scene_id != scene_id:
+        cited_scene = await client.domain(
+            "module_query",
+            {
+                "campaign_id": campaign_id,
+                "view": "scene",
+                "payload": {"scene_id": cited_scene_id},
+            },
+        )
+    exact_ref = _validate_source_ref(
+        cited_scene,
+        source_ref,
+        excerpt=source_excerpt,
+    )
+    location_keys = {
+        str(item.get("key") or "") for item in _scene_locations(occurrence_scene)
+    }
     if location_key not in location_keys:
         raise ValueError("resolve-contest location is not present in the scene atlas")
     source_actor = await client.domain(
@@ -2786,6 +2823,7 @@ async def _resolve_contest(
     return {
         "scene": {
             "scene_id": scene_id,
+            "source_scene_id": cited_scene_id,
             "location_key": location_key,
             "source_ref": exact_ref,
         },
@@ -9817,6 +9855,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     location_key=args.location_key,
                     source_excerpt=args.source_excerpt,
                     source_ref=args.source_ref_json,
+                    source_scene_id=args.source_scene_id,
                     occurrence_id=args.occurrence_id,
                     actor_id=args.check_actor_id,
                     kind=args.check_kind,
@@ -9842,6 +9881,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     location_key=args.location_key,
                     source_excerpt=args.source_excerpt,
                     source_ref=args.source_ref_json,
+                    source_scene_id=args.source_scene_id,
                     occurrence_id=args.occurrence_id,
                     source_actor_id=args.contest_source_actor_id,
                     target_actor_id=args.contest_target_actor_id,

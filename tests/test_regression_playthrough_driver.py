@@ -5028,12 +5028,15 @@ def test_failed_route_is_preserved_when_branching_from_verified_snapshot(
 
 
 @pytest.mark.parametrize("defer_checkpoint", [False, True])
+@pytest.mark.parametrize("cross_scene", [False, True])
 def test_source_cited_check_persists_result_and_explicit_knowledge(
     defer_checkpoint: bool,
+    cross_scene: bool,
 ) -> None:
+    source_scene_id = "rules-scene" if cross_scene else "scene-1"
     source_ref = {
         "module_id": "module-1",
-        "scene_id": "scene-1",
+        "scene_id": source_scene_id,
         "chunk_id": "chunk-1",
         "page_start": 7,
         "page_end": 7,
@@ -5052,9 +5055,18 @@ def test_source_cited_check_persists_result_and_explicit_knowledge(
 
         async def domain(self, tool_id: str, arguments: dict):
             if tool_id == "module_query" and arguments["view"] == "scene":
+                requested_scene_id = arguments["payload"]["scene_id"]
+                if requested_scene_id == "scene-1" and cross_scene:
+                    return {
+                        "module_id": "module-1",
+                        "scene_id": "scene-1",
+                        "content": "The party follows the road through the market.",
+                        "locations": [{"key": "ambush"}],
+                    }
+                assert requested_scene_id == source_scene_id
                 return {
                     "module_id": "module-1",
-                    "scene_id": "scene-1",
+                    "scene_id": source_scene_id,
                     "content": "A DC 10 Wisdom (Survival) check reveals the trail.",
                     "locations": [{"key": "ambush"}],
                 }
@@ -5130,6 +5142,7 @@ def test_source_cited_check_persists_result_and_explicit_knowledge(
             location_key="ambush",
             source_excerpt="A DC 10 Wisdom (Survival) check reveals the trail.",
             source_ref=source_ref,
+            source_scene_id=source_scene_id,
             occurrence_id=expected_identity,
             actor_id="actor-1",
             kind="ability",
@@ -5145,6 +5158,7 @@ def test_source_cited_check_persists_result_and_explicit_knowledge(
     )
 
     assert result["check"] == {"success": True, "total": 14}
+    assert result["scene"]["source_scene_id"] == source_scene_id
     assert result["knowledge_actor_ids"] == ["actor-1", "actor-2"]
     assert result["sync"]["campaign_revision"] == 7
     assert _check_knowledge_key("run-1", "trail-survival-1") != _check_knowledge_key(
