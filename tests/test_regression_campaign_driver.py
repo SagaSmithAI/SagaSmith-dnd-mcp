@@ -14,6 +14,7 @@ import pytest
 import scripts.regression_campaign as campaign_driver
 from scripts.regression_campaign import (
     _arguments,
+    _campaign_phase_lock,
     _character_summary,
     _configure_utf8_streams,
     _discover_rule_chunks,
@@ -31,6 +32,37 @@ from scripts.regression_campaign import (
     _statblock_replacement_fields,
     _validate_noncombat_scene,
 )
+
+
+def test_campaign_phase_lock_serializes_same_campaign(tmp_path: Path) -> None:
+    with _campaign_phase_lock(tmp_path, "campaign-1"):
+        with pytest.raises(
+            RuntimeError,
+            match="another regression command is temporarily transitioning",
+        ):
+            with _campaign_phase_lock(
+                tmp_path,
+                "campaign-1",
+                timeout_seconds=0.01,
+            ):
+                raise AssertionError("the second same-campaign lock must not enter")
+
+    with _campaign_phase_lock(
+        tmp_path,
+        "campaign-1",
+        timeout_seconds=0.01,
+    ):
+        pass
+
+
+def test_campaign_phase_lock_does_not_block_another_campaign(tmp_path: Path) -> None:
+    with _campaign_phase_lock(tmp_path, "campaign-1"):
+        with _campaign_phase_lock(
+            tmp_path,
+            "campaign-2",
+            timeout_seconds=0.01,
+        ):
+            pass
 
 
 def test_rule_statblock_idempotency_is_bound_to_source_and_actor_batch() -> None:

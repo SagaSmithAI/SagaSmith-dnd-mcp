@@ -13,9 +13,16 @@ import hashlib
 import json
 import os
 import sys
+import time
+from contextlib import contextmanager
 from copy import deepcopy
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
+
+if os.name == "nt":
+    import msvcrt
+else:
+    import fcntl
 
 from mcp import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
@@ -23,6 +30,53 @@ from mcp.client.stdio import StdioServerParameters, stdio_client
 PRINCIPAL_ID = "system:local"
 RULE_STATBLOCK_OCR_PROFILE = "layout-ocr-v1"
 RULE_STATBLOCK_CARD_PROFILE = "agent-ruling-v2"
+
+
+@contextmanager
+def _campaign_phase_lock(
+    home: Path,
+    campaign_id: str,
+    *,
+    timeout_seconds: float = 60.0,
+) -> Iterator[None]:
+    """Serialize driver-owned temporary phase transitions for one campaign."""
+
+    if timeout_seconds < 0:
+        raise ValueError("phase lock timeout must be nonnegative")
+    resolved_home = home.expanduser().resolve()
+    lock_dir = resolved_home / ".regression-locks"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    campaign_token = hashlib.sha256(campaign_id.encode("utf-8")).hexdigest()[:24]
+    lock_path = lock_dir / f"campaign-phase-{campaign_token}.lock"
+    with lock_path.open("a+b") as lock_file:
+        lock_file.seek(0, os.SEEK_END)
+        if lock_file.tell() == 0:
+            lock_file.write(b"\0")
+            lock_file.flush()
+        deadline = time.monotonic() + timeout_seconds
+        while True:
+            lock_file.seek(0)
+            try:
+                if os.name == "nt":
+                    msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError as exc:
+                if time.monotonic() >= deadline:
+                    raise RuntimeError(
+                        "another regression command is temporarily transitioning "
+                        f"campaign {campaign_id}; retry after it completes"
+                    ) from exc
+                time.sleep(0.05)
+        try:
+            yield
+        finally:
+            lock_file.seek(0)
+            if os.name == "nt":
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
 def _load_review_override(path: Path, observation: str) -> tuple[str, str, Path]:
@@ -2721,29 +2775,30 @@ async def _statblock_preparation_with_recovery(
     args: argparse.Namespace,
     operation: Any,
 ) -> dict[str, Any]:
-    token = _idempotency_token(args.run_id)
-    async with stdio_client(_server_parameters(args)) as (read, write):
-        async with ClientSession(read, write) as session:
-            await session.initialize()
-            initial_client = CampaignMcp(session, args.campaign_id)
-            original = await _statblock_preparation_context(
-                initial_client,
-                args.campaign_id,
-            )
-    try:
-        return await operation(args)
-    except BaseException:
+    with _campaign_phase_lock(args.home, args.campaign_id):
+        token = _idempotency_token(args.run_id)
         async with stdio_client(_server_parameters(args)) as (read, write):
             async with ClientSession(read, write) as session:
                 await session.initialize()
-                recovery_client = CampaignMcp(session, args.campaign_id)
-                await _restore_statblock_preparation_context(
-                    recovery_client,
-                    campaign_id=args.campaign_id,
-                    original=original,
-                    token=token,
+                initial_client = CampaignMcp(session, args.campaign_id)
+                original = await _statblock_preparation_context(
+                    initial_client,
+                    args.campaign_id,
                 )
-        raise
+        try:
+            return await operation(args)
+        except BaseException:
+            async with stdio_client(_server_parameters(args)) as (read, write):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    recovery_client = CampaignMcp(session, args.campaign_id)
+                    await _restore_statblock_preparation_context(
+                        recovery_client,
+                        campaign_id=args.campaign_id,
+                        original=original,
+                        token=token,
+                    )
+            raise
 
 
 async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
