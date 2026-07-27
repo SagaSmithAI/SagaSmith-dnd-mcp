@@ -3325,6 +3325,7 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
                             "missing Speed",
                             "missing the STR/DEX/CON/INT/WIS/CHA table",
                             "contain no creature core headed",
+                            "contains unparsed weapon action markers",
                         )
                     )
                     if (

@@ -1171,7 +1171,7 @@ def test_prepare_rule_statblock_recovers_an_existing_indexed_source_by_job(
                 self.calls.append(("domain", tool_id, arguments))
                 self.failed_creation = True
                 raise RuntimeError(
-                    "statblock source chunks contain no creature core headed 'Ettercap'"
+                    "statblock contains unparsed weapon action markers"
                 )
             if (
                 tool_id == "rule_import"
