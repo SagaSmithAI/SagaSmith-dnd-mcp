@@ -5836,8 +5836,10 @@ def test_short_rest_advances_clock_and_applies_only_explicit_resource_choices() 
 
 
 @pytest.mark.parametrize("defer_checkpoint", [False, True])
-def test_source_bound_time_advance_commits_clock_knowledge_and_snapshot(
+@pytest.mark.parametrize("evidence_mode", ["source", "agent", "source_and_agent"])
+def test_time_advance_commits_evidence_clock_knowledge_and_snapshot(
     defer_checkpoint: bool,
+    evidence_mode: str,
 ) -> None:
     source_ref = {
         "module_id": "module-1",
@@ -5847,6 +5849,14 @@ def test_source_bound_time_advance_commits_clock_knowledge_and_snapshot(
         "page_end": 14,
         "heading_path": ["Part 2"],
         "content_sha256": "abc",
+    }
+    agent_ruling = {
+        "default_resolver": "agent",
+        "ruling_kind": "agent_dm_adjudication",
+        "decision": "Advance the campaign clock by 13 hours.",
+        "reason": "The scene fixes arrival late in the day but not an exact hour.",
+        "period": "hour",
+        "count": 13,
     }
 
     class Client:
@@ -5901,8 +5911,20 @@ def test_source_bound_time_advance_commits_clock_knowledge_and_snapshot(
                 return {"world_time": deepcopy(self.world_time)}
             if tool_id == "memory_change":
                 payload = arguments["payload"]
-                assert payload["event"]["payload"]["source_ref"] == source_ref
-                assert payload["event"]["payload"]["elapsed_minutes"] == 780
+                event_payload = payload["event"]["payload"]
+                if evidence_mode == "agent":
+                    assert event_payload["source_ref"] is None
+                    assert event_payload["source_excerpt"] == ""
+                else:
+                    assert event_payload["source_ref"] == source_ref
+                if evidence_mode == "source":
+                    assert event_payload["agent_ruling"] is None
+                else:
+                    assert event_payload["agent_ruling"] == {
+                        **agent_ruling,
+                        "committed": True,
+                    }
+                assert event_payload["elapsed_minutes"] == 780
                 assert [item["actor_id"] for item in payload["actor_knowledge"]] == [
                     "actor-1",
                     "npc-1",
@@ -5932,12 +5954,17 @@ def test_source_bound_time_advance_commits_clock_knowledge_and_snapshot(
             run_id="run-1",
             occurrence_id="travel-to-phandalin-1",
             scene_id="scene-1",
-            source_excerpt="The characters arrive late in the day.",
-            source_ref=source_ref,
+            source_excerpt=(
+                ""
+                if evidence_mode == "agent"
+                else "The characters arrive late in the day."
+            ),
+            source_ref=None if evidence_mode == "agent" else source_ref,
             period="hour",
             count=13,
             reason="The party traveled with Sildar and arrived late in the day.",
             start_clock=None,
+            agent_ruling=None if evidence_mode == "source" else agent_ruling,
             knowledge_actor_ids=["actor-1", "npc-1"],
             defer_checkpoint=defer_checkpoint,
         )
@@ -5945,10 +5972,133 @@ def test_source_bound_time_advance_commits_clock_knowledge_and_snapshot(
 
     assert result["after"]["hour"] == 17
     assert result["knowledge_actor_ids"] == ["actor-1", "npc-1"]
+    if evidence_mode == "source":
+        assert result["agent_ruling"] is None
+    else:
+        assert result["agent_ruling"]["committed"] is True
     if defer_checkpoint:
         assert "snapshot" not in result["continuity"]
     else:
         assert result["continuity"]["snapshot"]["slot"] == 5
+
+
+@pytest.mark.parametrize(
+    ("value", "match"),
+    [
+        ([], "JSON object"),
+        (
+            {
+                "default_resolver": "external_input",
+                "ruling_kind": "agent_dm_adjudication",
+                "decision": "Advance one day.",
+                "reason": "Travel estimate.",
+                "period": "day",
+                "count": 1,
+            },
+            "default_resolver",
+        ),
+        (
+            {
+                "default_resolver": "agent",
+                "ruling_kind": "module_specific_procedure",
+                "decision": "Advance one day.",
+                "reason": "Travel estimate.",
+                "period": "day",
+                "count": 1,
+            },
+            "ruling_kind",
+        ),
+        (
+            {
+                "default_resolver": "agent",
+                "ruling_kind": "agent_dm_adjudication",
+                "decision": "",
+                "reason": "Travel estimate.",
+                "period": "day",
+                "count": 1,
+            },
+            "decision",
+        ),
+        (
+            {
+                "default_resolver": "agent",
+                "ruling_kind": "agent_dm_adjudication",
+                "decision": "Advance one day.",
+                "reason": "",
+                "period": "day",
+                "count": 1,
+            },
+            "reason",
+        ),
+        (
+            {
+                "default_resolver": "agent",
+                "ruling_kind": "agent_dm_adjudication",
+                "decision": "Advance one day.",
+                "reason": "Travel estimate.",
+                "period": "hour",
+                "count": 1,
+            },
+            "exactly match",
+        ),
+        (
+            {
+                "default_resolver": "agent",
+                "ruling_kind": "agent_dm_adjudication",
+                "decision": "Advance one day.",
+                "reason": "Travel estimate.",
+                "period": "day",
+                "count": 1,
+                "payload": {},
+            },
+            "unsupported fields",
+        ),
+    ],
+)
+def test_time_agent_ruling_is_strictly_bounded(value: object, match: str) -> None:
+    with pytest.raises(ValueError, match=match):
+        regression_playthrough._settled_time_agent_ruling(
+            value,
+            period="day",
+            count=1,
+        )
+
+
+@pytest.mark.parametrize(
+    ("source_excerpt", "source_ref", "match"),
+    [
+        ("", None, "exact source evidence or a settled Agent"),
+        ("Printed duration.", None, "both exact source ref and excerpt"),
+        ("", {"scene_id": "scene-1"}, "both exact source ref and excerpt"),
+    ],
+)
+def test_time_advance_rejects_missing_or_partial_evidence_before_public_calls(
+    source_excerpt: str,
+    source_ref: dict | None,
+    match: str,
+) -> None:
+    class Client:
+        async def domain(self, tool_id: str, arguments: dict):
+            raise AssertionError((tool_id, arguments))
+
+    with pytest.raises(ValueError, match=match):
+        asyncio.run(
+            _advance_time(
+                Client(),
+                campaign_id="campaign-1",
+                run_id="run-1",
+                occurrence_id="travel-1",
+                scene_id="scene-1",
+                source_excerpt=source_excerpt,
+                source_ref=source_ref,
+                period="day",
+                count=1,
+                reason="The party travels.",
+                start_clock=None,
+                agent_ruling=None,
+                knowledge_actor_ids=[],
+            )
+        )
 
 
 @pytest.mark.parametrize("defer_checkpoint", [False, True])

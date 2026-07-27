@@ -268,6 +268,15 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--time-count", type=int)
     parser.add_argument("--time-reason", default="")
     parser.add_argument("--time-start-clock-json", type=json.loads)
+    parser.add_argument(
+        "--time-agent-ruling-json",
+        type=json.loads,
+        help=(
+            "Settled Agent-as-DM duration ruling. Required when exact module text "
+            "does not establish the elapsed interval; may accompany a source "
+            "reference when the Agent converts narrative timing into an exact count."
+        ),
+    )
     parser.add_argument("--rest-member-json", action="append", type=json.loads, default=[])
     parser.add_argument("--rest-start-clock-json", type=json.loads)
     parser.add_argument("--rest-duration-minutes", type=int, default=60)
@@ -1597,6 +1606,56 @@ def _settled_replacement_agent_ruling(value: Any) -> dict[str, Any] | None:
         "ruling_kind": "module_specific_procedure",
         "decision": decision,
         "reason": reason,
+        "committed": True,
+    }
+
+
+def _settled_time_agent_ruling(
+    value: Any,
+    *,
+    period: str,
+    count: int | None,
+) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError("time Agent ruling must be a JSON object")
+    allowed = {
+        "default_resolver",
+        "ruling_kind",
+        "decision",
+        "reason",
+        "period",
+        "count",
+    }
+    unknown = sorted(set(value) - allowed)
+    if unknown:
+        raise ValueError(
+            "time Agent ruling contains unsupported fields: " + ", ".join(unknown)
+        )
+    if value.get("default_resolver") != "agent":
+        raise ValueError("time Agent ruling default_resolver must be agent")
+    if value.get("ruling_kind") != "agent_dm_adjudication":
+        raise ValueError(
+            "time Agent ruling ruling_kind must be agent_dm_adjudication"
+        )
+    decision = str(value.get("decision") or "").strip()
+    reason = str(value.get("reason") or "").strip()
+    if not decision or len(decision) > 1_000:
+        raise ValueError("time Agent ruling decision must contain 1 to 1000 characters")
+    if not reason or len(reason) > 500:
+        raise ValueError("time Agent ruling reason must contain 1 to 500 characters")
+    if value.get("period") != period or value.get("count") != count:
+        raise ValueError(
+            "time Agent ruling period and count must exactly match the requested advance"
+        )
+    return {
+        "default_resolver": "agent",
+        "ruling_kind": "agent_dm_adjudication",
+        "decision": decision,
+        "reason": reason,
+        "period": period,
+        "count": count,
         "committed": True,
     }
 
@@ -5382,6 +5441,7 @@ async def _advance_time(
     count: int | None,
     reason: str,
     start_clock: dict[str, Any] | None,
+    agent_ruling: dict[str, Any] | None,
     knowledge_actor_ids: list[str],
     defer_checkpoint: bool = False,
 ) -> dict[str, Any]:
@@ -5395,7 +5455,22 @@ async def _advance_time(
         or not normalized_reason
     ):
         raise ValueError(
-            "advance-time requires scene, positive count, period, reason, and exact source"
+            "advance-time requires scene, positive count, period, and reason"
+        )
+    normalized_agent_ruling = _settled_time_agent_ruling(
+        agent_ruling,
+        period=period,
+        count=count,
+    )
+    has_source_ref = source_ref is not None
+    has_source_excerpt = bool(source_excerpt.strip())
+    if has_source_ref != has_source_excerpt:
+        raise ValueError(
+            "advance-time source evidence requires both exact source ref and excerpt"
+        )
+    if not has_source_ref and normalized_agent_ruling is None:
+        raise ValueError(
+            "advance-time requires exact source evidence or a settled Agent duration ruling"
         )
     if len(knowledge_actor_ids) != len(set(knowledge_actor_ids)):
         raise ValueError("advance-time knowledge actor ids must be unique")
@@ -5407,7 +5482,11 @@ async def _advance_time(
             "payload": {"scene_id": scene_id},
         },
     )
-    exact_ref = _validate_source_ref(scene, source_ref, excerpt=source_excerpt)
+    exact_ref = (
+        _validate_source_ref(scene, source_ref, excerpt=source_excerpt)
+        if has_source_ref
+        else None
+    )
     actors = []
     for actor_id in knowledge_actor_ids:
         actor = await client.domain(
@@ -5487,8 +5566,9 @@ async def _advance_time(
                 "elapsed_minutes": expected_minutes,
                 "world_time_before": before,
                 "world_time_after": after,
-                "source_excerpt": source_excerpt,
+                "source_excerpt": source_excerpt.strip() if has_source_ref else "",
                 "source_ref": exact_ref,
+                "agent_ruling": normalized_agent_ruling,
             },
         },
         "actor_knowledge": [
@@ -5529,6 +5609,7 @@ async def _advance_time(
         "occurrence_id": identity,
         "scene_id": scene_id,
         "source_ref": exact_ref,
+        "agent_ruling": normalized_agent_ruling,
         "clock_set": clock_set,
         "before": before,
         "advance": advanced,
@@ -9631,6 +9712,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     count=args.time_count,
                     reason=args.time_reason,
                     start_clock=args.time_start_clock_json,
+                    agent_ruling=args.time_agent_ruling_json,
                     knowledge_actor_ids=args.knowledge_actor_id,
                     defer_checkpoint=args.defer_checkpoint,
                 )
