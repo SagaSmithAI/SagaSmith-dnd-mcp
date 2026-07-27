@@ -259,7 +259,7 @@ def test_compact_public_tool_and_schema_budgets_are_locked(tmp_path: Path) -> No
                 "combat": 44,
             }
         )
-        assert schema_bytes == TARGET_INPUT_SCHEMA_BYTES == 47_617
+        assert schema_bytes == TARGET_INPUT_SCHEMA_BYTES == 47_610
         assert schema_bytes < BASELINE_INPUT_SCHEMA_BYTES
         by_name = {tool.name: tool for tool in tools}
         assert by_name["chase"].inputSchema["properties"]["action"]["enum"] == [
@@ -272,6 +272,11 @@ def test_compact_public_tool_and_schema_budgets_are_locked(tmp_path: Path) -> No
             "check",
             "contest",
         ]
+        assert (
+            "rest"
+            not in by_name["character_state_change"]
+            .inputSchema["properties"]["action"]["enum"]
+        )
         assert by_name["rule_import"].inputSchema["properties"]["action"]["enum"] == [
             "discover",
             "stage",

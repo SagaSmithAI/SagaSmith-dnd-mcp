@@ -37,7 +37,7 @@ def _short_rest_schedule() -> dict[str, int]:
     }
 
 
-async def _advance_short_rest_clock(server, campaign_id: str, key: str) -> int:
+async def _ensure_rest_clock(server, campaign_id: str, key: str) -> dict:
     campaign = await _call(
         server,
         "campaign_query",
@@ -61,30 +61,44 @@ async def _advance_short_rest_clock(server, campaign_id: str, key: str) -> int:
             "campaign_query",
             {"view": "get", "payload": {"campaign_id": campaign_id}},
         )
-        world_time = dict(campaign["state"]["world_time"])
-    started = int(world_time["elapsed_minutes"])
-    completed = started + 60
-    await _call(
+    return campaign
+
+
+async def _party_short_rest(
+    server,
+    campaign_id: str,
+    key: str,
+    members: list[dict],
+) -> dict:
+    campaign = await _ensure_rest_clock(server, campaign_id, key)
+    result = await _call(
         server,
         "campaign_change",
         {
             "campaign_id": campaign_id,
-            "action": "clock_advance",
+            "action": "party_rest",
             "payload": {
-                "period": "minute",
-                "count": 60,
-                "expected_world_time": {
-                    "day": completed // 1440 + 1,
-                    "hour": (completed % 1440) // 60,
-                    "minute": completed % 60,
-                    "elapsed_minutes": completed,
-                },
+                "rest_type": "short_rest",
+                "duration_minutes": 60,
+                "members": members,
             },
             "expected_revision": campaign["revision"],
-            "idempotency_key": f"{key}-clock-advance",
+            "idempotency_key": key,
         },
     )
-    return started
+    primary_id = str(members[0]["character_id"])
+    primary = await _call(
+        server,
+        "character_query",
+        {"view": "get", "payload": {"character_id": primary_id}},
+    )
+    recovery = dict(result["recovered"][primary_id])
+    return {
+        **result,
+        "result": recovery,
+        "hit_dice_rolls": list(recovery.get("hit_dice_rolls") or []),
+        "character": primary,
+    }
 
 
 def _resting_sheet() -> dict:
@@ -323,24 +337,30 @@ def test_attunement_requires_a_short_rest_during_play(tmp_path: Path) -> None:
                 },
             )
 
-        started = await _advance_short_rest_clock(
+        rest_campaign = await _ensure_rest_clock(
             server,
             campaign["id"],
             "attunement",
         )
         pending_attunement = await _call(
             server,
-            "character_state_change",
+            "campaign_change",
             {
-                "character_id": actor["id"],
-                "action": "rest",
+                "campaign_id": campaign["id"],
+                "action": "party_rest",
                 "payload": {
                     "rest_type": "short_rest",
-                    "attune_item_id": "staff",
-                    "started_elapsed_minutes": started,
-                    "rest_schedule": _short_rest_schedule(),
+                    "duration_minutes": 60,
+                    "members": [
+                        {
+                            "character_id": actor["id"],
+                            "expected_revision": equipped_actor["revision"],
+                            "attune_item_id": "staff",
+                            "rest_schedule": _short_rest_schedule(),
+                        }
+                    ],
                 },
-                "expected_revision": equipped_actor["revision"],
+                "expected_revision": rest_campaign["revision"],
                 "idempotency_key": "unreviewed-attunement",
             },
         )
@@ -348,22 +368,19 @@ def test_attunement_requires_a_short_rest_during_play(tmp_path: Path) -> None:
         assert pending_attunement["default_resolver"] == "agent"
         assert pending_attunement["ruling_kind"] == "source_or_scene_fact"
         assert pending_attunement["committed"] is False
-        rested = await _call(
+        rested = await _party_short_rest(
             server,
-            "character_state_change",
-            {
-                "character_id": actor["id"],
-                "action": "rest",
-                "payload": {
-                    "rest_type": "short_rest",
+            campaign["id"],
+            "attune",
+            [
+                {
+                    "character_id": actor["id"],
+                    "expected_revision": equipped_actor["revision"],
                     "attune_item_id": "staff",
                     "attunement_prerequisite_confirmed": True,
-                    "started_elapsed_minutes": started,
                     "rest_schedule": _short_rest_schedule(),
-                },
-                "expected_revision": equipped_actor["revision"],
-                "idempotency_key": "attune",
-            },
+                }
+            ],
         )
         assert rested["result"]["attuned_item_id"] == "staff"
         staff = next(
@@ -398,22 +415,17 @@ def test_short_rest_rolls_requested_hit_dice_inside_the_mcp(tmp_path: Path) -> N
                 "idempotency_key": "actor",
             },
         )
-        started = await _advance_short_rest_clock(server, campaign["id"], "dice")
-        arguments = {
-            "character_id": actor["id"],
-            "action": "rest",
-            "payload": {
-                "rest_type": "short_rest",
-                "started_elapsed_minutes": started,
+        members = [
+            {
+                "character_id": actor["id"],
+                "expected_revision": actor["revision"],
                 "rest_schedule": _short_rest_schedule(),
                 "hit_dice_spends": [{"key": "fighter:d10", "count": 1}],
-            },
-            "expected_revision": actor["revision"],
-            "idempotency_key": "rest",
-        }
+            }
+        ]
 
-        rested = await _call(server, "character_state_change", arguments)
-        replay = await _call(server, "character_state_change", arguments)
+        rested = await _party_short_rest(server, campaign["id"], "rest", members)
+        replay = await _party_short_rest(server, campaign["id"], "rest", members)
 
         assert rested == replay
         assert len(rested["hit_dice_rolls"]) == 1
@@ -483,66 +495,44 @@ def test_short_rest_applies_source_bound_song_of_rest_inside_the_mcp(
         assert ready["song_of_rest_source_actor_id"] == bard["id"]
         assert ready["song_of_rest_die"] == "1d6"
 
-        started = await _advance_short_rest_clock(server, campaign["id"], "song")
-        with pytest.raises(Exception, match="completed the same short rest"):
-            await _call(
+        with pytest.raises(Exception, match="same party rest"):
+            await _party_short_rest(
                 server,
-                "character_state_change",
-                {
-                    "character_id": target["id"],
-                    "action": "rest",
-                    "payload": {
-                        "rest_type": "short_rest",
-                        "started_elapsed_minutes": started,
+                campaign["id"],
+                "premature-rest",
+                [
+                    {
+                        "character_id": target["id"],
+                        "expected_revision": target["revision"],
                         "rest_schedule": _short_rest_schedule(),
                         "hit_dice_spends": [{"key": "fighter:d10", "count": 1}],
                         "song_of_rest_source_actor_id": bard["id"],
-                    },
-                    "expected_revision": target["revision"],
-                    "idempotency_key": "premature-rest",
-                },
+                    }
+                ],
             )
-        bard_rested = await _call(
+        rested = await _party_short_rest(
             server,
-            "character_state_change",
-            {
-                "character_id": bard["id"],
-                "action": "rest",
-                "payload": {
-                    "rest_type": "short_rest",
-                    "started_elapsed_minutes": started,
-                    "rest_schedule": _short_rest_schedule(),
-                },
-                "expected_revision": bard["revision"],
-                "idempotency_key": "bard-rest",
-            },
-        )
-        assert bard_rested["status"] == "committed"
-        rested = await _call(
-            server,
-            "character_state_change",
-            {
-                "character_id": target["id"],
-                "action": "rest",
-                "payload": {
-                    "rest_type": "short_rest",
-                    "started_elapsed_minutes": started,
+            campaign["id"],
+            "rest",
+            [
+                {
+                    "character_id": target["id"],
+                    "expected_revision": target["revision"],
                     "rest_schedule": _short_rest_schedule(),
                     "hit_dice_spends": [{"key": "fighter:d10", "count": 1}],
                     "song_of_rest_source_actor_id": bard["id"],
                 },
-                "expected_revision": target["revision"],
-                "idempotency_key": "rest",
-            },
+                {
+                    "character_id": bard["id"],
+                    "expected_revision": bard["revision"],
+                    "rest_schedule": _short_rest_schedule(),
+                },
+            ],
         )
         song = rested["result"]["song_of_rest"]
         assert song["die"] == "1d6"
         assert 1 <= song["roll"]["total"] <= 6
         assert song["applied_healing"] == song["rolled_healing"]
-        assert rested["song_of_rest_source"] == {
-            "actor_id": bard["id"],
-            "die": "1d6",
-        }
         hit_die_total = rested["hit_dice_rolls"][0]["total"]
         assert (
             rested["character"]["sheet"]["combat"]["hp"]["value"]
@@ -550,7 +540,7 @@ def test_short_rest_applies_source_bound_song_of_rest_inside_the_mcp(
         )
         mechanic_ids = {
             receipt["mechanic_id"]
-            for receipt in rested["result"]["rule_receipts"]
+            for receipt in rested["rule_receipts"]
         }
         assert "dnd5e.core.rest.song_of_rest" in mechanic_ids
 
@@ -610,47 +600,39 @@ def test_short_rest_applies_natural_and_sorcerous_recovery_inside_the_mcp(
         )
         assert ready["natural_recovery"]["recovered"] == {"2": 1}
 
-        started = await _advance_short_rest_clock(server, campaign["id"], "class")
-        druid_rested = await _call(
+        rested = await _party_short_rest(
             server,
-            "character_state_change",
-            {
-                "character_id": druid["id"],
-                "action": "rest",
-                "payload": {
-                    "rest_type": "short_rest",
-                    "started_elapsed_minutes": started,
+            campaign["id"],
+            "class-rest",
+            [
+                {
+                    "character_id": druid["id"],
+                    "expected_revision": druid["revision"],
                     "rest_schedule": _short_rest_schedule(),
                     "natural_recovery": {"2": 1},
                     "rest_activity_minutes": {"meditation": 60},
                 },
-                "expected_revision": druid["revision"],
-                "idempotency_key": "druid-rest",
-            },
-        )
-        assert druid_rested["character"]["sheet"]["spellcasting"]["spell_slots"]["2"][
-            "value"
-        ] == 1
-        assert druid_rested["result"]["natural_recovery"]["used_levels"] == 2
-
-        sorcerer_rested = await _call(
-            server,
-            "character_state_change",
-            {
-                "character_id": sorcerer["id"],
-                "action": "rest",
-                "payload": {
-                    "rest_type": "short_rest",
-                    "started_elapsed_minutes": started,
+                {
+                    "character_id": sorcerer["id"],
+                    "expected_revision": sorcerer["revision"],
                     "rest_schedule": _short_rest_schedule(),
                 },
-                "expected_revision": sorcerer["revision"],
-                "idempotency_key": "sorcerer-rest",
-            },
+            ],
         )
-        assert sorcerer_rested["result"]["sorcerous_restoration"]["recovered"] == 4
+        assert rested["character"]["sheet"]["spellcasting"]["spell_slots"]["2"][
+            "value"
+        ] == 1
+        assert rested["result"]["natural_recovery"]["used_levels"] == 2
+
+        sorcerer_after = await _call(
+            server,
+            "character_query",
+            {"view": "get", "payload": {"character_id": sorcerer["id"]}},
+        )
+        sorcerer_recovery = rested["recovered"][sorcerer["id"]]
+        assert sorcerer_recovery["sorcerous_restoration"]["recovered"] == 4
         assert (
-            sorcerer_rested["character"]["sheet"]["resources"]["sorcery_points"][
+            sorcerer_after["sheet"]["resources"]["sorcery_points"][
                 "value"
             ]
             == 7
@@ -756,41 +738,33 @@ def test_short_rest_recovers_ki_only_after_declared_meditation(tmp_path: Path) -
                 "idempotency_key": "actor",
             },
         )
-        first_started = await _advance_short_rest_clock(server, campaign["id"], "ki-first")
-        no_meditation = await _call(
+        no_meditation = await _party_short_rest(
             server,
-            "character_state_change",
-            {
-                "character_id": actor["id"],
-                "action": "rest",
-                "payload": {
-                    "rest_type": "short_rest",
-                    "started_elapsed_minutes": first_started,
+            campaign["id"],
+            "rest-without-meditation",
+            [
+                {
+                    "character_id": actor["id"],
+                    "expected_revision": actor["revision"],
                     "rest_schedule": _short_rest_schedule(),
-                },
-                "expected_revision": actor["revision"],
-                "idempotency_key": "rest-without-meditation",
-            },
+                }
+            ],
         )
         assert no_meditation["character"]["sheet"]["resources"]["ki"]["value"] == 0
         assert "ki" in no_meditation["result"]["unmet_recovery_requirements"]
 
-        second_started = await _advance_short_rest_clock(server, campaign["id"], "ki-second")
-        rested = await _call(
+        rested = await _party_short_rest(
             server,
-            "character_state_change",
-            {
-                "character_id": actor["id"],
-                "action": "rest",
-                "payload": {
-                    "rest_type": "short_rest",
-                    "started_elapsed_minutes": second_started,
+            campaign["id"],
+            "rest-with-meditation",
+            [
+                {
+                    "character_id": actor["id"],
+                    "expected_revision": no_meditation["character"]["revision"],
                     "rest_schedule": _short_rest_schedule(),
                     "rest_activity_minutes": {"meditation": 30},
-                },
-                "expected_revision": no_meditation["character"]["revision"],
-                "idempotency_key": "rest-with-meditation",
-            },
+                }
+            ],
         )
         assert rested["character"]["sheet"]["resources"]["ki"]["value"] == 2
         assert rested["result"]["recovered"]["ki"] == 2
@@ -830,22 +804,21 @@ def test_short_rest_atomically_applies_arcane_recovery_choice(tmp_path: Path) ->
                 "idempotency_key": "actor",
             },
         )
-        started = await _advance_short_rest_clock(server, campaign["id"], "arcane")
-        arguments = {
-            "character_id": actor["id"],
-            "action": "rest",
-            "payload": {
-                "rest_type": "short_rest",
-                "started_elapsed_minutes": started,
+        members = [
+            {
+                "character_id": actor["id"],
+                "expected_revision": actor["revision"],
                 "rest_schedule": _short_rest_schedule(),
                 "arcane_recovery": {"1": 1},
-            },
-            "expected_revision": actor["revision"],
-            "idempotency_key": "arcane-rest",
-        }
+            }
+        ]
 
-        rested = await _call(server, "character_state_change", arguments)
-        replay = await _call(server, "character_state_change", arguments)
+        rested = await _party_short_rest(
+            server, campaign["id"], "arcane-rest", members
+        )
+        replay = await _party_short_rest(
+            server, campaign["id"], "arcane-rest", members
+        )
 
         assert replay == rested
         assert rested["result"]["arcane_recovery"]["recovered"] == {"1": 1}
@@ -888,24 +861,19 @@ def test_rest_rejects_stale_revision_before_hit_die_rng(tmp_path: Path, monkeypa
                 "idempotency_key": "actor",
             },
         )
-        started = await _advance_short_rest_clock(server, campaign["id"], "stale")
-
         with pytest.raises(Exception, match="character revision conflict"):
-            await _call(
+            await _party_short_rest(
                 server,
-                "character_state_change",
-                {
-                    "character_id": actor["id"],
-                    "action": "rest",
-                    "payload": {
-                        "rest_type": "short_rest",
-                        "started_elapsed_minutes": started,
+                campaign["id"],
+                "rest",
+                [
+                    {
+                        "character_id": actor["id"],
+                        "expected_revision": actor["revision"] + 1,
                         "rest_schedule": _short_rest_schedule(),
                         "hit_dice_spends": [{"key": "fighter:d10", "count": 1}],
-                    },
-                    "expected_revision": actor["revision"] + 1,
-                    "idempotency_key": "rest",
-                },
+                    }
+                ],
             )
 
     asyncio.run(exercise())
@@ -932,24 +900,19 @@ def test_rest_rejects_client_supplied_hit_die_results(tmp_path: Path) -> None:
                 "idempotency_key": "actor",
             },
         )
-        started = await _advance_short_rest_clock(server, campaign["id"], "forged")
-
         with pytest.raises(Exception, match="only key and count"):
-            await _call(
+            await _party_short_rest(
                 server,
-                "character_state_change",
-                {
-                    "character_id": actor["id"],
-                    "action": "rest",
-                    "payload": {
-                        "rest_type": "short_rest",
-                        "started_elapsed_minutes": started,
+                campaign["id"],
+                "rest",
+                [
+                    {
+                        "character_id": actor["id"],
+                        "expected_revision": actor["revision"],
                         "rest_schedule": _short_rest_schedule(),
                         "hit_dice_spends": [{"key": "fighter:d10", "roll": 10}],
-                    },
-                    "expected_revision": actor["revision"],
-                    "idempotency_key": "rest",
-                },
+                    }
+                ],
             )
 
     asyncio.run(exercise())

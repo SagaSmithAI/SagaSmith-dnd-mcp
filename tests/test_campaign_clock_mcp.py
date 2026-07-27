@@ -537,3 +537,162 @@ def test_generic_campaign_update_cannot_bypass_the_clock_owner(tmp_path: Path) -
         assert updated["state"]["world_time"] == clock["world_time"]
 
     asyncio.run(exercise())
+
+
+def test_ten_combat_rounds_advance_the_shared_clock_and_all_elapsed_effects(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        server = create_server(_config(tmp_path))
+        campaign = await _call(
+            server,
+            "campaign_create",
+            {
+                "name": "Combat clock",
+                "edition": "2014",
+                "idempotency_key": "campaign",
+            },
+        )
+        actors = []
+        for index, name in enumerate(("First", "Second", "Spectator")):
+            sheet = default_character_sheet()
+            sheet["effects"] = [
+                {
+                    "id": f"elapsed-{index}",
+                    "name": "One minute effect",
+                    "active": True,
+                    "duration": {"period": "minute", "remaining": 1},
+                }
+            ]
+            actors.append(
+                await _call(
+                    server,
+                    "character_create_from",
+                    {
+                        "mode": "direct",
+                        "payload": {
+                            "campaign_id": campaign["id"],
+                            "name": name,
+                            "sheet": sheet,
+                        },
+                        "idempotency_key": f"actor-{index}",
+                    },
+                )
+            )
+        current = await _call(
+            server,
+            "campaign_query",
+            {"view": "get", "payload": {"campaign_id": campaign["id"]}},
+        )
+        clock = await _call(
+            server,
+            "campaign_change",
+            {
+                "campaign_id": campaign["id"],
+                "action": "clock_set",
+                "payload": {"day": 1, "hour": 10, "minute": 0, "label": "Round test"},
+                "expected_revision": current["revision"],
+                "idempotency_key": "clock",
+            },
+        )
+        world_effect = await _call(
+            server,
+            "campaign_change",
+            {
+                "campaign_id": campaign["id"],
+                "action": "effect_add",
+                "payload": {
+                    "effect": {
+                        "id": "one-minute-light",
+                        "name": "One minute light",
+                        "kind": "light",
+                        "target": {"kind": "object", "id": "torch"},
+                        "duration": {"period": "minute", "remaining": 1},
+                    }
+                },
+                "expected_revision": clock["campaign_revision"],
+                "idempotency_key": "world-effect",
+            },
+        )
+        state = await _call(
+            server,
+            "combat_start",
+            {
+                "campaign_id": campaign["id"],
+                "participant_ids": [actors[0]["id"], actors[1]["id"]],
+                "participant_config": [
+                    {"actor_id": actors[0]["id"], "initiative": 20},
+                    {"actor_id": actors[1]["id"], "initiative": 10},
+                ],
+                "expected_revision": world_effect["campaign_revision"],
+                "idempotency_key": "combat-start",
+            },
+        )
+
+        final_arguments = None
+        for turn in range(20):
+            current_combatant = state["combat"]["combatants"][
+                state["combat"]["turn_index"]
+            ]
+            final_arguments = {
+                "campaign_id": campaign["id"],
+                "actor_id": current_combatant["actor_id"],
+                "expected_revision": state["campaign_revision"],
+                "idempotency_key": f"turn-{turn}",
+            }
+            state = await _call(server, "combat_end_turn", final_arguments)
+
+        assert final_arguments is not None
+        assert state["world_time"] == {
+            "schema_version": 1,
+            "day": 1,
+            "hour": 10,
+            "minute": 1,
+            "elapsed_minutes": 601,
+            "label": "Round test",
+        }
+        assert state["world_expired"] == ["one-minute-light"]
+        minute_boundary = state
+        next_combatant = state["combat"]["combatants"][state["combat"]["turn_index"]]
+        state = await _call(
+            server,
+            "combat_end_turn",
+            {
+                "campaign_id": campaign["id"],
+                "actor_id": next_combatant["actor_id"],
+                "expected_revision": state["campaign_revision"],
+                "idempotency_key": "turn-after-minute",
+            },
+        )
+        assert await _call(server, "combat_end_turn", final_arguments) == minute_boundary
+
+        persisted = await _call(
+            server,
+            "campaign_query",
+            {"view": "get", "payload": {"campaign_id": campaign["id"]}},
+        )
+        assert persisted["state"]["world_time"] == minute_boundary["world_time"]
+        assert persisted["state"]["world_effects"][0]["active"] is False
+        for actor in actors:
+            updated = await _call(
+                server,
+                "character_query",
+                {"view": "get", "payload": {"character_id": actor["id"]}},
+            )
+            assert updated["sheet"]["effects"][0]["active"] is False
+        receipt = await _call(
+            server,
+            "state_revision",
+            {
+                "campaign_id": campaign["id"],
+                "action": "receipt",
+                "payload": {"idempotency_key": "turn-19"},
+            },
+        )
+        assert receipt["response"]["world_time"] == minute_boundary["world_time"]
+        assert (
+            receipt["response"]["combat"]["turn_index"]
+            == minute_boundary["combat"]["turn_index"]
+        )
+
+    asyncio.run(exercise())

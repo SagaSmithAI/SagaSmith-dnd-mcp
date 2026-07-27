@@ -2924,8 +2924,31 @@ def test_source_authored_precombat_and_attack_tactics_are_structured() -> None:
             {
                 "actor_id": "duergar",
                 "weapon_id": "war-pick",
-                "id": "dismiss",
+                "id": "conditional_extra_damage",
+                "applies": False,
+                "trigger_facts": {"attacker_enlarged": False},
+                "default_resolver": "agent",
+                "ruling_kind": "agent_dm_adjudication",
+                "decision": "The conditional damage does not apply.",
+                "reason": "The duergar is not enlarged for this attack.",
                 "source_excerpt": ("or 11 (2d8 + 2) piercing damage while enlarged."),
+            },
+            {
+                "actor_id": "jamna",
+                "weapon_id": "shortsword",
+                "id": "conditional_extra_damage",
+                "applies": True,
+                "damage_formula": "1d6",
+                "damage_type": "piercing",
+                "trigger_facts": {"target_size": "medium"},
+                "default_resolver": "agent",
+                "ruling_kind": "agent_dm_adjudication",
+                "decision": "Apply the additional 1d6 piercing damage.",
+                "reason": "The target is Medium, satisfying the exact source threshold.",
+                "source_excerpt": (
+                    "or 9 (1d6 + 3 plus 1d6) piercing damage if the target "
+                    "is Medium or larger."
+                ),
             },
             {
                 "actor_id": "spider-1",
@@ -2986,6 +3009,7 @@ def test_source_authored_precombat_and_attack_tactics_are_structured() -> None:
             "durnan",
             "stirge",
             "duergar",
+            "jamna",
         ],
     )
     delayed = _source_delayed_actions(
@@ -3024,8 +3048,31 @@ def test_source_authored_precombat_and_attack_tactics_are_structured() -> None:
     assert rulings[("duergar", "war-pick")] == {
         "actor_id": "duergar",
         "weapon_id": "war-pick",
-        "id": "dismiss",
+        "id": "conditional_extra_damage",
+        "applies": False,
+        "trigger_facts": {"attacker_enlarged": False},
+        "default_resolver": "agent",
+        "ruling_kind": "agent_dm_adjudication",
+        "decision": "The conditional damage does not apply.",
+        "reason": "The duergar is not enlarged for this attack.",
         "source_excerpt": "or 11 (2d8 + 2) piercing damage while enlarged.",
+    }
+    assert rulings[("jamna", "shortsword")] == {
+        "actor_id": "jamna",
+        "weapon_id": "shortsword",
+        "id": "conditional_extra_damage",
+        "applies": True,
+        "damage_formula": "1d6",
+        "damage_type": "piercing",
+        "trigger_facts": {"target_size": "medium"},
+        "default_resolver": "agent",
+        "ruling_kind": "agent_dm_adjudication",
+        "decision": "Apply the additional 1d6 piercing damage.",
+        "reason": "The target is Medium, satisfying the exact source threshold.",
+        "source_excerpt": (
+            "or 9 (1d6 + 3 plus 1d6) piercing damage if the target "
+            "is Medium or larger."
+        ),
     }
     assert delayed["nezznar"]["until_round"] == 2
 
@@ -3241,7 +3288,7 @@ def test_interrupted_source_attachment_resumes_with_declared_settlement() -> Non
     ]
 
 
-def test_interrupted_source_alternative_damage_resumes_with_reviewed_dismissal() -> None:
+def test_interrupted_source_alternative_damage_resumes_with_agent_false_ruling() -> None:
     calls: list[tuple[str, dict]] = []
     excerpt = "or 11 (2d8 + 2) piercing damage while enlarged."
 
@@ -3263,7 +3310,13 @@ def test_interrupted_source_alternative_damage_resumes_with_reviewed_dismissal()
                     {
                         "actor_id": "duergar-1",
                         "weapon_id": "war-pick",
-                        "id": "dismiss",
+                        "id": "conditional_extra_damage",
+                        "applies": False,
+                        "trigger_facts": {"attacker_enlarged": False},
+                        "default_resolver": "agent",
+                        "ruling_kind": "agent_dm_adjudication",
+                        "decision": "The enlarged alternative does not apply.",
+                        "reason": "The attacker is not enlarged in the current encounter state.",
                         "source_excerpt": excerpt,
                     }
                 ],
@@ -3291,7 +3344,13 @@ def test_interrupted_source_alternative_damage_resumes_with_reviewed_dismissal()
     assert calls[0][0] == "combat_choice"
     assert calls[0][1]["action"] == "on_hit_ruling"
     assert calls[0][1]["payload"]["selection"] == {
-        "id": "dismiss",
+        "id": "conditional_extra_damage",
+        "applies": False,
+        "trigger_facts": {"attacker_enlarged": False},
+        "default_resolver": "agent",
+        "ruling_kind": "agent_dm_adjudication",
+        "decision": "The enlarged alternative does not apply.",
+        "reason": "The attacker is not enlarged in the current encounter state.",
         "source_excerpt": excerpt,
     }
 

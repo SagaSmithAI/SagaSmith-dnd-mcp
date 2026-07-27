@@ -484,7 +484,9 @@ def _arguments() -> argparse.Namespace:
             "Reviewed attack settlement with actor_id, weapon_id, exact "
             "source_excerpt, and condition/escape terms, "
             "id=saving_throw_condition plus save/repeat/duration terms, or "
-            "id=saving_throw_damage plus save/damage/zero-HP terms; use "
+            "id=saving_throw_damage plus save/damage/zero-HP terms, or "
+            "id=conditional_extra_damage plus Agent applicability, trigger facts, "
+            "and optional applied damage terms; use "
             "id=dismiss when the reviewed text is already represented by the "
             "selected attack variant and adds no separate structured effect"
         ),
@@ -2135,6 +2137,12 @@ def _source_on_hit_rulings(
         "half_on_success",
         "zero_hp_effect",
         "target_has_limbs",
+        "applies",
+        "trigger_facts",
+        "default_resolver",
+        "ruling_kind",
+        "decision",
+        "reason",
         "source_excerpt",
     }
     normalized: dict[tuple[str, str], dict[str, Any]] = {}
@@ -2163,6 +2171,7 @@ def _source_on_hit_rulings(
             "apply_condition",
             "saving_throw_condition",
             "saving_throw_damage",
+            "conditional_extra_damage",
             "attachment",
             "critical_followup",
             "dismiss",
@@ -2192,6 +2201,12 @@ def _source_on_hit_rulings(
                 "damage_type",
                 "half_on_success",
                 "zero_hp_effect",
+                "applies",
+                "trigger_facts",
+                "default_resolver",
+                "ruling_kind",
+                "decision",
+                "reason",
             }
             if any(raw.get(field) is not None for field in critical_fields) or not isinstance(
                 raw.get("target_has_limbs"), bool
@@ -2212,6 +2227,74 @@ def _source_on_hit_rulings(
             raise ValueError(
                 f"source on-hit ruling {index} target_has_limbs is only valid for critical_followup"
             )
+        if selection_id == "conditional_extra_damage":
+            incompatible_fields = {
+                "condition",
+                "escape_dc",
+                "escape_abilities",
+                "save_ability",
+                "save_dc",
+                "repeat_save_timing",
+                "duration",
+                "half_on_success",
+                "zero_hp_effect",
+            }
+            applies = raw.get("applies")
+            damage_formula = str(raw.get("damage_formula") or "").strip()
+            damage_type = str(raw.get("damage_type") or "").strip().casefold()
+            trigger_facts = raw.get("trigger_facts")
+            decision = str(raw.get("decision") or "").strip()
+            reason = str(raw.get("reason") or "").strip()
+            if (
+                any(raw.get(field) is not None for field in incompatible_fields)
+                or not isinstance(applies, bool)
+                or not isinstance(trigger_facts, dict)
+                or not trigger_facts
+                or raw.get("default_resolver") != "agent"
+                or raw.get("ruling_kind") != "agent_dm_adjudication"
+                or not decision
+                or not reason
+                or (
+                    applies
+                    and (
+                        not damage_formula
+                        or not damage_type
+                    )
+                )
+                or (
+                    not applies
+                    and (
+                        raw.get("damage_formula") not in (None, "")
+                        or raw.get("damage_type") not in (None, "")
+                    )
+                )
+            ):
+                raise ValueError(
+                    f"source on-hit ruling {index} conditional_extra_damage "
+                    "requires an Agent applicability decision, trigger facts, "
+                    "and damage terms only when it applies"
+                )
+            normalized[identity] = {
+                "actor_id": actor_id,
+                "weapon_id": weapon_id,
+                "id": selection_id,
+                "applies": applies,
+                "trigger_facts": deepcopy(trigger_facts),
+                "default_resolver": "agent",
+                "ruling_kind": "agent_dm_adjudication",
+                "decision": decision,
+                "reason": reason,
+                "source_excerpt": source_excerpt,
+                **(
+                    {
+                        "damage_formula": damage_formula,
+                        "damage_type": damage_type,
+                    }
+                    if applies
+                    else {}
+                ),
+            }
+            continue
         if selection_id == "dismiss":
             settlement_fields = {
                 "condition",
@@ -2225,6 +2308,12 @@ def _source_on_hit_rulings(
                 "damage_type",
                 "half_on_success",
                 "zero_hp_effect",
+                "applies",
+                "trigger_facts",
+                "default_resolver",
+                "ruling_kind",
+                "decision",
+                "reason",
             }
             if any(raw.get(field) is not None for field in settlement_fields):
                 raise ValueError(
@@ -2251,6 +2340,12 @@ def _source_on_hit_rulings(
                 "damage_type",
                 "half_on_success",
                 "zero_hp_effect",
+                "applies",
+                "trigger_facts",
+                "default_resolver",
+                "ruling_kind",
+                "decision",
+                "reason",
             }
             if any(raw.get(field) is not None for field in attachment_fields):
                 raise ValueError(
@@ -2272,6 +2367,12 @@ def _source_on_hit_rulings(
                 "damage_type",
                 "half_on_success",
                 "zero_hp_effect",
+                "applies",
+                "trigger_facts",
+                "default_resolver",
+                "ruling_kind",
+                "decision",
+                "reason",
             }
             if any(raw.get(field) is not None for field in incompatible_fields):
                 raise ValueError(
@@ -2331,6 +2432,12 @@ def _source_on_hit_rulings(
                 "escape_abilities",
                 "repeat_save_timing",
                 "duration",
+                "applies",
+                "trigger_facts",
+                "default_resolver",
+                "ruling_kind",
+                "decision",
+                "reason",
             }
             if any(raw.get(field) is not None for field in condition_fields):
                 raise ValueError(
@@ -2382,6 +2489,12 @@ def _source_on_hit_rulings(
             "damage_type",
             "half_on_success",
             "zero_hp_effect",
+            "applies",
+            "trigger_facts",
+            "default_resolver",
+            "ruling_kind",
+            "decision",
+            "reason",
         }
         if any(raw.get(field) is not None for field in condition_incompatible_fields):
             raise ValueError(

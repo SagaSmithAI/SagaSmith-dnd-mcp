@@ -479,6 +479,273 @@ def test_public_guiding_bolt_effect_grants_and_consumes_next_attack_advantage(
 
 
 @pytest.mark.parametrize(
+    ("target_size", "applies"),
+    [("medium", True), ("small", False)],
+)
+def test_public_on_hit_ruling_records_agent_conditional_extra_damage(
+    tmp_path: Path,
+    monkeypatch,
+    target_size: str,
+    applies: bool,
+) -> None:
+    original_attack_roll = server_module.roll_attack_action
+
+    def forced_hit(*, plan, rng=None):
+        result = original_attack_roll(plan=plan, rng=rng)
+        result.update(
+            natural=10,
+            total=max(int(plan["target_ac"]), int(result.get("total", 0) or 0)),
+            armor_class=int(plan["target_ac"]),
+            hit=True,
+            critical=False,
+            fumble=False,
+        )
+        return result
+
+    monkeypatch.setattr(server_module, "roll_attack_action", forced_hit)
+
+    async def exercise() -> None:
+        server = create_server(_config(tmp_path))
+
+        async def raw(name: str, arguments: dict):
+            _, result = await server.call_tool(name, arguments)
+            return result
+
+        async def call(name: str, arguments: dict):
+            result = await raw(name, arguments)
+            return result.get("result", result)
+
+        campaign = await call(
+            "campaign_create",
+            {
+                "name": "Conditional extra damage",
+                "edition": "2014",
+                "random_seed": f"conditional-extra-{target_size}",
+                "idempotency_key": "campaign",
+            },
+        )
+        attacker = await call(
+            "character_create",
+            {
+                "campaign_id": campaign["id"],
+                "name": "Reviewed attacker",
+                "character_type": "npc",
+                "idempotency_key": "attacker",
+            },
+        )
+        target = await call(
+            "character_create",
+            {
+                "campaign_id": campaign["id"],
+                "name": "Reviewed target",
+                "character_type": "monster",
+                "idempotency_key": "target",
+            },
+        )
+        effect = (
+            "or 9 (1d6 + 3 plus 1d6) piercing damage if the target "
+            "is Medium or larger."
+        )
+        attacker_sheet = default_character_sheet()
+        attacker_sheet["combat"]["hp"] = {"value": 20, "max": 20, "temp": 0}
+        attacker_sheet["inventory"]["items"] = [
+            {
+                "id": "shortsword",
+                "name": "Shortsword",
+                "kind": "weapon",
+                "equipped": True,
+                "equipped_slot": "main_hand",
+                "mechanics": {
+                    "attack_type": "melee",
+                    "attack_ability": "dexterity",
+                    "damage_formula": "1",
+                    "damage_type": "piercing",
+                    "on_hit_effect": effect,
+                    "reach_ft": 5,
+                    "attack_bonus_override": 5,
+                    "always_available": True,
+                },
+            }
+        ]
+        attacker_sheet["inventory"]["equipment_slots"]["main_hand"] = "shortsword"
+        target_sheet = default_character_sheet()
+        target_sheet["traits"]["size"] = target_size
+        target_sheet["combat"]["hp"] = {"value": 20, "max": 20, "temp": 0}
+        for actor, sheet, key in (
+            (attacker, attacker_sheet, "attacker-sheet"),
+            (target, target_sheet, "target-sheet"),
+        ):
+            await call(
+                "character_sheet_replace",
+                {
+                    "character_id": actor["id"],
+                    "sheet": sheet,
+                    "expected_revision": actor["revision"],
+                    "idempotency_key": key,
+                },
+            )
+        campaign = await call("campaign_get", {"campaign_id": campaign["id"]})
+        started = await raw(
+            "combat_start",
+            {
+                "campaign_id": campaign["id"],
+                "participant_ids": [attacker["id"], target["id"]],
+                "participant_config": [
+                    {
+                        "actor_id": attacker["id"],
+                        "initiative": 20,
+                        "position": {"x": 0, "y": 0},
+                    },
+                    {
+                        "actor_id": target["id"],
+                        "initiative": 10,
+                        "position": {"x": 1, "y": 0},
+                    },
+                ],
+                "expected_revision": campaign["revision"],
+                "idempotency_key": "start",
+            },
+        )
+        attacked = await raw(
+            "combat_resolve_attack",
+            {
+                "campaign_id": campaign["id"],
+                "actor_id": attacker["id"],
+                "target_id": target["id"],
+                "action": {"weapon_id": "shortsword", "attack_mode": "melee"},
+                "expected_revision": started["campaign_revision"],
+                "idempotency_key": "attack",
+            },
+        )
+        assert attacked["status"] == "pending_ruling"
+        choice_id = attacked["result"]["pending_on_hit_ruling_id"]
+        pending = next(
+            item for item in attacked["combat"]["pending"] if item["id"] == choice_id
+        )
+        assert any(
+            candidate["id"] == "conditional_extra_damage"
+            for candidate in pending["candidates"]
+        )
+        with pytest.raises(
+            Exception,
+            match="explicit structured on-hit effect cannot be dismissed",
+        ):
+            await call(
+                "combat_choice",
+                {
+                    "campaign_id": campaign["id"],
+                    "action": "on_hit_ruling",
+                    "actor_id": target["id"],
+                    "payload": {
+                        "choice_id": choice_id,
+                        "selection": {"id": "dismiss", "source_excerpt": effect},
+                    },
+                    "expected_revision": attacked["campaign_revision"],
+                    "idempotency_key": "invalid-dismiss",
+                },
+            )
+
+        wrong_applies = not applies
+        wrong_selection = {
+            "id": "conditional_extra_damage",
+            "applies": wrong_applies,
+            "trigger_facts": {"target_size": target_size},
+            "default_resolver": "agent",
+            "ruling_kind": "agent_dm_adjudication",
+            "decision": "Use the opposite applicability for validation.",
+            "reason": "This intentionally conflicts with the actor size.",
+            "source_excerpt": effect,
+            **(
+                {"damage_formula": "1d6", "damage_type": "piercing"}
+                if wrong_applies
+                else {}
+            ),
+        }
+        with pytest.raises(Exception, match="applicability conflicts"):
+            await call(
+                "combat_choice",
+                {
+                    "campaign_id": campaign["id"],
+                    "action": "on_hit_ruling",
+                    "actor_id": target["id"],
+                    "payload": {
+                        "choice_id": choice_id,
+                        "selection": wrong_selection,
+                    },
+                    "expected_revision": attacked["campaign_revision"],
+                    "idempotency_key": "invalid-applicability",
+                },
+            )
+        unchanged = await call("campaign_get", {"campaign_id": campaign["id"]})
+        assert unchanged["revision"] == attacked["campaign_revision"]
+
+        selection = {
+            "id": "conditional_extra_damage",
+            "applies": applies,
+            "trigger_facts": {"target_size": target_size},
+            "default_resolver": "agent",
+            "ruling_kind": "agent_dm_adjudication",
+            "decision": (
+                "Apply the printed extra die."
+                if applies
+                else "Do not apply the printed extra die."
+            ),
+            "reason": (
+                f"The target actor card records size {target_size}, and the source "
+                "requires Medium or larger."
+            ),
+            "source_excerpt": effect,
+            **(
+                {"damage_formula": "1d6", "damage_type": "piercing"}
+                if applies
+                else {}
+            ),
+        }
+        arguments = {
+            "campaign_id": campaign["id"],
+            "action": "on_hit_ruling",
+            "actor_id": target["id"],
+            "payload": {"choice_id": choice_id, "selection": selection},
+            "expected_revision": attacked["campaign_revision"],
+            "idempotency_key": "conditional-extra",
+        }
+        stream = server_module.CampaignRandomStream.from_campaign_state(
+            campaign["id"],
+            unchanged["state"],
+            operation="combat_choice",
+            idempotency_key="conditional-extra",
+        )
+        with server_module.use_random_stream(stream):
+            ruled = await call("combat_choice", arguments)
+        assert ruled["result"]["applies"] is applies
+        assert ruled["result"]["trigger_facts"] == {"target_size": target_size}
+        assert ruled["result"]["agent_ruling"]["default_resolver"] == "agent"
+        assert stream.has_unpersisted_draws is False
+
+        target_after = await call("character_get", {"character_id": target["id"]})
+        if applies:
+            extra = ruled["result"]["damage_roll"]["total"]
+            assert 1 <= extra <= 6
+            assert ruled["result"]["damage_amount"] == extra
+            assert target_after["sheet"]["combat"]["hp"]["value"] == 19 - extra
+            assert ruled["random_stream_receipt"]["position_before"] == 0
+            assert ruled["random_stream_receipt"]["position_after"] == 1
+        else:
+            assert ruled["result"]["damage_roll"] is None
+            assert ruled["result"]["damage_amount"] == 0
+            assert target_after["sheet"]["combat"]["hp"]["value"] == 19
+            assert "random_stream_receipt" not in ruled
+
+        replayed = await call("combat_choice", arguments)
+        assert replayed == ruled
+        after_replay = await call("campaign_get", {"campaign_id": campaign["id"]})
+        assert after_replay["state"]["random_stream"]["position"] == (1 if applies else 0)
+        assert after_replay["revision"] == attacked["campaign_revision"] + 1
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize(
     ("save_success", "starting_hp"),
     [(True, 20), (False, 4)],
 )

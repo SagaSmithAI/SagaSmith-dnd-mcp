@@ -13,6 +13,11 @@ LONG_REST_SCHEDULE = {
     "light_activity_minutes": 120,
     "strenuous_activity_minutes": 0,
 }
+SHORT_REST_SCHEDULE = {
+    "sleep_minutes": 0,
+    "light_activity_minutes": 60,
+    "strenuous_activity_minutes": 0,
+}
 
 
 async def _call(server, name: str, arguments: dict):
@@ -119,17 +124,28 @@ def test_party_long_rest_advances_once_and_settles_members_atomically(tmp_path: 
                 "idempotency_key": "clock",
             },
         )
-        with pytest.raises(Exception, match="party_rest"):
+        with pytest.raises(Exception, match="literal_error"):
             await _call(
                 server,
-                "character_rest",
+                "character_state_change",
                 {
                     "character_id": first["id"],
-                    "rest_type": "long_rest",
+                    "action": "rest",
+                    "payload": {
+                        "rest_type": "short_rest",
+                        "rest_schedule": SHORT_REST_SCHEDULE,
+                    },
                     "expected_revision": first["revision"],
-                    "idempotency_key": "unsafe-individual-long-rest",
+                    "idempotency_key": "unsafe-individual-short-rest",
                 },
             )
+        before_party_rest = await _call(
+            server,
+            "campaign_query",
+            {"view": "get", "payload": {"campaign_id": campaign["id"]}},
+        )
+        assert before_party_rest["revision"] == clock["campaign_revision"]
+        assert before_party_rest["state"]["world_time"] == clock["world_time"]
         arguments = {
             "campaign_id": campaign["id"],
             "action": "party_rest",
