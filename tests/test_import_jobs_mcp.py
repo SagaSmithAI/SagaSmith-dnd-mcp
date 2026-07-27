@@ -301,6 +301,7 @@ def test_rule_import_recovers_statblock_for_text_only_agent(
                 325,
             ),
             ocr_block("Hit: 2 (1d4) bludgeoning damage.", 30, 325, 310, 345),
+            ocr_block("COMMONER", 30, 355, 180, 380),
         ),
     )
     monkeypatch.setattr(
@@ -391,6 +392,8 @@ def test_rule_import_recovers_statblock_for_text_only_agent(
             "embedded_text" if embedded_text else "dual_layout_ocr"
         )
         assert result["recovery"]["evidence"]["text_only"] is True
+        assert result["recovery"]["evidence"]["matching_heading_count"] == 2
+        assert result["recovery"]["evidence"]["structural_heading_count"] == 1
         assert result["review"]["page_number"] == 1
         assert result["validation"]["experience_points"] == 10
         assert [item["field"] for item in result["corroborated_facts"]] == [

@@ -192,8 +192,9 @@ def _arguments() -> argparse.Namespace:
         "--source-page",
         type=int,
         help=(
-            "One-based PDF page for prepare-rule-statblock discovery or an explicit "
-            "visual-review page when a module candidate spans multiple pages"
+            "One-based PDF page for prepare-rule-statblock discovery, layout-OCR "
+            "recovery, or an explicit visual-review page when a candidate spans "
+            "multiple pages"
         ),
     )
     parser.add_argument(
@@ -2711,8 +2712,8 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError("--source-statblock-name must contain 2 to 200 characters")
     if source_page is not None and source_page < 1:
         raise ValueError("--source-page must be positive")
-    if explicit_chunk_ids and (source_query or source_page is not None):
-        raise ValueError("--chunk-id cannot be combined with source discovery filters")
+    if explicit_chunk_ids and source_query:
+        raise ValueError("--chunk-id cannot be combined with --source-query")
     reviewed_content = None
     review_observation = None
     review_override_path = None
@@ -2805,6 +2806,7 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
             await client.load("lobby.campaign", "lobby.rules", "lobby.characters")
 
             import_report: dict[str, Any] | None = None
+            source_import_job: dict[str, Any] | None = None
             if args.source_path:
                 source_path = resolved_source_path
                 assert source_path is not None
@@ -2868,6 +2870,26 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
                 }
             else:
                 source_id = str(args.source_id)
+                indexed_jobs = list(
+                    _facade_value(
+                        await client.domain(
+                            "import_query",
+                            {
+                                "campaign_id": args.campaign_id,
+                                "view": "list",
+                                "kind": "rulebook",
+                            },
+                        )
+                    )
+                )
+                source_import_job = next(
+                    (
+                        dict(item)
+                        for item in indexed_jobs
+                        if str(item.get("source_id") or "") == source_id
+                    ),
+                    None,
+                )
 
             rule_review: dict[str, Any] | None = None
             if reviewed_content is not None:
@@ -2893,7 +2915,9 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
 
             selected_source_chunks: list[dict[str, Any]] = []
             selected_chunk_ids = explicit_chunk_ids
-            if rule_review is None and (source_query or source_page is not None):
+            if rule_review is None and (
+                source_query or (source_page is not None and not explicit_chunk_ids)
+            ):
                 chunk_query_payload: dict[str, Any] = {
                     "source_id": source_id,
                     "query": source_query,
@@ -2921,6 +2945,16 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
             actors: list[dict[str, Any]] = []
             statblock_report: dict[str, Any] | None = None
             source_report: dict[str, Any] | None = None
+            ocr_recovery: dict[str, Any] | None = None
+            review_job_id = (
+                str(import_report["job_id"])
+                if import_report is not None
+                else (
+                    str(source_import_job["id"])
+                    if source_import_job is not None
+                    else None
+                )
+            )
             for index in range(1, args.actor_count + 1):
                 actor_name = (
                     args.actor_name if args.actor_count == 1 else f"{args.actor_name} {index}"
@@ -2939,8 +2973,12 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
                 )
                 creation_mode = "statblock"
                 if rule_review is not None:
+                    if review_job_id is None:
+                        raise RuntimeError(
+                            "reviewed rule statblock has no durable import job"
+                        )
                     creation_mode = "reviewed_rule_statblock"
-                    payload["job_id"] = import_report["job_id"]
+                    payload["job_id"] = review_job_id
                     payload["review_id"] = rule_review["id"]
                 else:
                     payload["source_id"] = source_id
@@ -2971,34 +3009,37 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
                             "missing Hit Points",
                             "missing Speed",
                             "missing the STR/DEX/CON/INT/WIS/CHA table",
+                            "contain no creature core headed",
                         )
                     )
                     if (
                         not recoverable
                         or rule_review is not None
-                        or import_report is None
-                        or resolved_source_path is None
-                        or resolved_source_path.suffix.casefold() != ".pdf"
+                        or review_job_id is None
                     ):
                         raise
+                    recovery_payload: dict[str, Any] = {
+                        "job_id": review_job_id,
+                        "name": source_statblock_name,
+                    }
+                    if source_page is not None:
+                        recovery_payload["page_number"] = source_page
                     recovered = _facade_value(
                         await client.domain(
                             "rule_import",
                             {
                                 "campaign_id": args.campaign_id,
                                 "action": "recover_statblock",
-                                "payload": {
-                                    "job_id": import_report["job_id"],
-                                    "name": source_statblock_name,
-                                },
+                                "payload": recovery_payload,
                                 "idempotency_key": f"{token}-recover-rule-statblock",
                             },
                         )
                     )
+                    ocr_recovery = dict(recovered)
                     rule_review = dict(recovered["review"])
                     payload.pop("source_id", None)
                     payload.pop("chunk_ids", None)
-                    payload["job_id"] = import_report["job_id"]
+                    payload["job_id"] = review_job_id
                     payload["review_id"] = rule_review["id"]
                     created = _facade_value(
                         await client.domain(
@@ -3082,9 +3123,11 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
                 "campaign_id": args.campaign_id,
                 "source_id": source_id,
                 "import": import_report,
+                "source_import_job": source_import_job,
                 "source": source_report,
                 "selected_source_chunks": selected_source_chunks,
                 "rule_review": rule_review,
+                "ocr_recovery": ocr_recovery,
                 "source_statblock_name": source_statblock_name,
                 "review_override_path": (
                     str(review_override_path) if review_override_path is not None else None
@@ -3279,6 +3322,18 @@ async def _discover_rule_sources(args: argparse.Namespace) -> dict[str, Any]:
                     )
                 )
             )
+            import_jobs = list(
+                _facade_value(
+                    await client.domain(
+                        "import_query",
+                        {
+                            "campaign_id": args.campaign_id,
+                            "view": "list",
+                            "kind": "rulebook",
+                        },
+                    )
+                )
+            )
             if initial_phase != "lobby":
                 campaign = _facade_value(
                     await client.core(
@@ -3315,6 +3370,7 @@ async def _discover_rule_sources(args: argparse.Namespace) -> dict[str, Any]:
                 "initial_phase": initial_phase,
                 "query": query_payload,
                 "sources": sources,
+                "import_jobs": import_jobs,
                 "phase_changes": phase_changes,
             }
 

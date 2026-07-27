@@ -18492,28 +18492,33 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
 
         target_key = re.sub(r"[^a-z0-9]+", "", target_name.casefold())
         selected_layout = None
+        recovered = None
         attempted_pages: list[int] = []
         for candidate in candidate_pages:
             attempted_pages.append(candidate)
             layout = provider.extract_layout(source_path, page_numbers=[candidate])[0]
-            heading_matches = [
-                block
+            if not any(
+                re.sub(r"[^a-z0-9]+", "", block.text.casefold()) == target_key
                 for block in layout.blocks
-                if re.sub(r"[^a-z0-9]+", "", block.text.casefold()) == target_key
-            ]
-            if len(heading_matches) == 1:
-                selected_layout = layout
-                break
+            ):
+                continue
+            try:
+                candidate_recovery = recover_2014_statblock_from_ocr(
+                    layout.as_dict(),
+                    name=target_name,
+                )
+            except StatblockImportError:
+                continue
+            selected_layout = layout
+            recovered = candidate_recovery
+            break
         if selected_layout is None:
             raise RuntimeError(
-                "layout OCR did not find one unambiguous target heading on candidate pages "
+                "layout OCR did not find one structurally unambiguous target statblock "
+                "on candidate pages "
                 + ", ".join(str(value) for value in attempted_pages)
             )
-
-        recovered = recover_2014_statblock_from_ocr(
-            selected_layout.as_dict(),
-            name=target_name,
-        )
+        assert recovered is not None
         evidence = dict(recovered["evidence"])
         recovered_page = int(evidence["page_number"])
         page_text = extract_pdf_page_text(source_path, recovered_page)

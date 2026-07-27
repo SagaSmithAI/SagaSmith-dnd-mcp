@@ -306,6 +306,13 @@ class _RuleStatblockClient:
                     }
                 }
             raise AssertionError(arguments)
+        if tool_id == "import_query":
+            assert arguments == {
+                "campaign_id": "campaign-1",
+                "view": "list",
+                "kind": "rulebook",
+            }
+            return []
         if tool_id == "rule_pack_query":
             if arguments["view"] == "sources":
                 assert arguments["payload"] == {
@@ -654,6 +661,7 @@ def test_discover_rule_sources_uses_public_lobby_query(
             "title": "Commoner",
         }
     ]
+    assert report["import_jobs"] == []
     assert any(
         scope == "domain"
         and tool_id == "rule_pack_query"
@@ -775,6 +783,87 @@ def test_prepare_rule_statblock_recovers_layout_ocr_without_image_model(
     )
     assert report["rule_review"]["page_number"] == 92
     assert report["source_statblock_name"] == "Adult Blue Dragon"
+
+
+def test_prepare_rule_statblock_recovers_an_existing_indexed_source_by_job(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class IndexedOcrFallbackClient(_RuleStatblockClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.failed_creation = False
+
+        async def domain(self, tool_id: str, arguments: dict):
+            if tool_id == "import_query":
+                self.calls.append(("domain", tool_id, arguments))
+                return [
+                    {
+                        "id": "existing-mm-job",
+                        "kind": "rulebook",
+                        "source_id": "source-1",
+                        "artifact": "monster-manual.pdf",
+                    }
+                ]
+            if (
+                tool_id == "character_create_from"
+                and arguments["mode"] == "statblock"
+                and not self.failed_creation
+            ):
+                self.calls.append(("domain", tool_id, arguments))
+                self.failed_creation = True
+                raise RuntimeError(
+                    "statblock source chunks contain no creature core headed 'Ettercap'"
+                )
+            if (
+                tool_id == "rule_import"
+                and arguments["action"] == "recover_statblock"
+            ):
+                self.calls.append(("domain", tool_id, arguments))
+                return {
+                    "review": {
+                        "id": "rule-statblock-review:ettercap",
+                        "source_id": "source-1",
+                        "page_number": 132,
+                    },
+                    "provider": "rapidocr",
+                    "corroboration_mode": "embedded_text",
+                }
+            return await super().domain(tool_id, arguments)
+
+    client = IndexedOcrFallbackClient()
+    _patch_rule_statblock_transport(monkeypatch, client)
+    args = _rule_statblock_args(tmp_path, defer_checkpoint=True)
+    args.chunk_id = ["ettercap-core", "ettercap-actions"]
+    args.source_page = 132
+    args.source_statblock_name = "Ettercap"
+
+    report = asyncio.run(_prepare_rule_statblock(args))
+
+    recovery_call = next(
+        arguments
+        for scope, tool_id, arguments in client.calls
+        if scope == "domain"
+        and tool_id == "rule_import"
+        and arguments["action"] == "recover_statblock"
+    )
+    assert recovery_call["payload"] == {
+        "job_id": "existing-mm-job",
+        "name": "Ettercap",
+        "page_number": 132,
+    }
+    create_calls = [
+        arguments
+        for scope, tool_id, arguments in client.calls
+        if scope == "domain" and tool_id == "character_create_from"
+    ]
+    assert [call["mode"] for call in create_calls] == [
+        "statblock",
+        "reviewed_rule_statblock",
+    ]
+    assert create_calls[1]["payload"]["job_id"] == "existing-mm-job"
+    assert report["source_import_job"]["id"] == "existing-mm-job"
+    assert report["ocr_recovery"]["provider"] == "rapidocr"
 
 
 def test_failed_rule_statblock_preparation_uses_shared_phase_recovery(
