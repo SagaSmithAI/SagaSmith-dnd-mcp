@@ -231,4 +231,4 @@ Smoke seed 创建两个 PC、一个 NPC、相互隔离的 actor knowledge、一�
 
 ## 状态与许可
 
-项目处于 Alpha，但这是 SagaSmithAI 当前最完整的 Agent-to-rules 参考实现。代码使用 MIT License；用户导入内容保留各自许可与来源。
+项目处于 Alpha，但这是 SagaSmithAI 当前最完整的 Agent-to-rules 参考实现。原创代码使用 Apache-2.0；用户导入内容保留各自许可与来源。
