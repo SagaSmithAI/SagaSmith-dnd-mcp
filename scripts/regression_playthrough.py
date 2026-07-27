@@ -326,6 +326,14 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--replacement-predecessor-id", default="")
     parser.add_argument("--replacement-actor-id", default="")
     parser.add_argument("--replacement-knowledge", action="append", default=[])
+    parser.add_argument(
+        "--replacement-agent-ruling-json",
+        type=json.loads,
+        help=(
+            "Settled Agent-as-DM ruling for a source-independent replacement arrival; "
+            "mutually exclusive with --source-ref-json"
+        ),
+    )
     parser.add_argument("--narrative-npc-name", default="")
     parser.add_argument("--narrative-npc-role", default="")
     parser.add_argument("--narrative-npc-summary", default="")
@@ -1434,6 +1442,43 @@ async def _register_party(
     ) | {"replace": replaced}
 
 
+def _settled_replacement_agent_ruling(value: Any) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError("replacement Agent ruling must be a JSON object")
+    allowed = {"default_resolver", "ruling_kind", "decision", "reason"}
+    unknown = sorted(set(value) - allowed)
+    if unknown:
+        raise ValueError(
+            "replacement Agent ruling contains unsupported fields: "
+            + ", ".join(unknown)
+        )
+    if value.get("default_resolver") != "agent":
+        raise ValueError("replacement Agent ruling default_resolver must be agent")
+    if value.get("ruling_kind") != "module_specific_procedure":
+        raise ValueError(
+            "replacement Agent ruling ruling_kind must be module_specific_procedure"
+        )
+    decision = str(value.get("decision") or "").strip()
+    reason = str(value.get("reason") or "").strip()
+    if not decision or len(decision) > 1_000:
+        raise ValueError(
+            "replacement Agent ruling decision must contain 1 to 1000 characters"
+        )
+    if not reason or len(reason) > 500:
+        raise ValueError(
+            "replacement Agent ruling reason must contain 1 to 500 characters"
+        )
+    return {
+        "default_resolver": "agent",
+        "ruling_kind": "module_specific_procedure",
+        "decision": decision,
+        "reason": reason,
+        "committed": True,
+    }
+
+
 async def _register_replacement(
     client: ExposureClient,
     *,
@@ -1445,6 +1490,7 @@ async def _register_replacement(
     location_key: str,
     source_excerpt: str,
     source_ref: dict[str, Any] | None,
+    agent_ruling: dict[str, Any] | None,
     summary: str,
     handoff_knowledge: list[str],
     witness_actor_ids: list[str],
@@ -1455,19 +1501,31 @@ async def _register_replacement(
     normalized_summary = summary.strip()
     handoff = [item.strip() for item in handoff_knowledge if item.strip()]
     witnesses = list(dict.fromkeys(witness_actor_ids))
+    normalized_agent_ruling = _settled_replacement_agent_ruling(agent_ruling)
     if not all(
         (
             predecessor_id,
             replacement_id,
             scene_id,
             location_key,
-            source_excerpt.strip(),
             normalized_summary,
         )
     ):
         raise ValueError(
             "register-replacement requires predecessor, replacement, scene, "
-            "location, source excerpt, and summary"
+            "location, and summary"
+        )
+    has_source_evidence = source_ref is not None or bool(source_excerpt.strip())
+    if normalized_agent_ruling is not None and has_source_evidence:
+        raise ValueError(
+            "replacement arrival must use either exact source evidence or an Agent "
+            "ruling, not both"
+        )
+    if normalized_agent_ruling is None and (
+        source_ref is None or not source_excerpt.strip()
+    ):
+        raise ValueError(
+            "replacement arrival requires exact source evidence or a settled Agent ruling"
         )
     if predecessor_id == replacement_id:
         raise ValueError("replacement actor must differ from predecessor")
@@ -1518,7 +1576,11 @@ async def _register_replacement(
             "payload": {"scene_id": scene_id},
         },
     )
-    exact_ref = _validate_source_ref(scene, source_ref, excerpt=source_excerpt)
+    exact_ref = (
+        _validate_source_ref(scene, source_ref, excerpt=source_excerpt)
+        if normalized_agent_ruling is None
+        else None
+    )
     if location_key not in {str(item.get("key") or "") for item in _scene_locations(scene)}:
         raise ValueError("replacement location is not present in the scene atlas")
 
@@ -1647,8 +1709,13 @@ async def _register_replacement(
                         "predecessor_actor_id": predecessor_id,
                         "replacement_actor_id": replacement_id,
                         "handoff_knowledge": handoff,
-                        "source_excerpt": source_excerpt.strip(),
+                        "source_excerpt": (
+                            source_excerpt.strip()
+                            if normalized_agent_ruling is None
+                            else ""
+                        ),
                         "source_ref": exact_ref,
+                        "agent_ruling": normalized_agent_ruling,
                     },
                 },
                 "actor_knowledge": actor_knowledge,
@@ -1729,6 +1796,7 @@ async def _register_replacement(
             "scene_id": scene_id,
             "location_key": location_key,
             "source_ref": exact_ref,
+            "agent_ruling": normalized_agent_ruling,
         },
         "predecessor": {
             "actor_id": predecessor_id,
@@ -9269,6 +9337,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     location_key=args.location_key,
                     source_excerpt=args.source_excerpt,
                     source_ref=args.source_ref_json,
+                    agent_ruling=args.replacement_agent_ruling_json,
                     summary=args.event_summary,
                     handoff_knowledge=args.replacement_knowledge,
                     witness_actor_ids=args.knowledge_actor_id,

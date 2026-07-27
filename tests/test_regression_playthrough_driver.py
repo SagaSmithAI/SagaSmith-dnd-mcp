@@ -3717,9 +3717,101 @@ def test_party_projection_keeps_knowledge_bound_to_the_new_actor() -> None:
     assert member["wallet"] == sheet["inventory"]["wallet"]
 
 
+@pytest.mark.parametrize(
+    ("value", "match"),
+    [
+        (
+            {
+                "default_resolver": "external_input",
+                "ruling_kind": "module_specific_procedure",
+                "decision": "Join.",
+                "reason": "Reason.",
+            },
+            "default_resolver must be agent",
+        ),
+        (
+            {
+                "default_resolver": "agent",
+                "ruling_kind": "player_owned_choice",
+                "decision": "Join.",
+                "reason": "Reason.",
+            },
+            "ruling_kind must be module_specific_procedure",
+        ),
+        (
+            {
+                "default_resolver": "agent",
+                "ruling_kind": "module_specific_procedure",
+                "decision": "",
+                "reason": "Reason.",
+            },
+            "decision must contain",
+        ),
+        (
+            {
+                "default_resolver": "agent",
+                "ruling_kind": "module_specific_procedure",
+                "decision": "Join.",
+                "reason": "Reason.",
+                "payload": {"unvalidated": True},
+            },
+            "unsupported fields",
+        ),
+    ],
+)
+def test_replacement_agent_ruling_is_strictly_bounded(value: dict, match: str) -> None:
+    with pytest.raises(ValueError, match=match):
+        regression_playthrough._settled_replacement_agent_ruling(value)
+
+
+@pytest.mark.parametrize(
+    ("source_excerpt", "source_ref", "agent_ruling", "match"),
+    [
+        ("", None, None, "requires exact source evidence or a settled Agent ruling"),
+        (
+            "Printed arrival.",
+            {"chunk_id": "chunk-1"},
+            {
+                "default_resolver": "agent",
+                "ruling_kind": "module_specific_procedure",
+                "decision": "The replacement joins.",
+                "reason": "The current scene permits an introduction.",
+            },
+            "either exact source evidence or an Agent ruling, not both",
+        ),
+    ],
+)
+def test_replacement_requires_exactly_one_evidence_path(
+    source_excerpt: str,
+    source_ref: dict | None,
+    agent_ruling: dict | None,
+    match: str,
+) -> None:
+    with pytest.raises(ValueError, match=match):
+        asyncio.run(
+            _register_replacement(
+                object(),
+                campaign_id="campaign-1",
+                run_id="run-1",
+                predecessor_actor_id="predecessor",
+                replacement_actor_id="replacement",
+                scene_id="scene-1",
+                location_key="inn",
+                source_excerpt=source_excerpt,
+                source_ref=source_ref,
+                agent_ruling=agent_ruling,
+                summary="The replacement joins.",
+                handoff_knowledge=["The party shares its current objective."],
+                witness_actor_ids=["replacement"],
+            )
+        )
+
+
 @pytest.mark.parametrize("defer_checkpoint", [False, True])
+@pytest.mark.parametrize("evidence_kind", ["source", "agent"])
 def test_replacement_join_preserves_predecessor_and_only_hands_off_explicit_knowledge(
     defer_checkpoint: bool,
+    evidence_kind: str,
 ) -> None:
     source_ref = {
         "module_id": "module-1",
@@ -3859,6 +3951,23 @@ def test_replacement_join_preserves_predecessor_and_only_hands_off_explicit_know
                 return deepcopy(self.knowledge[arguments["actor_id"]])
             if tool_id == "memory_change":
                 assert "snapshot" not in arguments["payload"]
+                event_payload = arguments["payload"]["event"]["payload"]
+                if evidence_kind == "source":
+                    assert event_payload["source_ref"] == source_ref
+                    assert event_payload["source_excerpt"] == (
+                        "The local inn has rooms for rent."
+                    )
+                    assert event_payload["agent_ruling"] is None
+                else:
+                    assert event_payload["source_ref"] is None
+                    assert event_payload["source_excerpt"] == ""
+                    assert event_payload["agent_ruling"] == {
+                        "default_resolver": "agent",
+                        "ruling_kind": "module_specific_procedure",
+                        "decision": "The replacement can join at the inn.",
+                        "reason": "The living party members can introduce the new adventurer.",
+                        "committed": True,
+                    }
                 rows = arguments["payload"]["actor_knowledge"]
                 assert [item["actor_id"] for item in rows] == [
                     "replacement",
@@ -3909,8 +4018,22 @@ def test_replacement_join_preserves_predecessor_and_only_hands_off_explicit_know
             replacement_actor_id="replacement",
             scene_id="scene-1",
             location_key="inn",
-            source_excerpt="The local inn has rooms for rent.",
-            source_ref=source_ref,
+            source_excerpt=(
+                "The local inn has rooms for rent." if evidence_kind == "source" else ""
+            ),
+            source_ref=source_ref if evidence_kind == "source" else None,
+            agent_ruling=(
+                {
+                    "default_resolver": "agent",
+                    "ruling_kind": "module_specific_procedure",
+                    "decision": "The replacement can join at the inn.",
+                    "reason": (
+                        "The living party members can introduce the new adventurer."
+                    ),
+                }
+                if evidence_kind == "agent"
+                else None
+            ),
             summary="New Wizard joined the party at the inn.",
             handoff_knowledge=["Gundren was taken to Cragmaw Castle."],
             witness_actor_ids=["replacement"],
@@ -3921,6 +4044,12 @@ def test_replacement_join_preserves_predecessor_and_only_hands_off_explicit_know
     assert result["predecessor"]["retained"] is True
     assert result["predecessor"]["knowledge_count"] == 1
     assert result["replacement"]["knowledge_scope_actor_id"] == "replacement"
+    if evidence_kind == "source":
+        assert result["scene"]["source_ref"] == source_ref
+        assert result["scene"]["agent_ruling"] is None
+    else:
+        assert result["scene"]["source_ref"] is None
+        assert result["scene"]["agent_ruling"]["committed"] is True
     assert client.manifest["party"]["members"][0]["actor_id"] == "replacement"
     assert client.manifest["party"]["replacements"] == [
         {
