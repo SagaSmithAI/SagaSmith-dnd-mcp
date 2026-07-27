@@ -1623,13 +1623,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             not in removed_subjects
         ]
 
-    def module_statblock_agent_fill_requirements(
+    def statblock_agent_fill_requirements(
         sheet: dict[str, Any],
     ) -> dict[str, Any]:
-        """Describe semantic module fields that the Agent must review.
+        """Describe semantic statblock fields that the Agent must review.
 
-        The text parser may propose a Multiattack composition, but module-authored
-        creatures are not allowed to make that lexical proposal authoritative.
+        The text parser may propose a Multiattack composition, but reviewed source
+        text is not allowed to make that lexical proposal authoritative.
         The Agent receives the exact activity prose plus the already-transcribed
         weapon ids and must submit the canonical composition explicitly.
         """
@@ -1672,22 +1672,22 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "available_weapons": weapons,
         }
 
-    def require_complete_module_statblock_agent_fill(
+    def require_complete_statblock_agent_fill(
         sheet: dict[str, Any],
         agent_fill: dict[str, Any] | None,
     ) -> dict[str, Any]:
-        requirements = module_statblock_agent_fill_requirements(sheet)
+        requirements = statblock_agent_fill_requirements(sheet)
         if not requirements["required"]:
             return requirements
         if not isinstance(agent_fill, dict):
             raise ValueError(
-                "module statblock Multiattack requires an Agent statblock fill; "
-                "the text parser is not authoritative for module-authored composition"
+                "reviewed statblock Multiattack requires an Agent statblock fill; "
+                "the text parser is not authoritative for reviewed composition"
             )
         declarations = agent_fill.get("multiattack_options")
         if not isinstance(declarations, list):
             raise ValueError(
-                "module statblock Agent fill must contain multiattack_options"
+                "reviewed statblock Agent fill must contain multiattack_options"
             )
         expected_ids = {
             str(item["activity_id"])
@@ -1700,7 +1700,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         }
         if submitted_ids != expected_ids or len(declarations) != len(expected_ids):
             raise ValueError(
-                "module statblock Agent fill must cover every source Multiattack "
+                "reviewed statblock Agent fill must cover every source Multiattack "
                 "activity exactly once"
             )
         return requirements
@@ -18295,7 +18295,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             source_key=f"module-review:{module_id}:{content_key}",
             name=None,
         )
-        agent_fill_requirements = require_complete_module_statblock_agent_fill(
+        agent_fill_requirements = require_complete_statblock_agent_fill(
             parsed.sheet,
             agent_fill,
         )
@@ -18410,7 +18410,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     name=None,
                 )
                 candidate["agent_fill_requirements"] = (
-                    module_statblock_agent_fill_requirements(parsed_candidate.sheet)
+                    statblock_agent_fill_requirements(parsed_candidate.sheet)
                 )
             if candidate.get("review_status") == "manual_review_required":
                 candidate["ruling_requirement"] = _ruling_requirement(
@@ -19278,8 +19278,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         idempotency_key: str | None = None,
         review_mode: Literal["visual", "agent_text"] = "visual",
         evidence_chunk_ids: list[str] | None = None,
+        agent_fill: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Retain a DM transcription bound to checksum-verified rulebook page evidence."""
+        """Retain a reviewed transcription and Agent fill bound to rulebook evidence."""
         access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
         if not idempotency_key:
             raise ValueError("idempotency_key is required for a rule statblock review")
@@ -19312,6 +19313,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if review_mode == "agent_text":
             payload["review_mode"] = review_mode
             payload["evidence_chunk_ids"] = evidence_chunk_ids
+        if agent_fill is not None:
+            payload["agent_fill"] = agent_fill
         scope = f"import-job:{campaign_id}:{job_id}:{principal_id}"
         replay = replay_idempotent(scope, idempotency_key, payload)
         if replay is not None:
@@ -19329,6 +19332,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if review_mode == "agent_text":
             evidence_identity = ",".join(str(item) for item in evidence_chunk_ids or [])
             review_identity = f"{review_identity}:{review_mode}:{evidence_identity}"
+        if agent_fill is not None:
+            fill_identity = json.dumps(
+                agent_fill,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            review_identity = f"{review_identity}:agent-fill:{fill_identity}"
         review_digest = hashlib.sha256(review_identity.encode()).hexdigest()
         review_id = f"rule-statblock-review:{review_digest[:24]}"
         parsed = parse_2014_statblock(
@@ -19339,6 +19350,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 f"rule-source-page:{job.source_id}:{page_number}",
                 f"rule-review:{review_id}",
             ],
+        )
+        agent_fill_requirements = require_complete_statblock_agent_fill(
+            parsed.sheet,
+            agent_fill,
+        )
+        filled = (
+            apply_reviewed_statblock_fill(parsed.sheet, agent_fill)
+            if agent_fill is not None
+            else None
         )
         text_evidence = (
             validate_agent_text_statblock_review(
@@ -19370,6 +19390,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "confidence": "reviewed_text" if review_mode == "agent_text" else "reviewed_image",
             "evidence_chunk_ids": [item["id"] for item in text_evidence],
             "text_evidence": text_evidence,
+            "agent_statblock_fill": (filled or {}).get("fill"),
         }
         reviews = list(dict(job.result or {}).get("statblock_reviews") or [])
         reviews = [item for item in reviews if str(item.get("id") or "") != review_id]
@@ -19380,13 +19401,28 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             state=job.state,
             source_id=job.source_id,
         )
+        resolved_warnings = set((filled or {}).get("resolved_warnings") or [])
+        retained_warnings = [
+            warning for warning in parsed.warnings if warning not in resolved_warnings
+        ]
+        retained_warnings = list(
+            dict.fromkeys(
+                [
+                    *retained_warnings,
+                    *((filled or {}).get("added_warnings") or []),
+                ]
+            )
+        )
         response = {
             "job": import_job_view(updated),
             "review": review,
             "validation": {
                 "challenge_rating": parsed.challenge_rating,
                 "experience_points": parsed.experience_points,
-                **statblock_settlement(list(parsed.warnings)),
+                **statblock_settlement(retained_warnings),
+                "agent_fill": (filled or {}).get("fill"),
+                "resolved_warnings": sorted(resolved_warnings),
+                "agent_fill_requirements": agent_fill_requirements,
             },
         }
         return remember_idempotent(
@@ -23384,6 +23420,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "observation",
                     "review_mode",
                     "evidence_chunk_ids",
+                    "agent_fill",
                 },
                 required_names=(
                     "job_id",
@@ -23404,6 +23441,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     idempotency_key,
                     data.get("review_mode", "visual"),
                     data.get("evidence_chunk_ids"),
+                    data.get("agent_fill"),
                 ),
             )
         if action == "extract_candidates":
@@ -24441,6 +24479,18 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 source_key=source_key,
                 rule_refs=source_rule_refs,
             )
+            reviewed_fill = review.get("agent_statblock_fill")
+            require_complete_statblock_agent_fill(
+                hydrated_sheet,
+                reviewed_fill,
+            )
+            filled = (
+                apply_reviewed_statblock_fill(hydrated_sheet, reviewed_fill)
+                if reviewed_fill is not None
+                else None
+            )
+            if filled is not None:
+                hydrated_sheet = filled["sheet"]
             variant = data.get("variant")
             variant_evidence = statblock_variant_evidence(campaign_id, variant)
             hydrated_sheet = hydrate_statblock_variant_spells(
@@ -24451,6 +24501,22 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             statblock_warnings = retained_statblock_warnings(
                 [*parsed.warnings, *spell_warnings],
                 variant,
+            )
+            resolved_fill_warnings = set(
+                (filled or {}).get("resolved_warnings") or []
+            )
+            statblock_warnings = [
+                warning
+                for warning in statblock_warnings
+                if warning not in resolved_fill_warnings
+            ]
+            statblock_warnings = list(
+                dict.fromkeys(
+                    [
+                        *statblock_warnings,
+                        *((filled or {}).get("added_warnings") or []),
+                    ]
+                )
             )
             sheet = (
                 apply_statblock_variant(hydrated_sheet, variant)
@@ -24491,6 +24557,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 )
             if statblock_warnings:
                 provenance += "\nManual rulings: " + "; ".join(statblock_warnings) + "."
+            if filled is not None:
+                provenance += (
+                    "\nAgent statblock fill: "
+                    + ", ".join(
+                        str(item["activity_id"])
+                        for item in filled["fill"]["multiattack_options"]
+                    )
+                    + "."
+                )
             existing_dm_notes = str(profile.get("dm_notes") or "").strip()
             profile["dm_notes"] = "\n".join(
                 item for item in (existing_dm_notes, provenance) if item
@@ -24520,6 +24595,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "challenge_rating": challenge_rating,
                     "experience_points": experience_points,
                     **statblock_settlement(statblock_warnings),
+                    "agent_fill": (filled or {}).get("fill"),
                 },
                 "variant": deepcopy(variant) if variant is not None else None,
                 "variant_evidence": variant_evidence,
@@ -24555,7 +24631,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             reviewed_fill = dict(review.get("metadata") or {}).get(
                 "agent_statblock_fill"
             )
-            require_complete_module_statblock_agent_fill(
+            require_complete_statblock_agent_fill(
                 hydrated_sheet,
                 reviewed_fill,
             )

@@ -713,6 +713,67 @@ def test_prepare_rule_statblock_uses_checksum_bound_visual_review(
     assert report["review_override_path"] == str(override.resolve())
 
 
+def test_prepare_rule_statblock_submits_agent_fill_with_durable_review(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = _RuleStatblockClient()
+    _patch_rule_statblock_transport(monkeypatch, client)
+    source = tmp_path / "monster-manual.pdf"
+    source.write_bytes(b"test fixture")
+    override = tmp_path / "peryton.md"
+    override.write_text("# Peryton\n\nReviewed statblock.", encoding="utf-8")
+    fill_path = tmp_path / "peryton-fill.json"
+    fill = {
+        "multiattack_options": [
+            {
+                "activity_id": "multiattack-action",
+                "source_excerpt": (
+                    "The peryton makes one gore attack and one talon attack."
+                ),
+                "reason": "The reviewed text explicitly names one attack with each weapon.",
+                "options": [
+                    {
+                        "id": "gore-and-talons",
+                        "attacks": [
+                            {
+                                "weapon_id": "gore",
+                                "attack_mode": "melee",
+                                "count": 1,
+                            },
+                            {
+                                "weapon_id": "talons",
+                                "attack_mode": "melee",
+                                "count": 1,
+                            },
+                        ],
+                    }
+                ],
+            }
+        ]
+    }
+    fill_path.write_text(json.dumps(fill), encoding="utf-8")
+    args = _rule_statblock_args(tmp_path, defer_checkpoint=True)
+    args.source_id = None
+    args.source_path = source
+    args.chunk_id = []
+    args.source_page = 195
+    args.review_override = override
+    args.review_observation = "Visually checked every Peryton field on rendered PDF page."
+    args.agent_statblock_fill = fill_path
+
+    report = asyncio.run(_prepare_rule_statblock(args))
+
+    review_call = next(
+        arguments
+        for scope, tool_id, arguments in client.calls
+        if scope == "domain"
+        and tool_id == "rule_import"
+        and arguments["action"] == "review_statblock"
+    )
+    assert review_call["payload"]["agent_fill"] == fill
+    assert report["agent_fill_path"] == str(fill_path.resolve())
+
+
 def test_prepare_rule_statblock_uses_contiguous_agent_text_evidence(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

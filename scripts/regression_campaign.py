@@ -175,8 +175,8 @@ def _arguments() -> argparse.Namespace:
         "--agent-statblock-fill",
         type=Path,
         help=(
-            "Agent-reviewed semantic JSON fill for every module Multiattack; submitted "
-            "through module_review so parser phrase matching is never authoritative"
+            "Agent-reviewed semantic JSON fill for every reviewed Multiattack; "
+            "submitted with the durable module or rule-statblock review"
         ),
     )
     parser.add_argument(
@@ -418,6 +418,7 @@ def _rule_statblock_operation_token(
     reviewed_content: str | None,
     review_observation: str | None,
     variant: dict[str, Any] | None,
+    agent_fill: dict[str, Any] | None = None,
     source_statblock_name: str | None = None,
     source_job_id: str | None = None,
 ) -> str:
@@ -442,6 +443,7 @@ def _rule_statblock_operation_token(
             ),
             "review_observation": review_observation or "",
             "variant": variant,
+            "agent_fill": agent_fill,
         },
         ensure_ascii=False,
         sort_keys=True,
@@ -2822,6 +2824,19 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
             args.statblock_variant,
             "statblock variant",
         )
+    agent_fill = None
+    agent_fill_path = None
+    agent_fill_argument = getattr(args, "agent_statblock_fill", None)
+    if agent_fill_argument is not None:
+        if reviewed_content is None:
+            raise ValueError(
+                "--agent-statblock-fill requires --review-override or "
+                "--agent-rule-statblock-review"
+            )
+        agent_fill, agent_fill_path = _load_json_object(
+            agent_fill_argument,
+            "Agent statblock fill",
+        )
     resolved_source_path = args.source_path.expanduser().resolve() if args.source_path else None
     source_identity = (
         {
@@ -2844,6 +2859,7 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
         reviewed_content=reviewed_content,
         review_observation=review_observation,
         variant=variant,
+        agent_fill=agent_fill,
         source_statblock_name=source_statblock_name,
         source_job_id=requested_source_job_id,
     )
@@ -3086,6 +3102,8 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
                             "ordered contiguous page segment"
                         )
                     review_payload["evidence_chunk_ids"] = explicit_chunk_ids
+                if agent_fill is not None:
+                    review_payload["agent_fill"] = agent_fill
                 reviewed = _facade_value(
                     await client.domain(
                         "rule_import",
@@ -3315,6 +3333,9 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
                 "review_evidence_chunks": review_evidence_chunks,
                 "review_override_path": (
                     str(review_override_path) if review_override_path is not None else None
+                ),
+                "agent_fill_path": (
+                    str(agent_fill_path) if agent_fill_path is not None else None
                 ),
                 "statblock": statblock_report,
                 "actors": actors,

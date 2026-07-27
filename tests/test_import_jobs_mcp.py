@@ -225,6 +225,131 @@ def test_rule_import_renders_a_checksum_bound_review_page(
             in (created["character"]["notes"]["profile"]["dm_notes"])
         )
 
+        reviewed_monster = """### Reviewed Hunter
+
+*Medium monstrosity, unaligned*
+
+**Armor Class** 13
+**Hit Points** 22 (4d8 + 4)
+**Speed** 30 ft.
+
+| STR | DEX | CON | INT | WIS | CHA |
+|:---:|:---:|:---:|:---:|:---:|:---:|
+| 14 (+2) | 12 (+1) | 12 (+1) | 8 (-1) | 12 (+1) | 8 (-1) |
+
+**Senses** passive Perception 11
+**Languages** understands Common but can't speak
+**Challenge** 1 (200 XP)
+
+###### Actions
+
+***Multiattack.*** The hunter makes one bite attack and one claw attack.
+
+***Bite.*** *Melee Weapon Attack:* +4 to hit, reach 5 ft., one target.
+*Hit:* 6 (1d8 + 2) piercing damage.
+
+***Claw.*** *Melee Weapon Attack:* +4 to hit, reach 5 ft., one target.
+*Hit:* 5 (1d6 + 2) slashing damage.
+"""
+        missing_fill_arguments = {
+            "campaign_id": campaign["id"],
+            "action": "review_statblock",
+            "payload": {
+                "job_id": job_id,
+                "page_number": 1,
+                "normalized_content": reviewed_monster,
+                "observation": "DM compared every monster field with the rendered page.",
+            },
+            "idempotency_key": "review-monster-without-fill",
+        }
+        with pytest.raises(Exception, match="requires an Agent statblock fill"):
+            await server.call_tool("rule_import", missing_fill_arguments)
+
+        source_excerpt = (
+            "The hunter makes one bite attack and one claw attack."
+        )
+        agent_fill = {
+            "multiattack_options": [
+                {
+                    "activity_id": "multiattack-activity",
+                    "source_excerpt": source_excerpt,
+                    "reason": (
+                        "The reviewed sentence explicitly requires one bite and one claw."
+                    ),
+                    "options": [
+                        {
+                            "id": "bite-and-claw",
+                            "attacks": [
+                                {
+                                    "weapon_id": "bite",
+                                    "attack_mode": "melee",
+                                    "count": 1,
+                                },
+                                {
+                                    "weapon_id": "claw",
+                                    "attack_mode": "melee",
+                                    "count": 1,
+                                },
+                            ],
+                        }
+                    ],
+                }
+            ]
+        }
+        filled_arguments = {
+            **missing_fill_arguments,
+            "payload": {
+                **missing_fill_arguments["payload"],
+                "agent_fill": agent_fill,
+            },
+            "idempotency_key": "review-monster-with-fill",
+        }
+        _, filled_review_response = await server.call_tool(
+            "rule_import",
+            filled_arguments,
+        )
+        filled_review = filled_review_response["result"]["review"]
+        filled_validation = filled_review_response["result"]["validation"]
+        assert filled_review["agent_statblock_fill"]["multiattack_options"][0][
+            "activity_id"
+        ] == "multiattack-activity"
+        assert filled_validation["resolved_warnings"] == []
+        assert filled_validation["warnings"] == []
+        assert filled_validation["agent_fill_requirements"]["required"] is True
+
+        _, filled_actor_response = await server.call_tool(
+            "character_create_from",
+            {
+                "mode": "reviewed_rule_statblock",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "job_id": job_id,
+                    "review_id": filled_review["id"],
+                    "name": "Reviewed Hunter",
+                    "character_type": "monster",
+                },
+                "idempotency_key": "reviewed-hunter",
+            },
+        )
+        filled_actor = filled_actor_response["result"]
+        assert filled_actor["character"]["derived"]["multiattack_options"] == [
+            {
+                "id": "bite-and-claw",
+                "attacks": [
+                    {"weapon_id": "bite", "attack_mode": "melee", "count": 1},
+                    {"weapon_id": "claw", "attack_mode": "melee", "count": 1},
+                ],
+            }
+        ]
+        assert filled_actor["statblock"]["warnings"] == []
+        assert filled_actor["statblock"]["agent_fill"]["multiattack_options"][0][
+            "default_resolver"
+        ] == "agent"
+        assert (
+            "Agent statblock fill: multiattack-activity."
+            in filled_actor["character"]["notes"]["profile"]["dm_notes"]
+        )
+
         evidence_chunks = [
             {
                 "id": "commoner-core",
