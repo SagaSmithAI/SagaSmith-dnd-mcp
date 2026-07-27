@@ -6143,13 +6143,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "death_saves",
             "initiative",
             "tie_breaker",
+            "join_round",
         }
         unknown = set(config_value) - allowed
         if unknown:
             raise ValueError(f"unsupported participant config fields: {sorted(unknown)}")
         payload = {
             "actor_id": actor_id,
-            "participant_config": config_value,
+            "participant_config": deepcopy(config_value),
             "branch_id": resolved_branch_id,
         }
         scope = f"combat-join:{campaign_id}:{resolved_branch_id}:{principal_id}"
@@ -6185,9 +6186,23 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 validate_position(battle_map, config_value.get("position"))
             except BattleMapError as error:
                 raise NeedsRulingError(str(error), missing=("position",)) from error
+        join_round = config_value.pop("join_round", None)
+        if (
+            join_round is not None
+            and (
+                isinstance(join_round, bool)
+                or not isinstance(join_round, int)
+                or join_round <= int(encounter.get("round", 1) or 1)
+            )
+        ):
+            raise ValueError("join_round must be an integer after the current combat round")
         actor = combat_actor_snapshot(actor_id)
         actor.update(config_value)
-        next_encounter = queue_combatant(encounter, actor)
+        next_encounter = queue_combatant(
+            encounter,
+            actor,
+            joins_round=join_round,
+        )
         queued = next(
             item
             for item in next_encounter.get("reinforcements", [])

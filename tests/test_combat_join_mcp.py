@@ -36,7 +36,7 @@ def test_combat_join_queues_actor_until_next_round(tmp_path: Path) -> None:
             {"name": "Reinforcements", "edition": "2014", "idempotency_key": "join-campaign"},
         )
         actors = []
-        for index, name in enumerate(("Fast", "Slow", "Ally")):
+        for index, name in enumerate(("Fast", "Slow", "Ally", "Late")):
             sheet = default_character_sheet()
             if name == "Fast":
                 sheet["abilities"]["charisma"]["score"] = 18
@@ -121,6 +121,24 @@ def test_combat_join_queues_actor_until_next_round(tmp_path: Path) -> None:
         assert actors[2]["id"] not in {
             item["actor_id"] for item in joined["combat"]["combatants"]
         }
+        scheduled = await _call(
+            server,
+            "combat_join",
+            {
+                "campaign_id": campaign["id"],
+                "actor_id": actors[3]["id"],
+                "participant_config": {
+                    "initiative": 12,
+                    "tie_breaker": 3,
+                    "disposition": "friendly",
+                    "join_round": 3,
+                },
+                "expected_revision": joined["campaign_revision"],
+                "idempotency_key": "join-scheduled",
+            },
+        )
+        assert scheduled["queued"]["actor_id"] == actors[3]["id"]
+        assert scheduled["queued"]["join_round"] == 3
 
         first_end = await _call(
             server,
@@ -128,7 +146,7 @@ def test_combat_join_queues_actor_until_next_round(tmp_path: Path) -> None:
             {
                 "campaign_id": campaign["id"],
                 "actor_id": actors[0]["id"],
-                "expected_revision": joined["campaign_revision"],
+                "expected_revision": scheduled["campaign_revision"],
                 "idempotency_key": "join-fast-end",
             },
         )
@@ -148,7 +166,47 @@ def test_combat_join_queues_actor_until_next_round(tmp_path: Path) -> None:
             actors[2]["id"],
             actors[1]["id"],
         ]
-        assert second_end["combat"]["reinforcements"] == []
+        assert [item["actor_id"] for item in second_end["combat"]["reinforcements"]] == [
+            actors[3]["id"]
+        ]
+        round_two_fast = await _call(
+            server,
+            "combat_end_turn",
+            {
+                "campaign_id": campaign["id"],
+                "actor_id": actors[0]["id"],
+                "expected_revision": second_end["campaign_revision"],
+                "idempotency_key": "join-round-two-fast-end",
+            },
+        )
+        round_two_ally = await _call(
+            server,
+            "combat_end_turn",
+            {
+                "campaign_id": campaign["id"],
+                "actor_id": actors[2]["id"],
+                "expected_revision": round_two_fast["campaign_revision"],
+                "idempotency_key": "join-round-two-ally-end",
+            },
+        )
+        round_two_slow = await _call(
+            server,
+            "combat_end_turn",
+            {
+                "campaign_id": campaign["id"],
+                "actor_id": actors[1]["id"],
+                "expected_revision": round_two_ally["campaign_revision"],
+                "idempotency_key": "join-round-two-slow-end",
+            },
+        )
+        assert round_two_slow["combat"]["round"] == 3
+        assert [item["actor_id"] for item in round_two_slow["combat"]["combatants"]] == [
+            actors[0]["id"],
+            actors[2]["id"],
+            actors[3]["id"],
+            actors[1]["id"],
+        ]
+        assert round_two_slow["combat"]["reinforcements"] == []
         ended = await _call(
             server,
             "combat_end",
@@ -158,7 +216,7 @@ def test_combat_join_queues_actor_until_next_round(tmp_path: Path) -> None:
                     "status": "victory",
                     "summary": "The queued ally entered and the opposition withdrew.",
                 },
-                "expected_revision": second_end["campaign_revision"],
+                "expected_revision": round_two_slow["campaign_revision"],
                 "idempotency_key": "join-combat-end",
             },
         )

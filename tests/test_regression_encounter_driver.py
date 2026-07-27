@@ -3206,9 +3206,9 @@ def test_encounter_manifest_tracks_delayed_source_reinforcements() -> None:
     }
 
 
-def test_source_reinforcements_enter_openly_at_next_round_positions() -> None:
+def test_source_reinforcements_enter_openly_at_configured_round_positions() -> None:
     first = _reinforcement_config("rift-1", 0)
-    second = _reinforcement_config("rift-2", 1)
+    second = _reinforcement_config("rift-2", 1, join_round=7)
 
     assert first == {
         "position": {"x": 7, "y": 2},
@@ -3218,6 +3218,7 @@ def test_source_reinforcements_enter_openly_at_next_round_positions() -> None:
         "death_saves": False,
     }
     assert second["position"] == {"x": 7, "y": 4}
+    assert second["join_round"] == 7
 
 
 def test_default_ambush_layout_keeps_two_goblins_thirty_feet_away() -> None:

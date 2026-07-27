@@ -313,6 +313,15 @@ def _arguments() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--reinforcement-round",
+        type=int,
+        default=0,
+        help=(
+            "Exact future round when every source-cited reinforcement enters; "
+            "defaults to the next round"
+        ),
+    )
+    parser.add_argument(
         "--agent-target-priority-json",
         action="append",
         type=json.loads,
@@ -765,6 +774,18 @@ def _encounter_actor_groups(args: argparse.Namespace) -> dict[str, Any]:
             "prepared primary hostile count does not match the complete "
             f"source-grounded count ({len(groups['hostile_ids'])} != "
             f"{required_hostile_count}): {hostile_count_basis}"
+        )
+    reinforcement_round = getattr(args, "reinforcement_round", 0)
+    if (
+        isinstance(reinforcement_round, bool)
+        or not isinstance(reinforcement_round, int)
+        or reinforcement_round < 0
+        or (reinforcement_round and not groups["reinforcement_hostile_ids"])
+        or (groups["reinforcement_hostile_ids"] and reinforcement_round == 1)
+    ):
+        raise ValueError(
+            "reinforcement round must be zero/omitted for next-round entry or "
+            "at least 2 with prepared source reinforcements"
         )
     actor_sets = [
         (name, set(groups[name]))
@@ -1230,7 +1251,12 @@ def _participant_config(
     return _apply_source_separations(configs, dict(source_separations or {}))
 
 
-def _reinforcement_config(actor_id: str, index: int) -> dict[str, Any]:
+def _reinforcement_config(
+    actor_id: str,
+    index: int,
+    *,
+    join_round: int = 0,
+) -> dict[str, Any]:
     """Place a queued source reinforcement without granting an immediate turn."""
 
     if not actor_id.strip():
@@ -1249,12 +1275,15 @@ def _reinforcement_config(actor_id: str, index: int) -> dict[str, Any]:
     )
     if index < 0 or index >= len(positions):
         raise ValueError("default encounter layout supports at most 10 reinforcements")
+    if isinstance(join_round, bool) or not isinstance(join_round, int) or join_round < 0:
+        raise ValueError("source reinforcement round must be a non-negative integer")
     return {
         "position": {"x": positions[index][0], "y": positions[index][1]},
         "disposition": "hostile",
         "hidden": False,
         "surprised": False,
         "death_saves": False,
+        **({"join_round": join_round} if join_round else {}),
     }
 
 
@@ -3459,7 +3488,11 @@ async def _start(
                 {
                     "campaign_id": args.campaign_id,
                     "actor_id": actor_id,
-                    "participant_config": _reinforcement_config(actor_id, index),
+                    "participant_config": _reinforcement_config(
+                        actor_id,
+                        index,
+                        join_round=int(args.reinforcement_round or 0),
+                    ),
                     "branch_id": branch["id"],
                     "expected_revision": campaign["revision"],
                     "idempotency_key": (
