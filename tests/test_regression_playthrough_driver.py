@@ -585,8 +585,10 @@ def test_module_refresh_identity_is_retry_stable_and_revision_sensitive(
 
 
 @pytest.mark.parametrize("defer_checkpoint", [False, True])
+@pytest.mark.parametrize("pre_registered", [False, True])
 def test_narrative_npc_driver_round_trips_lobby_and_registers_manifest(
     defer_checkpoint: bool,
+    pre_registered: bool,
 ) -> None:
     source_ref = {
         "purpose": "Create a source-bound narrative NPC",
@@ -622,7 +624,24 @@ def test_narrative_npc_driver_round_trips_lobby_and_registers_manifest(
                 "name": "Qelline Alderleaf",
                 "sheet": {"adventure_state": {"status_tags": ["narrative_only", "source_bound"]}},
             }
+            if pre_registered:
+                self.manifest["npcs"] = [
+                    {
+                        "actor_id": "npc-1",
+                        "name": "Qelline Alderleaf",
+                        "status": "active",
+                        "faction": "Phandalin",
+                        "relationship": "later relationship that must be preserved",
+                        "notes": (
+                            "Narrative-only source-bound actor; "
+                            "combat_statblock=not_imported; module=module-1; "
+                            "scene=scene-1; chunk=chunk-1; pages=18-18; "
+                            f"sha256={'b' * 64}."
+                        ),
+                    }
+                ]
             self.snapshot_calls = 0
+            self.manifest_replace_calls = 0
 
         async def open(self, campaign_id: str) -> None:
             assert campaign_id == "campaign-1"
@@ -701,6 +720,7 @@ def test_narrative_npc_driver_round_trips_lobby_and_registers_manifest(
                         "campaign_revision": self.revision,
                     }
                 if action == "replace":
+                    self.manifest_replace_calls += 1
                     self.manifest = deepcopy(arguments["payload"]["manifest"])
                 self.revision += 1
                 return {
@@ -758,8 +778,14 @@ def test_narrative_npc_driver_round_trips_lobby_and_registers_manifest(
     assert result["narrative_npc"]["combat_eligible"] is False
     assert client.manifest["npcs"][0]["actor_id"] == "npc-1"
     assert "combat_statblock=not_imported" in client.manifest["npcs"][0]["notes"]
-    assert client.snapshot_calls == (0 if defer_checkpoint else 1)
-    if defer_checkpoint:
+    assert client.manifest_replace_calls == (0 if pre_registered else 1)
+    if pre_registered:
+        assert (
+            client.manifest["npcs"][0]["relationship"]
+            == "later relationship that must be preserved"
+        )
+    assert client.snapshot_calls == (0 if defer_checkpoint or pre_registered else 1)
+    if defer_checkpoint or pre_registered:
         assert result["checkpoint"] is None
     else:
         assert result["checkpoint"]["verification"]["valid"] is True

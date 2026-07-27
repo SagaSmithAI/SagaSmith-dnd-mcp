@@ -3364,38 +3364,56 @@ async def _prepare_narrative_npc(
 
     current_manifest = await _manifest_get(client, campaign_id)
     manifest = deepcopy(dict(current_manifest["manifest"]))
+    existing_manifest_npc = next(
+        (
+            item
+            for item in list(manifest.get("npcs") or [])
+            if str(item.get("actor_id") or "") == str(actor["id"])
+        ),
+        None,
+    )
+    if existing_manifest_npc is not None and str(
+        existing_manifest_npc.get("name") or ""
+    ) != normalized_name:
+        raise RuntimeError(
+            "registered narrative NPC manifest name does not match its actor"
+        )
     source_note = (
         "Narrative-only source-bound actor; combat_statblock=not_imported; "
         f"module={exact_ref['module_id']}; scene={exact_ref['scene_id']}; "
         f"chunk={exact_ref['chunk_id']}; pages={exact_ref['page_start']}-"
         f"{exact_ref['page_end']}; sha256={exact_ref['content_sha256']}."
     )
-    manifest["npcs"] = _upsert_manifest_rows(
-        list(manifest.get("npcs") or []),
-        [
-            {
-                "actor_id": str(actor["id"]),
-                "name": normalized_name,
-                "status": "active",
-                "faction": faction.strip(),
-                "relationship": relationship.strip(),
-                "notes": source_note,
-            }
-        ],
-        key="actor_id",
-    )
-    manifest = validate_playthrough_manifest(manifest)
-    replaced = await _manifest_mutation(
-        client,
-        campaign_id=campaign_id,
-        action="replace",
-        run_id=run_id,
-        identity=f"narrative-npc-register:{actor['id']}",
-        payload={"manifest": manifest},
-    )
+    if existing_manifest_npc is None:
+        manifest["npcs"] = _upsert_manifest_rows(
+            list(manifest.get("npcs") or []),
+            [
+                {
+                    "actor_id": str(actor["id"]),
+                    "name": normalized_name,
+                    "status": "active",
+                    "faction": faction.strip(),
+                    "relationship": relationship.strip(),
+                    "notes": source_note,
+                }
+            ],
+            key="actor_id",
+        )
+        manifest = validate_playthrough_manifest(manifest)
+        replaced = await _manifest_mutation(
+            client,
+            campaign_id=campaign_id,
+            action="replace",
+            run_id=run_id,
+            identity=f"narrative-npc-register:{actor['id']}",
+            payload={"manifest": manifest},
+        )
+    else:
+        validate_playthrough_manifest(manifest)
+        replaced = current_manifest
     checkpoint = (
         None
-        if defer_checkpoint
+        if defer_checkpoint or existing_manifest_npc is not None
         else await _checkpoint(
             client,
             campaign_id=campaign_id,
