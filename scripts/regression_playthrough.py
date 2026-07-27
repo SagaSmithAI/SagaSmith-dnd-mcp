@@ -3504,6 +3504,7 @@ async def _roll_source_table(
     branch = next((item for item in branches if item.get("is_current")), None)
     if branch is None:
         raise RuntimeError("campaign has no current branch")
+    branch_id = str(branch["id"])
     roll_identity = json.dumps(
         {
             "scene_id": scene_id,
@@ -3516,13 +3517,22 @@ async def _roll_source_table(
         sort_keys=True,
         separators=(",", ":"),
     )
+    branch_roll_identity = json.dumps(
+        {
+            "branch_id": branch_id,
+            "roll_identity": roll_identity,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
     campaign = await _campaign(client, campaign_id)
     rolled = await client.domain(
         "dnd_dice_roll",
         {
             "campaign_id": campaign_id,
             "expression": normalized_expression,
-            "branch_id": str(branch["id"]),
+            "branch_id": branch_id,
             "expected_campaign_revision": campaign["revision"],
             "idempotency_key": _mutation_key(
                 run_id,
@@ -3545,8 +3555,8 @@ async def _roll_source_table(
     )
     state = deepcopy(dict((progress_before or {}).get("state") or {}))
     rolls = deepcopy(dict(state.get("full_playthrough_rolls") or {}))
-    roll_key = _token(f"{run_id}:{roll_identity}", length=24)
-    rolls[roll_key] = {
+    roll_key = _token(f"{run_id}:{branch_roll_identity}", length=24)
+    roll_record = {
         "roll_id": normalized_roll_id,
         "expression": normalized_expression,
         "reason": normalized_reason,
@@ -3554,24 +3564,33 @@ async def _roll_source_table(
         "random_stream_receipt": random_receipt,
         "source_ref": exact_ref,
     }
-    state["full_playthrough_rolls"] = rolls
-    progress = await client.domain(
-        "module_set_progress",
-        {
-            "campaign_id": campaign_id,
-            "scene_id": scene_id,
-            "status": str((progress_before or {}).get("status") or "active"),
-            "progress": _scene_progress_percent(progress_before),
-            "state": state,
-            "current_location_key": location_key,
-            "expected_state_version": int((progress_before or {}).get("state_version", 0) or 0),
-            "idempotency_key": _mutation_key(
-                run_id,
-                "source-roll-progress",
-                roll_identity,
-            ),
-        },
-    )
+    existing_roll = rolls.get(roll_key)
+    if existing_roll is not None and existing_roll != roll_record:
+        raise RuntimeError("stored source roll conflicts with the replayed server receipt")
+    if existing_roll == roll_record:
+        progress = deepcopy(progress_before or {})
+    else:
+        rolls[roll_key] = roll_record
+        state["full_playthrough_rolls"] = rolls
+        progress = await client.domain(
+            "module_set_progress",
+            {
+                "campaign_id": campaign_id,
+                "scene_id": scene_id,
+                "status": str((progress_before or {}).get("status") or "active"),
+                "progress": _scene_progress_percent(progress_before),
+                "state": state,
+                "current_location_key": location_key,
+                "expected_state_version": int(
+                    (progress_before or {}).get("state_version", 0) or 0
+                ),
+                "idempotency_key": _mutation_key(
+                    run_id,
+                    "source-roll-progress",
+                    branch_roll_identity,
+                ),
+            },
+        )
     event_summary = (
         f"{normalized_reason} Server roll {normalized_expression} = {roll_result['total']}."
     )
@@ -3592,7 +3611,7 @@ async def _roll_source_table(
                 "source_ref": exact_ref,
             },
         },
-        "branch_id": str(branch["id"]),
+        "branch_id": branch_id,
     }
     if not defer_checkpoint:
         continuity_payload["snapshot"] = {
@@ -3608,7 +3627,7 @@ async def _roll_source_table(
             "idempotency_key": _mutation_key(
                 run_id,
                 "source-roll-continuity",
-                roll_identity,
+                branch_roll_identity,
             ),
         },
     )
@@ -3617,7 +3636,7 @@ async def _roll_source_table(
         campaign_id=campaign_id,
         action="sync",
         run_id=run_id,
-        identity=f"source-roll-sync:{roll_identity}",
+        identity=f"source-roll-sync:{branch_roll_identity}",
     )
     return {
         "scene": {

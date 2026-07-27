@@ -3052,9 +3052,10 @@ def test_source_table_roll_is_public_replayable_and_deferred() -> None:
     }
 
     class Client:
-        def __init__(self) -> None:
+        def __init__(self, branch_id: str = "branch-1") -> None:
             self.campaign_revision = 10
             self.calls: list[tuple[str, dict]] = []
+            self.branch_id = branch_id
 
         async def core(self, tool_id: str, arguments: dict):
             assert tool_id == "campaign_query"
@@ -3088,7 +3089,7 @@ def test_source_table_roll_is_public_replayable_and_deferred() -> None:
                     }
                 ]
             if tool_id == "branch_query":
-                return [{"id": "branch-1", "is_current": True}]
+                return [{"id": self.branch_id, "is_current": True}]
             if tool_id == "dnd_dice_roll":
                 assert arguments["expression"] == "1d20"
                 assert arguments["expected_campaign_revision"] == 10
@@ -3146,6 +3147,96 @@ def test_source_table_roll_is_public_replayable_and_deferred() -> None:
     assert result["random_stream_receipt"]["end_position"] == 43
     dice_call = next(args for tool, args in client.calls if tool == "dnd_dice_roll")
     assert dice_call["idempotency_key"].startswith("full-playthrough-source-roll-")
+    stored_progress = deepcopy(
+        next(
+            args["state"]
+            for tool, args in client.calls
+            if tool == "module_set_progress"
+        )
+    )
+
+    class ResumeClient(Client):
+        def __init__(self) -> None:
+            super().__init__()
+            self.progress_writes = 0
+
+        async def domain(self, tool_id: str, arguments: dict):
+            if tool_id == "module_query" and arguments["view"] == "progress":
+                self.calls.append((tool_id, arguments))
+                return [
+                    {
+                        "scene_id": "scene-1",
+                        "status": "active",
+                        "progress": 25,
+                        "state_version": 3,
+                        "state": deepcopy(stored_progress),
+                    }
+                ]
+            if tool_id == "module_set_progress":
+                self.progress_writes += 1
+                raise AssertionError("matching source-roll progress must not be rewritten")
+            if tool_id == "memory_change":
+                raise RuntimeError("resume reached continuity boundary")
+            return await super().domain(tool_id, arguments)
+
+    resume_client = ResumeClient()
+    with pytest.raises(RuntimeError, match="resume reached continuity boundary"):
+        asyncio.run(
+            _roll_source_table(
+                resume_client,
+                campaign_id="campaign-1",
+                run_id="run-1",
+                scene_id="scene-1",
+                location_key="triboar-trail",
+                source_excerpt=(
+                    "Check for encounters once during the day and once at night "
+                    "by rolling a d20."
+                ),
+                source_ref=source_ref,
+                roll_id="travel-day-1-daylight",
+                expression="1d20",
+                reason="Daylight wilderness encounter check.",
+                audience_scope="dm",
+                defer_checkpoint=True,
+            )
+        )
+    assert resume_client.progress_writes == 0
+
+    second_client = Client(branch_id="branch-2")
+    asyncio.run(
+        _roll_source_table(
+            second_client,
+            campaign_id="campaign-1",
+            run_id="run-1",
+            scene_id="scene-1",
+            location_key="triboar-trail",
+            source_excerpt=(
+                "Check for encounters once during the day and once at night by rolling a d20."
+            ),
+            source_ref=source_ref,
+            roll_id="travel-day-1-daylight",
+            expression="1d20",
+            reason="Daylight wilderness encounter check.",
+            audience_scope="dm",
+            defer_checkpoint=True,
+        )
+    )
+    second_dice_call = next(
+        args for tool, args in second_client.calls if tool == "dnd_dice_roll"
+    )
+    assert dice_call["idempotency_key"] == second_dice_call["idempotency_key"]
+    for tool_id in ("module_set_progress", "memory_change", "playthrough_manifest"):
+        first_key = next(
+            args["idempotency_key"]
+            for tool, args in client.calls
+            if tool == tool_id
+        )
+        second_key = next(
+            args["idempotency_key"]
+            for tool, args in second_client.calls
+            if tool == tool_id
+        )
+        assert first_key != second_key
 
 
 def test_stable_party_recovery_uses_one_public_campaign_transition() -> None:
