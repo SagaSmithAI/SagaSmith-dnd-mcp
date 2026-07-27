@@ -82,6 +82,7 @@ from scripts.regression_encounter import (
     _status,
     _surprise_from_check_report,
     _surprise_from_hostile_stealth_totals,
+    _surprise_from_party_stealth_reports,
     _validate_hostile_attacks,
     _validate_source_flee_configuration,
     _wound_priority,
@@ -3155,6 +3156,115 @@ def test_failed_source_cited_scout_check_surprises_only_party(tmp_path) -> None:
         "goblin-2": False,
     }
     assert basis["check"]["success"] is False
+
+
+def test_complete_party_stealth_can_surprise_shared_passive_hostiles(tmp_path) -> None:
+    paths = []
+    for actor_id, total in (("pc-1", 14), ("pc-2", 10)):
+        path = tmp_path / f"{actor_id}.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "action": "resolve-check",
+                    "campaign_id": "campaign-1",
+                    "passed": True,
+                    "result": {
+                        "scene": {"scene_id": "scene-1", "location_key": "entrance"},
+                        "actor": {"id": actor_id, "name": actor_id},
+                        "check": {
+                            "success": True,
+                            "dc": 10,
+                            "natural": total,
+                            "total": total,
+                        },
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        paths.append(path)
+
+    surprise, basis = _surprise_from_party_stealth_reports(
+        paths,
+        campaign_id="campaign-1",
+        scene_id="scene-1",
+        location_key="entrance",
+        party_ids=["pc-1", "pc-2"],
+        hostile_ids=["dragonclaw-1", "dragonclaw-2"],
+    )
+
+    assert surprise == {
+        "pc-1": False,
+        "pc-2": False,
+        "dragonclaw-1": True,
+        "dragonclaw-2": True,
+    }
+    assert basis["mode"] == "party_stealth_vs_shared_hostile_passive"
+    assert basis["passive_perception"] == 10
+    assert basis["all_party_hidden"] is True
+
+
+def test_one_failed_party_stealth_check_prevents_group_surprise(tmp_path) -> None:
+    paths = []
+    for actor_id, success in (("pc-1", True), ("pc-2", False)):
+        path = tmp_path / f"{actor_id}.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "action": "resolve-check",
+                    "campaign_id": "campaign-1",
+                    "passed": True,
+                    "result": {
+                        "scene": {"scene_id": "scene-1", "location_key": "entrance"},
+                        "actor": {"id": actor_id},
+                        "check": {"success": success, "dc": 10, "total": 12 if success else 7},
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        paths.append(path)
+
+    surprise, basis = _surprise_from_party_stealth_reports(
+        paths,
+        campaign_id="campaign-1",
+        scene_id="scene-1",
+        location_key="entrance",
+        party_ids=["pc-1", "pc-2"],
+        hostile_ids=["dragonclaw-1"],
+    )
+
+    assert surprise == {"pc-1": False, "pc-2": False, "dragonclaw-1": False}
+    assert basis["all_party_hidden"] is False
+
+
+def test_party_stealth_surprise_requires_complete_shared_dc_evidence(tmp_path) -> None:
+    path = tmp_path / "pc-1.json"
+    path.write_text(
+        json.dumps(
+            {
+                "action": "resolve-check",
+                "campaign_id": "campaign-1",
+                "passed": True,
+                "result": {
+                    "scene": {"scene_id": "scene-1", "location_key": "entrance"},
+                    "actor": {"id": "pc-1"},
+                    "check": {"success": True, "dc": 10, "total": 14},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="exactly one check report"):
+        _surprise_from_party_stealth_reports(
+            [path],
+            campaign_id="campaign-1",
+            scene_id="scene-1",
+            location_key="entrance",
+            party_ids=["pc-1", "pc-2"],
+            hostile_ids=["dragonclaw-1"],
+        )
 
 
 def test_hostile_stealth_uses_every_actor_total_and_ties_are_detected() -> None:

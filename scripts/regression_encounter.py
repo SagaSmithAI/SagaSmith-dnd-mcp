@@ -271,6 +271,16 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--reinforcement-hostile-label", default="Source reinforcements")
     parser.add_argument("--reinforcement-hostile-source-excerpt", default="")
     parser.add_argument("--surprise-check-report", type=Path)
+    parser.add_argument(
+        "--party-stealth-check-report",
+        type=Path,
+        action="append",
+        default=[],
+        help=(
+            "One source-cited Stealth check report per party member against a "
+            "shared hostile passive Perception; repeat for the complete party"
+        ),
+    )
     parser.add_argument("--source-surprised-actor-id", action="append", default=[])
     parser.add_argument(
         "--source-condition-json",
@@ -1312,6 +1322,72 @@ def _source_declared_surprise(
             "source_excerpt": source_excerpt.strip(),
         },
     )
+
+
+def _surprise_from_party_stealth_reports(
+    paths: list[Path],
+    *,
+    campaign_id: str,
+    scene_id: str,
+    location_key: str,
+    party_ids: list[str],
+    hostile_ids: list[str],
+) -> tuple[dict[str, bool], dict[str, Any]]:
+    """Resolve a whole party sneaking past one shared passive Perception."""
+
+    if len(paths) != len(party_ids):
+        raise ValueError(
+            "party Stealth surprise requires exactly one check report per party member"
+        )
+    checks: list[dict[str, Any]] = []
+    seen_actor_ids: set[str] = set()
+    dcs: set[int] = set()
+    for path in paths:
+        report = _read_report(path)
+        result = dict(report.get("result") or {})
+        scene = dict(result.get("scene") or {})
+        actor = dict(result.get("actor") or {})
+        check = dict(result.get("check") or {})
+        actor_id = str(actor.get("id") or "")
+        dc = check.get("dc")
+        if (
+            report.get("passed") is not True
+            or report.get("action") != "resolve-check"
+            or report.get("campaign_id") != campaign_id
+            or scene.get("scene_id") != scene_id
+            or scene.get("location_key") != location_key
+            or actor_id not in party_ids
+            or actor_id in seen_actor_ids
+            or not isinstance(check.get("success"), bool)
+            or isinstance(dc, bool)
+            or not isinstance(dc, int)
+            or dc < 1
+        ):
+            raise ValueError("party Stealth check report does not match this encounter")
+        seen_actor_ids.add(actor_id)
+        dcs.add(dc)
+        checks.append(
+            {
+                "report_path": str(path.expanduser().resolve()),
+                "actor": actor,
+                "check": check,
+            }
+        )
+    if seen_actor_ids != set(party_ids):
+        raise ValueError("party Stealth reports must cover every party member exactly once")
+    if len(dcs) != 1:
+        raise ValueError(
+            "party Stealth reports must use one shared hostile passive Perception DC"
+        )
+    all_hidden = all(bool(item["check"]["success"]) for item in checks)
+    surprise = {actor_id: False for actor_id in party_ids}
+    surprise.update({actor_id: all_hidden for actor_id in hostile_ids})
+    return surprise, {
+        "mode": "party_stealth_vs_shared_hostile_passive",
+        "passive_perception": next(iter(dcs)),
+        "all_party_hidden": all_hidden,
+        "checks": checks,
+    }
 
 
 def _source_declared_conditions(
@@ -3039,13 +3115,15 @@ async def _start(
         (
             bool(args.no_surprise),
             args.surprise_check_report is not None,
+            bool(args.party_stealth_check_report),
             bool(args.source_surprised_actor_id),
         )
     )
     if surprise_modes > 1:
         raise ValueError(
-            "--no-surprise, --surprise-check-report, and "
-            "--source-surprised-actor-id are mutually exclusive"
+            "--no-surprise, --surprise-check-report, "
+            "--party-stealth-check-report, and --source-surprised-actor-id "
+            "are mutually exclusive"
         )
     if args.no_surprise:
         surprise = {actor_id: False for actor_id in [*party_ids, *initial_hostile_ids]}
@@ -3094,6 +3172,16 @@ async def _start(
                 hostile_id: list(party_ids) if scout_success else []
                 for hostile_id in selected_hidden_ids
             }
+    elif args.party_stealth_check_report:
+        surprise, surprise_basis = _surprise_from_party_stealth_reports(
+            args.party_stealth_check_report,
+            campaign_id=args.campaign_id,
+            scene_id=args.scene_id,
+            location_key=args.location_key,
+            party_ids=party_ids,
+            hostile_ids=initial_hostile_ids,
+        )
+        expected_revision = campaign["revision"]
     elif args.source_surprised_actor_id:
         surprise, surprise_basis = _source_declared_surprise(
             party_ids=party_ids,
@@ -3137,7 +3225,9 @@ async def _start(
             ally_ids=ally_ids,
             surprise_by_actor=surprise,
             hostiles_hidden=(
-                args.hostiles_hidden or (not args.no_surprise and not selected_hidden_ids)
+                args.hostiles_hidden
+                or surprise_basis.get("mode")
+                in {"source_shared_hostile_stealth", "individual_hostile_stealth"}
             ),
             hidden_actor_ids=selected_hidden_ids,
             visible_to_actor_ids_by_hostile=visible_to_actor_ids_by_hostile,
