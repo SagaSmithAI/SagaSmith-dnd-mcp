@@ -103,6 +103,41 @@ def _manifest_source_ref() -> dict:
     }
 
 
+def test_register_party_returns_unresolved_dm_review_to_agent() -> None:
+    manifest = new_playthrough_manifest(
+        run_id="run-1",
+        campaign_line_id="unknown-size",
+        module_ids=["module-1"],
+        recommended_party_minimum=None,
+        recommended_party_maximum=None,
+        selected_party_size=None,
+        source_refs=[_manifest_source_ref()],
+        review_blocks=[{"kind": "recommended_party_size"}],
+    )
+
+    class Client:
+        async def domain(self, tool_id: str, arguments: dict):
+            assert tool_id == "playthrough_manifest"
+            assert arguments == {"campaign_id": "campaign-1", "action": "get"}
+            return {"manifest": manifest}
+
+    with pytest.raises(RegressionRulingRequiredError) as raised:
+        asyncio.run(
+            regression_playthrough._register_party(
+                Client(),
+                campaign_id="campaign-1",
+                run_id="run-1",
+                selections=[{"actor_id": "pc-1", "source": "generated"}],
+            )
+        )
+
+    requirement = raised.value.requirement
+    assert requirement["operation"] == "playthrough_manifest.register_party"
+    assert requirement["ruling"]["default_resolver"] == "agent"
+    assert requirement["ruling"]["ruling_kind"] == "source_or_scene_fact"
+    assert requirement["ruling"]["committed"] is False
+
+
 def test_playthrough_parser_accepts_deferred_scene_checkpoint(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

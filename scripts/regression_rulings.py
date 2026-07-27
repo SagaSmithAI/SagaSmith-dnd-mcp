@@ -22,30 +22,59 @@ AGENT_RULING_KINDS = (
     "environmental_consequence",
     "module_specific_procedure",
 )
+RULING_KINDS = frozenset((*AGENT_RULING_KINDS, *EXTERNAL_RULING_KINDS))
 
 
 def pending_ruling_kind(ruling: dict[str, Any]) -> str:
     """Classify every nested requirement, with true external boundaries taking priority."""
 
     kinds: list[str] = []
-    direct_kind = str(ruling.get("ruling_kind") or "")
-    if direct_kind:
-        kinds.append(direct_kind)
-    for field in ("pending", "ruling_requirements"):
-        kinds.extend(
-            str(item.get("ruling_kind") or "")
-            for item in ruling.get(field, [])
-            if isinstance(item, dict) and str(item.get("ruling_kind") or "")
-        )
-    requirement = ruling.get("ruling_requirement")
-    if isinstance(requirement, dict) and str(requirement.get("ruling_kind") or ""):
-        kinds.append(str(requirement["ruling_kind"]))
+    visited: set[int] = set()
+
+    def collect(value: Any) -> None:
+        if not isinstance(value, dict) or id(value) in visited:
+            return
+        visited.add(id(value))
+        direct_kind = str(value.get("ruling_kind") or "")
+        if direct_kind:
+            kinds.append(direct_kind)
+        for field in (
+            "pending",
+            "pending_rulings",
+            "ruling_requirements",
+            "review_requirements",
+        ):
+            nested = value.get(field)
+            if isinstance(nested, dict):
+                collect(nested)
+            elif isinstance(nested, (list, tuple)):
+                for item in nested:
+                    collect(item)
+        for field in ("ruling_requirement", "ruling", "review_resolution"):
+            collect(value.get(field))
+        nested_result = value.get("result")
+        if isinstance(nested_result, dict) and (
+            nested_result.get("status") in {"pending_choice", "pending_ruling"}
+            or any(
+                field in nested_result
+                for field in (
+                    "pending",
+                    "pending_rulings",
+                    "ruling_requirement",
+                    "ruling_requirements",
+                    "review_requirements",
+                )
+            )
+        ):
+            collect(nested_result)
+
+    collect(ruling)
     external = next((kind for kind in kinds if kind in EXTERNAL_RULING_KINDS), "")
     if external:
         return external
     return next(
         (kind for kind in kinds if kind in AGENT_RULING_KINDS),
-        direct_kind or "agent_dm_adjudication",
+        "agent_dm_adjudication",
     )
 
 

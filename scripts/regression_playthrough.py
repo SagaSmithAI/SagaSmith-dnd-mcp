@@ -26,6 +26,7 @@ from sagasmith_dnd.playthrough import validate_playthrough_manifest
 
 from scripts.regression_modules import PRINCIPAL_ID, ExposureClient, _token
 from scripts.regression_rulings import (
+    RegressionRulingRequiredError,
     raise_for_pending_ruling,
     ruling_failure_fields,
 )
@@ -1376,7 +1377,28 @@ async def _register_party(
     manifest = deepcopy(current["manifest"])
     selected_size = manifest["party"]["selected_size"]
     if selected_size is None:
-        raise RuntimeError("party size still requires explicit Agent-as-DM review")
+        review = dict(manifest["party"].get("party_size_review") or {})
+        raise RegressionRulingRequiredError(
+            {
+                "status": "pending_ruling",
+                "default_resolver": str(review.get("default_resolver") or "agent"),
+                "ruling_kind": str(
+                    review.get("ruling_kind") or "source_or_scene_fact"
+                ),
+                "reason": "party size still requires explicit Agent-as-DM review",
+                "committed": False,
+            },
+            operation="playthrough_manifest.register_party",
+            context={
+                "campaign_id": campaign_id,
+                "run_id": run_id,
+                "party_size_status": manifest["party"]["party_size_status"],
+            },
+            retry_hint=(
+                "Complete the Agent-owned party-size review with source/rules evidence, "
+                "then retry register-party."
+            ),
+        )
     if len(selections) != selected_size:
         raise ValueError(
             f"register-party requires exactly the selected maximum of {selected_size} actors"

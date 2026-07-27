@@ -109,6 +109,33 @@ def test_facade_preserves_nested_external_ruling_ownership() -> None:
     assert result["ruling_kind"] == "missing_or_conflicting_source_review"
 
 
+def test_nested_pending_rulings_and_facade_results_preserve_external_ownership() -> None:
+    nested = {
+        "status": "pending_ruling",
+        "result": {
+            "status": "pending_ruling",
+            "pending_rulings": [
+                {
+                    "default_resolver": "external_input",
+                    "ruling_kind": "missing_or_conflicting_source_review",
+                }
+            ],
+        },
+    }
+
+    assert _agent_ruling_resolution(nested)["default_resolver"] == "external_input"
+    result = _facade_result("apply", nested)
+    assert result["default_resolver"] == "external_input"
+    assert result["ruling_kind"] == "missing_or_conflicting_source_review"
+
+
+def test_unknown_dm_ruling_kind_defaults_to_agent_adjudication() -> None:
+    result = _ruling_status("pending_ruling", "legacy_manual_dm_review")
+
+    assert result["default_resolver"] == "agent"
+    assert result["ruling_kind"] == "agent_dm_adjudication"
+
+
 def test_needs_ruling_boundary_returns_to_agent_without_committing() -> None:
     @_agent_ruling_boundary
     def operation() -> None:

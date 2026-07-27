@@ -1,6 +1,9 @@
 import asyncio
 from pathlib import Path
 
+from sagasmith_dnd.character_schema import derive_character_sheet
+from sagasmith_dnd.statblocks import parse_2014_statblock
+
 from sagasmith_dnd_mcp.config import McpConfig
 from sagasmith_dnd_mcp.server import create_server
 
@@ -49,6 +52,15 @@ EVIL_MAGE_MODULE = (
     "##### ACTIONS\n\n"
     "Quarterstaff. Melee Weapon Attack: +1 to hit, reach 5 ft., one target. "
     "Hit: 3 (1d8 - 1) bludgeoning damage.\n"
+)
+
+AGENT_FILLED_GOBLIN_MODULE = GOBLIN_MODULE.replace(
+    "##### ACTIONS\n\n",
+    (
+        "##### ACTIONS\n\n"
+        "Multiattack. In one coordinated assault, the goblin slashes with its "
+        "scimitar and follows with its shortbow. "
+    ),
 )
 
 
@@ -188,6 +200,192 @@ def test_text_module_statblock_candidate_can_create_a_source_bound_actor(
         assert {
             item["source_key"] for item in created["character"]["sheet"]["inventory"]["items"]
         } == {f"module-review:{reviewed['review']['id']}"}
+
+    asyncio.run(exercise())
+
+
+def test_agent_can_fill_custom_monster_multiattack_from_exact_module_source(
+    tmp_path: Path,
+) -> None:
+    config = McpConfig(
+        home=tmp_path / "home",
+        database_url=None,
+        chroma_url=None,
+        chroma_path_override=None,
+        dnd_skills_dir=tmp_path / "dnd",
+        modulegen_skills_dir=tmp_path / "modulegen",
+        auto_seed_rules=True,
+    )
+
+    async def exercise() -> None:
+        server = create_server(config)
+        campaign = await _call(
+            server,
+            "campaign_create",
+            {
+                "name": "Agent-filled monster",
+                "edition": "2014",
+                "idempotency_key": "campaign",
+            },
+        )
+        staged = await _call(
+            server,
+            "module_import",
+            {
+                "campaign_id": campaign["id"],
+                "action": "stage",
+                "payload": {
+                    "name": "agent-filled-goblin.md",
+                    "content": AGENT_FILLED_GOBLIN_MODULE,
+                    "source_key": "agent-filled-goblin",
+                    "title": "Agent-filled Goblin",
+                },
+                "idempotency_key": "stage",
+            },
+        )
+        job_id = staged["job"]["id"]
+        for action in ("inspect", "validate", "ingest"):
+            ingested = await _call(
+                server,
+                "module_import",
+                {
+                    "campaign_id": campaign["id"],
+                    "action": action,
+                    "payload": {"job_id": job_id},
+                    "idempotency_key": action,
+                },
+            )
+        current = await _call(
+            server,
+            "campaign_query",
+            {"view": "get", "payload": {"campaign_id": campaign["id"]}},
+        )
+        await _call(
+            server,
+            "module_import",
+            {
+                "campaign_id": campaign["id"],
+                "action": "activate",
+                "payload": {"job_id": job_id},
+                "expected_revision": current["revision"],
+                "idempotency_key": "activate",
+            },
+        )
+        candidates = await _call(
+            server,
+            "module_query",
+            {
+                "campaign_id": campaign["id"],
+                "view": "candidates",
+                "payload": {"module_id": ingested["module_id"]},
+            },
+        )
+        candidate = candidates[0]
+        parsed = parse_2014_statblock(
+            candidate["normalized_content"],
+            source_key="test-agent-fill",
+        )
+        activity = next(
+            item
+            for item in parsed.sheet["content"]["activities"]
+            if item["name"] == "Multiattack"
+        )
+        assert derive_character_sheet(parsed.sheet)["multiattack_options"] == []
+
+        reviewed = await _call(
+            server,
+            "module_review",
+            {
+                "campaign_id": campaign["id"],
+                "action": "submit_content",
+                "payload": {
+                    "module_id": ingested["module_id"],
+                    "scene_id": candidate["scene_id"],
+                    "content_key": "agent-filled-goblin",
+                    "normalized_content": candidate["normalized_content"],
+                    "source_chunk_ids": candidate["source_chunk_ids"],
+                    "observation": (
+                        "The Agent reviewed the exact custom monster source and filled "
+                        "the semantic Multiattack composition."
+                    ),
+                    "agent_fill": {
+                        "multiattack_options": [
+                            {
+                                "activity_id": activity["id"],
+                                "source_excerpt": activity["description"],
+                                "reason": (
+                                    "The sentence names one scimitar attack followed by "
+                                    "one shortbow attack."
+                                ),
+                                "options": [
+                                    {
+                                        "id": "coordinated-assault",
+                                        "attacks": [
+                                            {
+                                                "weapon_id": "scimitar",
+                                                "attack_mode": "melee",
+                                                "count": 1,
+                                            },
+                                            {
+                                                "weapon_id": "shortbow",
+                                                "attack_mode": "ranged",
+                                                "count": 1,
+                                            },
+                                        ],
+                                    }
+                                ],
+                            }
+                        ]
+                    },
+                },
+                "idempotency_key": "review-agent-filled-goblin",
+            },
+        )
+        assert reviewed["validation"]["agent_fill"]["multiattack_options"][0][
+            "default_resolver"
+        ] == "agent"
+        assert (
+            "Multiattack: Multiattack composition requires a DM ruling"
+            in reviewed["validation"]["resolved_warnings"]
+        )
+        assert (
+            "Multiattack: Multiattack composition requires a DM ruling"
+            not in reviewed["validation"]["warnings"]
+        )
+
+        created = await _call(
+            server,
+            "character_create_from",
+            {
+                "mode": "module_statblock",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "review_id": reviewed["review"]["id"],
+                    "name": "Custom Goblin",
+                    "character_type": "monster",
+                },
+                "idempotency_key": "create-agent-filled-goblin",
+            },
+        )
+        assert created["character"]["derived"]["multiattack_options"] == [
+            {
+                "id": "coordinated-assault",
+                "attacks": [
+                    {"weapon_id": "scimitar", "attack_mode": "melee", "count": 1},
+                    {"weapon_id": "shortbow", "attack_mode": "ranged", "count": 1},
+                ],
+            }
+        ]
+        assert (
+            "Multiattack: Multiattack composition requires a DM ruling"
+            not in created["statblock"]["warnings"]
+        )
+        assert created["statblock"]["agent_fill"]["multiattack_options"][0][
+            "ruling_kind"
+        ] == "module_specific_procedure"
+        assert "Agent statblock fill: multiattack-action." in created["character"]["notes"][
+            "profile"
+        ]["dm_notes"]
 
     asyncio.run(exercise())
 

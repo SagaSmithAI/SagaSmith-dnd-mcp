@@ -106,6 +106,53 @@ def test_nested_external_requirement_overrides_an_inconsistent_agent_envelope() 
     assert ruling["ruling_kind"] == "missing_or_conflicting_source_review"
 
 
+def test_nested_pending_rulings_inside_facade_result_preserve_external_owner() -> None:
+    try:
+        raise_for_pending_ruling(
+            {
+                "status": "pending_ruling",
+                "result": {
+                    "status": "pending_ruling",
+                    "pending_rulings": [
+                        {
+                            "default_resolver": "external_input",
+                            "ruling_kind": "missing_or_conflicting_source_review",
+                        }
+                    ],
+                },
+            },
+            operation="spell_effect",
+        )
+    except RegressionRulingRequiredError as error:
+        fields = ruling_failure_fields(error)
+    else:
+        raise AssertionError("nested source review did not stop the driver")
+
+    ruling = fields["ruling_requirements"][0]["ruling"]
+    assert ruling["default_resolver"] == "external_input"
+    assert ruling["ruling_kind"] == "missing_or_conflicting_source_review"
+
+
+def test_unknown_ruling_kind_defaults_to_agent_adjudication() -> None:
+    try:
+        raise_for_pending_ruling(
+            {
+                "status": "pending_ruling",
+                "ruling_kind": "legacy_manual_dm_review",
+                "reason": "an old caller did not use the typed ruling enum",
+            },
+            operation="legacy_review",
+        )
+    except RegressionRulingRequiredError as error:
+        fields = ruling_failure_fields(error)
+    else:
+        raise AssertionError("legacy ruling did not stop the driver")
+
+    ruling = fields["ruling_requirements"][0]["ruling"]
+    assert ruling["default_resolver"] == "agent"
+    assert ruling["ruling_kind"] == "agent_dm_adjudication"
+
+
 def test_inconsistent_agent_kind_is_normalized_back_to_agent() -> None:
     try:
         raise_for_pending_ruling(

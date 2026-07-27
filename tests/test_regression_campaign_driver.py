@@ -173,6 +173,31 @@ def test_prepare_statblock_accepts_an_npc_actor_type(
     assert _arguments().actor_type == "npc"
 
 
+def test_prepare_statblock_accepts_agent_semantic_fill(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fill_path = tmp_path / "guard-drake-fill.json"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "regression_campaign.py",
+            "--home",
+            str(tmp_path),
+            "--campaign-id",
+            "campaign",
+            "--output",
+            str(tmp_path / "report.json"),
+            "--candidate-id",
+            "guard-drake-candidate",
+            "--agent-statblock-fill",
+            str(fill_path),
+        ],
+    )
+
+    assert _arguments().agent_statblock_fill == fill_path
+
+
 def test_prepare_statblock_accepts_deferred_main_timeline_checkpoint(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -125,6 +125,14 @@ def _arguments() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--agent-statblock-fill",
+        type=Path,
+        help=(
+            "Source-reviewed semantic JSON fill for unresolved module Multiattack prose; "
+            "submitted through module_review rather than expanding parser heuristics"
+        ),
+    )
+    parser.add_argument(
         "--actor-name",
         default="Structured regression actor",
         help="Canonical actor name for actor preparation actions",
@@ -1949,6 +1957,18 @@ async def _prepare_statblock(args: argparse.Namespace) -> dict[str, Any]:
             args.statblock_variant,
             "statblock variant",
         )
+    agent_fill = None
+    agent_fill_path = None
+    if getattr(args, "agent_statblock_fill", None) is not None:
+        if args.candidate_id is None:
+            raise ValueError(
+                "--agent-statblock-fill requires --candidate-id so the fill is "
+                "stored in an immutable module review"
+            )
+        agent_fill, agent_fill_path = _load_json_object(
+            args.agent_statblock_fill,
+            "Agent statblock fill",
+        )
     token = _idempotency_token(args.run_id)
     async with stdio_client(_server_parameters(args)) as (read, write):
         async with ClientSession(read, write) as session:
@@ -2142,6 +2162,7 @@ async def _prepare_statblock(args: argparse.Namespace) -> dict[str, Any]:
                                 "page_number": page_number,
                                 "observation": observation,
                                 "metadata": review_metadata,
+                                "agent_fill": agent_fill,
                             },
                             "idempotency_key": f"{token}-review-candidate",
                         },
@@ -2443,6 +2464,9 @@ async def _prepare_statblock(args: argparse.Namespace) -> dict[str, Any]:
                     "variant": created.get("variant"),
                     "variant_evidence": created.get("variant_evidence"),
                     "variant_path": str(variant_path) if variant_path is not None else None,
+                    "agent_fill_path": (
+                        str(agent_fill_path) if agent_fill_path is not None else None
+                    ),
                 },
                 "snapshot": snapshot,
                 "snapshot_verification": verified,
