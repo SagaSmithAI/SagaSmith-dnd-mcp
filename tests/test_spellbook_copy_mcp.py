@@ -227,6 +227,16 @@ def test_discovered_spellbook_copy_is_source_bound_paid_timed_and_atomic(
         assert copied["spellbook_copy"]["hours"] == 2
         assert copied["spellbook_copy"]["world_time"]["hour"] == 12
         assert copied["spellbook_copy"]["world_expired"] == ["copy-room-light"]
+        receipt = await call(
+            server,
+            "state_revision",
+            {
+                "campaign_id": created["id"],
+                "action": "receipt",
+                "payload": {"idempotency_key": "copy"},
+            },
+        )
+        assert receipt["response"] == copied
         after = await campaign(server, created["id"])
         assert after["state"]["party"]["inventory"]["items"][0]["id"] == (
             "d11-red-spellbook"

@@ -127,11 +127,11 @@ def test_source_bound_loot_is_atomic_idempotent_and_branch_audited(tmp_path: Pat
         )
         play = await _call(
             server,
-            "campaign_change",
+            "game_phase",
             {
                 "campaign_id": campaign["id"],
-                "action": "update",
-                "payload": {"state": {**current["state"], "game_phase": "play"}},
+                "action": "set",
+                "tool_profile": "play",
                 "expected_revision": current["revision"],
                 "idempotency_key": "play",
             },
@@ -160,7 +160,7 @@ def test_source_bound_loot_is_atomic_idempotent_and_branch_audited(tmp_path: Pat
                 "reason": "The party opened the source-defined treasure chest.",
                 "source_ref": source_ref,
             },
-            "expected_revision": play["revision"],
+            "expected_revision": play["campaign_revision"],
             "idempotency_key": "loot",
         }
         invalid_source = json.loads(source_ref)
@@ -197,7 +197,7 @@ def test_source_bound_loot_is_atomic_idempotent_and_branch_audited(tmp_path: Pat
             "healing-draught",
             "jade-frog",
         ]
-        assert acquired["campaign"]["revision"] == play["revision"] + 1
+        assert acquired["campaign"]["revision"] == play["campaign_revision"] + 1
         assert acquired["campaign"]["state"]["loot_acquisitions"][0]["id"] == (
             "chapter-one-chest"
         )

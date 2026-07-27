@@ -110,7 +110,16 @@ def test_campaign_clock_and_elapsed_effects_advance_atomically(tmp_path: Path) -
         arguments = {
             "campaign_id": campaign["id"],
             "action": "clock_advance",
-            "payload": {"period": "hour", "count": 2},
+            "payload": {
+                "period": "hour",
+                "count": 2,
+                "expected_world_time": {
+                    "day": 2,
+                    "hour": 11,
+                    "minute": 30,
+                    "elapsed_minutes": 2130,
+                },
+            },
             "expected_revision": light["campaign_revision"],
             "idempotency_key": "clock-advance",
         }
@@ -119,6 +128,26 @@ def test_campaign_clock_and_elapsed_effects_advance_atomically(tmp_path: Path) -
         replay = await _call(server, "campaign_change", arguments)
 
         assert replay == advanced
+        set_receipt = await _call(
+            server,
+            "state_revision",
+            {
+                "campaign_id": campaign["id"],
+                "action": "receipt",
+                "payload": {"idempotency_key": "clock-set"},
+            },
+        )
+        assert set_receipt["response"] == clock
+        advance_receipt = await _call(
+            server,
+            "state_revision",
+            {
+                "campaign_id": campaign["id"],
+                "action": "receipt",
+                "payload": {"idempotency_key": "clock-advance"},
+            },
+        )
+        assert advance_receipt["response"] == advanced
         assert advanced["world_time"] == {
             "schema_version": 1,
             "day": 2,
@@ -175,6 +204,18 @@ def test_clock_advance_rejects_a_duration_that_misses_its_expected_target(
             "minute": 0,
             "elapsed_minutes": 78180,
         }
+        with pytest.raises(Exception, match="require expected_world_time"):
+            await _call(
+                server,
+                "campaign_change",
+                {
+                    "campaign_id": campaign["id"],
+                    "action": "clock_advance",
+                    "payload": {"period": "minute", "count": 14757},
+                    "expected_revision": clock["campaign_revision"],
+                    "idempotency_key": "unbound-road-duration",
+                },
+            )
         with pytest.raises(Exception, match="does not reach expected_world_time"):
             await _call(
                 server,
@@ -303,7 +344,16 @@ def test_minute_clock_advances_accumulate_for_hour_effects(tmp_path: Path) -> No
             {
                 "campaign_id": campaign["id"],
                 "action": "clock_advance",
-                "payload": {"period": "minute", "count": 30},
+                "payload": {
+                    "period": "minute",
+                    "count": 30,
+                    "expected_world_time": {
+                        "day": 1,
+                        "hour": 9,
+                        "minute": 30,
+                        "elapsed_minutes": 570,
+                    },
+                },
                 "expected_revision": clock["campaign_revision"],
                 "idempotency_key": "first-half-hour",
             },
@@ -331,7 +381,16 @@ def test_minute_clock_advances_accumulate_for_hour_effects(tmp_path: Path) -> No
             {
                 "campaign_id": campaign["id"],
                 "action": "clock_advance",
-                "payload": {"period": "minute", "count": 30},
+                "payload": {
+                    "period": "minute",
+                    "count": 30,
+                    "expected_world_time": {
+                        "day": 1,
+                        "hour": 10,
+                        "minute": 0,
+                        "elapsed_minutes": 600,
+                    },
+                },
                 "expected_revision": first["campaign_revision"],
                 "idempotency_key": "second-half-hour",
             },
@@ -365,7 +424,15 @@ def test_campaign_clock_must_be_set_before_time_advance(tmp_path: Path) -> None:
                 {
                     "campaign_id": campaign["id"],
                     "action": "clock_advance",
-                    "payload": {"period": "hour"},
+                    "payload": {
+                        "period": "hour",
+                        "expected_world_time": {
+                            "day": 1,
+                            "hour": 1,
+                            "minute": 0,
+                            "elapsed_minutes": 60,
+                        },
+                    },
                     "expected_revision": campaign["revision"],
                     "idempotency_key": "advance",
                 },
@@ -405,5 +472,68 @@ def test_campaign_clock_cannot_jump_past_timed_effects(tmp_path: Path) -> None:
                     "idempotency_key": "jump",
                 },
             )
+
+    asyncio.run(exercise())
+
+
+def test_generic_campaign_update_cannot_bypass_the_clock_owner(tmp_path: Path) -> None:
+    async def exercise() -> None:
+        server = create_server(_config(tmp_path))
+        campaign = await _call(
+            server,
+            "campaign_create",
+            {
+                "name": "Protected clock",
+                "edition": "2014",
+                "idempotency_key": "campaign",
+            },
+        )
+        clock = await _call(
+            server,
+            "campaign_change",
+            {
+                "campaign_id": campaign["id"],
+                "action": "clock_set",
+                "payload": {"day": 2, "hour": 7, "minute": 0},
+                "expected_revision": campaign["revision"],
+                "idempotency_key": "clock",
+            },
+        )
+
+        with pytest.raises(Exception, match="system-owned state fields: world_time"):
+            await _call(
+                server,
+                "campaign_change",
+                {
+                    "campaign_id": campaign["id"],
+                    "action": "update",
+                    "payload": {
+                        "state": {
+                            "world_time": {
+                                "day": 9,
+                                "hour": 0,
+                                "minute": 0,
+                                "elapsed_minutes": 11520,
+                            }
+                        }
+                    },
+                    "expected_revision": clock["campaign_revision"],
+                    "idempotency_key": "bypass-clock",
+                },
+            )
+
+        updated = await _call(
+            server,
+            "campaign_change",
+            {
+                "campaign_id": campaign["id"],
+                "action": "update",
+                "payload": {"state": {"party": {"notes": "Reviewed party note"}}},
+                "expected_revision": clock["campaign_revision"],
+                "idempotency_key": "party-note",
+            },
+        )
+        assert updated["state"]["party"]["notes"] == "Reviewed party note"
+        assert updated["state"]["world_time"] == clock["world_time"]
 
     asyncio.run(exercise())

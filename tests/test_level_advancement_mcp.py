@@ -1725,7 +1725,16 @@ def test_spell_mastery_preserves_existing_preparation_state(
             {
                 "campaign_id": campaign["id"],
                 "action": "clock_advance",
-                "payload": {"period": "minute", "count": 480},
+                "payload": {
+                    "period": "minute",
+                    "count": 480,
+                    "expected_world_time": {
+                        "day": 1,
+                        "hour": 8,
+                        "minute": 0,
+                        "elapsed_minutes": 480,
+                    },
+                },
                 "expected_revision": clock["campaign_revision"],
                 "idempotency_key": "study",
             },

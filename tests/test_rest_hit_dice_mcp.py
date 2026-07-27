@@ -63,13 +63,23 @@ async def _advance_short_rest_clock(server, campaign_id: str, key: str) -> int:
         )
         world_time = dict(campaign["state"]["world_time"])
     started = int(world_time["elapsed_minutes"])
+    completed = started + 60
     await _call(
         server,
         "campaign_change",
         {
             "campaign_id": campaign_id,
             "action": "clock_advance",
-            "payload": {"period": "minute", "count": 60},
+            "payload": {
+                "period": "minute",
+                "count": 60,
+                "expected_world_time": {
+                    "day": completed // 1440 + 1,
+                    "hour": (completed % 1440) // 60,
+                    "minute": completed % 60,
+                    "elapsed_minutes": completed,
+                },
+            },
             "expected_revision": campaign["revision"],
             "idempotency_key": f"{key}-clock-advance",
         },
@@ -287,11 +297,11 @@ def test_attunement_requires_a_short_rest_during_play(tmp_path: Path) -> None:
         )
         await _call(
             server,
-            "campaign_change",
+            "game_phase",
             {
                 "campaign_id": campaign["id"],
-                "action": "update",
-                "payload": {"state": {**current_campaign["state"], "game_phase": "play"}},
+                "action": "set",
+                "tool_profile": "play",
                 "expected_revision": current_campaign["revision"],
                 "idempotency_key": "play",
             },

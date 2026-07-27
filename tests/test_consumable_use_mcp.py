@@ -51,11 +51,11 @@ def test_shared_healing_potion_use_is_atomic_rolled_and_idempotent(
         )
         await _call(
             server,
-            "campaign_change",
+            "game_phase",
             {
                 "campaign_id": campaign["id"],
-                "action": "update",
-                "payload": {"state": {**campaign["state"], "game_phase": "play"}},
+                "action": "set",
+                "tool_profile": "play",
                 "expected_revision": campaign["revision"],
                 "idempotency_key": "play",
             },

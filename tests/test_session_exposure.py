@@ -522,12 +522,12 @@ def test_player_exposure_loads_scene_reads_but_not_scene_control(tmp_path: Path)
             "campaign_create",
             {"name": "Player exposure", "idempotency_key": "campaign"},
         )
-        campaign = await call(
-            "campaign_change",
+        await call(
+            "game_phase",
             {
                 "campaign_id": campaign["id"],
-                "action": "update",
-                "payload": {"state": {"game_phase": "play"}},
+                "action": "set",
+                "tool_profile": "play",
                 "expected_revision": campaign["revision"],
                 "idempotency_key": "play-phase",
             },

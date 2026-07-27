@@ -8,7 +8,7 @@ import json
 import re
 from contextlib import nullcontext
 from copy import deepcopy
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import datetime
 from functools import wraps
 from pathlib import Path
@@ -32,6 +32,7 @@ from sagasmith_core import (
     ContinuityService,
     EventService,
     IdempotencyService,
+    IdempotencyWrite,
     ImportJobService,
     MemoryService,
     ModuleService,
@@ -4542,8 +4543,21 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             raise ValueError(
                 "expected_revision and idempotency_key are required for campaign updates"
             )
-        if state is not None and "combat" in state:
-            raise ValueError("combat state is owned by structured combat tools")
+        system_owned_state_fields = {
+            "combat",
+            "game_phase",
+            "playthrough_manifest",
+            "random_stream",
+            "world_effects",
+            "world_time",
+        }
+        if state is not None:
+            protected = sorted(set(state) & system_owned_state_fields)
+            if protected:
+                raise ValueError(
+                    "campaign update cannot write system-owned state fields: "
+                    + ", ".join(protected)
+                )
         branch_id = require_current_branch(campaign_id, None)
         payload = {
             "name": name,
@@ -4560,11 +4574,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         before = campaigns.get(campaign_id)
         normalized_state = None
         if state is not None:
-            normalized_state = validate_party_state(state)
-            # A generic campaign update may manage the shared party document,
-            # but it must never erase an encounter maintained by combat tools.
-            if isinstance(before.state, dict) and "combat" in before.state:
-                normalized_state = {**before.state, "party": normalized_state["party"]}
+            normalized_patch = validate_party_state(state)
+            normalized_state = deepcopy(dict(before.state or {}))
+            for key in state:
+                normalized_state[key] = deepcopy(normalized_patch[key])
+            normalized_state = validate_party_state(normalized_state)
         after = campaigns.update_audited(
             campaign_id,
             name=name,
@@ -8385,6 +8399,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "label": str(label).strip(),
         }
         state["world_time"] = world_time
+        def clock_set_response(revisions: list[Any]) -> dict[str, Any]:
+            return {
+                "status": "committed",
+                "world_time": world_time,
+                "campaign_revision": campaign.revision + 1,
+                "revisions": [asdict(item) for item in revisions],
+            }
+
         revisions_result = StateMutationService(storage.database).replace(
             campaign_id,
             campaign_state=state,
@@ -8393,16 +8415,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             actor=principal_id,
             branch_id=resolved_branch_id,
             idempotency_key=idempotency_key,
+            idempotency_write=IdempotencyWrite(
+                scope=scope,
+                payload=payload,
+                response=clock_set_response,
+            ),
         )
-        response = {
-            "status": "committed",
-            "world_time": world_time,
-            "campaign_revision": mutation_revision(campaign_id),
-            "revisions": [asdict(item) for item in revisions_result or []],
-        }
-        return remember_idempotent(
-            scope, idempotency_key, payload, response, campaign_id=campaign_id
-        )
+        return clock_set_response(list(revisions_result or []))
 
     @mcp.tool()
     def campaign_advance_effects(
@@ -8472,6 +8491,21 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "minute": minute,
                 "elapsed_minutes": expected_elapsed,
             }
+        narrative_time_periods = {"minute", "hour", "day"}
+        if (
+            normalized_period in narrative_time_periods
+            and normalized_expected_world_time is None
+        ):
+            raise ValueError(
+                "minute, hour, and day advances require expected_world_time"
+            )
+        if (
+            normalized_period not in narrative_time_periods
+            and normalized_expected_world_time is not None
+        ):
+            raise ValueError(
+                "expected_world_time is valid only for minute, hour, and day advances"
+            )
         payload = {
             "period": normalized_period,
             "count": count,
@@ -8608,8 +8642,26 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             )
             advanced[character.id] = list(dict.fromkeys(character_advanced))
             expired[character.id] = list(dict.fromkeys(character_expired))
+        mutation_required = bool(updates or world_time is not None or world_state_changed)
+
+        def clock_advance_response(revisions: list[Any]) -> dict[str, Any]:
+            return {
+                "status": "committed" if mutation_required else "no_change",
+                "period": normalized_period,
+                "count": count,
+                "world_time": world_time,
+                "advanced": advanced,
+                "expired": expired,
+                "world_advanced": list(dict.fromkeys(world_advanced)),
+                "world_expired": list(dict.fromkeys(world_expired)),
+                "rule_receipts": rule_receipts,
+                "ruleset_fingerprint": rule_context.fingerprint,
+                "campaign_revision": campaign.revision + (1 if mutation_required else 0),
+                "revisions": [asdict(item) for item in revisions],
+            }
+
         revisions_result = None
-        if updates or world_time is not None or world_state_changed:
+        if mutation_required:
             revisions_result = StateMutationService(storage.database).replace(
                 campaign_id,
                 campaign_state=(
@@ -8621,26 +8673,16 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 actor=principal_id,
                 branch_id=resolved_branch_id,
                 idempotency_key=idempotency_key,
+                idempotency_write=IdempotencyWrite(
+                    scope=scope,
+                    payload=payload,
+                    response=clock_advance_response,
+                ),
                 rule_receipts=rule_receipts,
             )
-        response = {
-            "status": (
-                "committed"
-                if updates or world_time is not None or world_state_changed
-                else "no_change"
-            ),
-            "period": normalized_period,
-            "count": count,
-            "world_time": world_time,
-            "advanced": advanced,
-            "expired": expired,
-            "world_advanced": list(dict.fromkeys(world_advanced)),
-            "world_expired": list(dict.fromkeys(world_expired)),
-            "rule_receipts": rule_receipts,
-            "ruleset_fingerprint": rule_context.fingerprint,
-            "campaign_revision": mutation_revision(campaign_id),
-            "revisions": [asdict(item) for item in revisions_result or []],
-        }
+        response = clock_advance_response(list(revisions_result or []))
+        if mutation_required:
+            return response
         return remember_idempotent(
             scope, idempotency_key, payload, response, campaign_id=campaign_id
         )
@@ -14894,19 +14936,18 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "character.stable_recovery",
             )
         )
-        StateMutationService(storage.database).replace(
-            current.campaign_id,
-            campaign_state=next_state,
-            character_updates=updates,
-            expected_campaign_revision=campaign.revision,
-            operation="character.stable_recovery",
-            actor=principal_id,
-            branch_id=branch_id,
-            idempotency_key=idempotency_key,
-            rule_receipts=receipts,
+        target_update = next(
+            item for item in updates if item.character_id == character_id
         )
+        target_after = replace(
+            current,
+            sheet=target_update.sheet,
+            notes=target_update.notes,
+            revision=current.revision + 1,
+        )
+        stream = active_random_stream()
         response = {
-            "character": character_view(characters.get(character_id)),
+            "character": character_view(target_after),
             "status": "recovered",
             "recovery_roll": recovery_roll,
             "recovery_hours": applied["recovery_hours"],
@@ -14918,14 +14959,29 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "world_advanced": list(dict.fromkeys(world_advanced)),
             "world_expired": list(dict.fromkeys(world_expired)),
             "rule_receipts": receipts,
+            **(
+                {"random_stream_receipt": stream.receipt()}
+                if stream is not None and stream.draw_count > 0
+                else {}
+            ),
         }
-        return remember_idempotent(
-            scope,
-            idempotency_key,
-            request_payload,
-            response,
-            campaign_id=current.campaign_id,
+        StateMutationService(storage.database).replace(
+            current.campaign_id,
+            campaign_state=next_state,
+            character_updates=updates,
+            expected_campaign_revision=campaign.revision,
+            operation="character.stable_recovery",
+            actor=principal_id,
+            branch_id=branch_id,
+            idempotency_key=idempotency_key,
+            idempotency_write=IdempotencyWrite(
+                scope=scope,
+                payload=request_payload,
+                response=response,
+            ),
+            rule_receipts=receipts,
         )
+        return response
 
     def character_source_state_initialize(
         character_id: str,
@@ -15139,6 +15195,37 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 advanced[current.id] = list(dict.fromkeys(character_advanced))
             if character_expired:
                 expired[current.id] = list(dict.fromkeys(character_expired))
+        update_by_id = {item.character_id: item for item in updates}
+        stream = active_random_stream()
+        response = {
+            "status": "recovered",
+            "member_ids": member_ids,
+            "elapsed_hours": elapsed_hours,
+            "recoveries": recoveries,
+            "characters": {
+                character_id: character_view(
+                    replace(
+                        all_characters[character_id],
+                        sheet=update_by_id[character_id].sheet,
+                        notes=update_by_id[character_id].notes,
+                        revision=all_characters[character_id].revision + 1,
+                    )
+                )
+                for character_id in member_ids
+            },
+            "world_time": next_world_time,
+            "advanced": advanced,
+            "expired": expired,
+            "world_advanced": list(dict.fromkeys(world_advanced)),
+            "world_expired": list(dict.fromkeys(world_expired)),
+            "rule_receipts": receipts,
+            "campaign_revision": campaign.revision + 1,
+            **(
+                {"random_stream_receipt": stream.receipt()}
+                if stream is not None and stream.draw_count > 0
+                else {}
+            ),
+        }
         StateMutationService(storage.database).replace(
             campaign_id,
             campaign_state=next_state,
@@ -15148,32 +15235,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             actor=principal_id,
             branch_id=resolved_branch_id,
             idempotency_key=idempotency_key,
+            idempotency_write=IdempotencyWrite(
+                scope=scope,
+                payload=request_payload,
+                response=response,
+            ),
             rule_receipts=receipts,
         )
-        response = {
-            "status": "recovered",
-            "member_ids": member_ids,
-            "elapsed_hours": elapsed_hours,
-            "recoveries": recoveries,
-            "characters": {
-                character_id: character_view(characters.get(character_id))
-                for character_id in member_ids
-            },
-            "world_time": next_world_time,
-            "advanced": advanced,
-            "expired": expired,
-            "world_advanced": list(dict.fromkeys(world_advanced)),
-            "world_expired": list(dict.fromkeys(world_expired)),
-            "rule_receipts": receipts,
-            "campaign_revision": mutation_revision(campaign_id),
-        }
-        return remember_idempotent(
-            scope,
-            idempotency_key,
-            request_payload,
-            response,
-            campaign_id=campaign_id,
-        )
+        return response
 
     def character_stand(
         character_id: str,
@@ -15579,18 +15648,24 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         campaign_id: str,
         members: list[dict[str, Any]],
         duration_minutes: int = 480,
+        rest_type: str = "long_rest",
         principal_id: str = "system:local",
         expected_revision: int | None = None,
         branch_id: str | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
-        """Advance one long rest and settle every named member in one mutation."""
+        """Advance one short or long rest and settle every member atomically."""
         access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
         require_write_contract(expected_revision, idempotency_key)
         resolved_branch_id = require_current_branch(campaign_id, branch_id)
+        normalized_rest_type = str(rest_type).strip().lower().replace("-", "_")
+        if normalized_rest_type not in {"short_rest", "long_rest"}:
+            raise CombatEngineError("rest_type must be short_rest or long_rest")
         if isinstance(duration_minutes, bool) or not isinstance(duration_minutes, int):
             raise ValueError("duration_minutes must be an integer")
-        if duration_minutes < 240:
+        if normalized_rest_type == "short_rest" and duration_minutes < 60:
+            raise CombatEngineError("a short rest requires at least 60 minutes")
+        if normalized_rest_type == "long_rest" and duration_minutes < 240:
             raise CombatEngineError(
                 "a long rest requires at least 480 minutes, or 240 minutes "
                 "for a creature with the source-granted Trance feature"
@@ -15605,6 +15680,25 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "rest_activity_minutes",
             "rest_schedule",
             "food_and_drink",
+            "hit_dice_spends",
+            "arcane_recovery",
+            "natural_recovery",
+            "song_of_rest_source_actor_id",
+            "attune_item_id",
+            "attunement_prerequisite_confirmed",
+        }
+        long_rest_fields = {
+            "prepared_spell_ids",
+            "hit_dice_recovery",
+            "food_and_drink",
+        }
+        short_rest_fields = {
+            "hit_dice_spends",
+            "arcane_recovery",
+            "natural_recovery",
+            "song_of_rest_source_actor_id",
+            "attune_item_id",
+            "attunement_prerequisite_confirmed",
         }
         normalized_members: list[dict[str, Any]] = []
         member_ids: list[str] = []
@@ -15614,6 +15708,17 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             unknown = sorted(set(raw_member) - allowed_member_fields)
             if unknown:
                 raise ValueError(f"members[{index}] has unsupported fields: {unknown}")
+            disallowed = (
+                short_rest_fields
+                if normalized_rest_type == "long_rest"
+                else long_rest_fields
+            )
+            wrong_rest_fields = sorted(set(raw_member) & disallowed)
+            if wrong_rest_fields:
+                raise ValueError(
+                    f"members[{index}] fields are invalid for {normalized_rest_type}: "
+                    f"{wrong_rest_fields}"
+                )
             character_id = str(raw_member.get("character_id") or "").strip()
             if not character_id:
                 raise ValueError(f"members[{index}].character_id is required")
@@ -15629,34 +15734,96 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             recovery = raw_member.get("hit_dice_recovery")
             if recovery is not None and not isinstance(recovery, dict):
                 raise ValueError(f"members[{index}].hit_dice_recovery must be an object")
+            hit_dice_spends = raw_member.get("hit_dice_spends")
+            if hit_dice_spends is not None and not isinstance(hit_dice_spends, list):
+                raise ValueError(f"members[{index}].hit_dice_spends must be an array")
+            arcane_recovery = raw_member.get("arcane_recovery")
+            if arcane_recovery is not None and not isinstance(arcane_recovery, dict):
+                raise ValueError(f"members[{index}].arcane_recovery must be an object")
+            natural_recovery = raw_member.get("natural_recovery")
+            if natural_recovery is not None and not isinstance(natural_recovery, dict):
+                raise ValueError(f"members[{index}].natural_recovery must be an object")
+            song_source_id = (
+                str(raw_member.get("song_of_rest_source_actor_id") or "").strip()
+                or None
+            )
+            attune_item_id = str(raw_member.get("attune_item_id") or "").strip() or None
+            attunement_confirmed = raw_member.get(
+                "attunement_prerequisite_confirmed"
+            )
+            if attune_item_id and attunement_confirmed is not True:
+                raise NeedsRulingError(
+                    "attunement requires explicit DM confirmation that the actor "
+                    "satisfies every source-defined prerequisite",
+                    missing=("attunement_prerequisite",),
+                    ruling_kind="source_or_scene_fact",
+                )
+            if not attune_item_id and attunement_confirmed is not None:
+                raise ValueError(
+                    "attunement_prerequisite_confirmed requires attune_item_id"
+                )
+            food_and_drink = raw_member.get("food_and_drink", False)
+            if not isinstance(food_and_drink, bool):
+                raise ValueError(f"members[{index}].food_and_drink must be a boolean")
             rest_activities = validate_rest_activity_minutes(
                 raw_member.get("rest_activity_minutes")
             )
             rest_schedule = validate_rest_schedule(
-                rest_type="long_rest",
+                rest_type=normalized_rest_type,
                 duration_minutes=duration_minutes,
                 rest_schedule=raw_member.get("rest_schedule"),
-                allows_trance=allows_trance_rest(current_member.sheet),
+                allows_trance=(
+                    allows_trance_rest(current_member.sheet)
+                    if normalized_rest_type == "long_rest"
+                    else False
+                ),
             )
-            normalized_members.append(
-                {
-                    "character_id": character_id,
-                    "expected_revision": character_revision,
-                    "prepared_spell_ids": prepared_ids,
-                    "hit_dice_recovery": recovery,
-                    "rest_activity_minutes": rest_activities,
-                    "rest_schedule": rest_schedule,
-                    "food_and_drink": bool(raw_member.get("food_and_drink", False)),
-                }
-            )
+            normalized_member = {
+                "character_id": character_id,
+                "expected_revision": character_revision,
+                "rest_activity_minutes": rest_activities,
+                "rest_schedule": rest_schedule,
+            }
+            if normalized_rest_type == "long_rest":
+                normalized_member.update(
+                    {
+                        "prepared_spell_ids": prepared_ids,
+                        "hit_dice_recovery": recovery,
+                        "food_and_drink": food_and_drink,
+                    }
+                )
+            else:
+                normalized_member.update(
+                    {
+                        "hit_dice_spends": list(hit_dice_spends or []),
+                        "arcane_recovery": deepcopy(arcane_recovery or {}),
+                        "natural_recovery": deepcopy(natural_recovery or {}),
+                        "song_of_rest_source_actor_id": song_source_id,
+                        "attune_item_id": attune_item_id,
+                        "attunement_prerequisite_confirmed": attunement_confirmed,
+                    }
+                )
+            normalized_members.append(normalized_member)
             member_ids.append(character_id)
         if len(member_ids) != len(set(member_ids)):
             raise ValueError("party rest member ids must be unique")
+        if normalized_rest_type == "short_rest":
+            song_source_ids = {
+                str(item["song_of_rest_source_actor_id"])
+                for item in normalized_members
+                if item["song_of_rest_source_actor_id"] is not None
+            }
+            if song_source_ids - set(member_ids):
+                raise CombatEngineError(
+                    "every Song of Rest source must participate in the same party rest"
+                )
         request_payload = {
             "members": normalized_members,
             "duration_minutes": duration_minutes,
             "branch_id": resolved_branch_id,
         }
+        if normalized_rest_type != "long_rest":
+            request_payload["rest_type"] = normalized_rest_type
         scope = f"campaign-party-rest:{campaign_id}:{resolved_branch_id}:{principal_id}"
         replay = replay_idempotent(scope, idempotency_key, request_payload)
         if replay is not None:
@@ -15694,12 +15861,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 raise ValueError(f"character revision conflict: {current.id}")
             record_rest_completion(
                 current.sheet,
-                rest_type="long_rest",
+                rest_type=normalized_rest_type,
                 started_elapsed_minutes=started_elapsed,
                 completed_elapsed_minutes=completed_elapsed,
                 rest_schedule=member["rest_schedule"],
             )
-            if member["prepared_spell_ids"] is not None:
+            if normalized_rest_type == "long_rest" and member["prepared_spell_ids"] is not None:
                 preparation_preview = replace_prepared_spells(
                     current.sheet,
                     spell_ids=member["prepared_spell_ids"],
@@ -15714,6 +15881,31 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         f"prepared spell list for {current.id} requires "
                         f"{required_minutes} minutes of light preparation activity; "
                         f"the rest schedule records {available_minutes}"
+                    )
+            if normalized_rest_type == "short_rest":
+                validate_rest_hit_dice_requests(
+                    current.sheet,
+                    member["hit_dice_spends"],
+                )
+                validate_arcane_recovery_choice(
+                    current.sheet,
+                    member["arcane_recovery"],
+                    world_day=completed_clock["day"],
+                )
+                validate_natural_recovery_choice(
+                    current.sheet,
+                    member["natural_recovery"],
+                    rest_activity_minutes=member["rest_activity_minutes"],
+                )
+                song_source_id = member["song_of_rest_source_actor_id"]
+                if song_source_id is not None:
+                    validate_song_of_rest_source(
+                        all_characters[str(song_source_id)].sheet
+                    )
+                if member["attune_item_id"] is not None:
+                    attune_inventory_item(
+                        current.sheet,
+                        str(member["attune_item_id"]),
                     )
 
         world_advanced: list[str] = []
@@ -15765,30 +15957,64 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             if member is not None:
                 rest_rules = effective_rule_context(
                     campaign_id,
-                    facts={"actor_id": current.id, "rest_type": "long_rest"},
+                    facts={
+                        "actor_id": current.id,
+                        "rest_type": normalized_rest_type,
+                    },
                 )
-                applied = apply_rest(
-                    sheet,
-                    rest_type="long_rest",
-                    hit_dice_recovery=member["hit_dice_recovery"],
-                    rest_activity_minutes=member["rest_activity_minutes"],
-                    food_and_drink=member["food_and_drink"],
-                    rules=rest_rules,
-                    world_day=completed_clock["day"],
-                )
+                rest_arguments: dict[str, Any] = {
+                    "rest_type": normalized_rest_type,
+                    "rest_activity_minutes": member["rest_activity_minutes"],
+                    "rules": rest_rules,
+                    "world_day": completed_clock["day"],
+                }
+                if normalized_rest_type == "long_rest":
+                    rest_arguments.update(
+                        {
+                            "hit_dice_recovery": member["hit_dice_recovery"],
+                            "food_and_drink": member["food_and_drink"],
+                        }
+                    )
+                else:
+                    song_source_id = member["song_of_rest_source_actor_id"]
+                    rest_arguments.update(
+                        {
+                            "hit_dice_spends": member["hit_dice_spends"],
+                            "arcane_recovery": member["arcane_recovery"],
+                            "natural_recovery": member["natural_recovery"],
+                            "song_of_rest_source_sheet": (
+                                all_characters[str(song_source_id)].sheet
+                                if song_source_id is not None
+                                else None
+                            ),
+                        }
+                    )
+                applied = apply_rest(sheet, **rest_arguments)
                 if applied.get("status") != "committed":
                     raise CombatEngineError(
                         f"party rest for {current.id} requires an unresolved rule choice"
                     )
+                if (
+                    normalized_rest_type == "short_rest"
+                    and member["attune_item_id"] is not None
+                ):
+                    applied["sheet"] = attune_inventory_item(
+                        applied["sheet"],
+                        str(member["attune_item_id"]),
+                    )
+                    applied["attuned_item_id"] = str(member["attune_item_id"])
                 sheet = record_rest_completion(
                     applied["sheet"],
-                    rest_type="long_rest",
+                    rest_type=normalized_rest_type,
                     started_elapsed_minutes=started_elapsed,
                     completed_elapsed_minutes=completed_elapsed,
                     rest_schedule=member["rest_schedule"],
                 )
                 preparation_result = None
-                if member["prepared_spell_ids"] is not None:
+                if (
+                    normalized_rest_type == "long_rest"
+                    and member["prepared_spell_ids"] is not None
+                ):
                     preparation_result = replace_prepared_spells(
                         sheet,
                         spell_ids=member["prepared_spell_ids"],
@@ -15804,13 +16030,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     if key not in {"sheet", "rule_receipts"}
                 }
                 rule_receipts.extend(applied.get("rule_receipts") or [])
-                rule_receipts.extend(
-                    core_receipts(
-                        rest_rules,
-                        ["dnd5e.core.rest.long_rest_timing"],
-                        "party.rest.long_rest",
+                if normalized_rest_type == "long_rest":
+                    rule_receipts.extend(
+                        core_receipts(
+                            rest_rules,
+                            ["dnd5e.core.rest.long_rest_timing"],
+                            "party.rest.long_rest",
+                        )
                     )
-                )
                 if preparation_result is not None:
                     rule_receipts.extend(
                         core_receipts(
@@ -15832,20 +16059,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 advanced[current.id] = list(dict.fromkeys(actor_advanced))
             if actor_expired:
                 expired[current.id] = list(dict.fromkeys(actor_expired))
-        revisions_result = StateMutationService(storage.database).replace(
-            campaign_id,
-            campaign_state=validate_party_state(next_state),
-            character_updates=updates,
-            expected_campaign_revision=campaign.revision,
-            operation="campaign.party.rest.long_rest",
-            actor=principal_id,
-            branch_id=resolved_branch_id,
-            idempotency_key=idempotency_key,
-            rule_receipts=rule_receipts,
-        )
-        response = {
+        stream = active_random_stream()
+        base_response = {
             "status": "committed",
-            "rest_type": "long_rest",
+            "rest_type": normalized_rest_type,
             "duration_minutes": duration_minutes,
             "member_ids": member_ids,
             "world_time": completed_clock,
@@ -15855,14 +16072,39 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "expired": expired,
             "world_advanced": list(dict.fromkeys(world_advanced)),
             "world_expired": list(dict.fromkeys(world_expired)),
-            "campaign_revision": mutation_revision(campaign_id),
-            "revisions": [asdict(item) for item in revisions_result or []],
+            "campaign_revision": campaign.revision + 1,
             "rule_receipts": rule_receipts,
             "ruleset_fingerprint": rule_context.fingerprint,
+            **(
+                {"random_stream_receipt": stream.receipt()}
+                if stream is not None and stream.draw_count > 0
+                else {}
+            ),
         }
-        return remember_idempotent(
-            scope, idempotency_key, request_payload, response, campaign_id=campaign_id
+
+        def party_rest_response(revisions: list[Any]) -> dict[str, Any]:
+            return {
+                **base_response,
+                "revisions": [asdict(item) for item in revisions],
+            }
+
+        revisions_result = StateMutationService(storage.database).replace(
+            campaign_id,
+            campaign_state=validate_party_state(next_state),
+            character_updates=updates,
+            expected_campaign_revision=campaign.revision,
+            operation=f"campaign.party.rest.{normalized_rest_type}",
+            actor=principal_id,
+            branch_id=resolved_branch_id,
+            idempotency_key=idempotency_key,
+            idempotency_write=IdempotencyWrite(
+                scope=scope,
+                payload=request_payload,
+                response=party_rest_response,
+            ),
+            rule_receipts=rule_receipts,
         )
+        return party_rest_response(list(revisions_result or []))
 
     @mcp.tool()
     def character_use_activity(
@@ -21411,18 +21653,17 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "character.spellbook.copy",
             )
         )
-        StateMutationService(storage.database).replace(
-            campaign_id,
-            campaign_state=next_state,
-            character_updates=updates,
-            expected_campaign_revision=campaign.revision,
-            operation="character.spellbook.copy",
-            actor=principal_id,
-            branch_id=branch_id,
-            idempotency_key=idempotency_key,
-            rule_receipts=receipts,
+        current_update = next(
+            item for item in updates if item.character_id == current.id
         )
-        response = character_view(characters.get(current.id))
+        response = character_view(
+            replace(
+                current,
+                sheet=current_update.sheet,
+                notes=current_update.notes,
+                revision=current.revision + 1,
+            )
+        )
         response["spellbook_copy"] = {
             "spell_id": artifact_id,
             "source_owner": source_owner,
@@ -21444,13 +21685,23 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "world_expired": list(dict.fromkeys(world_expired)),
             "rule_receipts": receipts,
         }
-        return remember_idempotent(
-            scope,
-            idempotency_key,
-            request_payload,
-            response,
-            campaign_id=campaign_id,
+        StateMutationService(storage.database).replace(
+            campaign_id,
+            campaign_state=next_state,
+            character_updates=updates,
+            expected_campaign_revision=campaign.revision,
+            operation="character.spellbook.copy",
+            actor=principal_id,
+            branch_id=branch_id,
+            idempotency_key=idempotency_key,
+            idempotency_write=IdempotencyWrite(
+                scope=scope,
+                payload=request_payload,
+                response=response,
+            ),
+            rule_receipts=receipts,
         )
+        return response
 
     @mcp.tool()
     def character_content_apply(
@@ -25775,13 +26026,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             )
         elif action == "party_rest":
             result = campaign_party_rest(
-                campaign_id,
-                required(data, "members"),
-                data.get("duration_minutes", 480),
-                principal_id,
-                expected_revision,
-                branch_id,
-                idempotency_key,
+                campaign_id=campaign_id,
+                members=required(data, "members"),
+                duration_minutes=data.get("duration_minutes", 480),
+                rest_type=data.get("rest_type", "long_rest"),
+                principal_id=principal_id,
+                expected_revision=expected_revision,
+                branch_id=branch_id,
+                idempotency_key=idempotency_key,
             )
         elif action == "stable_recovery":
             result = campaign_stable_recovery(

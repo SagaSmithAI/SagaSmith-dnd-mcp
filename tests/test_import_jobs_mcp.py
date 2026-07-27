@@ -737,11 +737,11 @@ def test_rule_import_recovers_statblock_for_text_only_agent(
                     },
                 )
             await server.call_tool(
-                "campaign_change",
+                "game_phase",
                 {
                     "campaign_id": campaign["id"],
-                    "action": "update",
-                    "payload": {"state": {"game_phase": "play"}},
+                    "action": "set",
+                    "tool_profile": "play",
                     "expected_revision": campaign["revision"],
                     "idempotency_key": "enter-play",
                 },

@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 from sagasmith_dnd.character_schema import default_character_sheet
+from sagasmith_dnd.random_stream import CampaignRandomStream, use_random_stream
 
 from sagasmith_dnd_mcp.config import McpConfig
 from sagasmith_dnd_mcp.server import create_server
@@ -229,6 +230,184 @@ def test_party_long_rest_advances_once_and_settles_members_atomically(tmp_path: 
         )
         assert unchanged["state"]["world_time"]["elapsed_minutes"] == 1740
         assert unchanged["revision"] == rested["campaign_revision"]
+
+    asyncio.run(exercise())
+
+
+def test_party_short_rest_advances_and_settles_every_member_atomically(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        server = create_server(_config(tmp_path))
+        campaign = await _call(
+            server,
+            "campaign_create",
+            {"name": "Atomic short rest", "edition": "2014", "idempotency_key": "campaign"},
+        )
+        first_sheet = _spent_sheet()
+        first_sheet["combat"]["hit_dice"]["fighter:d10"]["value"] = 1
+        first = await _call(
+            server,
+            "character_create_from",
+            {
+                "mode": "direct",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "name": "Meditating monk",
+                    "sheet": first_sheet,
+                },
+                "idempotency_key": "first",
+            },
+        )
+        second = await _call(
+            server,
+            "character_create_from",
+            {
+                "mode": "direct",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "name": "Watching fighter",
+                    "sheet": _spent_sheet(),
+                },
+                "idempotency_key": "second",
+            },
+        )
+        current = await _call(
+            server,
+            "campaign_query",
+            {"view": "get", "payload": {"campaign_id": campaign["id"]}},
+        )
+        clock = await _call(
+            server,
+            "campaign_change",
+            {
+                "campaign_id": campaign["id"],
+                "action": "clock_set",
+                "payload": {"day": 3, "hour": 10, "minute": 0, "label": "Roadside"},
+                "expected_revision": current["revision"],
+                "idempotency_key": "clock",
+            },
+        )
+        schedule = {
+            "sleep_minutes": 0,
+            "light_activity_minutes": 60,
+            "strenuous_activity_minutes": 0,
+        }
+        arguments = {
+            "campaign_id": campaign["id"],
+            "action": "party_rest",
+            "payload": {
+                "rest_type": "short_rest",
+                "duration_minutes": 60,
+                "members": [
+                    {
+                        "character_id": first["id"],
+                        "expected_revision": first["revision"],
+                        "hit_dice_spends": [{"key": "fighter:d10", "count": 1}],
+                        "rest_activity_minutes": {"meditation": 30},
+                        "rest_schedule": schedule,
+                    },
+                    {
+                        "character_id": second["id"],
+                        "expected_revision": second["revision"],
+                        "rest_schedule": schedule,
+                    },
+                ],
+            },
+            "expected_revision": clock["campaign_revision"],
+            "idempotency_key": "short-rest",
+        }
+
+        stream = CampaignRandomStream.from_campaign_state(
+            campaign["id"],
+            current["state"],
+            operation="campaign_change",
+            idempotency_key="short-rest",
+        )
+        with use_random_stream(stream):
+            rested = await _call(server, "campaign_change", arguments)
+        assert await _call(server, "campaign_change", arguments) == rested
+        assert rested["rest_type"] == "short_rest"
+        assert len(rested["recovered"][first["id"]]["hit_dice_rolls"]) == 1
+        assert rested["random_stream_receipt"]["draw_count"] == 1
+        assert rested["world_time"] == {
+            "schema_version": 1,
+            "day": 3,
+            "hour": 11,
+            "minute": 0,
+            "elapsed_minutes": 3540,
+            "label": "Roadside",
+        }
+        updated = []
+        for actor in (first, second):
+            current_actor = await _call(
+                server,
+                "character_query",
+                {"view": "get", "payload": {"character_id": actor["id"]}},
+            )
+            updated.append(current_actor)
+            assert current_actor["sheet"]["combat"]["rest_history"] == {
+                "last_rest_type": "short_rest",
+                "last_rest_started_elapsed_minutes": 3480,
+                "last_rest_completed_elapsed_minutes": 3540,
+                "last_long_rest_elapsed_minutes": None,
+            }
+        assert updated[0]["sheet"]["resources"]["ki"]["value"] == 2
+        assert updated[1]["sheet"]["resources"]["ki"]["value"] == 0
+        receipt = await _call(
+            server,
+            "state_revision",
+            {
+                "campaign_id": campaign["id"],
+                "action": "receipt",
+                "payload": {"idempotency_key": "short-rest"},
+            },
+        )
+        assert receipt["response"] == rested
+
+        before_failure = await _call(
+            server,
+            "campaign_query",
+            {"view": "get", "payload": {"campaign_id": campaign["id"]}},
+        )
+        with pytest.raises(Exception, match="strenuous"):
+            await _call(
+                server,
+                "campaign_change",
+                {
+                    "campaign_id": campaign["id"],
+                    "action": "party_rest",
+                    "payload": {
+                        "rest_type": "short_rest",
+                        "duration_minutes": 60,
+                        "members": [
+                            {
+                                "character_id": updated[0]["id"],
+                                "expected_revision": updated[0]["revision"],
+                                "rest_schedule": schedule,
+                            },
+                            {
+                                "character_id": updated[1]["id"],
+                                "expected_revision": updated[1]["revision"],
+                                "rest_schedule": {
+                                    **schedule,
+                                    "light_activity_minutes": 0,
+                                    "strenuous_activity_minutes": 60,
+                                },
+                            },
+                        ],
+                    },
+                    "expected_revision": before_failure["revision"],
+                    "idempotency_key": "invalid-short-rest",
+                },
+            )
+        after_failure = await _call(
+            server,
+            "campaign_query",
+            {"view": "get", "payload": {"campaign_id": campaign["id"]}},
+        )
+        assert after_failure["revision"] == before_failure["revision"]
+        assert after_failure["state"]["world_time"]["elapsed_minutes"] == 3540
 
     asyncio.run(exercise())
 

@@ -109,6 +109,16 @@ def test_stable_recovery_is_rolled_atomic_idempotent_and_audited(
         assert recovered["character"]["sheet"]["conditions"] == ["prone"]
         assert recovered["world_expired"] == ["recovery-light"]
         assert replay == recovered
+        receipt = await _call(
+            server,
+            "state_revision",
+            {
+                "campaign_id": campaign["id"],
+                "action": "receipt",
+                "payload": {"idempotency_key": "recover"},
+            },
+        )
+        assert receipt["response"] == recovered
         receipts = await _call(
             server,
             "campaign_rules",
@@ -232,6 +242,16 @@ def test_party_stable_recovery_uses_longest_concurrent_wait(
             for item in recovered["characters"].values()
         } == {1}
         assert replay == recovered
+        receipt = await _call(
+            server,
+            "state_revision",
+            {
+                "campaign_id": campaign["id"],
+                "action": "receipt",
+                "payload": {"idempotency_key": "recover-party"},
+            },
+        )
+        assert receipt["response"] == recovered
 
     asyncio.run(exercise())
 
