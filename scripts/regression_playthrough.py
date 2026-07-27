@@ -5857,7 +5857,9 @@ async def _long_rest(
         rest_recovered = True
     if rested.get("status") != "committed":
         raise RuntimeError("long rest did not commit")
-    campaign = await _campaign(client, campaign_id)
+    rested_revision = rested.get("campaign_revision")
+    if isinstance(rested_revision, bool) or not isinstance(rested_revision, int):
+        raise RuntimeError("long rest response has no integer campaign revision")
     committed = await client.domain(
         "memory_change",
         {
@@ -5891,7 +5893,10 @@ async def _long_rest(
                 "snapshot": {"label": f"Full playthrough long rest: {reason.strip()}"},
                 "branch_id": str(branch["id"]),
             },
-            "expected_revision": campaign["revision"],
+            # Do not attach a rest event after an unrelated intervening write.
+            # A prior identical continuity commit still replays before the
+            # revision check.
+            "expected_revision": rested_revision,
             "idempotency_key": _mutation_key(run_id, "long-rest-continuity", rest_identity),
         },
     )
@@ -6009,6 +6014,7 @@ async def _advance_time(
     normalized_expected_after = _normalize_expected_world_time(expected_after)
     expected_minutes = count * {"minute": 1, "hour": 60, "day": 1440}[period]
     projected_before = before
+    clock_recovery = False
     if not projected_before and isinstance(start_clock, dict):
         start_day = start_clock.get("day")
         start_hour = start_clock.get("hour", 0)
@@ -6035,14 +6041,36 @@ async def _advance_time(
             raise ValueError(
                 "advance-time expected target requires an existing or supplied start clock"
             )
-        projected_after = _project_world_time(projected_before, expected_minutes)
-        if projected_after != normalized_expected_after:
-            raise ValueError(
-                "advance-time duration does not reach expected target: "
-                f"computed day {projected_after['day']} "
-                f"{projected_after['hour']:02}:{projected_after['minute']:02}, "
-                f"elapsed {projected_after['elapsed_minutes']}"
+        current_projection = {
+            key: projected_before.get(key)
+            for key in ("day", "hour", "minute", "elapsed_minutes")
+        }
+        clock_recovery = current_projection == normalized_expected_after
+        if clock_recovery:
+            original_elapsed = (
+                normalized_expected_after["elapsed_minutes"] - expected_minutes
             )
+            if original_elapsed < 0:
+                raise ValueError(
+                    "advance-time recovery target predates the requested duration"
+                )
+            before = {
+                "schema_version": int(projected_before.get("schema_version", 1) or 1),
+                "day": original_elapsed // 1440 + 1,
+                "hour": (original_elapsed % 1440) // 60,
+                "minute": original_elapsed % 60,
+                "elapsed_minutes": original_elapsed,
+                "label": str(projected_before.get("label") or ""),
+            }
+        else:
+            projected_after = _project_world_time(projected_before, expected_minutes)
+            if projected_after != normalized_expected_after:
+                raise ValueError(
+                    "advance-time duration does not reach expected target: "
+                    f"computed day {projected_after['day']} "
+                    f"{projected_after['hour']:02}:{projected_after['minute']:02}, "
+                    f"elapsed {projected_after['elapsed_minutes']}"
+                )
     clock_set = None
     if not before:
         if not isinstance(start_clock, dict):
@@ -6083,6 +6111,9 @@ async def _advance_time(
             "idempotency_key": _mutation_key(run_id, "advance-time-clock", identity),
         },
     )
+    advanced_revision = advanced.get("campaign_revision")
+    if isinstance(advanced_revision, bool) or not isinstance(advanced_revision, int):
+        raise RuntimeError("campaign clock response has no integer campaign revision")
     after = deepcopy(dict(advanced.get("world_time") or {}))
     if (
         not before
@@ -6096,7 +6127,6 @@ async def _advance_time(
         for key in ("day", "hour", "minute", "elapsed_minutes")
     } != normalized_expected_after:
         raise RuntimeError("campaign clock response does not match expected target")
-    campaign = await _campaign(client, campaign_id)
     continuity_payload = {
         "event": {
             "summary": normalized_reason,
@@ -6143,7 +6173,12 @@ async def _advance_time(
             "campaign_id": campaign_id,
             "action": "commit",
             "payload": continuity_payload,
-            "expected_revision": campaign["revision"],
+            # Bind continuity to the exact clock mutation. On a response-lost
+            # retry the clock action replays its original revision; a missing
+            # continuity write can proceed only if no intervening mutation
+            # changed the campaign. A previously committed continuity request
+            # still replays before this revision guard.
+            "expected_revision": advanced_revision,
             "idempotency_key": _mutation_key(run_id, "advance-time-continuity", identity),
         },
     )
@@ -6160,6 +6195,7 @@ async def _advance_time(
         "source_ref": exact_ref,
         "agent_ruling": normalized_agent_ruling,
         "preconditions": preconditions,
+        "clock_recovery": clock_recovery,
         "clock_set": clock_set,
         "before": before,
         "advance": advanced,

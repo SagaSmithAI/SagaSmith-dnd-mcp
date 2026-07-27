@@ -6085,8 +6085,12 @@ def test_time_advance_commits_evidence_clock_knowledge_and_snapshot(
                     "label": "Trail",
                 }
                 self.revision += 1
-                return {"world_time": deepcopy(self.world_time)}
+                return {
+                    "world_time": deepcopy(self.world_time),
+                    "campaign_revision": self.revision,
+                }
             if tool_id == "memory_change":
+                assert arguments["expected_revision"] == self.revision
                 payload = arguments["payload"]
                 event_payload = payload["event"]["payload"]
                 if evidence_mode == "agent":
@@ -6157,6 +6161,210 @@ def test_time_advance_commits_evidence_clock_knowledge_and_snapshot(
         assert "snapshot" not in result["continuity"]
     else:
         assert result["continuity"]["snapshot"]["slot"] == 5
+
+
+def test_time_advance_recovers_clock_response_without_advancing_twice() -> None:
+    source_ref = {
+        "module_id": "module-1",
+        "scene_id": "scene-1",
+        "chunk_id": "chunk-1",
+        "page_start": 14,
+        "page_end": 14,
+        "heading_path": ["Part 2"],
+        "content_sha256": "abc",
+    }
+
+    class Client:
+        revision = 10
+        clock_calls = 0
+        continuity_calls = 0
+
+        async def core(self, tool_id: str, arguments: dict):
+            assert tool_id == "campaign_query"
+            return {
+                "result": {
+                    "id": "campaign-1",
+                    "revision": self.revision,
+                    "state": {
+                        "game_phase": "play",
+                        # The first attempt committed this exact clock target,
+                        # then lost its response before continuity was written.
+                        "world_time": {
+                            "day": 2,
+                            "hour": 17,
+                            "minute": 0,
+                            "elapsed_minutes": 2460,
+                            "label": "Trail",
+                        },
+                    },
+                }
+            }
+
+        async def domain(self, tool_id: str, arguments: dict):
+            if tool_id == "module_query":
+                return {
+                    "module_id": "module-1",
+                    "scene_id": "scene-1",
+                    "content": "The characters arrive late in the day.",
+                }
+            if tool_id == "branch_query":
+                return [{"id": "branch-1", "is_current": True}]
+            if tool_id == "campaign_change":
+                self.clock_calls += 1
+                assert arguments["action"] == "clock_advance"
+                assert arguments["payload"] == {
+                    "period": "hour",
+                    "count": 13,
+                    "expected_world_time": {
+                        "day": 2,
+                        "hour": 17,
+                        "minute": 0,
+                        "elapsed_minutes": 2460,
+                    },
+                }
+                # Public idempotency replays the original response. It does not
+                # execute a second 13-hour advance.
+                return {
+                    "world_time": {
+                        "day": 2,
+                        "hour": 17,
+                        "minute": 0,
+                        "elapsed_minutes": 2460,
+                        "label": "Trail",
+                    },
+                    "campaign_revision": 10,
+                }
+            if tool_id == "memory_change":
+                self.continuity_calls += 1
+                assert arguments["expected_revision"] == 10
+                payload = arguments["payload"]["event"]["payload"]
+                assert payload["world_time_before"]["elapsed_minutes"] == 1680
+                assert payload["world_time_after"]["elapsed_minutes"] == 2460
+                self.revision += 1
+                return {"event": {"id": "event-1"}, "snapshot": None}
+            if tool_id == "playthrough_manifest":
+                return {
+                    "manifest": {"status": "in_progress"},
+                    "campaign_revision": self.revision,
+                }
+            raise AssertionError((tool_id, arguments))
+
+    client = Client()
+    result = asyncio.run(
+        _advance_time(
+            client,
+            campaign_id="campaign-1",
+            run_id="run-1",
+            occurrence_id="travel-to-phandalin-1",
+            scene_id="scene-1",
+            source_excerpt="The characters arrive late in the day.",
+            source_ref=source_ref,
+            period="hour",
+            count=13,
+            reason="The party traveled and arrived late in the day.",
+            start_clock=None,
+            agent_ruling=None,
+            knowledge_actor_ids=[],
+            defer_checkpoint=True,
+            expected_after={
+                "day": 2,
+                "hour": 17,
+                "minute": 0,
+                "elapsed_minutes": 2460,
+            },
+        )
+    )
+
+    assert result["clock_recovery"] is True
+    assert result["before"]["elapsed_minutes"] == 1680
+    assert result["after"]["elapsed_minutes"] == 2460
+    assert client.clock_calls == 1
+    assert client.continuity_calls == 1
+
+
+def test_time_advance_recovery_binds_continuity_to_original_clock_revision() -> None:
+    source_ref = {
+        "module_id": "module-1",
+        "scene_id": "scene-1",
+        "chunk_id": "chunk-1",
+        "page_start": 14,
+        "page_end": 14,
+        "heading_path": ["Part 2"],
+        "content_sha256": "abc",
+    }
+
+    class Client:
+        revision = 11
+
+        async def core(self, tool_id: str, arguments: dict):
+            assert tool_id == "campaign_query"
+            return {
+                "result": {
+                    "id": "campaign-1",
+                    "revision": self.revision,
+                    "state": {
+                        "game_phase": "play",
+                        "world_time": {
+                            "day": 2,
+                            "hour": 17,
+                            "minute": 0,
+                            "elapsed_minutes": 2460,
+                            "label": "Trail",
+                        },
+                    },
+                }
+            }
+
+        async def domain(self, tool_id: str, arguments: dict):
+            if tool_id == "module_query":
+                return {
+                    "module_id": "module-1",
+                    "scene_id": "scene-1",
+                    "content": "The characters arrive late in the day.",
+                }
+            if tool_id == "branch_query":
+                return [{"id": "branch-1", "is_current": True}]
+            if tool_id == "campaign_change":
+                return {
+                    "world_time": {
+                        "day": 2,
+                        "hour": 17,
+                        "minute": 0,
+                        "elapsed_minutes": 2460,
+                        "label": "Trail",
+                    },
+                    "campaign_revision": 10,
+                }
+            if tool_id == "memory_change":
+                assert arguments["expected_revision"] == 10
+                raise ValueError("campaign revision conflict: expected 10, found 11")
+            raise AssertionError((tool_id, arguments))
+
+    with pytest.raises(ValueError, match="expected 10, found 11"):
+        asyncio.run(
+            _advance_time(
+                Client(),
+                campaign_id="campaign-1",
+                run_id="run-1",
+                occurrence_id="travel-to-phandalin-1",
+                scene_id="scene-1",
+                source_excerpt="The characters arrive late in the day.",
+                source_ref=source_ref,
+                period="hour",
+                count=13,
+                reason="The party traveled and arrived late in the day.",
+                start_clock=None,
+                agent_ruling=None,
+                knowledge_actor_ids=[],
+                defer_checkpoint=True,
+                expected_after={
+                    "day": 2,
+                    "hour": 17,
+                    "minute": 0,
+                    "elapsed_minutes": 2460,
+                },
+            )
+        )
 
 
 @pytest.mark.parametrize(
@@ -7105,8 +7313,10 @@ def test_long_rest_uses_atomic_party_rest_and_unique_occurrence_knowledge() -> N
                     "status": "committed",
                     "world_time": self.world_time,
                     "member_ids": ["fighter", "cleric"],
+                    "campaign_revision": self.revision,
                 }
             if tool_id == "memory_change":
+                assert arguments["expected_revision"] == self.revision
                 self.continuity_keys.append(arguments["idempotency_key"])
                 event = arguments["payload"]["event"]
                 assert event["event_type"] == "long_rest"
