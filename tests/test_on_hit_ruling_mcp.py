@@ -704,3 +704,252 @@ def test_public_on_hit_ruling_resolves_spider_bite_poison(
             assert ruled["result"]["zero_hp_effect"]["effect_id"] == poison_effect["id"]
 
     asyncio.run(exercise())
+
+
+def test_public_on_hit_ruling_repeats_save_gated_condition_at_turn_end(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    original_attack_roll = server_module.roll_attack_action
+    original_actor_check = server_module.resolve_actor_check
+    save_results = iter((False, True))
+    save_calls: list[bool] = []
+
+    def forced_hit(*, plan, rng=None):
+        result = original_attack_roll(plan=plan, rng=rng)
+        result.update(
+            natural=10,
+            total=max(int(plan["target_ac"]), int(result.get("total", 0) or 0)),
+            armor_class=int(plan["target_ac"]),
+            hit=True,
+            critical=False,
+            fumble=False,
+        )
+        return result
+
+    def forced_save(*args, **kwargs):
+        success = next(save_results)
+        save_calls.append(success)
+        result = original_actor_check(*args, **kwargs)
+        result.update(
+            natural=15 if success else 5,
+            total=int(kwargs["dc"]) if success else int(kwargs["dc"]) - 1,
+            success=success,
+        )
+        return result
+
+    monkeypatch.setattr(server_module, "roll_attack_action", forced_hit)
+    monkeypatch.setattr(server_module, "resolve_actor_check", forced_save)
+
+    async def exercise() -> None:
+        server = create_server(_config(tmp_path))
+
+        async def raw(name: str, arguments: dict):
+            _, result = await server.call_tool(name, arguments)
+            return result
+
+        async def call(name: str, arguments: dict):
+            result = await raw(name, arguments)
+            return result.get("result", result)
+
+        campaign = await call(
+            "campaign_create",
+            {
+                "name": "Save-gated on-hit condition",
+                "edition": "2014",
+                "idempotency_key": "campaign",
+            },
+        )
+        ettercap = await call(
+            "character_create",
+            {
+                "campaign_id": campaign["id"],
+                "name": "Ettercap",
+                "character_type": "monster",
+                "idempotency_key": "ettercap",
+            },
+        )
+        target = await call(
+            "character_create",
+            {
+                "campaign_id": campaign["id"],
+                "name": "Target",
+                "character_type": "pc",
+                "idempotency_key": "target",
+            },
+        )
+        bite_effect = (
+            "The target must succeed on a DC 11 Constitution saving throw or be "
+            "poisoned for 1 minute. The creature can repeat the saving throw at "
+            "the end of each of its turns, ending the effect on itself on a success."
+        )
+        ettercap_sheet = default_character_sheet()
+        ettercap_sheet["combat"]["hp"] = {"value": 44, "max": 44, "temp": 0}
+        ettercap_sheet["inventory"]["items"] = [
+            {
+                "id": "bite",
+                "name": "Bite",
+                "kind": "weapon",
+                "equipped": True,
+                "equipped_slot": "main_hand",
+                "mechanics": {
+                    "attack_type": "melee",
+                    "attack_ability": "strength",
+                    "damage_formula": "1",
+                    "damage_type": "piercing",
+                    "on_hit_effect": bite_effect,
+                    "reach_ft": 5,
+                    "attack_bonus_override": 4,
+                    "always_available": True,
+                },
+            }
+        ]
+        ettercap_sheet["inventory"]["equipment_slots"]["main_hand"] = "bite"
+        target_sheet = default_character_sheet()
+        target_sheet["combat"]["hp"] = {"value": 20, "max": 20, "temp": 0}
+        for actor, sheet, key in (
+            (ettercap, ettercap_sheet, "ettercap-sheet"),
+            (target, target_sheet, "target-sheet"),
+        ):
+            await call(
+                "character_sheet_replace",
+                {
+                    "character_id": actor["id"],
+                    "sheet": sheet,
+                    "expected_revision": actor["revision"],
+                    "idempotency_key": key,
+                },
+            )
+        campaign = await call("campaign_get", {"campaign_id": campaign["id"]})
+        started = await raw(
+            "combat_start",
+            {
+                "campaign_id": campaign["id"],
+                "participant_ids": [ettercap["id"], target["id"]],
+                "participant_config": [
+                    {
+                        "actor_id": ettercap["id"],
+                        "initiative": 20,
+                        "position": {"x": 0, "y": 0},
+                    },
+                    {
+                        "actor_id": target["id"],
+                        "initiative": 10,
+                        "position": {"x": 1, "y": 0},
+                        "death_saves": True,
+                    },
+                ],
+                "expected_revision": campaign["revision"],
+                "idempotency_key": "start",
+            },
+        )
+        attacked = await raw(
+            "combat_resolve_attack",
+            {
+                "campaign_id": campaign["id"],
+                "actor_id": ettercap["id"],
+                "target_id": target["id"],
+                "action": {"weapon_id": "bite", "attack_mode": "melee"},
+                "expected_revision": started["campaign_revision"],
+                "idempotency_key": "bite",
+            },
+        )
+        choice_id = attacked["result"]["pending_on_hit_ruling_id"]
+        with pytest.raises(
+            Exception,
+            match="requires saving-throw settlement",
+        ):
+            await call(
+                "combat_choice",
+                {
+                    "campaign_id": campaign["id"],
+                    "action": "on_hit_ruling",
+                    "actor_id": target["id"],
+                    "payload": {
+                        "choice_id": choice_id,
+                        "selection": {
+                            "id": "apply_condition",
+                            "condition": "poisoned",
+                            "escape_dc": 11,
+                            "escape_abilities": ["constitution"],
+                            "source_excerpt": bite_effect,
+                        },
+                    },
+                    "expected_revision": attacked["campaign_revision"],
+                    "idempotency_key": "invalid-action-escape",
+                },
+            )
+        ruled = await call(
+            "combat_choice",
+            {
+                "campaign_id": campaign["id"],
+                "action": "on_hit_ruling",
+                "actor_id": target["id"],
+                "payload": {
+                    "choice_id": choice_id,
+                    "selection": {
+                        "id": "saving_throw_condition",
+                        "condition": "poisoned",
+                        "save_ability": "constitution",
+                        "save_dc": 11,
+                        "repeat_save_timing": "turn_end",
+                        "duration": {"period": "minute", "remaining": 1},
+                        "source_excerpt": bite_effect,
+                    },
+                },
+                "expected_revision": attacked["campaign_revision"],
+                "idempotency_key": "rule-bite",
+            },
+        )
+        assert ruled["result"]["save"]["success"] is False
+        assert ruled["result"]["condition_applied"] is True
+        target_after_hit = await call("character_get", {"character_id": target["id"]})
+        assert target_after_hit["sheet"]["conditions"] == ["poisoned"]
+        timed = next(
+            item
+            for item in target_after_hit["sheet"]["effects"]
+            if item["id"] == ruled["result"]["effect_id"]
+        )
+        assert timed["duration"] == {"period": "minute", "remaining": 1}
+
+        ended_ettercap = await raw(
+            "combat_end_turn",
+            {
+                "campaign_id": campaign["id"],
+                "actor_id": ettercap["id"],
+                "expected_revision": ruled["campaign_revision"],
+                "idempotency_key": "end-ettercap",
+            },
+        )
+        target_combatant = next(
+            item
+            for item in ended_ettercap["combat"]["combatants"]
+            if item["actor_id"] == target["id"]
+        )
+        assert target_combatant["turn_budget"]["main_action"] == 1
+        end_arguments = {
+            "campaign_id": campaign["id"],
+            "actor_id": target["id"],
+            "expected_revision": ended_ettercap["campaign_revision"],
+            "idempotency_key": "end-target",
+        }
+        ended_target = await raw("combat_end_turn", end_arguments)
+        replayed = await raw("combat_end_turn", end_arguments)
+        assert replayed == ended_target
+        assert save_calls == [False, True]
+        assert ended_target["repeat_saves"][0]["condition_ended"] is True
+        stored = next(
+            item
+            for item in ended_target["combat"]["ongoing_effects"]
+            if item["id"] == ruled["result"]["effect_id"]
+        )
+        assert stored["active"] is False
+        assert stored["resolution"]["kind"] == "repeat_save_success"
+        target_after_save = await call("character_get", {"character_id": target["id"]})
+        assert target_after_save["sheet"]["conditions"] == []
+        assert all(
+            item["id"] != ruled["result"]["effect_id"]
+            for item in target_after_save["sheet"]["effects"]
+        )
+
+    asyncio.run(exercise())

@@ -2756,8 +2756,31 @@ def test_source_authored_precombat_and_attack_tactics_are_structured() -> None:
                     "for 1 hour, and paralyzed while poisoned in this way."
                 ),
             },
+            {
+                "actor_id": "ettercap-1",
+                "weapon_id": "bite",
+                "id": "saving_throw_condition",
+                "condition": "poisoned",
+                "save_ability": "constitution",
+                "save_dc": 11,
+                "repeat_save_timing": "turn_end",
+                "duration": {"period": "minute", "remaining": 1},
+                "source_excerpt": (
+                    "The target must succeed on a DC 11 Constitution saving throw "
+                    "or be poisoned for 1 minute. The creature can repeat the saving "
+                    "throw at the end of each of its turns, ending the effect on "
+                    "itself on a success."
+                ),
+            },
         ],
-        participant_ids=["nezznar", "spider-1", "durnan", "stirge", "duergar"],
+        participant_ids=[
+            "nezznar",
+            "spider-1",
+            "ettercap-1",
+            "durnan",
+            "stirge",
+            "duergar",
+        ],
     )
     delayed = _source_delayed_actions(
         [
@@ -2775,6 +2798,21 @@ def test_source_authored_precombat_and_attack_tactics_are_structured() -> None:
     assert rulings[("spider-1", "web")]["escape_dc"] == 12
     assert rulings[("spider-1", "bite")]["id"] == "saving_throw_damage"
     assert rulings[("spider-1", "bite")]["zero_hp_effect"]["stable"] is True
+    assert rulings[("ettercap-1", "bite")] == {
+        "actor_id": "ettercap-1",
+        "weapon_id": "bite",
+        "id": "saving_throw_condition",
+        "condition": "poisoned",
+        "save_ability": "constitution",
+        "save_dc": 11,
+        "repeat_save_timing": "turn_end",
+        "duration": {"period": "minute", "remaining": 1},
+        "source_excerpt": (
+            "The target must succeed on a DC 11 Constitution saving throw or be "
+            "poisoned for 1 minute. The creature can repeat the saving throw at "
+            "the end of each of its turns, ending the effect on itself on a success."
+        ),
+    }
     assert rulings[("durnan", "grimvault")]["target_has_limbs"] is True
     assert rulings[("stirge", "blood-drain")]["id"] == "attachment"
     assert rulings[("duergar", "war-pick")] == {
@@ -2784,6 +2822,42 @@ def test_source_authored_precombat_and_attack_tactics_are_structured() -> None:
         "source_excerpt": "or 11 (2d8 + 2) piercing damage while enlarged.",
     }
     assert delayed["nezznar"]["until_round"] == 2
+
+
+@pytest.mark.parametrize(
+    "ruling",
+    [
+        {
+            "actor_id": "ettercap-1",
+            "weapon_id": "bite",
+            "id": "saving_throw_condition",
+            "condition": "poisoned",
+            "save_ability": "constitution",
+            "save_dc": 11,
+            "repeat_save_timing": "turn_end",
+            "duration": {"period": "minute", "remaining": 0},
+            "source_excerpt": "Exact attack text.",
+        },
+        {
+            "actor_id": "ettercap-1",
+            "weapon_id": "web",
+            "id": "apply_condition",
+            "condition": "restrained",
+            "escape_dc": 11,
+            "escape_abilities": ["strength"],
+            "save_ability": "strength",
+            "source_excerpt": "Exact attack text.",
+        },
+    ],
+)
+def test_source_on_hit_rulings_reject_mixed_or_invalid_condition_terms(
+    ruling: dict,
+) -> None:
+    with pytest.raises(ValueError):
+        _source_on_hit_rulings(
+            [ruling],
+            participant_ids=["ettercap-1"],
+        )
 
 
 def test_auto_run_starts_from_play_before_loading_combat_tools() -> None:

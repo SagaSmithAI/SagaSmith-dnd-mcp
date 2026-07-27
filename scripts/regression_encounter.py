@@ -472,7 +472,8 @@ def _arguments() -> argparse.Namespace:
         default=[],
         help=(
             "Reviewed attack settlement with actor_id, weapon_id, exact "
-            "source_excerpt, and either condition/escape terms or "
+            "source_excerpt, and condition/escape terms, "
+            "id=saving_throw_condition plus save/repeat/duration terms, or "
             "id=saving_throw_damage plus save/damage/zero-HP terms; use "
             "id=dismiss when the reviewed text is already represented by the "
             "selected attack variant and adds no separate structured effect"
@@ -2077,6 +2078,8 @@ def _source_on_hit_rulings(
         "escape_abilities",
         "save_ability",
         "save_dc",
+        "repeat_save_timing",
+        "duration",
         "damage_formula",
         "damage_type",
         "half_on_success",
@@ -2097,11 +2100,18 @@ def _source_on_hit_rulings(
         weapon_id = str(raw.get("weapon_id") or "").strip()
         selection_id = str(raw.get("id") or "").strip().casefold()
         if not selection_id:
-            selection_id = (
-                "saving_throw_damage" if raw.get("save_ability") is not None else "apply_condition"
-            )
+            if raw.get("save_ability") is not None:
+                selection_id = (
+                    "saving_throw_condition"
+                    if raw.get("condition") is not None
+                    and raw.get("damage_formula") is None
+                    else "saving_throw_damage"
+                )
+            else:
+                selection_id = "apply_condition"
         if selection_id not in {
             "apply_condition",
+            "saving_throw_condition",
             "saving_throw_damage",
             "attachment",
             "critical_followup",
@@ -2126,6 +2136,8 @@ def _source_on_hit_rulings(
                 "escape_abilities",
                 "save_ability",
                 "save_dc",
+                "repeat_save_timing",
+                "duration",
                 "damage_formula",
                 "damage_type",
                 "half_on_success",
@@ -2157,6 +2169,8 @@ def _source_on_hit_rulings(
                 "escape_abilities",
                 "save_ability",
                 "save_dc",
+                "repeat_save_timing",
+                "duration",
                 "damage_formula",
                 "damage_type",
                 "half_on_success",
@@ -2181,6 +2195,8 @@ def _source_on_hit_rulings(
                 "escape_abilities",
                 "save_ability",
                 "save_dc",
+                "repeat_save_timing",
+                "duration",
                 "damage_formula",
                 "damage_type",
                 "half_on_success",
@@ -2198,11 +2214,73 @@ def _source_on_hit_rulings(
                 "source_excerpt": source_excerpt,
             }
             continue
+        if selection_id == "saving_throw_condition":
+            incompatible_fields = {
+                "escape_dc",
+                "escape_abilities",
+                "damage_formula",
+                "damage_type",
+                "half_on_success",
+                "zero_hp_effect",
+            }
+            if any(raw.get(field) is not None for field in incompatible_fields):
+                raise ValueError(
+                    f"source on-hit ruling {index} mixes save-condition with "
+                    "escape or damage terms"
+                )
+            condition = str(raw.get("condition") or "").strip().casefold()
+            save_ability = str(raw.get("save_ability") or "").strip().casefold()
+            save_dc = raw.get("save_dc")
+            repeat_save_timing = str(
+                raw.get("repeat_save_timing") or ""
+            ).strip().casefold()
+            raw_duration = raw.get("duration")
+            if not isinstance(raw_duration, dict):
+                raise ValueError(
+                    f"source on-hit ruling {index} requires a structured duration"
+                )
+            duration = dict(raw_duration)
+            duration_period = str(duration.get("period") or "").strip().casefold()
+            duration_remaining = duration.get("remaining")
+            if (
+                set(duration) - {"period", "remaining"}
+                or not condition
+                or not save_ability
+                or isinstance(save_dc, bool)
+                or not isinstance(save_dc, int)
+                or not 1 <= save_dc <= 40
+                or repeat_save_timing != "turn_end"
+                or duration_period not in {"round", "minute", "hour", "day"}
+                or isinstance(duration_remaining, bool)
+                or not isinstance(duration_remaining, int)
+                or duration_remaining < 1
+            ):
+                raise ValueError(
+                    f"source on-hit ruling {index} requires reviewed condition, "
+                    "save, turn-end repeat, duration, and exact excerpt terms"
+                )
+            normalized[identity] = {
+                "actor_id": actor_id,
+                "weapon_id": weapon_id,
+                "id": selection_id,
+                "condition": condition,
+                "save_ability": save_ability,
+                "save_dc": save_dc,
+                "repeat_save_timing": repeat_save_timing,
+                "duration": {
+                    "period": duration_period,
+                    "remaining": duration_remaining,
+                },
+                "source_excerpt": source_excerpt,
+            }
+            continue
         if selection_id == "saving_throw_damage":
             condition_fields = {
                 "condition",
                 "escape_dc",
                 "escape_abilities",
+                "repeat_save_timing",
+                "duration",
             }
             if any(raw.get(field) is not None for field in condition_fields):
                 raise ValueError(
@@ -2245,6 +2323,21 @@ def _source_on_hit_rulings(
                 ),
             }
             continue
+        condition_incompatible_fields = {
+            "save_ability",
+            "save_dc",
+            "repeat_save_timing",
+            "duration",
+            "damage_formula",
+            "damage_type",
+            "half_on_success",
+            "zero_hp_effect",
+        }
+        if any(raw.get(field) is not None for field in condition_incompatible_fields):
+            raise ValueError(
+                f"source on-hit ruling {index} mixes action escape with "
+                "saving-throw or damage terms"
+            )
         condition = str(raw.get("condition") or "").strip().casefold()
         escape_dc = raw.get("escape_dc")
         escape_abilities = [
@@ -5957,6 +6050,10 @@ async def _auto_run(
                 and item.get("active", True)
                 and str(item.get("target_id") or "") == actor_id
                 and str(item.get("condition") or "").casefold() in actor_conditions
+                and isinstance(item.get("escape_abilities"), list)
+                and bool(item.get("escape_abilities"))
+                and isinstance(item.get("escape_dc"), int)
+                and not isinstance(item.get("escape_dc"), bool)
             ),
             None,
         )

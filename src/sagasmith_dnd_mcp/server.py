@@ -2456,6 +2456,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "name": "Apply a structured condition",
                 },
                 {
+                    "id": "saving_throw_condition",
+                    "name": "Resolve a saving throw and condition",
+                },
+                {
                     "id": "saving_throw_damage",
                     "name": "Resolve a saving throw and damage",
                 },
@@ -6730,6 +6734,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         "name": "Apply a structured condition",
                     },
                     {
+                        "id": "saving_throw_condition",
+                        "name": "Resolve a saving throw and condition",
+                    },
+                    {
                         "id": "saving_throw_damage",
                         "name": "Resolve a saving throw and damage",
                     },
@@ -6856,6 +6864,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         selection_id = str(normalized_selection.get("id") or "").strip().casefold()
         if selection_id not in {
             "apply_condition",
+            "saving_throw_condition",
             "saving_throw_damage",
             "next_attack_advantage",
             "attachment",
@@ -6863,9 +6872,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "dismiss",
         }:
             raise CombatEngineError(
-                "attack on-hit ruling must apply a condition, resolve save damage, "
-                "grant reviewed next-attack advantage, apply an attachment, settle "
-                "a critical follow-up, or dismiss it"
+                "attack on-hit ruling must apply a condition, resolve a save-gated "
+                "condition or save damage, grant reviewed next-attack advantage, "
+                "apply an attachment, settle a critical follow-up, or dismiss it"
             )
         effect = str(window.get("effect") or "").strip()
         is_critical_body_part_loss = window.get("trigger") == "critical_body_part_loss"
@@ -6892,8 +6901,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             raise CombatEngineError(
                 "critical follow-up settlement requires its triggered d20 window"
             )
+        has_explicit_saving_throw = re.search(r"(?i)\bsaving throw\b", effect) is not None
         has_explicit_save_damage = (
-            re.search(r"(?i)\bsaving throw\b", effect) is not None
+            has_explicit_saving_throw
             and re.search(r"(?i)\bdamage\b", effect) is not None
         )
         if selection_id == "dismiss":
@@ -6935,9 +6945,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 or candidate_ids & {"attachment", "next_attack_advantage"}
             ):
                 raise CombatEngineError("an explicit structured on-hit effect cannot be dismissed")
-        if selection_id == "apply_condition" and has_explicit_save_damage:
+        if selection_id == "apply_condition" and has_explicit_saving_throw:
             raise CombatEngineError(
-                "an explicit saving-throw damage effect requires save-and-damage settlement"
+                "an explicit saving-throw condition requires saving-throw settlement"
+            )
+        if selection_id == "saving_throw_condition" and has_explicit_save_damage:
+            raise CombatEngineError(
+                "an explicit saving-throw damage effect cannot be reduced to a condition"
             )
         states_next_attack_advantage = (
             re.search(
@@ -7186,6 +7200,184 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 *list(next_encounter.get("ongoing_effects") or []),
                 ongoing_effect,
             ]
+        elif selection_id == "saving_throw_condition":
+            allowed_fields = {
+                "id",
+                "condition",
+                "save_ability",
+                "save_dc",
+                "repeat_save_timing",
+                "duration",
+                "source_excerpt",
+            }
+            unknown_fields = set(normalized_selection) - allowed_fields
+            if unknown_fields:
+                raise CombatEngineError(
+                    "unsupported on-hit save-condition fields: "
+                    + ", ".join(sorted(unknown_fields))
+                )
+            condition = str(normalized_selection.get("condition") or "").strip().casefold()
+            save_ability = str(
+                normalized_selection.get("save_ability") or ""
+            ).strip().casefold()
+            save_dc = normalized_selection.get("save_dc")
+            repeat_save_timing = str(
+                normalized_selection.get("repeat_save_timing") or ""
+            ).strip().casefold()
+            raw_duration = normalized_selection.get("duration")
+            source_excerpt = str(normalized_selection.get("source_excerpt") or "").strip()
+            supported_conditions = {
+                "blinded",
+                "charmed",
+                "deafened",
+                "frightened",
+                "grappled",
+                "incapacitated",
+                "paralyzed",
+                "poisoned",
+                "prone",
+                "restrained",
+                "stunned",
+                "unconscious",
+            }
+            supported_abilities = {
+                "strength",
+                "dexterity",
+                "constitution",
+                "intelligence",
+                "wisdom",
+                "charisma",
+            }
+            if not isinstance(raw_duration, dict):
+                raise CombatEngineError(
+                    "on-hit save condition requires a structured source duration"
+                )
+            duration = dict(raw_duration)
+            duration_period = str(duration.get("period") or "").strip().casefold()
+            duration_remaining = duration.get("remaining")
+            if (
+                set(duration) - {"period", "remaining"}
+                or condition not in supported_conditions
+                or save_ability not in supported_abilities
+                or isinstance(save_dc, bool)
+                or not isinstance(save_dc, int)
+                or not 1 <= save_dc <= 40
+                or repeat_save_timing != "turn_end"
+                or duration_period not in {"round", "minute", "hour", "day"}
+                or isinstance(duration_remaining, bool)
+                or not isinstance(duration_remaining, int)
+                or duration_remaining < 1
+                or not source_excerpt
+                or source_excerpt.casefold() != effect.casefold()
+            ):
+                raise CombatEngineError(
+                    "on-hit save condition requires exact reviewed condition, save, "
+                    "repeat timing, duration, and excerpt terms"
+                )
+            if (
+                re.search(rf"(?i)\b{re.escape(condition)}\b", effect) is None
+                or re.search(
+                    rf"(?i)\bDC\s*{save_dc}\s+{re.escape(save_ability)}\s+saving throw\b",
+                    effect,
+                )
+                is None
+            ):
+                raise CombatEngineError(
+                    "condition, save DC, or ability is not stated by the reviewed attack"
+                )
+            if not (
+                re.search(r"(?i)\brepeat\b", effect)
+                and re.search(r"(?i)\bsaving throw\b", effect)
+                and re.search(r"(?i)\bend\b[^.]{0,120}\bturns?\b", effect)
+            ):
+                raise CombatEngineError(
+                    "turn-end repeat saving throw is not stated by the reviewed attack"
+                )
+            if (
+                re.search(
+                    rf"(?i)\b{duration_remaining}\s+"
+                    rf"{re.escape(duration_period)}s?\b",
+                    effect,
+                )
+                is None
+            ):
+                raise CombatEngineError(
+                    "condition duration is not stated by the reviewed attack"
+                )
+            normalized_duration = {
+                "period": duration_period,
+                "remaining": duration_remaining,
+            }
+            target_actor = combat_actor_snapshot(target_id)
+            target_actor["sheet"] = deepcopy(updated_sheet)
+            target_actor["derived"] = derive_character_sheet(updated_sheet)
+            saved = resolve_actor_check(
+                target_actor,
+                kind="save",
+                ability=save_ability,
+                dc=save_dc,
+                ruleset=str(next_encounter.get("ruleset") or "2014"),
+                rules=effective_rule_context(
+                    campaign_id,
+                    facts={
+                        "actor_id": target_id,
+                        "attacker_id": str(window.get("attacker_id") or ""),
+                        "weapon_id": str(window.get("weapon_id") or ""),
+                        "kind": "attack_on_hit_save_condition",
+                    },
+                ),
+            )
+            rule_receipts.extend(saved.get("rule_receipts") or [])
+            effect_id: str | None = None
+            if not saved["success"]:
+                effect_id = f"{choice_id}:save-condition"
+                updated_sheet, _ = add_effect(
+                    updated_sheet,
+                    {
+                        "id": effect_id,
+                        "name": "Attack save-gated condition",
+                        "kind": "timed_conditions",
+                        "source": str(window.get("weapon_id") or ""),
+                        "active": True,
+                        "duration": normalized_duration,
+                        "changes": [
+                            {
+                                "path": "conditions",
+                                "mode": "add",
+                                "value": [condition],
+                            }
+                        ],
+                        "description": source_excerpt,
+                    },
+                )
+                end_concentration_for_incapacitating_conditions(updated_sheet)
+                ongoing_effect = {
+                    "id": effect_id,
+                    "kind": "on_hit_save_condition",
+                    "source_actor_id": str(window.get("attacker_id") or ""),
+                    "target_id": target_id,
+                    "weapon_id": str(window.get("weapon_id") or ""),
+                    "condition": condition,
+                    "save_ability": save_ability,
+                    "save_dc": save_dc,
+                    "repeat_save_timing": repeat_save_timing,
+                    "duration": normalized_duration,
+                    "source_excerpt": source_excerpt,
+                    "effect": effect,
+                    "active": True,
+                }
+                next_encounter["ongoing_effects"] = [
+                    *list(next_encounter.get("ongoing_effects") or []),
+                    ongoing_effect,
+                ]
+                sync_combatant_conditions(next_encounter, target_id, updated_sheet)
+                reconcile_readied_spells(next_encounter, target_id, updated_sheet)
+            settlement_result = {
+                "save": saved,
+                "condition": condition,
+                "condition_applied": not saved["success"],
+                "effect_id": effect_id,
+            }
         elif selection_id == "saving_throw_damage":
             allowed_fields = {
                 "id",
@@ -7548,9 +7740,93 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         _, encounter = active_encounter(campaign_id)
         before_readied = list(encounter.get("readied", []))
         current = characters.get(actor_id)
-        duration = advance_effect_durations(current.sheet, period="turn_end")
+        current_sheet = deepcopy(current.sheet)
+        next_encounter = deepcopy(encounter)
+        repeat_saves: list[dict[str, Any]] = []
+        repeat_save_receipts: list[dict[str, Any]] = []
+        for ongoing in next_encounter.get("ongoing_effects", []):
+            if (
+                not isinstance(ongoing, dict)
+                or not ongoing.get("active", True)
+                or ongoing.get("kind") != "on_hit_save_condition"
+                or str(ongoing.get("target_id") or "") != actor_id
+                or ongoing.get("repeat_save_timing") != "turn_end"
+            ):
+                continue
+            condition = str(ongoing.get("condition") or "").strip().casefold()
+            effect_id = str(ongoing.get("id") or "")
+            sheet_effect = next(
+                (
+                    effect
+                    for effect in current_sheet.get("effects", [])
+                    if str(effect.get("id") or "") == effect_id
+                    and effect.get("active", True)
+                ),
+                None,
+            )
+            if (
+                sheet_effect is None
+                or condition
+                not in {
+                    str(item).strip().casefold()
+                    for item in current_sheet.get("conditions", [])
+                }
+            ):
+                continue
+            save_ability = str(ongoing.get("save_ability") or "").strip().casefold()
+            save_dc = int(ongoing.get("save_dc", 0) or 0)
+            target_actor = combat_actor_snapshot(actor_id)
+            target_actor["sheet"] = deepcopy(current_sheet)
+            target_actor["derived"] = derive_character_sheet(current_sheet)
+            saved = resolve_actor_check(
+                target_actor,
+                kind="save",
+                ability=save_ability,
+                dc=save_dc,
+                ruleset=str(next_encounter.get("ruleset") or "2014"),
+                rules=effective_rule_context(
+                    campaign_id,
+                    facts={
+                        "actor_id": actor_id,
+                        "source_actor_id": str(ongoing.get("source_actor_id") or ""),
+                        "weapon_id": str(ongoing.get("weapon_id") or ""),
+                        "ongoing_effect_id": effect_id,
+                        "kind": "attack_on_hit_repeat_save_condition",
+                    },
+                ),
+            )
+            repeat_save_receipts.extend(saved.get("rule_receipts") or [])
+            ended = bool(saved["success"])
+            if ended:
+                current_sheet = remove_effect(current_sheet, effect_id)
+                ongoing["active"] = False
+                ongoing["resolution"] = {
+                    "kind": "repeat_save_success",
+                    "actor_id": actor_id,
+                    "round": int(next_encounter.get("round", 1) or 1),
+                }
+            repeat_saves.append(
+                {
+                    "ongoing_effect_id": effect_id,
+                    "condition": condition,
+                    "save_ability": save_ability,
+                    "save_dc": save_dc,
+                    "save": saved,
+                    "condition_ended": ended,
+                }
+            )
+        if repeat_saves:
+            next_encounter["log"] = [
+                *list(next_encounter.get("log") or []),
+                {
+                    "type": "on_hit_condition_repeat_saves",
+                    "actor_id": actor_id,
+                    "results": repeat_saves,
+                },
+            ][-100:]
+        duration = advance_effect_durations(current_sheet, period="turn_end")
         next_state = dict(campaign.state or {})
-        next_state["combat"] = end_turn(encounter, actor_id_value=actor_id)
+        next_state["combat"] = end_turn(next_encounter, actor_id_value=actor_id)
         expired_attack_advantage = expire_next_attack_advantage(
             next_state["combat"],
             actor_id=actor_id,
@@ -7626,6 +7902,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             ["dnd5e.core.mcp.duration_clock"],
             "turn.end.duration_clock",
         )
+        rule_receipts.extend(repeat_save_receipts)
         for combatant in next_state["combat"].get("combatants", []):
             target_id = str(combatant.get("actor_id"))
             target = characters.get(target_id)
@@ -7681,6 +7958,18 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         expected_revision=target.revision,
                     )
                 )
+        for ongoing in next_state["combat"].get("ongoing_effects", []):
+            if (
+                isinstance(ongoing, dict)
+                and ongoing.get("active", True)
+                and str(ongoing.get("id") or "") in expired_effects
+            ):
+                ongoing["active"] = False
+                ongoing["resolution"] = {
+                    "kind": "duration_expired",
+                    "actor_id": actor_id,
+                    "round": int(next_state["combat"].get("round", 1) or 1),
+                }
         revisions_result = StateMutationService(storage.database).replace(
             campaign_id,
             campaign_state=validate_party_state(next_state),
@@ -7698,6 +7987,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "effects_expired": sorted(expired_effects),
             "readied_spells_expired": sorted(str(item.get("id")) for item in expired_readied),
             "source_turn_start": source_turn_start,
+            "repeat_saves": repeat_saves,
             "rule_receipts": rule_receipts,
             "ruleset_fingerprint": rule_context.fingerprint,
             "campaign_revision": mutation_revision(campaign_id),
