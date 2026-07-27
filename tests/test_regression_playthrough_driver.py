@@ -6243,6 +6243,82 @@ def test_time_advance_rejects_missing_or_partial_evidence_before_public_calls(
         )
 
 
+def test_time_advance_rejects_wrong_road_calendar_delta_before_clock_write() -> None:
+    class Client:
+        clock_changes = 0
+
+        async def core(self, tool_id: str, arguments: dict):
+            assert tool_id == "campaign_query"
+            return {
+                "result": {
+                    "id": "campaign-1",
+                    "revision": 10,
+                    "state": {
+                        "game_phase": "play",
+                        "world_time": {
+                            "day": 45,
+                            "hour": 1,
+                            "minute": 3,
+                            "elapsed_minutes": 63423,
+                        },
+                    },
+                }
+            }
+
+        async def domain(self, tool_id: str, arguments: dict):
+            if tool_id == "module_query":
+                return {"scene_id": "scene-1", "content": "Routine road journey."}
+            if tool_id == "branch_query":
+                return [{"id": "branch-1", "is_current": True}]
+            if tool_id == "campaign_change":
+                self.clock_changes += 1
+                raise AssertionError("clock mutation must not be attempted")
+            raise AssertionError((tool_id, arguments))
+
+    client = Client()
+    with pytest.raises(ValueError, match="does not reach expected target"):
+        asyncio.run(
+            _advance_time(
+                client,
+                campaign_id="campaign-1",
+                run_id="run-1",
+                occurrence_id="road-to-travel-day-25",
+                scene_id="scene-1",
+                source_excerpt="",
+                source_ref=None,
+                period="minute",
+                count=13197,
+                reason="Continue to travel day 25 at 7 a.m.",
+                start_clock=None,
+                agent_ruling={
+                    "default_resolver": "agent",
+                    "ruling_kind": "agent_dm_adjudication",
+                    "decision": "Reach travel day 25 at 7 a.m.",
+                    "reason": "The locked road calendar fixes the event time.",
+                    "period": "minute",
+                    "count": 13197,
+                },
+                knowledge_actor_ids=[],
+                expected_after={
+                    "day": 55,
+                    "hour": 7,
+                    "minute": 0,
+                    "elapsed_minutes": 78180,
+                },
+            )
+        )
+    assert client.clock_changes == 0
+    assert regression_playthrough._project_world_time(
+        {"elapsed_minutes": 63423},
+        14757,
+    ) == {
+        "day": 55,
+        "hour": 7,
+        "minute": 0,
+        "elapsed_minutes": 78180,
+    }
+
+
 @pytest.mark.parametrize("defer_checkpoint", [False, True])
 def test_play_activity_records_structured_effect_and_random_receipt(
     defer_checkpoint: bool,

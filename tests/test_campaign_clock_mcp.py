@@ -148,6 +148,80 @@ def test_campaign_clock_and_elapsed_effects_advance_atomically(tmp_path: Path) -
     asyncio.run(exercise())
 
 
+def test_clock_advance_rejects_a_duration_that_misses_its_expected_target(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        server = create_server(_config(tmp_path))
+        campaign = await _call(
+            server,
+            "campaign_create",
+            {"name": "Road calendar", "edition": "2014", "idempotency_key": "campaign"},
+        )
+        clock = await _call(
+            server,
+            "campaign_change",
+            {
+                "campaign_id": campaign["id"],
+                "action": "clock_set",
+                "payload": {"day": 45, "hour": 1, "minute": 3},
+                "expected_revision": campaign["revision"],
+                "idempotency_key": "clock",
+            },
+        )
+        expected = {
+            "day": 55,
+            "hour": 7,
+            "minute": 0,
+            "elapsed_minutes": 78180,
+        }
+        with pytest.raises(Exception, match="does not reach expected_world_time"):
+            await _call(
+                server,
+                "campaign_change",
+                {
+                    "campaign_id": campaign["id"],
+                    "action": "clock_advance",
+                    "payload": {
+                        "period": "minute",
+                        "count": 13197,
+                        "expected_world_time": expected,
+                    },
+                    "expected_revision": clock["campaign_revision"],
+                    "idempotency_key": "wrong-road-duration",
+                },
+            )
+        unchanged = await _call(
+            server,
+            "campaign_query",
+            {"view": "get", "payload": {"campaign_id": campaign["id"]}},
+        )
+        assert unchanged["revision"] == clock["campaign_revision"]
+        assert unchanged["state"]["world_time"]["elapsed_minutes"] == 63423
+
+        advanced = await _call(
+            server,
+            "campaign_change",
+            {
+                "campaign_id": campaign["id"],
+                "action": "clock_advance",
+                "payload": {
+                    "period": "minute",
+                    "count": 14757,
+                    "expected_world_time": expected,
+                },
+                "expected_revision": unchanged["revision"],
+                "idempotency_key": "correct-road-duration",
+            },
+        )
+        assert {
+            key: advanced["world_time"][key]
+            for key in ("day", "hour", "minute", "elapsed_minutes")
+        } == expected
+
+    asyncio.run(exercise())
+
+
 def test_minute_clock_advances_accumulate_for_hour_effects(tmp_path: Path) -> None:
     async def exercise() -> None:
         server = create_server(_config(tmp_path))

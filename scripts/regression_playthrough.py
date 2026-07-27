@@ -278,6 +278,14 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--time-reason", default="")
     parser.add_argument("--time-start-clock-json", type=json.loads)
     parser.add_argument(
+        "--time-expected-after-json",
+        type=json.loads,
+        help=(
+            "Machine-verifiable day/hour/minute/elapsed_minutes target for "
+            "advance-time; rejected before clock mutation when count cannot reach it"
+        ),
+    )
+    parser.add_argument(
         "--time-agent-ruling-json",
         type=json.loads,
         help=(
@@ -1675,6 +1683,67 @@ def _settled_time_agent_ruling(
             "time Agent ruling period and count must exactly match the requested advance"
         )
     return normalized
+
+
+def _normalize_expected_world_time(value: Any) -> dict[str, int] | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError("expected world time must be a JSON object")
+    unknown = set(value) - {"day", "hour", "minute", "elapsed_minutes"}
+    if unknown:
+        raise ValueError(
+            "expected world time contains unsupported fields: "
+            + ", ".join(sorted(unknown))
+        )
+    day = value.get("day")
+    hour = value.get("hour")
+    minute = value.get("minute")
+    elapsed = value.get("elapsed_minutes")
+    if (
+        isinstance(day, bool)
+        or not isinstance(day, int)
+        or day < 1
+        or isinstance(hour, bool)
+        or not isinstance(hour, int)
+        or not 0 <= hour <= 23
+        or isinstance(minute, bool)
+        or not isinstance(minute, int)
+        or not 0 <= minute <= 59
+        or isinstance(elapsed, bool)
+        or not isinstance(elapsed, int)
+        or elapsed < 0
+    ):
+        raise ValueError(
+            "expected world time requires positive day, hour 0..23, "
+            "minute 0..59, and nonnegative elapsed_minutes"
+        )
+    derived = (day - 1) * 1440 + hour * 60 + minute
+    if elapsed != derived:
+        raise ValueError(
+            "expected world time elapsed_minutes does not match day/hour/minute"
+        )
+    return {
+        "day": day,
+        "hour": hour,
+        "minute": minute,
+        "elapsed_minutes": elapsed,
+    }
+
+
+def _project_world_time(clock: dict[str, Any], elapsed_minutes: int) -> dict[str, int]:
+    current_elapsed = clock.get("elapsed_minutes")
+    if isinstance(current_elapsed, bool) or not isinstance(current_elapsed, int):
+        raise ValueError("campaign clock must contain integer elapsed_minutes")
+    if elapsed_minutes < 1:
+        raise ValueError("elapsed_minutes must be positive")
+    projected = current_elapsed + elapsed_minutes
+    return {
+        "day": projected // 1440 + 1,
+        "hour": (projected % 1440) // 60,
+        "minute": projected % 60,
+        "elapsed_minutes": projected,
+    }
 
 
 def _settled_event_agent_ruling(value: Any) -> dict[str, Any] | None:
@@ -5663,6 +5732,7 @@ async def _advance_time(
     agent_ruling: dict[str, Any] | None,
     knowledge_actor_ids: list[str],
     defer_checkpoint: bool = False,
+    expected_after: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     identity = _occurrence_identity(occurrence_id, "advance-time")
     normalized_reason = reason.strip()
@@ -5725,6 +5795,43 @@ async def _advance_time(
     branch_id = str(branch["id"])
     campaign = await _campaign(client, campaign_id)
     before = deepcopy(dict(dict(campaign.get("state") or {}).get("world_time") or {}))
+    normalized_expected_after = _normalize_expected_world_time(expected_after)
+    expected_minutes = count * {"minute": 1, "hour": 60, "day": 1440}[period]
+    projected_before = before
+    if not projected_before and isinstance(start_clock, dict):
+        start_day = start_clock.get("day")
+        start_hour = start_clock.get("hour", 0)
+        start_minute = start_clock.get("minute", 0)
+        if (
+            isinstance(start_day, bool)
+            or not isinstance(start_day, int)
+            or start_day < 1
+            or isinstance(start_hour, bool)
+            or not isinstance(start_hour, int)
+            or not 0 <= start_hour <= 23
+            or isinstance(start_minute, bool)
+            or not isinstance(start_minute, int)
+            or not 0 <= start_minute <= 59
+        ):
+            raise ValueError("advance-time start clock is invalid")
+        projected_before = {
+            "elapsed_minutes": (
+                (start_day - 1) * 1440 + start_hour * 60 + start_minute
+            )
+        }
+    if normalized_expected_after is not None:
+        if not projected_before:
+            raise ValueError(
+                "advance-time expected target requires an existing or supplied start clock"
+            )
+        projected_after = _project_world_time(projected_before, expected_minutes)
+        if projected_after != normalized_expected_after:
+            raise ValueError(
+                "advance-time duration does not reach expected target: "
+                f"computed day {projected_after['day']} "
+                f"{projected_after['hour']:02}:{projected_after['minute']:02}, "
+                f"elapsed {projected_after['elapsed_minutes']}"
+            )
     clock_set = None
     if not before:
         if not isinstance(start_clock, dict):
@@ -5751,19 +5858,21 @@ async def _advance_time(
     elif start_clock is not None:
         raise ValueError("advance-time start clock must be omitted after the clock is set")
     campaign = await _campaign(client, campaign_id)
+    advance_payload: dict[str, Any] = {"period": period, "count": count}
+    if normalized_expected_after is not None:
+        advance_payload["expected_world_time"] = normalized_expected_after
     advanced = await client.domain(
         "campaign_change",
         {
             "campaign_id": campaign_id,
             "action": "clock_advance",
-            "payload": {"period": period, "count": count},
+            "payload": advance_payload,
             "branch_id": branch_id,
             "expected_revision": campaign["revision"],
             "idempotency_key": _mutation_key(run_id, "advance-time-clock", identity),
         },
     )
     after = deepcopy(dict(advanced.get("world_time") or {}))
-    expected_minutes = count * {"minute": 1, "hour": 60, "day": 1440}[period]
     if (
         not before
         or not after
@@ -5771,6 +5880,11 @@ async def _advance_time(
         != expected_minutes
     ):
         raise RuntimeError("campaign clock did not advance by the requested duration")
+    if normalized_expected_after is not None and {
+        key: int(after.get(key, -1))
+        for key in ("day", "hour", "minute", "elapsed_minutes")
+    } != normalized_expected_after:
+        raise RuntimeError("campaign clock response does not match expected target")
     campaign = await _campaign(client, campaign_id)
     continuity_payload = {
         "event": {
@@ -5783,6 +5897,11 @@ async def _advance_time(
                 "period": period,
                 "count": count,
                 "elapsed_minutes": expected_minutes,
+                **(
+                    {"expected_world_time": normalized_expected_after}
+                    if normalized_expected_after is not None
+                    else {}
+                ),
                 "world_time_before": before,
                 "world_time_after": after,
                 "source_excerpt": source_excerpt.strip() if has_source_ref else "",
@@ -5833,6 +5952,7 @@ async def _advance_time(
         "before": before,
         "advance": advanced,
         "after": after,
+        "expected_after": normalized_expected_after,
         "knowledge_actor_ids": [str(actor["id"]) for actor in actors],
         "continuity": committed,
         "sync": synced,
@@ -9937,6 +10057,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     agent_ruling=args.time_agent_ruling_json,
                     knowledge_actor_ids=args.knowledge_actor_id,
                     defer_checkpoint=args.defer_checkpoint,
+                    expected_after=args.time_expected_after_json,
                 )
             elif args.action == "initialize-clock":
                 if phase != "play":

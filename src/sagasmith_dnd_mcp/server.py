@@ -8221,6 +8221,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         expected_revision: int | None = None,
         branch_id: str | None = None,
         idempotency_key: str | None = None,
+        expected_world_time: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Advance the campaign clock and matching timed effects atomically."""
         access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
@@ -8231,11 +8232,61 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             raise ValueError("period must be minute, hour, day, round, or encounter")
         if isinstance(count, bool) or not isinstance(count, int) or count < 1:
             raise ValueError("count must be a positive integer")
+        normalized_expected_world_time: dict[str, int] | None = None
+        if expected_world_time is not None:
+            if not isinstance(expected_world_time, dict):
+                raise ValueError("expected_world_time must be an object")
+            unknown_expected_fields = set(expected_world_time) - {
+                "day",
+                "hour",
+                "minute",
+                "elapsed_minutes",
+            }
+            if unknown_expected_fields:
+                raise ValueError(
+                    "expected_world_time contains unsupported fields: "
+                    + ", ".join(sorted(unknown_expected_fields))
+                )
+            day = expected_world_time.get("day")
+            hour = expected_world_time.get("hour")
+            minute = expected_world_time.get("minute")
+            expected_elapsed = expected_world_time.get("elapsed_minutes")
+            if (
+                isinstance(day, bool)
+                or not isinstance(day, int)
+                or day < 1
+                or isinstance(hour, bool)
+                or not isinstance(hour, int)
+                or not 0 <= hour <= 23
+                or isinstance(minute, bool)
+                or not isinstance(minute, int)
+                or not 0 <= minute <= 59
+                or isinstance(expected_elapsed, bool)
+                or not isinstance(expected_elapsed, int)
+                or expected_elapsed < 0
+            ):
+                raise ValueError(
+                    "expected_world_time requires positive day, hour 0..23, "
+                    "minute 0..59, and nonnegative elapsed_minutes"
+                )
+            derived_elapsed = (day - 1) * 1440 + hour * 60 + minute
+            if expected_elapsed != derived_elapsed:
+                raise ValueError(
+                    "expected_world_time elapsed_minutes does not match day/hour/minute"
+                )
+            normalized_expected_world_time = {
+                "day": day,
+                "hour": hour,
+                "minute": minute,
+                "elapsed_minutes": expected_elapsed,
+            }
         payload = {
             "period": normalized_period,
             "count": count,
             "branch_id": resolved_branch_id,
         }
+        if normalized_expected_world_time is not None:
+            payload["expected_world_time"] = normalized_expected_world_time
         scope = f"campaign-advance-effects:{campaign_id}:{resolved_branch_id}:{principal_id}"
         replay = replay_idempotent(scope, idempotency_key, payload)
         if replay is not None:
@@ -8265,6 +8316,20 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "elapsed_minutes": elapsed,
                 "label": str(current_clock.get("label") or ""),
             }
+            if (
+                normalized_expected_world_time is not None
+                and {
+                    key: int(world_time[key])
+                    for key in ("day", "hour", "minute", "elapsed_minutes")
+                }
+                != normalized_expected_world_time
+            ):
+                raise ValueError(
+                    "clock advance does not reach expected_world_time: "
+                    f"computed day {world_time['day']} "
+                    f"{world_time['hour']:02}:{world_time['minute']:02}, "
+                    f"elapsed {world_time['elapsed_minutes']}"
+                )
             next_state["world_time"] = world_time
         elapsed_minutes = time_minutes.get(normalized_period, 0) * count
         effect_steps = (
@@ -25077,6 +25142,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 expected_revision,
                 branch_id,
                 idempotency_key,
+                data.get("expected_world_time"),
             )
         elif action == "party_rest":
             result = campaign_party_rest(
