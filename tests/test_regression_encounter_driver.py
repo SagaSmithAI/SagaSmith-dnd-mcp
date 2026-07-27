@@ -13,6 +13,7 @@ from scripts.regression_encounter import (
     EncounterRulingRequiredError,
     _agent_party_absences,
     _agent_positions,
+    _agent_target_priorities,
     _apply_agent_positions,
     _apply_party_loadouts,
     _apply_source_casualty_rolls,
@@ -2440,6 +2441,58 @@ def test_source_target_priorities_preserve_authored_roles_and_tactical_order() -
         assert "participant ids" in str(exc)
     else:
         raise AssertionError("target priorities cannot cite nonparticipants")
+
+
+def test_agent_target_priorities_are_tactical_and_party_scoped() -> None:
+    priorities = _agent_target_priorities(
+        [
+            {
+                "actor_ids": ["cleric", "rogue"],
+                "priority_groups": [["kobold-1", "kobold-2"], ["drake"]],
+                "ruling_reason": (
+                    "Remove the fragile bomb throwers before focusing the guard drake."
+                ),
+            }
+        ],
+        party_ids=["cleric", "rogue", "wizard"],
+        hostile_ids=["kobold-1", "kobold-2", "drake"],
+    )
+
+    assert priorities["cleric"] == priorities["rogue"]
+    assert priorities["cleric"]["default_resolver"] == "agent"
+    assert priorities["cleric"]["ruling_kind"] == "tactical_decision"
+    assert _prioritize_targets(
+        "cleric",
+        ["drake", "kobold-2", "kobold-1"],
+        priorities,
+    ) == ["kobold-2", "kobold-1", "drake"]
+
+
+def test_agent_target_priorities_reject_wrong_side_actors_and_targets() -> None:
+    with pytest.raises(ValueError, match="unique party actor_ids"):
+        _agent_target_priorities(
+            [
+                {
+                    "actor_ids": ["drake"],
+                    "priority_groups": [["kobold"]],
+                    "ruling_reason": "Invalid hostile actor.",
+                }
+            ],
+            party_ids=["cleric"],
+            hostile_ids=["kobold", "drake"],
+        )
+    with pytest.raises(ValueError, match="unique encounter hostiles"):
+        _agent_target_priorities(
+            [
+                {
+                    "actor_ids": ["cleric"],
+                    "priority_groups": [["cleric"]],
+                    "ruling_reason": "Invalid friendly target.",
+                }
+            ],
+            party_ids=["cleric"],
+            hostile_ids=["kobold"],
+        )
 
 
 def test_source_opening_item_casts_preserve_authored_order_and_evidence() -> None:

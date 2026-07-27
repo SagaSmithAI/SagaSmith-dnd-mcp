@@ -313,6 +313,16 @@ def _arguments() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--agent-target-priority-json",
+        action="append",
+        type=json.loads,
+        default=[],
+        help=(
+            "Agent tactical focus-fire decision with party actor_ids, ordered hostile "
+            "priority_groups, and ruling_reason; the server still validates every target"
+        ),
+    )
+    parser.add_argument(
         "--no-surprise",
         action="store_true",
         help="Explicitly start with neither side surprised when the cited scene warrants it",
@@ -1673,6 +1683,78 @@ def _source_target_priorities(
     return by_actor
 
 
+def _agent_target_priorities(
+    declarations: list[dict[str, Any]],
+    *,
+    party_ids: list[str],
+    hostile_ids: list[str],
+) -> dict[str, dict[str, Any]]:
+    """Validate explicit Agent tactics without pretending they are module facts."""
+
+    party = set(party_ids)
+    hostiles = set(hostile_ids)
+    by_actor: dict[str, dict[str, Any]] = {}
+    allowed = {"actor_ids", "priority_groups", "ruling_reason"}
+    for index, declaration in enumerate(declarations):
+        if not isinstance(declaration, dict):
+            raise ValueError(f"Agent target priority {index} must be an object")
+        unknown = set(declaration) - allowed
+        if unknown:
+            raise ValueError(
+                f"Agent target priority {index} has unsupported fields: {sorted(unknown)}"
+            )
+        actor_ids = [str(item).strip() for item in declaration.get("actor_ids") or []]
+        raw_groups = declaration.get("priority_groups")
+        ruling_reason = " ".join(
+            str(declaration.get("ruling_reason") or "").split()
+        )
+        if (
+            not actor_ids
+            or any(not item for item in actor_ids)
+            or len(actor_ids) != len(set(actor_ids))
+            or not set(actor_ids) <= party
+            or not isinstance(raw_groups, list)
+            or not raw_groups
+            or not ruling_reason
+            or len(ruling_reason) > 500
+        ):
+            raise ValueError(
+                "Agent target priority requires unique party actor_ids, non-empty "
+                "hostile priority_groups, and a 1-to-500-character ruling_reason"
+            )
+        priority_groups: list[list[str]] = []
+        for raw_group in raw_groups:
+            if not isinstance(raw_group, list):
+                raise ValueError("Agent target priority groups must be actor-id lists")
+            group = [str(item).strip() for item in raw_group]
+            if (
+                not group
+                or any(not item for item in group)
+                or len(group) != len(set(group))
+                or not set(group) <= hostiles
+            ):
+                raise ValueError(
+                    "Agent target priority groups must contain unique encounter hostiles"
+                )
+            priority_groups.append(group)
+        target_ids = [item for group in priority_groups for item in group]
+        if len(target_ids) != len(set(target_ids)) or set(actor_ids) & set(by_actor):
+            raise ValueError(
+                "Agent priority targets must be unique and each party actor may be "
+                "declared only once"
+            )
+        value = {
+            "actor_ids": actor_ids,
+            "priority_groups": priority_groups,
+            "ruling_reason": ruling_reason,
+            "default_resolver": "agent",
+            "ruling_kind": "tactical_decision",
+        }
+        for actor_id in actor_ids:
+            by_actor[actor_id] = value
+    return by_actor
+
+
 def _prioritize_targets(
     actor_id: str,
     target_ids: list[str],
@@ -2910,11 +2992,21 @@ async def _start(
     )
     initial_hostile_ids = [*hostile_ids, *additional_hostile_ids]
     all_hostile_ids = [*initial_hostile_ids, *reinforcement_hostile_ids]
-    target_priorities = _source_target_priorities(
+    source_target_priorities = _source_target_priorities(
         args.source_target_priority_json,
         participant_ids=[*party_ids, *all_hostile_ids],
         encounter_source_excerpt=str(args.source_excerpt or ""),
     )
+    agent_target_priorities = _agent_target_priorities(
+        getattr(args, "agent_target_priority_json", []),
+        party_ids=pc_ids,
+        hostile_ids=all_hostile_ids,
+    )
+    if set(source_target_priorities) & set(agent_target_priorities):
+        raise ValueError(
+            "the same actor cannot have both source-authored and Agent tactical "
+            "target priorities"
+        )
     source_conditions_by_actor = _source_declared_conditions(
         args.source_condition_json,
         participant_ids=[*party_ids, *initial_hostile_ids],
@@ -3298,7 +3390,16 @@ async def _start(
         "source_zero_hp_finisher": source_zero_hp_finisher,
         "source_zero_hp_stabilization": source_zero_hp_stabilization,
         "source_target_priorities": list(
-            {tuple(value["actor_ids"]): value for value in target_priorities.values()}.values()
+            {
+                tuple(value["actor_ids"]): value
+                for value in source_target_priorities.values()
+            }.values()
+        ),
+        "agent_target_priorities": list(
+            {
+                tuple(value["actor_ids"]): value
+                for value in agent_target_priorities.values()
+            }.values()
         ),
         "source_precombat_casts": precombat_cast_results,
         "source_opening_weapons": list(opening_weapons.values()),
@@ -4847,11 +4948,22 @@ async def _auto_run(
         args.source_delayed_action_json,
         participant_ids=hostile_ids,
     )
-    target_priorities = _source_target_priorities(
+    source_target_priorities = _source_target_priorities(
         args.source_target_priority_json,
         participant_ids=[*party_ids, *hostile_ids],
         encounter_source_excerpt=str(args.source_excerpt or ""),
     )
+    agent_target_priorities = _agent_target_priorities(
+        getattr(args, "agent_target_priority_json", []),
+        party_ids=party_ids,
+        hostile_ids=hostile_ids,
+    )
+    if set(source_target_priorities) & set(agent_target_priorities):
+        raise ValueError(
+            "the same actor cannot have both source-authored and Agent tactical "
+            "target priorities"
+        )
+    target_priorities = {**source_target_priorities, **agent_target_priorities}
     ally_ids = _selected_prepared_actor_ids(
         args.ally_report,
         getattr(args, "ally_actor_id", []),
@@ -6573,7 +6685,16 @@ async def _auto_run(
         "source_zero_hp_finisher": source_zero_hp_finisher,
         "source_zero_hp_stabilization": source_zero_hp_stabilization,
         "source_target_priorities": list(
-            {tuple(value["actor_ids"]): value for value in target_priorities.values()}.values()
+            {
+                tuple(value["actor_ids"]): value
+                for value in source_target_priorities.values()
+            }.values()
+        ),
+        "agent_target_priorities": list(
+            {
+                tuple(value["actor_ids"]): value
+                for value in agent_target_priorities.values()
+            }.values()
         ),
         "surrender": (
             {
