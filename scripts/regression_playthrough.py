@@ -368,6 +368,14 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--narrative-npc-relationship", default="")
     parser.add_argument("--narrative-npc-source-identity", default="")
     parser.add_argument("--narrative-npc-instance-key", default="")
+    parser.add_argument(
+        "--narrative-npc-identity-agent-ruling-json",
+        type=json.loads,
+        help=(
+            "Settled Agent-as-DM naming decision for one source-backed anonymous "
+            "NPC instance. The source identity and instance key remain mandatory."
+        ),
+    )
     parser.add_argument("--outcome-id", default="")
     parser.add_argument("--fact-json", action="append", type=json.loads, default=[])
     parser.add_argument("--npc-state-json", action="append", type=json.loads, default=[])
@@ -3079,6 +3087,7 @@ async def _prepare_narrative_npc(
     relationship: str,
     source_identity: str = "",
     instance_key: str = "",
+    identity_agent_ruling: dict[str, Any] | None = None,
     defer_checkpoint: bool = False,
 ) -> dict[str, Any]:
     npc_identity = _occurrence_identity(occurrence_id, "prepare-narrative-npc")
@@ -3087,6 +3096,14 @@ async def _prepare_narrative_npc(
     normalized_summary = summary.strip()
     normalized_source_identity = source_identity.strip() or normalized_name
     normalized_instance_key = instance_key.strip()
+    normalized_identity_agent_ruling = _settled_agent_ruling(
+        identity_agent_ruling,
+        label="narrative NPC identity",
+        ruling_kinds=frozenset({"agent_dm_adjudication"}),
+        extra_fields=frozenset(
+            {"assigned_name", "source_identity", "instance_key"}
+        ),
+    )
     if initial_phase != "play":
         raise RuntimeError("prepare-narrative-npc requires the play phase")
     if not all(
@@ -3102,7 +3119,27 @@ async def _prepare_narrative_npc(
         raise ValueError(
             "prepare-narrative-npc requires scene, location, excerpt, name, role, and summary"
         )
-    if normalized_instance_key and normalized_name != (
+    if normalized_identity_agent_ruling is not None:
+        if not normalized_instance_key:
+            raise ValueError(
+                "Agent-named narrative NPCs require a source instance key"
+            )
+        expected_identity_fields = {
+            "assigned_name": normalized_name,
+            "source_identity": normalized_source_identity,
+            "instance_key": normalized_instance_key,
+        }
+        mismatched = sorted(
+            field
+            for field, expected in expected_identity_fields.items()
+            if normalized_identity_agent_ruling.get(field) != expected
+        )
+        if mismatched:
+            raise ValueError(
+                "narrative NPC identity Agent ruling must match: "
+                + ", ".join(mismatched)
+            )
+    elif normalized_instance_key and normalized_name != (
         f"{normalized_source_identity} [{normalized_instance_key}]"
     ):
         raise ValueError(
@@ -3174,6 +3211,15 @@ async def _prepare_narrative_npc(
                         if normalized_instance_key
                         else {}
                     ),
+                    **(
+                        {
+                            "identity_agent_ruling": (
+                                normalized_identity_agent_ruling
+                            )
+                        }
+                        if normalized_identity_agent_ruling is not None
+                        else {}
+                    ),
                 },
                 "idempotency_key": _mutation_key(
                     run_id,
@@ -3204,12 +3250,20 @@ async def _prepare_narrative_npc(
         or provenance.get("combat_eligible") is not False
         or provenance.get("combat_statblock") != "not_imported"
         or dict(provenance.get("source_ref") or {}) != canonical_source_ref
+        or (
+            normalized_identity_agent_ruling is not None
+            and dict(provenance.get("identity_agent_ruling") or {})
+            != normalized_identity_agent_ruling
+        )
     ):
         raise RuntimeError("source-bound narrative NPC creation verification failed")
     status_tags = set(
         dict(dict(actor.get("sheet") or {}).get("adventure_state") or {}).get("status_tags") or []
     )
-    if not {"narrative_only", "source_bound"}.issubset(status_tags):
+    required_status_tags = {"narrative_only", "source_bound"}
+    if normalized_identity_agent_ruling is not None:
+        required_status_tags.add("agent_named_source_instance")
+    if not required_status_tags.issubset(status_tags):
         raise RuntimeError("narrative NPC actor is missing its noncombat provenance tags")
 
     campaign = await _campaign(client, campaign_id)
@@ -9743,6 +9797,9 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                         relationship=args.narrative_npc_relationship,
                         source_identity=args.narrative_npc_source_identity,
                         instance_key=args.narrative_npc_instance_key,
+                        identity_agent_ruling=(
+                            args.narrative_npc_identity_agent_ruling_json
+                        ),
                         defer_checkpoint=args.defer_checkpoint,
                     )
                 except Exception:

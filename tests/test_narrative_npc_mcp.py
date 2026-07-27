@@ -331,6 +331,86 @@ def test_narrative_npc_supports_distinct_anonymous_source_instances(
     asyncio.run(exercise())
 
 
+def test_narrative_npc_accepts_agent_named_source_instance(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        server, campaign_id, source_ref = await _campaign_with_narrative_module(tmp_path)
+        ruling = {
+            "default_resolver": "agent",
+            "ruling_kind": "agent_dm_adjudication",
+            "decision": (
+                "Track the first source-authored townsperson as Caldan Voss so "
+                "their independent knowledge remains addressable."
+            ),
+            "reason": (
+                "The source establishes two anonymous townsfolk but supplies no "
+                "individual names."
+            ),
+            "assigned_name": "Caldan Voss",
+            "source_identity": "Townsfolk",
+            "instance_key": "gate-1",
+            "committed": True,
+        }
+        created = await _call(
+            server,
+            "character_create_from",
+            {
+                "mode": "narrative_npc",
+                "payload": {
+                    "campaign_id": campaign_id,
+                    "name": "Caldan Voss",
+                    "source_identity": "Townsfolk",
+                    "instance_key": "gate-1",
+                    "identity_agent_ruling": ruling,
+                    "role": "Source-authored anonymous townsperson.",
+                    "summary": "A separately tracked witness at the gate.",
+                    "source_ref": source_ref,
+                    "source_excerpt": "Two townsfolk wait by the gate.",
+                },
+                "idempotency_key": "agent-named-townsperson",
+            },
+        )
+
+        assert created["character"]["name"] == "Caldan Voss"
+        assert created["narrative_npc"]["source_identity"] == "Townsfolk"
+        assert created["narrative_npc"]["instance_key"] == "gate-1"
+        assert created["narrative_npc"]["identity_agent_ruling"] == ruling
+        assert created["character"]["sheet"]["adventure_state"]["status_tags"] == [
+            "narrative_only",
+            "source_bound",
+            "anonymous_source_instance",
+            "agent_named_source_instance",
+        ]
+
+        mismatched = {
+            **ruling,
+            "assigned_name": "Invented Mayor",
+        }
+        with pytest.raises(Exception, match="assigned_name"):
+            await _call(
+                server,
+                "character_create_from",
+                {
+                    "mode": "narrative_npc",
+                    "payload": {
+                        "campaign_id": campaign_id,
+                        "name": "Caldan Voss",
+                        "source_identity": "Townsfolk",
+                        "instance_key": "gate-2",
+                        "identity_agent_ruling": mismatched,
+                        "role": "Unsupported identity mismatch.",
+                        "summary": "The ruling must bind the assigned name.",
+                        "source_ref": source_ref,
+                        "source_excerpt": "Two townsfolk wait by the gate.",
+                    },
+                    "idempotency_key": "agent-name-mismatch",
+                },
+            )
+
+    asyncio.run(exercise())
+
+
 def test_narrative_npc_accepts_two_part_name_split_by_source_appositive(
     tmp_path: Path,
 ) -> None:

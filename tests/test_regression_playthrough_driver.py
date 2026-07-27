@@ -789,6 +789,43 @@ def test_narrative_npc_driver_requires_canonical_anonymous_instance_name() -> No
         )
 
 
+def test_narrative_npc_driver_strictly_binds_agent_assigned_identity() -> None:
+    ruling = {
+        "default_resolver": "agent",
+        "ruling_kind": "agent_dm_adjudication",
+        "decision": "Name the first anonymous townsperson Caldan Voss.",
+        "reason": "The source specifies anonymous townsfolk without names.",
+        "assigned_name": "Different Name",
+        "source_identity": "Townsfolk",
+        "instance_key": "retreat-1",
+    }
+    with pytest.raises(
+        ValueError,
+        match="identity Agent ruling must match: assigned_name",
+    ):
+        asyncio.run(
+            _prepare_narrative_npc(
+                object(),
+                campaign_id="campaign-1",
+                run_id="run-1",
+                occurrence_id="anonymous-agent-name-1",
+                initial_phase="play",
+                scene_id="scene-1",
+                location_key="gate",
+                source_excerpt="Two townsfolk wait by the gate.",
+                source_ref={},
+                name="Caldan Voss",
+                role="Anonymous source-counted townsperson.",
+                summary="A separately tracked anonymous townsperson.",
+                faction="Greenest",
+                relationship="rescued civilian",
+                source_identity="Townsfolk",
+                instance_key="retreat-1",
+                identity_agent_ruling=ruling,
+            )
+        )
+
+
 @pytest.mark.parametrize("defer_checkpoint", [False, True])
 def test_shared_consumable_driver_keeps_roll_item_and_healing_in_one_transition(
     defer_checkpoint: bool,

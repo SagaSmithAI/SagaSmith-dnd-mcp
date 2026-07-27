@@ -23379,6 +23379,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             summary = str(required(data, "summary")).strip()
             source_identity = str(data.get("source_identity") or name).strip()
             instance_key = str(data.get("instance_key") or "").strip()
+            identity_agent_ruling_raw = data.get("identity_agent_ruling")
+            identity_agent_ruling: dict[str, Any] | None = None
             source_ref = data.get("source_ref")
             source_excerpt = " ".join(str(required(data, "source_excerpt")).split()).strip()
             if not name or len(name) > 200:
@@ -23387,7 +23389,95 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 raise ValueError("narrative NPC source_identity must contain 1 to 200 characters")
             if len(instance_key) > 100:
                 raise ValueError("narrative NPC instance_key must not exceed 100 characters")
-            if instance_key:
+            if identity_agent_ruling_raw is not None:
+                if not isinstance(identity_agent_ruling_raw, dict):
+                    raise ValueError(
+                        "narrative NPC identity_agent_ruling must be an object"
+                    )
+                allowed_ruling_fields = {
+                    "default_resolver",
+                    "ruling_kind",
+                    "decision",
+                    "reason",
+                    "assigned_name",
+                    "source_identity",
+                    "instance_key",
+                    "committed",
+                }
+                unknown_ruling_fields = sorted(
+                    set(identity_agent_ruling_raw) - allowed_ruling_fields
+                )
+                if unknown_ruling_fields:
+                    raise ValueError(
+                        "narrative NPC identity_agent_ruling contains unsupported "
+                        "fields: " + ", ".join(unknown_ruling_fields)
+                    )
+                if identity_agent_ruling_raw.get("default_resolver") != "agent":
+                    raise ValueError(
+                        "narrative NPC identity_agent_ruling default_resolver must be agent"
+                    )
+                if (
+                    str(identity_agent_ruling_raw.get("ruling_kind") or "")
+                    != "agent_dm_adjudication"
+                ):
+                    raise ValueError(
+                        "narrative NPC identity_agent_ruling ruling_kind must be "
+                        "agent_dm_adjudication"
+                    )
+                decision = str(
+                    identity_agent_ruling_raw.get("decision") or ""
+                ).strip()
+                reason = str(identity_agent_ruling_raw.get("reason") or "").strip()
+                if not decision or len(decision) > 1_000:
+                    raise ValueError(
+                        "narrative NPC identity_agent_ruling decision must contain "
+                        "1 to 1000 characters"
+                    )
+                if not reason or len(reason) > 500:
+                    raise ValueError(
+                        "narrative NPC identity_agent_ruling reason must contain "
+                        "1 to 500 characters"
+                    )
+                if identity_agent_ruling_raw.get("committed") is not True:
+                    raise ValueError(
+                        "narrative NPC identity_agent_ruling must be committed"
+                    )
+                if not instance_key:
+                    raise ValueError(
+                        "Agent-named narrative NPCs require a source instance_key"
+                    )
+                if str(identity_agent_ruling_raw.get("assigned_name") or "") != name:
+                    raise ValueError(
+                        "narrative NPC identity_agent_ruling assigned_name must "
+                        "match name"
+                    )
+                if (
+                    str(identity_agent_ruling_raw.get("source_identity") or "")
+                    != source_identity
+                ):
+                    raise ValueError(
+                        "narrative NPC identity_agent_ruling source_identity must "
+                        "match source_identity"
+                    )
+                if (
+                    str(identity_agent_ruling_raw.get("instance_key") or "")
+                    != instance_key
+                ):
+                    raise ValueError(
+                        "narrative NPC identity_agent_ruling instance_key must "
+                        "match instance_key"
+                    )
+                identity_agent_ruling = {
+                    "default_resolver": "agent",
+                    "ruling_kind": "agent_dm_adjudication",
+                    "decision": decision,
+                    "reason": reason,
+                    "assigned_name": name,
+                    "source_identity": source_identity,
+                    "instance_key": instance_key,
+                    "committed": True,
+                }
+            elif instance_key:
                 expected_instance_name = f"{source_identity} [{instance_key}]"
                 if name != expected_instance_name:
                     raise ValueError(
@@ -23517,12 +23607,22 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     if instance_key
                     else {}
                 ),
+                **(
+                    {"identity_agent_ruling": identity_agent_ruling}
+                    if identity_agent_ruling is not None
+                    else {}
+                ),
             }
             sheet = default_character_sheet()
             sheet["adventure_state"]["status_tags"] = [
                 "narrative_only",
                 "source_bound",
                 *(["anonymous_source_instance"] if instance_key else []),
+                *(
+                    ["agent_named_source_instance"]
+                    if identity_agent_ruling is not None
+                    else []
+                ),
             ]
             notes = default_character_notes()
             notes["profile"]["summary"] = role
