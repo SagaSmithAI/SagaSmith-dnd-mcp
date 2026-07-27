@@ -314,6 +314,81 @@ def test_preflight_returns_agent_ruling_instead_of_misclassifying_it_as_on_hit()
     assert "--source-attack-environment-json" in requirement["retry_hint"]
 
 
+def test_preflight_agent_declines_unsatisfied_positional_attack_and_continues() -> None:
+    calls: list[dict] = []
+
+    class Client:
+        async def domain(self, tool_id: str, arguments: dict) -> dict:
+            assert tool_id == "combat_preflight_attack"
+            calls.append(arguments)
+            if arguments["action"]["weapon_id"] == "dagger":
+                raise RuntimeError("target is beyond melee reach")
+            return {
+                "status": "pending_ruling",
+                "default_resolver": "agent",
+                "ruling_kind": "agent_dm_adjudication",
+                "reason": "Dropped Rock uses a source-defined positional target restriction",
+                "missing": ["weapon.targeting:dropped-rock"],
+                "committed": False,
+            }
+
+    actor = {
+        "id": "winged-kobold",
+        "derived": {
+            "inventory": {
+                "weapon_attacks": [
+                    {"item_id": "dagger", "attack_type": "melee"},
+                    {"item_id": "dropped-rock", "attack_type": "ranged"},
+                ]
+            }
+        },
+    }
+    rulings: list[dict] = []
+
+    result = asyncio.run(
+        _preflight_attack(
+            Client(),
+            SimpleNamespace(campaign_id="campaign-1"),
+            actor,
+            ["pc-1"],
+            preferred_weapon_id="dagger",
+            agent_rulings=rulings,
+        )
+    )
+
+    assert result is None
+    assert [call["action"]["weapon_id"] for call in calls] == [
+        "dagger",
+        "dropped-rock",
+    ]
+    assert rulings == [
+        {
+            "operation": "combat_preflight_attack",
+            "actor_id": "winged-kobold",
+            "target_id": "pc-1",
+            "action": {
+                "weapon_id": "dropped-rock",
+                "attack_mode": "ranged",
+            },
+            "decision": "decline_optional_attack",
+            "reason": (
+                "The current two-dimensional temporary map has no vertical-position "
+                "fact satisfying the source-defined target restriction."
+            ),
+            "ruling": {
+                "status": "pending_ruling",
+                "default_resolver": "agent",
+                "ruling_kind": "agent_dm_adjudication",
+                "reason": (
+                    "Dropped Rock uses a source-defined positional target restriction"
+                ),
+                "missing": ["weapon.targeting:dropped-rock"],
+                "committed": False,
+            },
+        }
+    ]
+
+
 def test_unclassified_encounter_ruling_defaults_to_agent_reasoning() -> None:
     error = EncounterRulingRequiredError(
         {"reason": "the module has a one-off narrative procedure"},

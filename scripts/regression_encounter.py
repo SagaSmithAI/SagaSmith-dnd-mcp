@@ -4497,6 +4497,7 @@ async def _preflight_attack(
     multiattack_option_id: str = "",
     action_context: dict[str, Any] | None = None,
     knock_out_target_ids: set[str] | None = None,
+    agent_rulings: list[dict[str, Any]] | None = None,
 ) -> tuple[str, dict[str, Any], dict[str, Any]] | None:
     knock_out_targets = set(knock_out_target_ids or set())
     weapons = list(
@@ -4546,6 +4547,32 @@ async def _preflight_attack(
                 except RuntimeError:
                     continue
                 if plan.get("status") == "pending_ruling":
+                    missing = {
+                        str(item)
+                        for item in plan.get("missing", [])
+                        if str(item)
+                    }
+                    if (
+                        str(plan.get("default_resolver") or "") == "agent"
+                        and any(item.startswith("weapon.targeting:") for item in missing)
+                    ):
+                        if agent_rulings is not None:
+                            agent_rulings.append(
+                                {
+                                    "operation": "combat_preflight_attack",
+                                    "actor_id": str(actor["id"]),
+                                    "target_id": target_id,
+                                    "action": action,
+                                    "decision": "decline_optional_attack",
+                                    "reason": (
+                                        "The current two-dimensional temporary map has "
+                                        "no vertical-position fact satisfying the "
+                                        "source-defined target restriction."
+                                    ),
+                                    "ruling": plan,
+                                }
+                            )
+                        continue
                     raise EncounterRulingRequiredError(
                         plan,
                         operation="combat_preflight_attack",
@@ -4951,8 +4978,9 @@ async def _auto_run(
                 "expected_revision": campaign["revision"],
                 "idempotency_key": (f"encounter-reveal-surprised-{_operation_token(args)}"),
             },
-        )
+    )
     turns: list[dict[str, Any]] = []
+    agent_preflight_rulings: list[dict[str, Any]] = []
     completed_opening_casts: set[int] = set()
     completed_opening_weapon_actor_ids: set[str] = set()
     fled_hostile_ids: set[str] = set()
@@ -6291,6 +6319,7 @@ async def _auto_run(
             knock_out_target_ids=(
                 knock_out_hostile_ids if actor_id in effective_party_ids else None
             ),
+            agent_rulings=agent_preflight_rulings,
         )
         source_separation_target = _source_separation_target(
             actor_id,
@@ -6345,6 +6374,7 @@ async def _auto_run(
                     knock_out_target_ids=(
                         knock_out_hostile_ids if actor_id in effective_party_ids else None
                     ),
+                    agent_rulings=agent_preflight_rulings,
                 )
         if plan is None and source_separation_target is not None:
             turns.append(
@@ -6538,6 +6568,7 @@ async def _auto_run(
         "source_save_activities": list(save_activities.values()),
         "source_contest_activities": list(contest_activities.values()),
         "source_attack_environments": list(attack_environments.values()),
+        "agent_preflight_rulings": agent_preflight_rulings,
         "source_avoidances": source_avoidance_evidence,
         "source_zero_hp_finisher": source_zero_hp_finisher,
         "source_zero_hp_stabilization": source_zero_hp_stabilization,

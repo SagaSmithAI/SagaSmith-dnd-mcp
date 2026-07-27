@@ -539,7 +539,14 @@ def test_scene_readiness_blocks_missing_combatants_and_reserves(tmp_path: Path) 
                 "campaign_id": campaign["id"],
                 "participant_ids": participant_ids,
                 "participant_config": [
-                    {"actor_id": actor_id, "initiative": 20 - index, "tie_breaker": index}
+                    {
+                        "actor_id": actor_id,
+                        "initiative": (
+                            30 if actor_id == actors["bandit1"]["id"] else 20 - index
+                        ),
+                        "tie_breaker": index,
+                        "position": {"x": index, "y": 0},
+                    }
                     for index, actor_id in enumerate(participant_ids)
                 ],
                 "participant_manifest": complete_manifest,
@@ -552,5 +559,22 @@ def test_scene_readiness_blocks_missing_combatants_and_reserves(tmp_path: Path) 
         assert actors["guard"]["id"] not in {
             item["actor_id"] for item in started["combat"]["combatants"]
         }
+        positional_preflight = await _call(
+            server,
+            "combat_preflight_attack",
+            {
+                "campaign_id": campaign["id"],
+                "actor_id": actors["bandit1"]["id"],
+                "target_id": actors["hero"]["id"],
+                "action": {
+                    "weapon_id": "dropped-rock",
+                    "attack_mode": "ranged",
+                },
+            },
+        )
+        assert positional_preflight["status"] == "pending_ruling"
+        assert positional_preflight["default_resolver"] == "agent"
+        assert positional_preflight["ruling_kind"] == "agent_dm_adjudication"
+        assert positional_preflight["missing"] == ["weapon.targeting:dropped-rock"]
 
     asyncio.run(exercise())

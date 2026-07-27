@@ -6150,9 +6150,34 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 attack_mode=str(plan.get("attack_mode") or "melee"),
                 multiattack_option_id=action.get("multiattack_option_id"),
             )
-        except NeedsRulingError:
+        except NeedsRulingError as error:
             if access.require_campaign(campaign_id, principal_id).role not in {"owner", "dm"}:
                 raise CombatEngineError("attack requires Agent-as-DM adjudication") from None
+            weapon_id = str(action.get("weapon_id") or "")
+            missing = {str(item) for item in error.missing}
+            if weapon_id and f"weapon.range:{weapon_id}" in missing:
+                actor = combat_actor_snapshot(actor_id)
+                item = next(
+                    (
+                        value
+                        for value in dict(actor.get("sheet") or {})
+                        .get("inventory", {})
+                        .get("items", [])
+                        if isinstance(value, dict) and str(value.get("id") or "") == weapon_id
+                    ),
+                    None,
+                )
+                if isinstance(item, dict) and _has_source_defined_positional_targeting(
+                    item.get("description")
+                ):
+                    raise NeedsRulingError(
+                        (
+                            f"{str(item.get('name') or weapon_id)} uses a source-defined "
+                            "positional target restriction"
+                        ),
+                        missing=[f"weapon.targeting:{weapon_id}"],
+                        ruling_kind="agent_dm_adjudication",
+                    ) from error
             raise
         # Mechanical details are for the commit path and DM audit only.  A
         # player receives an opaque plan token and the legal action metadata,
