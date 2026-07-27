@@ -14,6 +14,12 @@ from mcp.types import ImageContent
 from pypdf import PdfWriter
 from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 from sagasmith_dnd.combat_engine import NeedsRulingError
+from sagasmith_dnd.engine import roll
+from sagasmith_dnd.random_stream import (
+    CampaignRandomStream,
+    initial_random_stream,
+    use_random_stream,
+)
 from sagasmith_dnd.rule_engine import RuleEventRulingRequiredError
 
 from sagasmith_dnd_mcp.config import McpConfig
@@ -164,6 +170,42 @@ def test_needs_ruling_boundary_returns_to_agent_without_committing() -> None:
             "use_public_tools_only": True,
         },
     }
+
+
+def test_needs_ruling_boundary_rewinds_uncommitted_random_draws() -> None:
+    state = {"random_stream": initial_random_stream("agent-ruling-retry")}
+    stream = CampaignRandomStream.from_campaign_state(
+        "campaign-1",
+        state,
+        operation="combat_join",
+        idempotency_key="join-retry",
+    )
+
+    @_agent_ruling_boundary
+    def operation() -> None:
+        roll("1d20")
+        raise NeedsRulingError(
+            "joining initiative ties need an explicit tie_breaker choice",
+            missing=("tie_breaker",),
+        )
+
+    with use_random_stream(stream):
+        first = operation()
+        assert stream.position == 0
+        replayed_roll = roll("1d20")
+
+    replay = CampaignRandomStream.from_campaign_state(
+        "campaign-1",
+        state,
+        operation="combat_join",
+        idempotency_key="join-retry",
+    )
+    with use_random_stream(replay):
+        expected_roll = roll("1d20")
+
+    assert first["status"] == "pending_ruling"
+    assert first["default_resolver"] == "agent"
+    assert replayed_roll == expected_roll
 
 
 def test_needs_ruling_boundary_keeps_source_defects_external() -> None:

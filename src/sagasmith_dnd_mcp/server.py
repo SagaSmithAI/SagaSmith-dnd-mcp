@@ -472,9 +472,13 @@ def _agent_ruling_boundary(function: _RULING_FUNCTION) -> _RULING_FUNCTION:
 
     @wraps(function)
     def wrapped(*args: Any, **kwargs: Any) -> Any:
+        stream = active_random_stream()
+        random_position_before = stream.position if stream is not None else None
         try:
             return function(*args, **kwargs)
         except (NeedsRulingError, RuleEventRulingRequiredError) as exc:
+            if stream is not None and random_position_before is not None:
+                stream.rewind_unpersisted(random_position_before)
             ruling_kind = _needs_ruling_kind(exc)
             resolution = _ruling_resolution_for_kind(ruling_kind)
             requirements = [

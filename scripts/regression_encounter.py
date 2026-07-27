@@ -1256,6 +1256,7 @@ def _reinforcement_config(
     index: int,
     *,
     join_round: int = 0,
+    tie_breaker: int | None = None,
 ) -> dict[str, Any]:
     """Place a queued source reinforcement without granting an immediate turn."""
 
@@ -1277,12 +1278,19 @@ def _reinforcement_config(
         raise ValueError("default encounter layout supports at most 10 reinforcements")
     if isinstance(join_round, bool) or not isinstance(join_round, int) or join_round < 0:
         raise ValueError("source reinforcement round must be a non-negative integer")
+    if tie_breaker is not None and (
+        isinstance(tie_breaker, bool)
+        or not isinstance(tie_breaker, int)
+        or tie_breaker < 0
+    ):
+        raise ValueError("Agent reinforcement tie breaker must be a non-negative integer")
     return {
         "position": {"x": positions[index][0], "y": positions[index][1]},
         "disposition": "hostile",
         "hidden": False,
         "surprised": False,
         "death_saves": False,
+        **({"tie_breaker": tie_breaker} if tie_breaker is not None else {}),
         **({"join_round": join_round} if join_round else {}),
     }
 
@@ -3480,8 +3488,22 @@ async def _start(
         "combat.map",
     )
     reinforcement_queue: list[dict[str, Any]] = []
+    agent_reinforcement_initiative_rulings: list[dict[str, Any]] = []
     for index, actor_id in enumerate(reinforcement_hostile_ids):
         campaign = await _campaign(client, args.campaign_id)
+        tie_breaker = len(party_ids) + len(initial_hostile_ids) + index
+        agent_reinforcement_initiative_rulings.append(
+            {
+                "actor_id": actor_id,
+                "tie_breaker": tie_breaker,
+                "ruling_reason": (
+                    "The Agent places a late-arriving hostile after every already "
+                    "ordered participant with the same rolled initiative; this "
+                    "preselects only the DM-owned tie and does not replace the "
+                    "server initiative roll."
+                ),
+            }
+        )
         reinforcement_queue.append(
             await client.domain(
                 "combat_join",
@@ -3492,6 +3514,7 @@ async def _start(
                         actor_id,
                         index,
                         join_round=int(args.reinforcement_round or 0),
+                        tie_breaker=tie_breaker,
                     ),
                     "branch_id": branch["id"],
                     "expected_revision": campaign["revision"],
@@ -3544,6 +3567,9 @@ async def _start(
         "source_opening_casts": _source_opening_casts(
             args.source_opening_cast_json,
             participant_ids=[*party_ids, *all_hostile_ids],
+        ),
+        "agent_reinforcement_initiative_rulings": (
+            agent_reinforcement_initiative_rulings
         ),
         "start": started,
         "reinforcement_queue": reinforcement_queue,
