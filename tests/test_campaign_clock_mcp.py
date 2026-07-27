@@ -188,6 +188,147 @@ def test_campaign_clock_and_elapsed_effects_advance_atomically(tmp_path: Path) -
     asyncio.run(exercise())
 
 
+def test_game_timeline_restores_and_remains_isolated_across_snapshot_branches(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        server = create_server(_config(tmp_path))
+        campaign = await _call(
+            server,
+            "campaign_create",
+            {
+                "name": "Timeline branches",
+                "edition": "2014",
+                "idempotency_key": "campaign",
+            },
+        )
+        campaign_id = campaign["id"]
+        branches = await _call(
+            server,
+            "branch_query",
+            {"campaign_id": campaign_id, "view": "list"},
+        )
+        main_branch_id = next(item["id"] for item in branches if item["is_current"])
+        clock = await _call(
+            server,
+            "campaign_change",
+            {
+                "campaign_id": campaign_id,
+                "action": "clock_set",
+                "payload": {"day": 1, "hour": 8, "minute": 0},
+                "expected_revision": campaign["revision"],
+                "idempotency_key": "clock",
+            },
+        )
+        first = await _call(
+            server,
+            "campaign_change",
+            {
+                "campaign_id": campaign_id,
+                "action": "clock_advance",
+                "payload": {"period": "round", "count": 5},
+                "expected_revision": clock["campaign_revision"],
+                "idempotency_key": "first-five-rounds",
+            },
+        )
+        assert first["game_time"]["elapsed_ticks"] == 5
+        assert first["world_time"]["second"] == 30
+        checkpoint = await _call(
+            server,
+            "snapshot_create",
+            {
+                "campaign_id": campaign_id,
+                "label": "Five elapsed rounds",
+                "expected_revision": first["campaign_revision"],
+                "expected_head_snapshot_id": "",
+                "idempotency_key": "timeline-checkpoint",
+            },
+        )
+        parent = await _call(
+            server,
+            "campaign_change",
+            {
+                "campaign_id": campaign_id,
+                "action": "clock_advance",
+                "payload": {"period": "round", "count": 5},
+                "expected_revision": first["campaign_revision"],
+                "idempotency_key": "parent-five-more",
+            },
+        )
+        assert parent["game_time"]["elapsed_ticks"] == 10
+        restored = await _call(
+            server,
+            "snapshot_restore",
+            {
+                "campaign_id": campaign_id,
+                "slot": checkpoint["slot"],
+                "expected_revision": parent["campaign_revision"],
+                "expected_branch_id": main_branch_id,
+                "idempotency_key": "restore-five",
+            },
+        )
+        branch_campaign = await _call(
+            server,
+            "campaign_query",
+            {"view": "get", "payload": {"campaign_id": campaign_id}},
+        )
+        assert branch_campaign["state"]["game_time"]["elapsed_ticks"] == 5
+        assert branch_campaign["state"]["world_time"]["second"] == 30
+        branch_advance = await _call(
+            server,
+            "campaign_change",
+            {
+                "campaign_id": campaign_id,
+                "action": "clock_advance",
+                "payload": {"period": "round", "count": 2},
+                "expected_revision": branch_campaign["revision"],
+                "idempotency_key": "branch-two-more",
+            },
+        )
+        assert branch_advance["game_time"]["elapsed_ticks"] == 7
+        current_branches = await _call(
+            server,
+            "branch_query",
+            {"campaign_id": campaign_id, "view": "list"},
+        )
+        restored_branch_id = next(
+            item["id"] for item in current_branches if item["is_current"]
+        )
+        await _call(
+            server,
+            "snapshot_create",
+            {
+                "campaign_id": campaign_id,
+                "label": "Seven elapsed rounds",
+                "expected_revision": branch_advance["campaign_revision"],
+                "expected_head_snapshot_id": restored["id"],
+                "idempotency_key": "branch-checkpoint",
+            },
+        )
+        await _call(
+            server,
+            "branch_change",
+            {
+                "campaign_id": campaign_id,
+                "action": "checkout",
+                "payload": {"branch_id": main_branch_id},
+                "expected_revision": branch_advance["campaign_revision"],
+                "expected_branch_id": restored_branch_id,
+                "idempotency_key": "checkout-parent",
+            },
+        )
+        parent_campaign = await _call(
+            server,
+            "campaign_query",
+            {"view": "get", "payload": {"campaign_id": campaign_id}},
+        )
+        assert parent_campaign["state"]["game_time"]["elapsed_ticks"] == 10
+        assert parent_campaign["state"]["world_time"]["minute"] == 1
+        assert parent_campaign["state"]["world_time"]["second"] == 0
+
+    asyncio.run(exercise())
+
+
 def test_clock_advance_rejects_a_duration_that_misses_its_expected_target(
     tmp_path: Path,
 ) -> None:
