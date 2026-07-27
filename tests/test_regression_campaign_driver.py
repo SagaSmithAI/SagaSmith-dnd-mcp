@@ -698,12 +698,60 @@ def test_discover_rule_sources_uses_public_lobby_query(
         }
     ]
     assert report["import_jobs"] == []
+    assert report["selected_import_job"] is None
     assert any(
         scope == "domain"
         and tool_id == "rule_pack_query"
         and arguments["view"] == "sources"
         for scope, tool_id, arguments in client.calls
     )
+
+
+def test_discover_rule_sources_can_inspect_one_retained_import_job(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class ImportDetailClient(_RuleStatblockClient):
+        async def domain(self, tool_id: str, arguments: dict):
+            if tool_id == "import_query":
+                self.calls.append(("domain", tool_id, arguments))
+                if arguments["view"] == "list":
+                    return [
+                        {
+                            "id": "existing-mm-job",
+                            "kind": "rulebook",
+                            "source_id": "source-1",
+                            "artifact": "monster-manual.pdf",
+                        }
+                    ]
+                assert arguments == {
+                    "campaign_id": "campaign-1",
+                    "view": "get",
+                    "job_id": "existing-mm-job",
+                }
+                return {
+                    "view": "get",
+                    "result": {
+                        "id": "existing-mm-job",
+                        "result": {
+                            "statblock_reviews": [
+                                {"id": "rule-statblock-review:lizardfolk"}
+                            ]
+                        },
+                    },
+                }
+            return await super().domain(tool_id, arguments)
+
+    client = ImportDetailClient()
+    _patch_rule_statblock_transport(monkeypatch, client)
+    args = _rule_statblock_args(tmp_path, defer_checkpoint=False)
+    args.source_job_id = "existing-mm-job"
+
+    report = asyncio.run(_discover_rule_sources(args))
+
+    assert report["selected_import_job"]["result"]["statblock_reviews"] == [
+        {"id": "rule-statblock-review:lizardfolk"}
+    ]
 
 
 def test_prepare_rule_statblock_uses_checksum_bound_visual_review(
@@ -1143,9 +1191,17 @@ def test_prepare_rule_statblock_recovers_layout_ocr_without_image_model(
     assert report["source_statblock_name"] == "Adult Blue Dragon"
 
 
+@pytest.mark.parametrize(
+    "failure_message",
+    [
+        "statblock contains unparsed weapon action markers",
+        "statblock INT score is ambiguous",
+    ],
+)
 def test_prepare_rule_statblock_recovers_an_existing_indexed_source_by_job(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    failure_message: str,
 ) -> None:
     class IndexedOcrFallbackClient(_RuleStatblockClient):
         def __init__(self) -> None:
@@ -1170,9 +1226,7 @@ def test_prepare_rule_statblock_recovers_an_existing_indexed_source_by_job(
             ):
                 self.calls.append(("domain", tool_id, arguments))
                 self.failed_creation = True
-                raise RuntimeError(
-                    "statblock contains unparsed weapon action markers"
-                )
+                raise RuntimeError(failure_message)
             if (
                 tool_id == "rule_import"
                 and arguments["action"] == "recover_statblock"
@@ -1222,6 +1276,111 @@ def test_prepare_rule_statblock_recovers_an_existing_indexed_source_by_job(
     assert create_calls[1]["payload"]["job_id"] == "existing-mm-job"
     assert report["source_import_job"]["id"] == "existing-mm-job"
     assert report["ocr_recovery"]["provider"] == "rapidocr"
+
+
+def test_prepare_rule_statblock_augments_automatic_ocr_with_agent_fill(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent_fill = {
+        "multiattack_options": [
+            {
+                "activity_id": "multiattack-activity",
+                "source_excerpt": (
+                    "The lizardfolk makes two melee attacks, each one with a "
+                    "different weapon."
+                ),
+                "reason": "The Agent maps the printed composition to legal attacks.",
+                "options": [
+                    {
+                        "id": "bite-and-heavy-club",
+                        "attacks": [
+                            {"weapon_id": "bite", "attack_mode": "melee", "count": 1},
+                            {
+                                "weapon_id": "heavy-club",
+                                "attack_mode": "melee",
+                                "count": 1,
+                            },
+                        ],
+                    }
+                ],
+                "default_resolver": "agent",
+                "ruling_kind": "module_specific_procedure",
+            }
+        ]
+    }
+
+    class OcrAgentFillClient(_RuleStatblockClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.failed_creation = False
+
+        async def domain(self, tool_id: str, arguments: dict):
+            if tool_id == "import_query":
+                self.calls.append(("domain", tool_id, arguments))
+                return [
+                    {
+                        "id": "existing-mm-job",
+                        "kind": "rulebook",
+                        "source_id": "source-1",
+                        "artifact": "monster-manual.pdf",
+                    }
+                ]
+            if (
+                tool_id == "character_create_from"
+                and arguments["mode"] == "statblock"
+                and not self.failed_creation
+            ):
+                self.calls.append(("domain", tool_id, arguments))
+                self.failed_creation = True
+                raise RuntimeError("statblock INT score is ambiguous")
+            if tool_id == "rule_import":
+                self.calls.append(("domain", tool_id, arguments))
+                assert arguments["action"] == "recover_statblock"
+                assert arguments["payload"] == {
+                    "job_id": "existing-mm-job",
+                    "name": "Lizardfolk",
+                    "page_number": 205,
+                    "agent_fill": agent_fill,
+                }
+                return {
+                    "review": {
+                        "id": "rule-statblock-review:lizardfolk-filled",
+                        "source_id": "source-1",
+                        "page_number": 205,
+                    },
+                    "provider": "rapidocr",
+                }
+            return await super().domain(tool_id, arguments)
+
+    client = OcrAgentFillClient()
+    _patch_rule_statblock_transport(monkeypatch, client)
+    fill_path = tmp_path / "lizardfolk-fill.json"
+    fill_path.write_text(json.dumps(agent_fill), encoding="utf-8")
+    args = _rule_statblock_args(tmp_path, defer_checkpoint=True)
+    args.chunk_id = []
+    args.source_page = 205
+    args.source_statblock_name = "Lizardfolk"
+    args.source_job_id = "existing-mm-job"
+    args.agent_statblock_fill = fill_path
+    args.review_observation = "Agent mapped the printed different-weapon Multiattack."
+
+    report = asyncio.run(_prepare_rule_statblock(args))
+
+    create_calls = [
+        arguments
+        for scope, tool_id, arguments in client.calls
+        if scope == "domain" and tool_id == "character_create_from"
+    ]
+    assert [call["mode"] for call in create_calls] == [
+        "statblock",
+        "reviewed_rule_statblock",
+    ]
+    assert (
+        create_calls[1]["payload"]["review_id"]
+        == "rule-statblock-review:lizardfolk-filled"
+    )
+    assert report["rule_review"]["id"] == "rule-statblock-review:lizardfolk-filled"
 
 
 def test_failed_rule_statblock_preparation_uses_shared_phase_recovery(

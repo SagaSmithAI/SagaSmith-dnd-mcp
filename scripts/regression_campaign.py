@@ -2916,10 +2916,15 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
     agent_fill_argument = getattr(args, "agent_statblock_fill", None)
     if agent_fill_argument is not None:
         if reviewed_content is None and not base_rule_review_id:
-            raise ValueError(
-                "--agent-statblock-fill requires --review-override or "
-                "--agent-rule-statblock-review, or --base-rule-review-id"
-            )
+            if not args.source_id or args.source_path or source_page is None:
+                raise ValueError(
+                    "automatic OCR Agent fill requires --source-id and "
+                    "--source-page without --source-path"
+                )
+            if not str(args.review_observation or "").strip():
+                raise ValueError(
+                    "automatic OCR Agent fill requires --review-observation"
+                )
         agent_fill, agent_fill_path = _load_json_object(
             agent_fill_argument,
             "Agent statblock fill",
@@ -3324,6 +3329,7 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
                             "missing Hit Points",
                             "missing Speed",
                             "missing the STR/DEX/CON/INT/WIS/CHA table",
+                            " score is ambiguous",
                             "contain no creature core headed",
                             "contains unparsed weapon action markers",
                         )
@@ -3340,6 +3346,8 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
                     }
                     if source_page is not None:
                         recovery_payload["page_number"] = source_page
+                    if agent_fill is not None:
+                        recovery_payload["agent_fill"] = agent_fill
                     recovered = _facade_value(
                         await client.domain(
                             "rule_import",
@@ -3661,6 +3669,32 @@ async def _discover_rule_sources(args: argparse.Namespace) -> dict[str, Any]:
                     )
                 )
             )
+            selected_import_job: dict[str, Any] | None = None
+            requested_source_job_id = str(
+                getattr(args, "source_job_id", "") or ""
+            ).strip()
+            if requested_source_job_id:
+                matching_jobs = [
+                    item
+                    for item in import_jobs
+                    if str(item.get("id") or "") == requested_source_job_id
+                ]
+                if len(matching_jobs) != 1:
+                    raise RuntimeError(
+                        "--source-job-id is not one retained rulebook import job"
+                    )
+                selected_import_job = dict(
+                    _facade_value(
+                        await client.domain(
+                            "import_query",
+                            {
+                                "campaign_id": args.campaign_id,
+                                "view": "get",
+                                "job_id": requested_source_job_id,
+                            },
+                        )
+                    )
+                )
             if initial_phase != "lobby":
                 campaign = _facade_value(
                     await client.core(
@@ -3698,6 +3732,7 @@ async def _discover_rule_sources(args: argparse.Namespace) -> dict[str, Any]:
                 "query": query_payload,
                 "sources": sources,
                 "import_jobs": [_import_job_summary(item) for item in import_jobs],
+                "selected_import_job": selected_import_job,
                 "phase_changes": phase_changes,
             }
 

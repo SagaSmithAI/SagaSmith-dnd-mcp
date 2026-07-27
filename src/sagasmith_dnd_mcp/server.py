@@ -1701,7 +1701,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if submitted_ids != expected_ids or len(declarations) != len(expected_ids):
             raise ValueError(
                 "reviewed statblock Agent fill must cover every source Multiattack "
-                "activity exactly once"
+                "activity exactly once; expected "
+                f"{sorted(expected_ids)}, received {sorted(submitted_ids)}"
             )
         return requirements
 
@@ -19035,6 +19036,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         page_number: int | None = None,
         principal_id: str = "system:local",
         idempotency_key: str | None = None,
+        agent_fill: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Recover and review one statblock through layout OCR for text-only agents."""
 
@@ -19224,8 +19226,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             recovered_page,
             content,
             observation,
-            principal_id,
-            idempotency_key,
+            principal_id=principal_id,
+            idempotency_key=idempotency_key,
+            agent_fill=agent_fill,
         )
         return {
             "campaign_id": campaign_id,
@@ -23628,7 +23631,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             data = strict_facade_payload(
                 payload,
                 action="rule_import(recover_statblock)",
-                allowed={"job_id", "name", "page_number"},
+                allowed={"job_id", "name", "page_number", "agent_fill"},
                 required_names=("job_id", "name"),
             )
             return facade_result(
@@ -23640,6 +23643,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     data.get("page_number"),
                     principal_id,
                     idempotency_key,
+                    data.get("agent_fill"),
                 ),
             )
         job_id = required(data, "job_id")
