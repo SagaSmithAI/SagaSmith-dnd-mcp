@@ -17,6 +17,7 @@ from scripts.regression_campaign import (
     _character_summary,
     _configure_utf8_streams,
     _discover_rule_chunks,
+    _discover_rule_sources,
     _expanded_source_ref,
     _load_json_object,
     _load_review_override,
@@ -306,6 +307,19 @@ class _RuleStatblockClient:
                 }
             raise AssertionError(arguments)
         if tool_id == "rule_pack_query":
+            if arguments["view"] == "sources":
+                assert arguments["payload"] == {
+                    "system_id": "dnd5e",
+                    "edition": "2014",
+                }
+                return [
+                    {
+                        "id": "source-1",
+                        "system_id": "dnd5e",
+                        "edition": "2014",
+                        "title": "Commoner",
+                    }
+                ]
             assert arguments["view"] == "source_chunks"
             return [
                 {
@@ -618,6 +632,34 @@ def test_discover_rule_chunks_returns_boundaries_without_creating_an_actor(
         if scope == "core" and tool_id == "game_phase" and arguments["action"] == "set"
     ]
     assert phase_sets == ["lobby", "play"]
+
+
+def test_discover_rule_sources_uses_public_lobby_query(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _RuleStatblockClient()
+    _patch_rule_statblock_transport(monkeypatch, client)
+    args = _rule_statblock_args(tmp_path, defer_checkpoint=False)
+
+    report = asyncio.run(_discover_rule_sources(args))
+
+    assert report["action"] == "discover-rule-sources"
+    assert report["initial_phase"] == "play"
+    assert report["sources"] == [
+        {
+            "id": "source-1",
+            "system_id": "dnd5e",
+            "edition": "2014",
+            "title": "Commoner",
+        }
+    ]
+    assert any(
+        scope == "domain"
+        and tool_id == "rule_pack_query"
+        and arguments["view"] == "sources"
+        for scope, tool_id, arguments in client.calls
+    )
 
 
 def test_prepare_rule_statblock_uses_checksum_bound_visual_review(

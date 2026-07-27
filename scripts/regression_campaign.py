@@ -86,6 +86,7 @@ def _arguments() -> argparse.Namespace:
             "restore-regression",
             "relock-core",
             "prepare-statblock",
+            "discover-rule-sources",
             "discover-rule-chunks",
             "prepare-rule-statblock",
             "prepare-core-wizard",
@@ -3181,6 +3182,122 @@ async def _discover_rule_chunks(args: argparse.Namespace) -> dict[str, Any]:
             }
 
 
+async def _discover_rule_sources(args: argparse.Namespace) -> dict[str, Any]:
+    """List indexed D&D 2014 sources through the public lobby facade."""
+
+    token = _idempotency_token(args.run_id)
+    async with stdio_client(_server_parameters(args)) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            client = CampaignMcp(session, args.campaign_id)
+            phase_payload = await client.core(
+                "game_phase", {"campaign_id": args.campaign_id, "action": "get"}
+            )
+            initial_phase = str(_facade_value(phase_payload)["tool_profile"])
+            await client.open()
+            await client.load(*_phase_groups(initial_phase))
+            branches = _facade_value(
+                await client.domain(
+                    "branch_query",
+                    {"campaign_id": args.campaign_id, "view": "list"},
+                )
+            )
+            current_branch = next(
+                (item for item in branches if item.get("is_current")),
+                None,
+            )
+            if current_branch is None:
+                raise RuntimeError("campaign has no current branch")
+            phase_changes: list[dict[str, Any]] = []
+            if initial_phase != "lobby":
+                campaign = _facade_value(
+                    await client.core(
+                        "campaign_query",
+                        {
+                            "view": "get",
+                            "payload": {"campaign_id": args.campaign_id},
+                        },
+                    )
+                )
+                phase_changes.append(
+                    _facade_value(
+                        await client.core(
+                            "game_phase",
+                            {
+                                "campaign_id": args.campaign_id,
+                                "action": "set",
+                                "tool_profile": "lobby",
+                                "expected_revision": campaign["revision"],
+                                "branch_id": current_branch["id"],
+                                "idempotency_key": _phase_transition_key(
+                                    token,
+                                    "rule-source-discovery-enter-lobby",
+                                    campaign,
+                                ),
+                            },
+                        )
+                    )
+                )
+            await client.open()
+            await client.load("lobby.campaign", "lobby.rules")
+            query_payload = {"system_id": "dnd5e", "edition": "2014"}
+            sources = list(
+                _facade_value(
+                    await client.domain(
+                        "rule_pack_query",
+                        {"view": "sources", "payload": query_payload},
+                    )
+                )
+            )
+            if initial_phase != "lobby":
+                campaign = _facade_value(
+                    await client.core(
+                        "campaign_query",
+                        {
+                            "view": "get",
+                            "payload": {"campaign_id": args.campaign_id},
+                        },
+                    )
+                )
+                phase_changes.append(
+                    _facade_value(
+                        await client.core(
+                            "game_phase",
+                            {
+                                "campaign_id": args.campaign_id,
+                                "action": "set",
+                                "tool_profile": initial_phase,
+                                "expected_revision": campaign["revision"],
+                                "branch_id": current_branch["id"],
+                                "idempotency_key": _phase_transition_key(
+                                    token,
+                                    "rule-source-discovery-restore-phase",
+                                    campaign,
+                                ),
+                            },
+                        )
+                    )
+                )
+            return {
+                "action": "discover-rule-sources",
+                "transport": "stdio",
+                "campaign_id": args.campaign_id,
+                "initial_phase": initial_phase,
+                "query": query_payload,
+                "sources": sources,
+                "phase_changes": phase_changes,
+            }
+
+
+async def _discover_rule_sources_with_recovery(
+    args: argparse.Namespace,
+) -> dict[str, Any]:
+    return await _statblock_preparation_with_recovery(
+        args,
+        _discover_rule_sources,
+    )
+
+
 async def _discover_rule_chunks_with_recovery(
     args: argparse.Namespace,
 ) -> dict[str, Any]:
@@ -5371,6 +5488,7 @@ def main() -> int:
         "restore-regression": _restore_regression,
         "relock-core": _relock_core,
         "prepare-statblock": _prepare_statblock_with_recovery,
+        "discover-rule-sources": _discover_rule_sources_with_recovery,
         "discover-rule-chunks": _discover_rule_chunks_with_recovery,
         "prepare-rule-statblock": _prepare_rule_statblock_with_recovery,
         "prepare-core-wizard": _prepare_core_wizard,
