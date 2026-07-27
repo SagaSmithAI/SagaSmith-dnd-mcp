@@ -24,6 +24,7 @@ from sagasmith_dnd.lifecycle import allows_trance_rest
 from sagasmith_dnd.module_profile import DndModuleProfile
 from sagasmith_dnd.playthrough import validate_playthrough_manifest
 
+from scripts.regression_lock import campaign_operation_lock
 from scripts.regression_modules import PRINCIPAL_ID, ExposureClient, _token
 from scripts.regression_rulings import (
     RegressionRulingRequiredError,
@@ -281,8 +282,8 @@ def _arguments() -> argparse.Namespace:
         "--time-expected-after-json",
         type=json.loads,
         help=(
-            "Machine-verifiable day/hour/minute/elapsed_minutes target for "
-            "advance-time; rejected before clock mutation when count cannot reach it"
+            "Required machine-verifiable day/hour/minute/elapsed_minutes target "
+            "for advance-time; rejected before clock mutation when count cannot reach it"
         ),
     )
     parser.add_argument(
@@ -1243,6 +1244,35 @@ def _validate_recovered_long_rest(
     if receipt.get("request_hash") != expected_request_hash:
         raise RuntimeError("long-rest recovery receipt request does not match")
     actor_ids = [str(item["actor_id"]) for item in members]
+    current_clock = dict(dict(campaign.get("state") or {}).get("world_time") or {})
+    if (
+        response.get("idempotency_replayed") is True
+        and response.get("response_recovery") == "read_current_state"
+    ):
+        actor_by_id = {str(actor.get("id")): actor for actor in actors}
+        preparations: dict[str, dict[str, list[str]]] = {}
+        for member in members:
+            if member.get("prepared_spell_ids") is None:
+                continue
+            actor_id = str(member["actor_id"])
+            actor = actor_by_id.get(actor_id)
+            if actor is None:
+                raise RuntimeError("long-rest recovery is missing a requested actor")
+            spellcasting = dict(dict(actor.get("sheet") or {}).get("spellcasting") or {})
+            preparation = dict(spellcasting.get("preparation") or {})
+            preparations[actor_id] = {
+                "selected_spell_ids": list(preparation.get("selected_spell_ids") or [])
+            }
+        response = {
+            **response,
+            "status": "committed",
+            "rest_type": "long_rest",
+            "duration_minutes": duration_minutes,
+            "member_ids": actor_ids,
+            "campaign_revision": campaign.get("revision"),
+            "world_time": current_clock,
+            "preparations": preparations,
+        }
     if (
         response.get("status") != "committed"
         or response.get("rest_type") != "long_rest"
@@ -1253,7 +1283,6 @@ def _validate_recovered_long_rest(
     campaign_revision = campaign.get("revision")
     if response.get("campaign_revision") != campaign_revision:
         raise RuntimeError("long-rest recovery receipt is not the current campaign mutation")
-    current_clock = dict(dict(campaign.get("state") or {}).get("world_time") or {})
     receipt_clock = response.get("world_time")
     if not current_clock or receipt_clock != current_clock:
         raise RuntimeError("long-rest recovery receipt does not match the current world clock")
@@ -1288,6 +1317,111 @@ def _validate_recovered_long_rest(
                 raise RuntimeError(
                     f"long-rest recovery preparations do not match for actor {actor_id}"
                 )
+    return deepcopy(response)
+
+
+def _validate_recovered_short_rest(
+    receipt: dict[str, Any],
+    *,
+    campaign: dict[str, Any],
+    actors: list[dict[str, Any]],
+    members: list[dict[str, Any]],
+    duration_minutes: int,
+    expected_request_hash: str,
+) -> dict[str, Any]:
+    response = receipt.get("response")
+    if receipt.get("replayed") is not True or not isinstance(response, dict):
+        raise RuntimeError("short-rest recovery receipt has no response")
+    if receipt.get("request_hash") != expected_request_hash:
+        raise RuntimeError("short-rest recovery receipt request does not match")
+    if response.get("response_recovery") == "read_current_state":
+        raise RuntimeError(
+            "random-capable short-rest recovery requires its atomic exact response"
+        )
+    actor_ids = [str(item["actor_id"]) for item in members]
+    if (
+        response.get("status") != "committed"
+        or response.get("rest_type") != "short_rest"
+        or response.get("duration_minutes") != duration_minutes
+        or response.get("member_ids") != actor_ids
+    ):
+        raise RuntimeError("short-rest recovery receipt does not match the requested rest")
+    if response.get("campaign_revision") != campaign.get("revision"):
+        raise RuntimeError("short-rest recovery receipt is not the current campaign mutation")
+    current_clock = dict(dict(campaign.get("state") or {}).get("world_time") or {})
+    if not current_clock or response.get("world_time") != current_clock:
+        raise RuntimeError("short-rest recovery receipt does not match the current world clock")
+    completed_elapsed = current_clock.get("elapsed_minutes")
+    if isinstance(completed_elapsed, bool) or not isinstance(completed_elapsed, int):
+        raise RuntimeError("short-rest recovery requires an elapsed campaign clock")
+    started_elapsed = completed_elapsed - duration_minutes
+    actor_by_id = {str(actor.get("id")): actor for actor in actors}
+    recovered_by_id = dict(response.get("recovered") or {})
+    requested_draws = 0
+    for member in members:
+        actor_id = str(member["actor_id"])
+        actor = actor_by_id.get(actor_id)
+        if actor is None:
+            raise RuntimeError("short-rest recovery is missing a requested actor")
+        history = dict(
+            dict(dict(actor.get("sheet") or {}).get("combat") or {}).get(
+                "rest_history"
+            )
+            or {}
+        )
+        if (
+            history.get("last_rest_type") != "short_rest"
+            or history.get("last_rest_started_elapsed_minutes") != started_elapsed
+            or history.get("last_rest_completed_elapsed_minutes") != completed_elapsed
+        ):
+            raise RuntimeError(
+                f"short-rest recovery history does not match for actor {actor_id}"
+            )
+        recovered = recovered_by_id.get(actor_id)
+        if not isinstance(recovered, dict):
+            raise RuntimeError(
+                f"short-rest recovery has no exact member result for actor {actor_id}"
+            )
+        requested_actor_draws = sum(
+            int(item["count"]) for item in list(member.get("hit_dice_spends") or [])
+        )
+        requested_draws += requested_actor_draws
+        if len(list(recovered.get("hit_dice_rolls") or [])) != requested_actor_draws:
+            raise RuntimeError(
+                f"short-rest recovery has incomplete Hit Dice rolls for actor {actor_id}"
+            )
+        attune_item_id = str(member.get("attune_item_id") or "")
+        if attune_item_id:
+            inventory = list(
+                dict(dict(actor.get("sheet") or {}).get("inventory") or {}).get(
+                    "items"
+                )
+                or []
+            )
+            item = next(
+                (
+                    value
+                    for value in inventory
+                    if str(dict(value).get("id") or "") == attune_item_id
+                ),
+                None,
+            )
+            if (
+                item is None
+                or dict(item).get("attunement") != "attuned"
+                or recovered.get("attuned_item_id") != attune_item_id
+            ):
+                raise RuntimeError(
+                    f"short-rest recovery attunement does not match for actor {actor_id}"
+                )
+    if requested_draws:
+        random_receipt = response.get("random_stream_receipt")
+        if (
+            not isinstance(random_receipt, dict)
+            or random_receipt.get("idempotency_key") != receipt.get("key")
+            or int(random_receipt.get("draw_count", 0) or 0) < requested_draws
+        ):
+            raise RuntimeError("short-rest recovery has no complete random-stream receipt")
     return deepcopy(response)
 
 
@@ -4852,63 +4986,149 @@ async def _short_rest(
     elif start_clock is not None:
         raise ValueError("short-rest start clock must be omitted after the clock is set")
     campaign = await _campaign(client, campaign_id)
-    started_elapsed_minutes = dict(dict(campaign.get("state") or {}).get("world_time") or {}).get(
-        "elapsed_minutes"
-    )
-    if isinstance(started_elapsed_minutes, bool) or not isinstance(started_elapsed_minutes, int):
-        raise RuntimeError("short-rest campaign clock has no elapsed_minutes")
-    clock_advanced = await client.domain(
-        "campaign_change",
-        {
-            "campaign_id": campaign_id,
-            "action": "clock_advance",
-            "payload": {"period": "minute", "count": duration_minutes},
-            "branch_id": str(branch["id"]),
-            "expected_revision": campaign["revision"],
-            "idempotency_key": _mutation_key(run_id, "short-rest-clock-advance", rest_identity),
-        },
-    )
-    rested = []
     actor_by_id = {str(actor["id"]): actor for actor in actors}
-    ordered_members = [
-        *[item for item in normalized if item["actor_id"] in song_source_ids],
-        *[item for item in normalized if item["actor_id"] not in song_source_ids],
-    ]
-    for member in ordered_members:
-        actor_id = member["actor_id"]
-        payload: dict[str, Any] = {
-            "rest_type": "short_rest",
-            "started_elapsed_minutes": started_elapsed_minutes,
+    party_members: list[dict[str, Any]] = []
+    for member in normalized:
+        party_member: dict[str, Any] = {
+            "character_id": member["actor_id"],
+            "expected_revision": actor_by_id[member["actor_id"]]["revision"],
             "rest_schedule": member["rest_schedule"],
         }
         if member["arcane_recovery"]:
-            payload["arcane_recovery"] = member["arcane_recovery"]
+            party_member["arcane_recovery"] = member["arcane_recovery"]
         if member["natural_recovery"]:
-            payload["natural_recovery"] = member["natural_recovery"]
+            party_member["natural_recovery"] = member["natural_recovery"]
         if member["song_of_rest_source_actor_id"] is not None:
-            payload["song_of_rest_source_actor_id"] = member["song_of_rest_source_actor_id"]
+            party_member["song_of_rest_source_actor_id"] = member[
+                "song_of_rest_source_actor_id"
+            ]
         if member.get("attune_item_id"):
-            payload["attune_item_id"] = member["attune_item_id"]
-            payload["attunement_prerequisite_confirmed"] = True
+            party_member["attune_item_id"] = member["attune_item_id"]
+            party_member["attunement_prerequisite_confirmed"] = True
         if member["hit_dice_spends"]:
-            payload["hit_dice_spends"] = member["hit_dice_spends"]
+            party_member["hit_dice_spends"] = member["hit_dice_spends"]
         if member["rest_activity_minutes"]:
-            payload["rest_activity_minutes"] = member["rest_activity_minutes"]
-        result = await client.domain(
-            "character_state_change",
+            party_member["rest_activity_minutes"] = member["rest_activity_minutes"]
+        party_members.append(party_member)
+    party_rest_key = _mutation_key(run_id, "short-rest-party", rest_identity)
+    rest_recovered = False
+    try:
+        rested = await client.domain(
+            "campaign_change",
             {
-                "character_id": actor_id,
-                "action": "rest",
-                "payload": payload,
-                "expected_revision": actor_by_id[actor_id]["revision"],
-                "idempotency_key": _mutation_key(
-                    run_id, "short-rest-actor", f"{rest_identity}:{actor_id}"
-                ),
+                "campaign_id": campaign_id,
+                "action": "party_rest",
+                "payload": {
+                    "rest_type": "short_rest",
+                    "members": party_members,
+                    "duration_minutes": duration_minutes,
+                },
+                "branch_id": str(branch["id"]),
+                "expected_revision": campaign["revision"],
+                "idempotency_key": party_rest_key,
             },
         )
-        if result.get("status") != "committed":
-            raise RuntimeError(f"short rest for {actor_id} did not commit")
-        rested.append(result)
+    except Exception as exc:
+        if "idempotency key reused with a different request" not in str(exc):
+            raise
+        receipt = await client.domain(
+            "state_revision",
+            {
+                "campaign_id": campaign_id,
+                "action": "receipt",
+                "payload": {"idempotency_key": party_rest_key},
+            },
+        )
+        receipt_branch_id = str(receipt.get("branch_id") or "")
+        if receipt_branch_id != str(branch["id"]):
+            raise RuntimeError("short-rest recovery receipt is from another branch")
+        revision_rows = list(receipt.get("entity_revisions") or [])
+        if not all(isinstance(item, dict) for item in revision_rows):
+            raise RuntimeError("short-rest recovery receipt has invalid revision evidence")
+        revision_by_entity = {
+            (str(item.get("entity_type") or ""), str(item.get("entity_id") or "")): item
+            for item in revision_rows
+        }
+        if len(revision_by_entity) != len(revision_rows):
+            raise RuntimeError("short-rest recovery receipt repeats revision evidence")
+        expected_entities = {("campaign", campaign_id)} | {
+            ("character", actor_id) for actor_id in actor_ids
+        }
+        if not expected_entities.issubset(revision_by_entity) or any(
+            entity_type not in {"campaign", "character"}
+            for entity_type, _entity_id in revision_by_entity
+        ):
+            raise RuntimeError("short-rest recovery receipt has unexpected revision evidence")
+        campaign_revision_row = revision_by_entity[("campaign", campaign_id)]
+        if (
+            campaign_revision_row.get("after_revision") != campaign.get("revision")
+            or campaign_revision_row.get("before_revision")
+            != campaign.get("revision") - 1
+        ):
+            raise RuntimeError("short-rest recovery campaign revisions do not match")
+        for (entity_type, entity_id), revision_row in revision_by_entity.items():
+            if entity_type != "character":
+                continue
+            current_actor = actor_by_id.get(entity_id)
+            if current_actor is None:
+                current_actor = await client.domain(
+                    "character_query",
+                    {"view": "get", "payload": {"character_id": entity_id}},
+                )
+            current_revision = current_actor.get("revision")
+            if (
+                current_actor.get("campaign_id") != campaign_id
+                or isinstance(current_revision, bool)
+                or not isinstance(current_revision, int)
+                or revision_row.get("after_revision") != current_revision
+                or revision_row.get("before_revision") != current_revision - 1
+            ):
+                raise RuntimeError("short-rest recovery actor revisions do not match")
+        recovery_members = []
+        for member in normalized:
+            revision_row = revision_by_entity[("character", member["actor_id"])]
+            recovery_members.append(
+                {
+                    "character_id": member["actor_id"],
+                    "expected_revision": revision_row["before_revision"],
+                    "rest_activity_minutes": member["rest_activity_minutes"],
+                    "rest_schedule": member["rest_schedule"],
+                    "hit_dice_spends": member["hit_dice_spends"],
+                    "arcane_recovery": member["arcane_recovery"],
+                    "natural_recovery": member["natural_recovery"],
+                    "song_of_rest_source_actor_id": member[
+                        "song_of_rest_source_actor_id"
+                    ],
+                    "attune_item_id": member.get("attune_item_id"),
+                    "attunement_prerequisite_confirmed": (
+                        True if member.get("attune_item_id") else None
+                    ),
+                }
+            )
+        expected_request_hash = _idempotency_request_hash(
+            {
+                "members": recovery_members,
+                "duration_minutes": duration_minutes,
+                "branch_id": receipt_branch_id,
+                "rest_type": "short_rest",
+            }
+        )
+        rested = _validate_recovered_short_rest(
+            receipt,
+            campaign=campaign,
+            actors=actors,
+            members=normalized,
+            duration_minutes=duration_minutes,
+            expected_request_hash=expected_request_hash,
+        )
+        rest_recovered = True
+    if (
+        rested.get("status") != "committed"
+        or rested.get("rest_type") != "short_rest"
+        or rested.get("duration_minutes") != duration_minutes
+        or rested.get("member_ids") != actor_ids
+    ):
+        raise RuntimeError("atomic short rest did not settle the requested party")
     campaign = await _campaign(client, campaign_id)
     committed = await client.domain(
         "memory_change",
@@ -4962,8 +5182,13 @@ async def _short_rest(
             "world_time": required_start_clock,
         },
         "clock_set": clock_set,
-        "clock_advanced": clock_advanced,
-        "rests": rested,
+        "rest_recovered": rest_recovered,
+        "clock_advanced": rested,
+        "rests": [
+            dict(dict(rested.get("recovered") or {}).get(actor_id) or {})
+            for actor_id in actor_ids
+        ],
+        "party_rest": rested,
         "continuity": committed,
         "sync": synced,
     }
@@ -5805,10 +6030,15 @@ async def _long_rest(
             (str(item.get("entity_type") or ""), str(item.get("entity_id") or "")): item
             for item in revision_rows
         }
+        if len(revision_by_entity) != len(revision_rows):
+            raise RuntimeError("long-rest recovery receipt repeats revision evidence")
         expected_entities = {("campaign", campaign_id)} | {
             ("character", actor_id) for actor_id in actor_ids
         }
-        if set(revision_by_entity) != expected_entities:
+        if not expected_entities.issubset(revision_by_entity) or any(
+            entity_type not in {"campaign", "character"}
+            for entity_type, _entity_id in revision_by_entity
+        ):
             raise RuntimeError("long-rest recovery receipt has unexpected revision evidence")
         campaign_revision_row = revision_by_entity[("campaign", campaign_id)]
         if (
@@ -5816,6 +6046,24 @@ async def _long_rest(
             or campaign_revision_row.get("before_revision") != campaign.get("revision") - 1
         ):
             raise RuntimeError("long-rest recovery campaign revisions do not match")
+        for (entity_type, entity_id), revision_row in revision_by_entity.items():
+            if entity_type != "character" or entity_id in actor_by_id:
+                continue
+            current_actor = await client.domain(
+                "character_query",
+                {"view": "get", "payload": {"character_id": entity_id}},
+            )
+            current_revision = current_actor.get("revision")
+            if (
+                current_actor.get("campaign_id") != campaign_id
+                or isinstance(current_revision, bool)
+                or not isinstance(current_revision, int)
+                or revision_row.get("after_revision") != current_revision
+                or revision_row.get("before_revision") != current_revision - 1
+            ):
+                raise RuntimeError(
+                    "long-rest recovery incidental actor revisions do not match"
+                )
         recovery_members = []
         for member in normalized:
             actor = actor_by_id[member["actor_id"]]
@@ -5955,6 +6203,12 @@ async def _advance_time(
         raise ValueError(
             "advance-time requires scene, positive count, period, and reason"
         )
+    normalized_expected_after = _normalize_expected_world_time(expected_after)
+    if normalized_expected_after is None:
+        raise ValueError(
+            "advance-time requires --time-expected-after-json so every elapsed "
+            "interval is bound to one machine-verifiable destination"
+        )
     normalized_agent_ruling = _settled_time_agent_ruling(
         agent_ruling,
         period=period,
@@ -6011,7 +6265,6 @@ async def _advance_time(
     branch_id = str(branch["id"])
     campaign = await _campaign(client, campaign_id)
     before = deepcopy(dict(dict(campaign.get("state") or {}).get("world_time") or {}))
-    normalized_expected_after = _normalize_expected_world_time(expected_after)
     expected_minutes = count * {"minute": 1, "hour": 60, "day": 1440}[period]
     projected_before = before
     clock_recovery = False
@@ -6036,41 +6289,36 @@ async def _advance_time(
                 (start_day - 1) * 1440 + start_hour * 60 + start_minute
             )
         }
-    if normalized_expected_after is not None:
-        if not projected_before:
-            raise ValueError(
-                "advance-time expected target requires an existing or supplied start clock"
-            )
-        current_projection = {
-            key: projected_before.get(key)
-            for key in ("day", "hour", "minute", "elapsed_minutes")
+    if not projected_before:
+        raise ValueError(
+            "advance-time expected target requires an existing or supplied start clock"
+        )
+    current_projection = {
+        key: projected_before.get(key)
+        for key in ("day", "hour", "minute", "elapsed_minutes")
+    }
+    clock_recovery = current_projection == normalized_expected_after
+    if clock_recovery:
+        original_elapsed = normalized_expected_after["elapsed_minutes"] - expected_minutes
+        if original_elapsed < 0:
+            raise ValueError("advance-time recovery target predates the requested duration")
+        before = {
+            "schema_version": int(projected_before.get("schema_version", 1) or 1),
+            "day": original_elapsed // 1440 + 1,
+            "hour": (original_elapsed % 1440) // 60,
+            "minute": original_elapsed % 60,
+            "elapsed_minutes": original_elapsed,
+            "label": str(projected_before.get("label") or ""),
         }
-        clock_recovery = current_projection == normalized_expected_after
-        if clock_recovery:
-            original_elapsed = (
-                normalized_expected_after["elapsed_minutes"] - expected_minutes
+    else:
+        projected_after = _project_world_time(projected_before, expected_minutes)
+        if projected_after != normalized_expected_after:
+            raise ValueError(
+                "advance-time duration does not reach expected target: "
+                f"computed day {projected_after['day']} "
+                f"{projected_after['hour']:02}:{projected_after['minute']:02}, "
+                f"elapsed {projected_after['elapsed_minutes']}"
             )
-            if original_elapsed < 0:
-                raise ValueError(
-                    "advance-time recovery target predates the requested duration"
-                )
-            before = {
-                "schema_version": int(projected_before.get("schema_version", 1) or 1),
-                "day": original_elapsed // 1440 + 1,
-                "hour": (original_elapsed % 1440) // 60,
-                "minute": original_elapsed % 60,
-                "elapsed_minutes": original_elapsed,
-                "label": str(projected_before.get("label") or ""),
-            }
-        else:
-            projected_after = _project_world_time(projected_before, expected_minutes)
-            if projected_after != normalized_expected_after:
-                raise ValueError(
-                    "advance-time duration does not reach expected target: "
-                    f"computed day {projected_after['day']} "
-                    f"{projected_after['hour']:02}:{projected_after['minute']:02}, "
-                    f"elapsed {projected_after['elapsed_minutes']}"
-                )
     clock_set = None
     if not before:
         if not isinstance(start_clock, dict):
@@ -6097,9 +6345,11 @@ async def _advance_time(
     elif start_clock is not None:
         raise ValueError("advance-time start clock must be omitted after the clock is set")
     campaign = await _campaign(client, campaign_id)
-    advance_payload: dict[str, Any] = {"period": period, "count": count}
-    if normalized_expected_after is not None:
-        advance_payload["expected_world_time"] = normalized_expected_after
+    advance_payload: dict[str, Any] = {
+        "period": period,
+        "count": count,
+        "expected_world_time": normalized_expected_after,
+    }
     advanced = await client.domain(
         "campaign_change",
         {
@@ -6111,6 +6361,70 @@ async def _advance_time(
             "idempotency_key": _mutation_key(run_id, "advance-time-clock", identity),
         },
     )
+    clock_receipt_recovered = False
+    if (
+        advanced.get("idempotency_replayed") is True
+        and advanced.get("response_recovery") == "read_current_state"
+    ):
+        clock_key = _mutation_key(run_id, "advance-time-clock", identity)
+        receipt = await client.domain(
+            "state_revision",
+            {
+                "campaign_id": campaign_id,
+                "action": "receipt",
+                "payload": {
+                    "idempotency_key": clock_key,
+                    "branch_id": branch_id,
+                },
+            },
+        )
+        if str(receipt.get("branch_id") or "") != branch_id:
+            raise RuntimeError("clock recovery receipt is from another branch")
+        expected_request_hash = _idempotency_request_hash(
+            {
+                "period": period,
+                "count": count,
+                "branch_id": branch_id,
+                "expected_world_time": normalized_expected_after,
+            }
+        )
+        if receipt.get("request_hash") != expected_request_hash:
+            raise RuntimeError("clock recovery receipt request does not match")
+        campaign_revisions = [
+            item
+            for item in list(receipt.get("entity_revisions") or [])
+            if isinstance(item, dict)
+            and item.get("entity_type") == "campaign"
+            and item.get("entity_id") == campaign_id
+        ]
+        if len(campaign_revisions) != 1:
+            raise RuntimeError("clock recovery receipt has no unique campaign revision")
+        revision_row = campaign_revisions[0]
+        before_revision = revision_row.get("before_revision")
+        after_revision = revision_row.get("after_revision")
+        if (
+            isinstance(before_revision, bool)
+            or not isinstance(before_revision, int)
+            or isinstance(after_revision, bool)
+            or not isinstance(after_revision, int)
+            or after_revision != before_revision + 1
+        ):
+            raise RuntimeError("clock recovery receipt campaign revisions are invalid")
+        current_clock = deepcopy(
+            dict(dict(campaign.get("state") or {}).get("world_time") or {})
+        )
+        if {
+            key: current_clock.get(key)
+            for key in ("day", "hour", "minute", "elapsed_minutes")
+        } != normalized_expected_after:
+            raise RuntimeError("clock recovery current state does not match the exact target")
+        advanced = {
+            **advanced,
+            "world_time": current_clock,
+            "campaign_revision": after_revision,
+            "recovery_receipt": receipt,
+        }
+        clock_receipt_recovered = True
     advanced_revision = advanced.get("campaign_revision")
     if isinstance(advanced_revision, bool) or not isinstance(advanced_revision, int):
         raise RuntimeError("campaign clock response has no integer campaign revision")
@@ -6122,7 +6436,7 @@ async def _advance_time(
         != expected_minutes
     ):
         raise RuntimeError("campaign clock did not advance by the requested duration")
-    if normalized_expected_after is not None and {
+    if {
         key: int(after.get(key, -1))
         for key in ("day", "hour", "minute", "elapsed_minutes")
     } != normalized_expected_after:
@@ -6138,11 +6452,7 @@ async def _advance_time(
                 "period": period,
                 "count": count,
                 "elapsed_minutes": expected_minutes,
-                **(
-                    {"expected_world_time": normalized_expected_after}
-                    if normalized_expected_after is not None
-                    else {}
-                ),
+                "expected_world_time": normalized_expected_after,
                 "world_time_before": before,
                 "world_time_after": after,
                 "source_excerpt": source_excerpt.strip() if has_source_ref else "",
@@ -6196,6 +6506,7 @@ async def _advance_time(
         "agent_ruling": normalized_agent_ruling,
         "preconditions": preconditions,
         "clock_recovery": clock_recovery,
+        "clock_receipt_recovered": clock_receipt_recovered,
         "clock_set": clock_set,
         "before": before,
         "advance": advanced,
@@ -10993,7 +11304,8 @@ def main() -> int:
             reconfigure(encoding="utf-8", errors="backslashreplace")
     args = _arguments()
     try:
-        report = asyncio.run(_run(args))
+        with campaign_operation_lock(args.home, args.campaign_id):
+            report = asyncio.run(_run(args))
     except Exception as error:
 
         def leaf_messages(item: BaseException) -> list[str]:

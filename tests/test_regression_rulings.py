@@ -217,6 +217,7 @@ def test_playthrough_driver_writes_structured_external_handoff(
     output = tmp_path / "playthrough.json"
     args = SimpleNamespace(
         output=output,
+        home=tmp_path / "home",
         action="advance-level",
         campaign_id="campaign-1",
         run_id="run-1",

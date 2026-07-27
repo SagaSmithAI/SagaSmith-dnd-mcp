@@ -5924,42 +5924,53 @@ def test_short_rest_advances_clock_and_applies_only_explicit_resource_choices() 
                 }
                 self.revision += 1
                 return {"world_time": self.world_time}
-            if tool_id == "campaign_change" and arguments["action"] == "clock_advance":
-                self.remember("clock_advance", arguments["idempotency_key"])
-                assert arguments["payload"] == {"period": "minute", "count": 60}
+            if tool_id == "campaign_change" and arguments["action"] == "party_rest":
+                self.remember("party_rest", arguments["idempotency_key"])
+                assert arguments["payload"] == {
+                    "rest_type": "short_rest",
+                    "duration_minutes": 60,
+                    "members": [
+                        {
+                            "character_id": "fighter",
+                            "expected_revision": 2,
+                            "hit_dice_spends": [{"key": "fighter:d10", "count": 1}],
+                            "song_of_rest_source_actor_id": "wizard",
+                            "rest_activity_minutes": {"meditation": 30},
+                            "rest_schedule": {
+                                "sleep_minutes": 0,
+                                "light_activity_minutes": 60,
+                                "strenuous_activity_minutes": 0,
+                            },
+                        },
+                        {
+                            "character_id": "wizard",
+                            "expected_revision": 2,
+                            "arcane_recovery": {"1": 1},
+                            "rest_schedule": {
+                                "sleep_minutes": 0,
+                                "light_activity_minutes": 60,
+                                "strenuous_activity_minutes": 0,
+                            },
+                        },
+                    ],
+                }
                 self.world_time = {
                     **self.world_time,
                     "hour": 15,
                     "elapsed_minutes": 900,
                 }
                 self.revision += 1
-                return {"world_time": self.world_time}
-            if tool_id == "character_state_change":
-                self.remember("actor", arguments["idempotency_key"])
-                assert arguments["action"] == "rest"
-                assert arguments["payload"]["started_elapsed_minutes"] == 840
-                assert arguments["payload"]["rest_schedule"] == {
-                    "sleep_minutes": 0,
-                    "light_activity_minutes": 60,
-                    "strenuous_activity_minutes": 0,
-                }
-                if arguments["character_id"] == "fighter":
-                    assert arguments["payload"]["hit_dice_spends"] == [
-                        {"key": "fighter:d10", "count": 1}
-                    ]
-                    assert arguments["payload"]["song_of_rest_source_actor_id"] == "wizard"
-                    assert arguments["payload"]["rest_activity_minutes"] == {"meditation": 30}
-                else:
-                    assert "hit_dice_spends" not in arguments["payload"]
-                    assert "rest_activity_minutes" not in arguments["payload"]
-                if arguments["character_id"] == "wizard":
-                    assert arguments["payload"]["arcane_recovery"] == {"1": 1}
-                else:
-                    assert "arcane_recovery" not in arguments["payload"]
-                self.revision += 1
                 return {
                     "status": "committed",
-                    "character": {"id": arguments["character_id"]},
+                    "rest_type": "short_rest",
+                    "duration_minutes": 60,
+                    "member_ids": ["fighter", "wizard"],
+                    "world_time": self.world_time,
+                    "recovered": {
+                        "fighter": {"hit_dice_healing": 7},
+                        "wizard": {"recovered": {"spell_slot:1": 1}},
+                    },
+                    "campaign_revision": self.revision,
                 }
             if tool_id == "memory_change":
                 self.remember("continuity", arguments["idempotency_key"])
@@ -5999,17 +6010,175 @@ def test_short_rest_advances_clock_and_applies_only_explicit_resource_choices() 
     assert result["member_ids"] == ["fighter", "wizard"]
     assert result["clock_advanced"]["world_time"]["hour"] == 15
     assert len(result["rests"]) == 2
+    assert result["rest_recovered"] is False
     identity = "hideout-short-rest-1"
     assert client.keys["clock_set"] == [_mutation_key("run-1", "short-rest-clock-set", identity)]
-    assert client.keys["clock_advance"] == [
-        _mutation_key("run-1", "short-rest-clock-advance", identity)
-    ]
-    assert client.keys["actor"] == [
-        _mutation_key("run-1", "short-rest-actor", f"{identity}:wizard"),
-        _mutation_key("run-1", "short-rest-actor", f"{identity}:fighter"),
+    assert client.keys["party_rest"] == [
+        _mutation_key("run-1", "short-rest-party", identity)
     ]
     assert client.keys["continuity"] == [_mutation_key("run-1", "short-rest-continuity", identity)]
     assert client.keys["sync"] == [_mutation_key("run-1", "sync", f"short-rest-sync:{identity}")]
+
+
+def test_short_rest_recovers_the_atomic_random_receipt_without_rerolling() -> None:
+    rest_key = _mutation_key("run-1", "short-rest-party", "recovered-short-rest-1")
+    schedule = {
+        "sleep_minutes": 0,
+        "light_activity_minutes": 60,
+        "strenuous_activity_minutes": 0,
+    }
+    response = {
+        "status": "committed",
+        "rest_type": "short_rest",
+        "duration_minutes": 60,
+        "member_ids": ["fighter"],
+        "world_time": {
+            "schema_version": 1,
+            "day": 1,
+            "hour": 1,
+            "minute": 0,
+            "elapsed_minutes": 60,
+            "label": "Camp",
+        },
+        "recovered": {
+            "fighter": {
+                "hit_dice_rolls": [
+                    {
+                        "key": "fighter:d10",
+                        "roll": 7,
+                    }
+                ]
+            }
+        },
+        "preparations": {},
+        "campaign_revision": 6,
+        "random_stream_receipt": {
+            "algorithm": "sha256-counter-v1",
+            "position_before": 20,
+            "position_after": 21,
+            "draw_count": 1,
+            "operation": "campaign_change",
+            "idempotency_key": rest_key,
+        },
+    }
+
+    class Client:
+        def __init__(self) -> None:
+            self.revision = 6
+            self.party_rest_calls = 0
+
+        async def core(self, tool_id: str, arguments: dict):
+            assert tool_id == "campaign_query"
+            return {
+                "result": {
+                    "id": "campaign-1",
+                    "revision": self.revision,
+                    "state": {
+                        "game_phase": "play",
+                        "world_time": response["world_time"],
+                    },
+                }
+            }
+
+        async def domain(self, tool_id: str, arguments: dict):
+            if tool_id == "character_query":
+                if arguments["view"] == "rest":
+                    return {"ready": True}
+                sheet = default_character_sheet()
+                sheet["combat"]["rest_history"] = {
+                    "last_rest_type": "short_rest",
+                    "last_rest_started_elapsed_minutes": 0,
+                    "last_rest_completed_elapsed_minutes": 60,
+                    "last_long_rest_elapsed_minutes": None,
+                }
+                return {
+                    "id": "fighter",
+                    "campaign_id": "campaign-1",
+                    "revision": 3,
+                    "sheet": sheet,
+                }
+            if tool_id == "branch_query":
+                return [{"id": "branch-1", "is_current": True}]
+            if tool_id == "campaign_change":
+                self.party_rest_calls += 1
+                raise RuntimeError(
+                    f"idempotency key reused with a different request: {rest_key}"
+                )
+            if tool_id == "state_revision":
+                normalized_request = {
+                    "members": [
+                        {
+                            "character_id": "fighter",
+                            "expected_revision": 2,
+                            "rest_activity_minutes": {},
+                            "rest_schedule": schedule,
+                            "hit_dice_spends": [{"key": "fighter:d10", "count": 1}],
+                            "arcane_recovery": {},
+                            "natural_recovery": {},
+                            "song_of_rest_source_actor_id": None,
+                            "attune_item_id": None,
+                            "attunement_prerequisite_confirmed": None,
+                        }
+                    ],
+                    "duration_minutes": 60,
+                    "branch_id": "branch-1",
+                    "rest_type": "short_rest",
+                }
+                return {
+                    "key": rest_key,
+                    "replayed": True,
+                    "request_hash": regression_playthrough._idempotency_request_hash(
+                        normalized_request
+                    ),
+                    "branch_id": "branch-1",
+                    "entity_revisions": [
+                        {
+                            "entity_type": "campaign",
+                            "entity_id": "campaign-1",
+                            "before_revision": 5,
+                            "after_revision": 6,
+                        },
+                        {
+                            "entity_type": "character",
+                            "entity_id": "fighter",
+                            "before_revision": 2,
+                            "after_revision": 3,
+                        },
+                    ],
+                    "response": response,
+                }
+            if tool_id == "memory_change":
+                self.revision += 1
+                return {"event": {"id": "event-1"}, "snapshot": {"slot": 4}}
+            if tool_id == "playthrough_manifest":
+                return {
+                    "manifest": {"status": "in_progress"},
+                    "campaign_revision": self.revision,
+                }
+            raise AssertionError((tool_id, arguments))
+
+    client = Client()
+    result = asyncio.run(
+        _short_rest(
+            client,
+            campaign_id="campaign-1",
+            run_id="run-1",
+            occurrence_id="recovered-short-rest-1",
+            members=[
+                {
+                    "actor_id": "fighter",
+                    "hit_dice_spends": [{"key": "fighter:d10", "count": 1}],
+                }
+            ],
+            start_clock=None,
+            duration_minutes=60,
+            reason="The party completed the recorded short rest.",
+        )
+    )
+
+    assert client.party_rest_calls == 1
+    assert result["rest_recovered"] is True
+    assert result["party_rest"]["random_stream_receipt"]["position_after"] == 21
 
 
 @pytest.mark.parametrize("defer_checkpoint", [False, True])
@@ -6076,7 +6245,16 @@ def test_time_advance_commits_evidence_clock_knowledge_and_snapshot(
                 return [{"id": "branch-1", "is_current": True}]
             if tool_id == "campaign_change":
                 assert arguments["action"] == "clock_advance"
-                assert arguments["payload"] == {"period": "hour", "count": 13}
+                assert arguments["payload"] == {
+                    "period": "hour",
+                    "count": 13,
+                    "expected_world_time": {
+                        "day": 2,
+                        "hour": 17,
+                        "minute": 0,
+                        "elapsed_minutes": 2460,
+                    },
+                }
                 self.world_time = {
                     "day": 2,
                     "hour": 17,
@@ -6148,6 +6326,12 @@ def test_time_advance_commits_evidence_clock_knowledge_and_snapshot(
             agent_ruling=None if evidence_mode == "source" else agent_ruling,
             knowledge_actor_ids=["actor-1", "npc-1"],
             defer_checkpoint=defer_checkpoint,
+            expected_after={
+                "day": 2,
+                "hour": 17,
+                "minute": 0,
+                "elapsed_minutes": 2460,
+            },
         )
     )
 
@@ -6367,6 +6551,137 @@ def test_time_advance_recovery_binds_continuity_to_original_clock_revision() -> 
         )
 
 
+def test_time_advance_recovers_a_committed_clock_without_a_rich_response() -> None:
+    source_ref = {
+        "module_id": "module-1",
+        "scene_id": "scene-1",
+        "chunk_id": "chunk-1",
+        "page_start": 14,
+        "page_end": 14,
+        "heading_path": ["Part 2"],
+        "content_sha256": "abc",
+    }
+    branch_id = "branch-1"
+    clock_key = _mutation_key("run-1", "advance-time-clock", "travel-to-phandalin-1")
+    expected_clock_request = {
+        "period": "hour",
+        "count": 13,
+        "branch_id": branch_id,
+        "expected_world_time": {
+            "day": 2,
+            "hour": 17,
+            "minute": 0,
+            "elapsed_minutes": 2460,
+        },
+    }
+
+    class Client:
+        revision = 10
+
+        async def core(self, tool_id: str, arguments: dict):
+            assert tool_id == "campaign_query"
+            return {
+                "result": {
+                    "id": "campaign-1",
+                    "revision": self.revision,
+                    "state": {
+                        "game_phase": "play",
+                        "world_time": {
+                            "day": 2,
+                            "hour": 17,
+                            "minute": 0,
+                            "elapsed_minutes": 2460,
+                            "label": "Trail",
+                        },
+                    },
+                }
+            }
+
+        async def domain(self, tool_id: str, arguments: dict):
+            if tool_id == "module_query":
+                return {
+                    "module_id": "module-1",
+                    "scene_id": "scene-1",
+                    "content": "The characters arrive late in the day.",
+                }
+            if tool_id == "branch_query":
+                return [{"id": branch_id, "is_current": True}]
+            if tool_id == "campaign_change":
+                return {
+                    "status": "committed",
+                    "idempotency_replayed": True,
+                    "response_recovery": "read_current_state",
+                }
+            if tool_id == "state_revision":
+                assert arguments["payload"] == {
+                    "idempotency_key": clock_key,
+                    "branch_id": branch_id,
+                }
+                return {
+                    "key": clock_key,
+                    "replayed": True,
+                    "response": {
+                        "status": "committed",
+                        "idempotency_replayed": True,
+                        "response_recovery": "read_current_state",
+                    },
+                    "mutation_group_id": "group-1",
+                    "request_hash": regression_playthrough._idempotency_request_hash(
+                        expected_clock_request
+                    ),
+                    "branch_id": branch_id,
+                    "entity_revisions": [
+                        {
+                            "entity_type": "campaign",
+                            "entity_id": "campaign-1",
+                            "before_revision": 9,
+                            "after_revision": 10,
+                        }
+                    ],
+                }
+            if tool_id == "memory_change":
+                assert arguments["expected_revision"] == 10
+                self.revision += 1
+                return {"event": {"id": "event-1"}}
+            if tool_id == "playthrough_manifest":
+                self.revision += 1
+                return {
+                    "manifest": {"status": "in_progress"},
+                    "campaign_revision": self.revision,
+                }
+            raise AssertionError((tool_id, arguments))
+
+    result = asyncio.run(
+        _advance_time(
+            Client(),
+            campaign_id="campaign-1",
+            run_id="run-1",
+            occurrence_id="travel-to-phandalin-1",
+            scene_id="scene-1",
+            source_excerpt="The characters arrive late in the day.",
+            source_ref=source_ref,
+            period="hour",
+            count=13,
+            reason="The party traveled and arrived late in the day.",
+            start_clock=None,
+            agent_ruling=None,
+            knowledge_actor_ids=[],
+            defer_checkpoint=True,
+            expected_after={
+                "day": 2,
+                "hour": 17,
+                "minute": 0,
+                "elapsed_minutes": 2460,
+            },
+        )
+    )
+
+    assert result["clock_recovery"] is True
+    assert result["clock_receipt_recovered"] is True
+    assert result["advance"]["campaign_revision"] == 10
+    assert result["after"]["elapsed_minutes"] == 2460
+
+
 @pytest.mark.parametrize(
     ("value", "match"),
     [
@@ -6476,6 +6791,37 @@ def test_time_advance_rejects_missing_or_partial_evidence_before_public_calls(
                 scene_id="scene-1",
                 source_excerpt=source_excerpt,
                 source_ref=source_ref,
+                period="day",
+                count=1,
+                reason="The party travels.",
+                start_clock=None,
+                agent_ruling=None,
+                knowledge_actor_ids=[],
+                expected_after={
+                    "day": 2,
+                    "hour": 0,
+                    "minute": 0,
+                    "elapsed_minutes": 1440,
+                },
+            )
+        )
+
+
+def test_time_advance_requires_an_exact_target_before_public_calls() -> None:
+    class Client:
+        async def domain(self, tool_id: str, arguments: dict):
+            raise AssertionError((tool_id, arguments))
+
+    with pytest.raises(ValueError, match="requires --time-expected-after-json"):
+        asyncio.run(
+            _advance_time(
+                Client(),
+                campaign_id="campaign-1",
+                run_id="run-1",
+                occurrence_id="travel-1",
+                scene_id="scene-1",
+                source_excerpt="One day passes.",
+                source_ref={"scene_id": "scene-1"},
                 period="day",
                 count=1,
                 reason="The party travels.",
@@ -7388,7 +7734,10 @@ def test_long_rest_uses_atomic_party_rest_and_unique_occurrence_knowledge() -> N
     assert len(set(client.continuity_keys)) == 2
 
 
-def test_long_rest_recovers_committed_receipt_without_advancing_time_twice() -> None:
+@pytest.mark.parametrize("rich_response", [True, False])
+def test_long_rest_recovers_committed_receipt_without_advancing_time_twice(
+    rich_response: bool,
+) -> None:
     class Client:
         def __init__(self) -> None:
             self.revision = 6
@@ -7479,7 +7828,7 @@ def test_long_rest_recovers_committed_receipt_without_advancing_time_twice() -> 
                         "branch_id": "branch-1",
                     }
                 )
-                return {
+                receipt = {
                     "key": self.receipt_key,
                     "replayed": True,
                     "request_hash": request_hash,
@@ -7504,7 +7853,9 @@ def test_long_rest_recovers_committed_receipt_without_advancing_time_twice() -> 
                             "after_revision": 3,
                         },
                     ],
-                    "response": {
+                }
+                if rich_response:
+                    receipt["response"] = {
                         "status": "committed",
                         "rest_type": "long_rest",
                         "duration_minutes": 480,
@@ -7512,8 +7863,14 @@ def test_long_rest_recovers_committed_receipt_without_advancing_time_twice() -> 
                         "world_time": self.world_time,
                         "campaign_revision": 6,
                         "preparations": {"cleric": {"selected_spell_ids": ["cure-wounds"]}},
-                    },
-                }
+                    }
+                else:
+                    receipt["response"] = {
+                        "status": "committed",
+                        "idempotency_replayed": True,
+                        "response_recovery": "read_current_state",
+                    }
+                return receipt
             if tool_id == "memory_change":
                 self.revision += 1
                 return {"event": {"id": "event-1"}, "snapshot": {"slot": 5}}

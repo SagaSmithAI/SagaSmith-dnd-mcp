@@ -16,6 +16,7 @@ from typing import Any
 from mcp import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
 
+from scripts.regression_lock import campaign_operation_lock
 from scripts.regression_modules import PRINCIPAL_ID, ExposureClient, _token
 from scripts.regression_playthrough import _checkpoint, _manifest_get, _manifest_mutation
 from scripts.regression_rulings import normalize_pending_ruling
@@ -7467,7 +7468,8 @@ def _leaf_ruling_requirements(error: BaseException) -> list[dict[str, Any]]:
 def main() -> int:
     args = _arguments()
     try:
-        report = asyncio.run(_run(args))
+        with campaign_operation_lock(args.home, args.campaign_id):
+            report = asyncio.run(_run(args))
     except Exception as error:
         ruling_requirements = _leaf_ruling_requirements(error)
         report = {

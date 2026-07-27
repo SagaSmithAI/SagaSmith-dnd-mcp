@@ -38,7 +38,7 @@ def test_campaign_phase_lock_serializes_same_campaign(tmp_path: Path) -> None:
     with _campaign_phase_lock(tmp_path, "campaign-1"):
         with pytest.raises(
             RuntimeError,
-            match="another regression command is temporarily transitioning",
+            match="another regression command is operating on campaign",
         ):
             with _campaign_phase_lock(
                 tmp_path,
