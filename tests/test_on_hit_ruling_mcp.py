@@ -567,9 +567,9 @@ def test_public_on_hit_ruling_resolves_spider_bite_poison(
         bite_effect = (
             "and the target must make a DC 11 Constitution saving throw, taking "
             "9 (2d8) poison damage on a failed save, or half as much damage on "
-            "a successful one. If the poison reduces the target to 0 hit points, "
-            "the target is stable but poisoned for 1 hour, and paralyzed while "
-            "poisoned in this way."
+            "a successful one. If the poison damage reduces the target to 0 hit "
+            "points, the target is stable but poisoned for 1 hour, even after "
+            "regaining hit points, and is paralyzed while poisoned in this way."
         )
         spider_sheet = default_character_sheet()
         spider_sheet["combat"]["hp"] = {"value": 26, "max": 26, "temp": 0}

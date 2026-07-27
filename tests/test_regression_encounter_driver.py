@@ -2751,9 +2751,10 @@ def test_source_authored_precombat_and_attack_tactics_are_structured() -> None:
                 "source_excerpt": (
                     "The target must make a DC 11 Constitution saving throw, "
                     "taking 9 (2d8) poison damage on a failed save, or half as "
-                    "much damage on a successful one. If the poison reduces the "
-                    "target to 0 hit points, the target is stable but poisoned "
-                    "for 1 hour, and paralyzed while poisoned in this way."
+                    "much damage on a successful one. If the poison damage "
+                    "reduces the target to 0 hit points, the target is stable but "
+                    "poisoned for 1 hour, even after regaining hit points, and is "
+                    "paralyzed while poisoned in this way."
                 ),
             },
             {

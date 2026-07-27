@@ -7482,7 +7482,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 raise CombatEngineError("success damage does not match the reviewed attack")
             states_zero_hp_effect = (
                 re.search(
-                    r"(?i)\b(?:the poison|it)\s+reduces the target to 0 hit points\b",
+                    (
+                        rf"(?i)\b(?:the\s+{re.escape(damage_type)}(?:\s+damage)?|"
+                        rf"{re.escape(damage_type)}\s+damage|this\s+damage|"
+                        r"the\s+damage|it)\s+reduces\s+the\s+target\s+to\s+"
+                        r"0\s+hit\s+points\b"
+                    ),
                     effect,
                 )
                 is not None
@@ -7511,22 +7516,45 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     for item in raw_zero_conditions
                     if str(item).strip()
                 ]
+                duration_period = str(duration.get("period") or "").strip().casefold()
                 duration_remaining = duration.get("remaining")
+                normalized_effect = _normalize_source_evidence_text(effect)
+                conditions_match_source = all(
+                    re.search(
+                        rf"(?<!\w){re.escape(condition)}(?!\w)",
+                        normalized_effect,
+                    )
+                    is not None
+                    for condition in zero_conditions
+                )
+                duration_matches_source = (
+                    isinstance(duration_remaining, int)
+                    and not isinstance(duration_remaining, bool)
+                    and re.search(
+                        (
+                            rf"(?<!\w)for\s+{duration_remaining}\s+"
+                            rf"{re.escape(duration_period)}s?(?!\w)"
+                        ),
+                        normalized_effect,
+                    )
+                    is not None
+                )
                 if (
                     unknown_zero_fields
                     or unknown_duration_fields
                     or zero_hp_effect.get("stable") is not True
-                    or set(zero_conditions) != {"poisoned", "paralyzed"}
-                    or len(zero_conditions) != 2
-                    or str(duration.get("period") or "").strip().casefold() != "hour"
+                    or not zero_conditions
+                    or len(zero_conditions) != len(raw_zero_conditions)
+                    or len(zero_conditions) != len(set(zero_conditions))
+                    or any(len(condition) > 64 for condition in zero_conditions)
+                    or duration_period not in {"round", "minute", "hour", "day"}
                     or isinstance(duration_remaining, bool)
-                    or duration_remaining != 1
-                    or re.search(r"(?i)\bstable but poisoned for 1 hour\b", effect) is None
-                    or re.search(
-                        r"(?i)\bparalyzed while poisoned in this way\b",
-                        effect,
-                    )
-                    is None
+                    or not isinstance(duration_remaining, int)
+                    or duration_remaining < 1
+                    or duration_remaining > 100000
+                    or re.search(r"(?i)\bthe\s+target\s+is\s+stable\b", effect) is None
+                    or not conditions_match_source
+                    or not duration_matches_source
                 ):
                     raise CombatEngineError(
                         "zero-hit-point settlement does not match the reviewed attack"
@@ -7534,7 +7562,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 normalized_zero_hp_effect = {
                     "stable": True,
                     "conditions": zero_conditions,
-                    "duration": {"period": "hour", "remaining": 1},
+                    "duration": {
+                        "period": duration_period,
+                        "remaining": duration_remaining,
+                    },
                 }
             elif zero_hp_effect is not None:
                 raise CombatEngineError(
@@ -7629,7 +7660,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         updated_sheet,
                         {
                             "id": effect_id,
-                            "name": "Attack poison at 0 hit points",
+                            "name": "Attack effect at 0 hit points",
                             "kind": "timed_conditions",
                             "source": str(window.get("weapon_id") or ""),
                             "active": True,
