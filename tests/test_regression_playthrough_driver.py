@@ -6444,7 +6444,10 @@ def test_source_spell_driver_returns_precommit_ruling_without_charge_assumption(
     )
 
 
-def test_dm_event_keeps_enemy_knowledge_out_of_party_event_stream() -> None:
+@pytest.mark.parametrize("evidence_mode", ["source", "agent", "source_and_agent"])
+def test_dm_event_preserves_evidence_and_keeps_enemy_knowledge_private(
+    evidence_mode: str,
+) -> None:
     source_ref = {
         "module_id": "module-1",
         "scene_id": "scene-1",
@@ -6453,6 +6456,12 @@ def test_dm_event_keeps_enemy_knowledge_out_of_party_event_stream() -> None:
         "page_end": 12,
         "heading_path": ["Developments"],
         "content_sha256": "abc",
+    }
+    agent_ruling = {
+        "default_resolver": "agent",
+        "ruling_kind": "module_specific_procedure",
+        "decision": "The messenger reaches the leader before the party.",
+        "reason": "The current scene state leaves the messenger's timing to the DM.",
     }
 
     class Client:
@@ -6480,6 +6489,19 @@ def test_dm_event_keeps_enemy_knowledge_out_of_party_event_stream() -> None:
             if tool_id == "memory_change":
                 event = arguments["payload"]["event"]
                 assert event["audience_scope"] == "dm"
+                event_payload = event["payload"]
+                if evidence_mode == "agent":
+                    assert event_payload["source_ref"] is None
+                    assert event_payload["source_excerpt"] == ""
+                else:
+                    assert event_payload["source_ref"] == source_ref
+                if evidence_mode == "source":
+                    assert event_payload["agent_ruling"] is None
+                else:
+                    assert event_payload["agent_ruling"] == {
+                        **agent_ruling,
+                        "committed": True,
+                    }
                 knowledge = arguments["payload"]["actor_knowledge"]
                 assert [item["actor_id"] for item in knowledge] == ["enemy"]
                 self.revision += 1
@@ -6499,18 +6521,25 @@ def test_dm_event_keeps_enemy_knowledge_out_of_party_event_stream() -> None:
             occurrence_id="enemy-alerted-1",
             scene_id="scene-1",
             location_key="8-cave",
-            source_excerpt="A messenger warned the leader.",
-            source_ref=source_ref,
+            source_excerpt=(
+                "" if evidence_mode == "agent" else "A messenger warned the leader."
+            ),
+            source_ref=None if evidence_mode == "agent" else source_ref,
             event_type="enemy_alerted",
             summary="The leader received the warning.",
             knowledge="The party is approaching.",
             knowledge_actor_ids=["enemy"],
             progress_percent=60,
             audience_scope="dm",
+            agent_ruling=None if evidence_mode == "source" else agent_ruling,
         )
     )
 
     assert result["knowledge_actor_ids"] == ["enemy"]
+    if evidence_mode == "source":
+        assert result["scene"]["agent_ruling"] is None
+    else:
+        assert result["scene"]["agent_ruling"]["committed"] is True
 
 
 def test_long_rest_uses_atomic_party_rest_and_unique_occurrence_knowledge() -> None:
@@ -7327,6 +7356,12 @@ def test_record_outcome_commits_facts_then_syncs_manifest_and_checkpoint(
         "heading_path": ["Goblin Den"],
         "content_sha256": "abc",
     }
+    agent_ruling = {
+        "default_resolver": "agent",
+        "ruling_kind": "agent_dm_adjudication",
+        "decision": "The captor departs after releasing the hostage.",
+        "reason": "The source establishes release but leaves the captor's response to the DM.",
+    }
 
     class Client:
         def __init__(self) -> None:
@@ -7404,6 +7439,10 @@ def test_record_outcome_commits_facts_then_syncs_manifest_and_checkpoint(
             if tool_id == "module_set_progress":
                 outcomes = arguments["state"]["full_playthrough_outcomes"]
                 assert set(outcomes) == {"prior", "hostage-released"}
+                assert outcomes["hostage-released"]["agent_ruling"] == {
+                    **agent_ruling,
+                    "committed": True,
+                }
                 assert arguments["status"] == "completed"
                 return {"scene_id": "scene-1", "state_version": 3}
             if tool_id == "branch_query":
@@ -7424,6 +7463,10 @@ def test_record_outcome_commits_facts_then_syncs_manifest_and_checkpoint(
                 assert self.continuity_payload["facts"][0]["expected_revision_id"] == (
                     "fact-revision-7"
                 )
+                assert self.continuity_payload["event"]["payload"]["agent_ruling"] == {
+                    **agent_ruling,
+                    "committed": True,
+                }
                 self.revision += 1
                 return {
                     "event": {"id": "event-1"},
@@ -7521,6 +7564,7 @@ def test_record_outcome_commits_facts_then_syncs_manifest_and_checkpoint(
             progress_percent=100,
             source_scene_id="source-scene-1",
             defer_checkpoint=defer_checkpoint,
+            agent_ruling=agent_ruling,
         )
     )
 
@@ -7529,6 +7573,7 @@ def test_record_outcome_commits_facts_then_syncs_manifest_and_checkpoint(
     else:
         assert result["checkpoint"]["verification"]["valid"] is True
     assert result["scene"]["source_scene_id"] == "source-scene-1"
+    assert result["scene"]["agent_ruling"]["committed"] is True
     assert client.continuity_payload["event"]["payload"]["source_scene_id"] == ("source-scene-1")
     assert client.loaded_groups == [("play.characters",)]
     assert client.replaced_manifest["current"]["objective"] == ("Escort the hostage to safety.")

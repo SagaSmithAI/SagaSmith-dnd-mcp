@@ -332,6 +332,15 @@ def _arguments() -> argparse.Namespace:
         default="witnessed",
         help="How the event knowledge recipients learned the proposition",
     )
+    parser.add_argument(
+        "--event-agent-ruling-json",
+        type=json.loads,
+        help=(
+            "Settled Agent-as-DM adjudication recorded with record-event or "
+            "record-outcome. It may replace absent source evidence or accompany "
+            "source text whose module-specific consequence needs a DM decision."
+        ),
+    )
     parser.add_argument("--replacement-predecessor-id", default="")
     parser.add_argument("--replacement-actor-id", default="")
     parser.add_argument("--replacement-knowledge", action="append", default=[])
@@ -1573,41 +1582,61 @@ async def _register_party(
     ) | {"replace": replaced}
 
 
-def _settled_replacement_agent_ruling(value: Any) -> dict[str, Any] | None:
+def _settled_agent_ruling(
+    value: Any,
+    *,
+    label: str,
+    ruling_kinds: frozenset[str],
+    extra_fields: frozenset[str] = frozenset(),
+) -> dict[str, Any] | None:
     if value is None:
         return None
     if not isinstance(value, dict):
-        raise ValueError("replacement Agent ruling must be a JSON object")
-    allowed = {"default_resolver", "ruling_kind", "decision", "reason"}
+        raise ValueError(f"{label} Agent ruling must be a JSON object")
+    allowed = {
+        "default_resolver",
+        "ruling_kind",
+        "decision",
+        "reason",
+        *extra_fields,
+    }
     unknown = sorted(set(value) - allowed)
     if unknown:
         raise ValueError(
-            "replacement Agent ruling contains unsupported fields: "
-            + ", ".join(unknown)
+            f"{label} Agent ruling contains unsupported fields: " + ", ".join(unknown)
         )
     if value.get("default_resolver") != "agent":
-        raise ValueError("replacement Agent ruling default_resolver must be agent")
-    if value.get("ruling_kind") != "module_specific_procedure":
-        raise ValueError(
-            "replacement Agent ruling ruling_kind must be module_specific_procedure"
+        raise ValueError(f"{label} Agent ruling default_resolver must be agent")
+    ruling_kind = str(value.get("ruling_kind") or "")
+    if ruling_kind not in ruling_kinds:
+        expected = (
+            next(iter(ruling_kinds))
+            if len(ruling_kinds) == 1
+            else ", ".join(sorted(ruling_kinds))
         )
+        raise ValueError(f"{label} Agent ruling ruling_kind must be {expected}")
     decision = str(value.get("decision") or "").strip()
     reason = str(value.get("reason") or "").strip()
     if not decision or len(decision) > 1_000:
-        raise ValueError(
-            "replacement Agent ruling decision must contain 1 to 1000 characters"
-        )
+        raise ValueError(f"{label} Agent ruling decision must contain 1 to 1000 characters")
     if not reason or len(reason) > 500:
-        raise ValueError(
-            "replacement Agent ruling reason must contain 1 to 500 characters"
-        )
+        raise ValueError(f"{label} Agent ruling reason must contain 1 to 500 characters")
     return {
         "default_resolver": "agent",
-        "ruling_kind": "module_specific_procedure",
+        "ruling_kind": ruling_kind,
         "decision": decision,
         "reason": reason,
+        **{field: deepcopy(value.get(field)) for field in extra_fields},
         "committed": True,
     }
+
+
+def _settled_replacement_agent_ruling(value: Any) -> dict[str, Any] | None:
+    return _settled_agent_ruling(
+        value,
+        label="replacement",
+        ruling_kinds=frozenset({"module_specific_procedure"}),
+    )
 
 
 def _settled_time_agent_ruling(
@@ -1616,48 +1645,32 @@ def _settled_time_agent_ruling(
     period: str,
     count: int | None,
 ) -> dict[str, Any] | None:
-    if value is None:
+    normalized = _settled_agent_ruling(
+        value,
+        label="time",
+        ruling_kinds=frozenset({"agent_dm_adjudication"}),
+        extra_fields=frozenset({"period", "count"}),
+    )
+    if normalized is None:
         return None
-    if not isinstance(value, dict):
-        raise ValueError("time Agent ruling must be a JSON object")
-    allowed = {
-        "default_resolver",
-        "ruling_kind",
-        "decision",
-        "reason",
-        "period",
-        "count",
-    }
-    unknown = sorted(set(value) - allowed)
-    if unknown:
-        raise ValueError(
-            "time Agent ruling contains unsupported fields: " + ", ".join(unknown)
-        )
-    if value.get("default_resolver") != "agent":
-        raise ValueError("time Agent ruling default_resolver must be agent")
-    if value.get("ruling_kind") != "agent_dm_adjudication":
-        raise ValueError(
-            "time Agent ruling ruling_kind must be agent_dm_adjudication"
-        )
-    decision = str(value.get("decision") or "").strip()
-    reason = str(value.get("reason") or "").strip()
-    if not decision or len(decision) > 1_000:
-        raise ValueError("time Agent ruling decision must contain 1 to 1000 characters")
-    if not reason or len(reason) > 500:
-        raise ValueError("time Agent ruling reason must contain 1 to 500 characters")
-    if value.get("period") != period or value.get("count") != count:
+    if normalized.get("period") != period or normalized.get("count") != count:
         raise ValueError(
             "time Agent ruling period and count must exactly match the requested advance"
         )
-    return {
-        "default_resolver": "agent",
-        "ruling_kind": "agent_dm_adjudication",
-        "decision": decision,
-        "reason": reason,
-        "period": period,
-        "count": count,
-        "committed": True,
-    }
+    return normalized
+
+
+def _settled_event_agent_ruling(value: Any) -> dict[str, Any] | None:
+    return _settled_agent_ruling(
+        value,
+        label="event",
+        ruling_kinds=frozenset(
+            {
+                "agent_dm_adjudication",
+                "module_specific_procedure",
+            }
+        ),
+    )
 
 
 async def _register_replacement(
@@ -2813,10 +2826,24 @@ async def _record_event(
     source_scene_id: str = "",
     defer_checkpoint: bool = False,
     knowledge_cause: str = "witnessed",
+    agent_ruling: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     event_identity = _occurrence_identity(occurrence_id, "record-event")
-    if not all((scene_id, location_key, source_excerpt, event_type, summary)):
-        raise ValueError("record-event requires scene, location, excerpt, event type, and summary")
+    if not all((scene_id, location_key, event_type, summary)):
+        raise ValueError("record-event requires scene, location, event type, and summary")
+    normalized_agent_ruling = _settled_event_agent_ruling(agent_ruling)
+    has_source_ref = source_ref is not None
+    has_source_excerpt = bool(source_excerpt.strip())
+    if has_source_ref != has_source_excerpt:
+        raise ValueError(
+            "record-event source evidence requires both exact source ref and excerpt"
+        )
+    if not has_source_ref and normalized_agent_ruling is None:
+        raise ValueError(
+            "record-event requires exact source evidence or a settled Agent ruling"
+        )
+    if not has_source_ref and source_scene_id.strip():
+        raise ValueError("record-event source scene requires exact source evidence")
     if bool(knowledge.strip()) != bool(knowledge_actor_ids):
         raise ValueError(
             "record-event knowledge text and knowledge actor ids must be provided together"
@@ -2836,10 +2863,9 @@ async def _record_event(
         },
     )
     cited_scene_id = source_scene_id.strip() or scene_id
-    source_scene = (
-        occurrence_scene
-        if cited_scene_id == scene_id
-        else await client.domain(
+    source_scene = occurrence_scene
+    if has_source_ref and cited_scene_id != scene_id:
+        source_scene = await client.domain(
             "module_query",
             {
                 "campaign_id": campaign_id,
@@ -2847,8 +2873,11 @@ async def _record_event(
                 "payload": {"scene_id": cited_scene_id},
             },
         )
+    exact_ref = (
+        _validate_source_ref(source_scene, source_ref, excerpt=source_excerpt)
+        if has_source_ref
+        else None
     )
-    exact_ref = _validate_source_ref(source_scene, source_ref, excerpt=source_excerpt)
     location_keys = {str(item.get("key") or "") for item in _scene_locations(occurrence_scene)}
     if location_key not in location_keys:
         raise ValueError("record-event location is not present in the scene atlas")
@@ -2868,6 +2897,11 @@ async def _record_event(
         "event_type": event_type,
         "summary": summary.strip(),
         "source_ref": exact_ref,
+        **(
+            {"agent_ruling": normalized_agent_ruling}
+            if normalized_agent_ruling is not None
+            else {}
+        ),
     }
     state["full_playthrough_events"] = events
     progress = await client.domain(
@@ -2905,8 +2939,9 @@ async def _record_event(
                 "source_scene_id": cited_scene_id,
                 "location_key": location_key,
                 "occurrence_id": event_identity,
-                "source_excerpt": source_excerpt,
+                "source_excerpt": source_excerpt.strip() if has_source_ref else "",
                 "source_ref": exact_ref,
+                "agent_ruling": normalized_agent_ruling,
             },
         },
         "actor_knowledge": [
@@ -2946,6 +2981,7 @@ async def _record_event(
             "source_scene_id": cited_scene_id,
             "location_key": location_key,
             "source_ref": exact_ref,
+            "agent_ruling": normalized_agent_ruling,
         },
         "progress": progress,
         "occurrence_id": event_identity,
@@ -3238,20 +3274,33 @@ async def _record_outcome(
     source_scene_id: str = "",
     defer_checkpoint: bool = False,
     knowledge_cause: str = "witnessed",
+    agent_ruling: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if not all(
         (
             outcome_id.strip(),
             scene_id,
             location_key,
-            source_excerpt,
             event_type,
             summary.strip(),
         )
     ):
         raise ValueError(
-            "record-outcome requires outcome id, scene, location, excerpt, event type, and summary"
+            "record-outcome requires outcome id, scene, location, event type, and summary"
         )
+    normalized_agent_ruling = _settled_event_agent_ruling(agent_ruling)
+    has_source_ref = source_ref is not None
+    has_source_excerpt = bool(source_excerpt.strip())
+    if has_source_ref != has_source_excerpt:
+        raise ValueError(
+            "record-outcome source evidence requires both exact source ref and excerpt"
+        )
+    if not has_source_ref and normalized_agent_ruling is None:
+        raise ValueError(
+            "record-outcome requires exact source evidence or a settled Agent ruling"
+        )
+    if not has_source_ref and source_scene_id.strip():
+        raise ValueError("record-outcome source scene requires exact source evidence")
     if bool(knowledge.strip()) != bool(knowledge_actor_ids):
         raise ValueError(
             "record-outcome knowledge text and knowledge actor ids must be provided together"
@@ -3307,10 +3356,9 @@ async def _record_outcome(
         },
     )
     cited_scene_id = source_scene_id.strip() or scene_id
-    source_scene = (
-        occurrence_scene
-        if cited_scene_id == scene_id
-        else await client.domain(
+    source_scene = occurrence_scene
+    if has_source_ref and cited_scene_id != scene_id:
+        source_scene = await client.domain(
             "module_query",
             {
                 "campaign_id": campaign_id,
@@ -3318,8 +3366,11 @@ async def _record_outcome(
                 "payload": {"scene_id": cited_scene_id},
             },
         )
+    exact_ref = (
+        _validate_source_ref(source_scene, source_ref, excerpt=source_excerpt)
+        if has_source_ref
+        else None
     )
-    exact_ref = _validate_source_ref(source_scene, source_ref, excerpt=source_excerpt)
     if location_key not in {
         str(item.get("key") or "") for item in _scene_locations(occurrence_scene)
     }:
@@ -3394,6 +3445,11 @@ async def _record_outcome(
         "event_type": event_type,
         "summary": summary.strip(),
         "source_ref": exact_ref,
+        **(
+            {"agent_ruling": normalized_agent_ruling}
+            if normalized_agent_ruling is not None
+            else {}
+        ),
         "fact_keys": [str(item["fact_key"]) for item in normalized_facts],
     }
     existing_outcome = outcomes.get(outcome_id.strip())
@@ -3444,8 +3500,11 @@ async def _record_outcome(
                         "scene_id": scene_id,
                         "source_scene_id": cited_scene_id,
                         "location_key": location_key,
-                        "source_excerpt": source_excerpt,
+                        "source_excerpt": (
+                            source_excerpt.strip() if has_source_ref else ""
+                        ),
                         "source_ref": exact_ref,
+                        "agent_ruling": normalized_agent_ruling,
                     },
                 },
                 "facts": normalized_facts,
@@ -3494,6 +3553,7 @@ async def _record_outcome(
             "source_scene_id": cited_scene_id,
             "location_key": location_key,
             "source_ref": exact_ref,
+            "agent_ruling": normalized_agent_ruling,
         },
         "progress": progress,
         "continuity": committed,
@@ -9820,6 +9880,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     source_scene_id=args.source_scene_id,
                     defer_checkpoint=args.defer_checkpoint,
                     knowledge_cause=args.event_knowledge_cause,
+                    agent_ruling=args.event_agent_ruling_json,
                 )
             elif args.action == "record-outcome":
                 if phase != "play":
@@ -9848,6 +9909,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     source_scene_id=args.source_scene_id,
                     defer_checkpoint=args.defer_checkpoint,
                     knowledge_cause=args.event_knowledge_cause,
+                    agent_ruling=args.event_agent_ruling_json,
                 )
             elif args.action == "apply-damage":
                 if phase != "play":
