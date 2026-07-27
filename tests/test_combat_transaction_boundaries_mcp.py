@@ -91,6 +91,248 @@ def test_end_turn_does_not_revision_unchanged_character_documents(tmp_path: Path
     asyncio.run(exercise())
 
 
+def test_agent_source_damage_is_authorized_and_settled_in_one_attack(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_excerpt = (
+        "If the peryton is flying and dives at least 30 feet straight toward a "
+        "target and then hits it with a melee weapon attack, the attack deals an "
+        "extra 9 (2d8) damage to the target."
+    )
+    original_attack_roll = server_module.roll_attack_action
+
+    def forced_critical(*, plan, rng=None):
+        result = original_attack_roll(plan=plan, rng=rng)
+        result.update(
+            natural=20,
+            total=max(int(plan["target_ac"]), int(result.get("total", 0) or 0)),
+            armor_class=int(plan["target_ac"]),
+            hit=True,
+            critical=True,
+            fumble=False,
+        )
+        return result
+
+    monkeypatch.setattr(server_module, "roll_attack_action", forced_critical)
+
+    async def exercise() -> None:
+        server = create_server(_config(tmp_path))
+        campaign = await _call(
+            server,
+            "campaign_create",
+            {
+                "name": "Atomic Agent source damage",
+                "edition": "2014",
+                "idempotency_key": "campaign",
+            },
+        )
+        attacker_sheet = default_character_sheet()
+        attacker_sheet["content"]["features"] = [
+            {
+                "id": "dive-attack-passive",
+                "name": "Dive Attack",
+                "description": source_excerpt,
+                "choices": {
+                    "manual_ruling": {
+                        "kind": "descriptive_passive",
+                        "default_resolver": "agent",
+                        "source_excerpt": source_excerpt,
+                    }
+                },
+            }
+        ]
+        target_sheet = default_character_sheet()
+        target_sheet["combat"]["hp"] = {"value": 100, "max": 100, "temp": 0}
+        attacker = await _call(
+            server,
+            "character_create",
+            {
+                "campaign_id": campaign["id"],
+                "name": "Peryton",
+                "character_type": "monster",
+                "sheet": attacker_sheet,
+                "idempotency_key": "attacker",
+            },
+        )
+        target = await _call(
+            server,
+            "character_create",
+            {
+                "campaign_id": campaign["id"],
+                "name": "Target",
+                "sheet": target_sheet,
+                "idempotency_key": "target",
+            },
+        )
+        campaign = await _call(
+            server, "campaign_get", {"campaign_id": campaign["id"]}
+        )
+        await _call_raw(
+            server,
+            "combat_start",
+            {
+                "campaign_id": campaign["id"],
+                "participant_ids": [attacker["id"], target["id"]],
+                "participant_config": [
+                    {
+                        "actor_id": attacker["id"],
+                        "initiative": 20,
+                        "position": {"x": 0, "y": 0},
+                    },
+                    {
+                        "actor_id": target["id"],
+                        "initiative": 10,
+                        "position": {"x": 1, "y": 0},
+                    },
+                ],
+                "expected_revision": campaign["revision"],
+                "idempotency_key": "start",
+            },
+        )
+        ruling = {
+            "source": "dm_ruling",
+            "kind": "source_conditional_extra_damage",
+            "application_id": "peryton:dive:round-1",
+            "feature_id": "dive-attack-passive",
+            "source_excerpt": source_excerpt,
+            "damage_expression": "2d8",
+            "damage_type": "weapon",
+            "condition_satisfied": True,
+            "trigger_facts": {"flying": True, "straight_dive_ft": 30},
+            "default_resolver": "agent",
+            "ruling_kind": "agent_dm_adjudication",
+            "decision": "Apply Dive Attack to this qualifying hit.",
+            "reason": "The peryton completed the printed 30-foot straight dive.",
+        }
+        action = {
+            "weapon_id": "unarmed-strike",
+            "attack_mode": "melee",
+            "rulings": [ruling],
+        }
+        plan = await _call(
+            server,
+            "combat_preflight_attack",
+            {
+                "campaign_id": campaign["id"],
+                "actor_id": attacker["id"],
+                "target_id": target["id"],
+                "action": action,
+            },
+        )
+        assert plan["additional_damage"] == [
+            {
+                "damage_expression": "2d8",
+                "damage_type": "bludgeoning",
+                "source": "agent-ruling:peryton:dive:round-1",
+            }
+        ]
+        assert [item["kind"] for item in plan["rulings"]].count(
+            "source_conditional_extra_damage"
+        ) == 1
+
+        with pytest.raises(Exception, match="exact Agent-owned passive"):
+            await _call(
+                server,
+                "combat_preflight_attack",
+                {
+                    "campaign_id": campaign["id"],
+                    "actor_id": attacker["id"],
+                    "target_id": target["id"],
+                    "action": {
+                        **action,
+                        "rulings": [
+                            {
+                                **ruling,
+                                "source_excerpt": "The peryton deals 2d8.",
+                            }
+                        ],
+                    },
+                },
+            )
+        with pytest.raises(Exception, match="is incomplete"):
+            await _call(
+                server,
+                "combat_preflight_attack",
+                {
+                    "campaign_id": campaign["id"],
+                    "actor_id": attacker["id"],
+                    "target_id": target["id"],
+                    "action": {
+                        **action,
+                        "rulings": [
+                            ruling,
+                            {
+                                **ruling,
+                                "application_id": "peryton:dive:duplicate",
+                            },
+                        ],
+                    },
+                },
+            )
+
+        await _call(
+            server,
+            "campaign_member_grant",
+            {
+                "campaign_id": campaign["id"],
+                "principal_id": "player:test",
+                "role": "player",
+            },
+        )
+        await _call(
+            server,
+            "actor_grant",
+            {
+                "campaign_id": campaign["id"],
+                "principal_id": "player:test",
+                "actor_id": attacker["id"],
+                "can_control": True,
+                "can_view_private": True,
+            },
+        )
+        with pytest.raises(Exception, match="Owner/DM authority"):
+            await _call(
+                server,
+                "combat_preflight_attack",
+                {
+                    "campaign_id": campaign["id"],
+                    "actor_id": attacker["id"],
+                    "target_id": target["id"],
+                    "action": action,
+                    "principal_id": "player:test",
+                },
+            )
+
+        current = await _call(
+            server, "campaign_get", {"campaign_id": campaign["id"]}
+        )
+        resolved = await _call_raw(
+            server,
+            "combat_resolve_attack",
+            {
+                "campaign_id": campaign["id"],
+                "actor_id": attacker["id"],
+                "target_id": target["id"],
+                "action": action,
+                "expected_revision": current["revision"],
+                "idempotency_key": "attack",
+            },
+        )
+        parts = resolved["result"]["damage"]["roll_parts"]
+        assert len(parts) == 2
+        assert parts[1]["expression"] == "2d8"
+        assert parts[1]["rolled_expression"] == "4d8"
+        assert parts[1]["source"] == "agent-ruling:peryton:dive:round-1"
+        assert [item["entity_type"] for item in resolved["revisions"]] == [
+            "campaign",
+            "character",
+        ]
+        assert resolved["revisions"][1]["entity_id"] == target["id"]
+
+    asyncio.run(exercise())
+
+
 def test_available_actions_explicitly_discovers_required_death_save(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

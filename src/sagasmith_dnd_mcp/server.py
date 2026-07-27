@@ -2132,6 +2132,177 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             ]
         return value
 
+    def apply_agent_attack_rulings(
+        attacker: dict[str, Any],
+        plan: dict[str, Any],
+        action: dict[str, Any],
+        *,
+        authorized: bool,
+    ) -> dict[str, Any]:
+        """Bind Agent-adjudicated source riders to one atomic attack plan."""
+
+        supported_kind = "source_conditional_extra_damage"
+        requested = [
+            item
+            for item in action.get("rulings") or []
+            if isinstance(item, dict) and item.get("kind") == supported_kind
+        ]
+        if requested and not authorized:
+            raise CombatEngineError(
+                "source conditional extra-damage rulings require Owner/DM authority"
+            )
+        allowed = {
+            "source",
+            "kind",
+            "application_id",
+            "feature_id",
+            "source_excerpt",
+            "damage_expression",
+            "damage_type",
+            "condition_satisfied",
+            "trigger_facts",
+            "default_resolver",
+            "ruling_kind",
+            "decision",
+            "reason",
+        }
+        result = deepcopy(plan)
+        additional_damage = deepcopy(list(result.get("additional_damage") or []))
+        normalized_rulings = [
+            deepcopy(item)
+            for item in result.get("rulings") or []
+            if not (
+                isinstance(item, dict)
+                and item.get("kind") == supported_kind
+            )
+        ]
+        application_ids: set[str] = set()
+        feature_ids: set[str] = set()
+        features = [
+            dict(item)
+            for item in dict(attacker.get("sheet") or {})
+            .get("content", {})
+            .get("features", [])
+            if isinstance(item, dict)
+        ]
+
+        for index, raw in enumerate(action.get("rulings") or []):
+            if not isinstance(raw, dict) or raw.get("kind") != supported_kind:
+                continue
+            unknown = set(raw) - allowed
+            if unknown:
+                raise CombatEngineError(
+                    "source conditional extra-damage ruling has unsupported fields: "
+                    + ", ".join(sorted(unknown))
+                )
+            application_id = str(raw.get("application_id") or "").strip()
+            feature_id = str(raw.get("feature_id") or "").strip()
+            source_excerpt = str(raw.get("source_excerpt") or "").strip()
+            expression = str(raw.get("damage_expression") or "").strip()
+            damage_type = str(raw.get("damage_type") or "").strip().casefold()
+            trigger_facts = raw.get("trigger_facts")
+            decision = str(raw.get("decision") or "").strip()
+            reason = str(raw.get("reason") or "").strip()
+            if (
+                raw.get("source") != "dm_ruling"
+                or raw.get("default_resolver") != "agent"
+                or raw.get("ruling_kind") != "agent_dm_adjudication"
+                or raw.get("condition_satisfied") is not True
+                or not application_id
+                or application_id in application_ids
+                or not feature_id
+                or feature_id in feature_ids
+                or not source_excerpt
+                or not expression
+                or not isinstance(trigger_facts, dict)
+                or not trigger_facts
+                or not decision
+                or not reason
+            ):
+                raise CombatEngineError(
+                    f"source conditional extra-damage ruling {index} is incomplete"
+                )
+            feature = next(
+                (item for item in features if str(item.get("id") or "") == feature_id),
+                None,
+            )
+            if feature is None:
+                raise CombatEngineError(
+                    "source conditional extra-damage feature is absent from the attacker card"
+                )
+            manual_ruling = dict(
+                dict(feature.get("choices") or {}).get("manual_ruling") or {}
+            )
+            recorded_excerpt = str(manual_ruling.get("source_excerpt") or "").strip()
+
+            def compact(value: Any) -> str:
+                return " ".join(str(value).split()).casefold()
+
+            if (
+                manual_ruling.get("default_resolver") != "agent"
+                or manual_ruling.get("kind") != "descriptive_passive"
+                or compact(source_excerpt) != compact(recorded_excerpt)
+                or compact(source_excerpt) != compact(feature.get("description") or "")
+            ):
+                raise CombatEngineError(
+                    "source conditional extra-damage excerpt is not the exact "
+                    "Agent-owned passive on the attacker card"
+                )
+            compact_expression = "".join(expression.split()).casefold()
+            compact_excerpt = "".join(source_excerpt.split()).casefold()
+            if (
+                not compact_expression
+                or re.search(
+                    rf"(?<![a-z0-9_]){re.escape(compact_expression)}(?![a-z0-9_])",
+                    compact_excerpt,
+                )
+                is None
+            ):
+                raise CombatEngineError(
+                    "source conditional extra-damage expression is absent from "
+                    "the recorded passive"
+                )
+            resolved_damage_type = (
+                str(result.get("damage_type") or "").strip().casefold()
+                if damage_type == "weapon"
+                else damage_type
+            )
+            if not resolved_damage_type:
+                raise CombatEngineError(
+                    "source conditional extra damage requires a recorded damage type"
+                )
+            if (
+                damage_type != "weapon"
+                and re.search(
+                    rf"\b{re.escape(damage_type)}\b",
+                    compact(source_excerpt),
+                )
+                is None
+            ):
+                raise CombatEngineError(
+                    "source conditional extra-damage type is absent from the "
+                    "recorded passive; use damage_type='weapon' for the attack's type"
+                )
+            application_ids.add(application_id)
+            feature_ids.add(feature_id)
+            additional_damage.append(
+                {
+                    "damage_expression": expression,
+                    "damage_type": resolved_damage_type,
+                    "source": f"agent-ruling:{application_id}",
+                }
+            )
+            normalized_rulings.append(
+                {
+                    **deepcopy(raw),
+                    "damage_type": resolved_damage_type,
+                }
+            )
+
+        result["additional_damage"] = additional_damage
+        result["rulings"] = normalized_rulings
+        return result
+
     def sync_combatant_conditions(
         encounter: dict[str, Any], actor_id: str, sheet: dict[str, Any]
     ) -> None:
@@ -6315,8 +6486,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         require_campaign_actor(campaign_id, target_id)
         action = sanitize_attack_action(campaign_id, principal_id, dict(action or {}))
         try:
+            attacker = combat_actor_snapshot(actor_id)
             plan = preflight_attack(
-                combat_actor_snapshot(actor_id),
+                attacker,
                 combat_actor_snapshot(target_id),
                 action={**action, "target_id": target_id},
                 encounter=encounter,
@@ -6325,9 +6497,18 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     facts={"actor_id": actor_id, "target_id": target_id, "kind": "attack"},
                 ),
             )
+            plan = apply_agent_attack_rulings(
+                attacker,
+                plan,
+                action,
+                authorized=access.require_campaign(
+                    campaign_id, principal_id
+                ).role
+                in {"owner", "dm"},
+            )
             pay_attack_action(
                 encounter,
-                combat_actor_snapshot(actor_id),
+                attacker,
                 weapon_id=str(plan.get("weapon_id") or ""),
                 attack_mode=str(plan.get("attack_mode") or "melee"),
                 multiattack_option_id=action.get("multiattack_option_id"),
@@ -6474,6 +6655,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     action=action_payload,
                     encounter=encounter,
                     rules=rule_context,
+                )
+                plan = apply_agent_attack_rulings(
+                    attacker,
+                    plan,
+                    action_payload,
+                    authorized=access.require_campaign(
+                        campaign_id, principal_id
+                    ).role
+                    in {"owner", "dm"},
                 )
         except NeedsRulingError:
             if access.require_campaign(campaign_id, principal_id).role not in {"owner", "dm"}:

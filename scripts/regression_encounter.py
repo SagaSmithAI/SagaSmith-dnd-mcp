@@ -489,6 +489,18 @@ def _arguments() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--source-extra-damage-ruling-json",
+        action="append",
+        type=json.loads,
+        default=[],
+        help=(
+            "Agent-as-DM conditional extra-damage ruling bound to an exact actor "
+            "feature: actor_id, feature_id, weapon_ids, rounds, max_applications, "
+            "damage_expression, damage_type, source_excerpt, trigger_facts, "
+            "decision, and reason"
+        ),
+    )
+    parser.add_argument(
         "--source-delayed-action-json",
         action="append",
         type=json.loads,
@@ -2406,6 +2418,212 @@ def _source_on_hit_rulings(
     return normalized
 
 
+def _source_extra_damage_rulings(
+    values: list[dict[str, Any]],
+    *,
+    participant_ids: list[str],
+    actors: dict[str, dict[str, Any]],
+) -> dict[str, list[dict[str, Any]]]:
+    """Validate Agent-owned conditional damage against exact actor-card evidence."""
+
+    allowed = {
+        "actor_id",
+        "feature_id",
+        "weapon_ids",
+        "rounds",
+        "max_applications",
+        "damage_expression",
+        "damage_type",
+        "source_excerpt",
+        "trigger_facts",
+        "decision",
+        "reason",
+    }
+    normalized: dict[str, list[dict[str, Any]]] = {}
+    identities: set[tuple[str, str]] = set()
+    for index, raw in enumerate(values):
+        if not isinstance(raw, dict):
+            raise ValueError(f"source extra-damage ruling {index} must be an object")
+        unknown = set(raw) - allowed
+        if unknown:
+            raise ValueError(
+                f"source extra-damage ruling {index} has unsupported fields: "
+                f"{', '.join(sorted(unknown))}"
+            )
+        actor_id = str(raw.get("actor_id") or "").strip()
+        feature_id = str(raw.get("feature_id") or "").strip()
+        weapon_ids = [
+            str(item).strip()
+            for item in raw.get("weapon_ids") or []
+            if str(item).strip()
+        ]
+        rounds = list(raw.get("rounds") or [])
+        max_applications = raw.get("max_applications")
+        expression = str(raw.get("damage_expression") or "").strip()
+        damage_type = str(raw.get("damage_type") or "").strip().casefold()
+        source_excerpt = str(raw.get("source_excerpt") or "").strip()
+        trigger_facts = raw.get("trigger_facts")
+        decision = str(raw.get("decision") or "").strip()
+        reason = str(raw.get("reason") or "").strip()
+        identity = (actor_id, feature_id)
+        if (
+            actor_id not in participant_ids
+            or actor_id not in actors
+            or not feature_id
+            or identity in identities
+            or not weapon_ids
+            or len(weapon_ids) != len(set(weapon_ids))
+            or not rounds
+            or any(
+                isinstance(value, bool) or not isinstance(value, int) or value < 1
+                for value in rounds
+            )
+            or len(rounds) != len(set(rounds))
+            or isinstance(max_applications, bool)
+            or not isinstance(max_applications, int)
+            or max_applications < 1
+            or not expression
+            or not damage_type
+            or not source_excerpt
+            or not isinstance(trigger_facts, dict)
+            or not trigger_facts
+            or not decision
+            or not reason
+        ):
+            raise ValueError(
+                f"source extra-damage ruling {index} requires one participant "
+                "feature, unique weapons/rounds, a positive limit, exact source "
+                "terms, trigger facts, and an Agent decision"
+            )
+        actor = actors[actor_id]
+        features = [
+            dict(item)
+            for item in dict(actor.get("sheet") or {})
+            .get("content", {})
+            .get("features", [])
+            if isinstance(item, dict)
+        ]
+        feature = next(
+            (item for item in features if str(item.get("id") or "") == feature_id),
+            None,
+        )
+        manual_ruling = dict(
+            dict((feature or {}).get("choices") or {}).get("manual_ruling") or {}
+        )
+
+        def compact(value: Any) -> str:
+            return " ".join(str(value).split()).casefold()
+
+        if (
+            feature is None
+            or manual_ruling.get("default_resolver") != "agent"
+            or manual_ruling.get("kind") != "descriptive_passive"
+            or compact(source_excerpt)
+            != compact(manual_ruling.get("source_excerpt") or "")
+            or compact(source_excerpt) != compact(feature.get("description") or "")
+            or re.search(
+                (
+                    r"(?<![a-z0-9_])"
+                    + re.escape("".join(expression.split()).casefold())
+                    + r"(?![a-z0-9_])"
+                ),
+                "".join(source_excerpt.split()).casefold(),
+            )
+            is None
+        ):
+            raise ValueError(
+                f"source extra-damage ruling {index} is not bound to the exact "
+                "Agent-owned passive and printed dice expression"
+            )
+        attacks = list(
+            dict(dict(actor.get("derived") or {}).get("inventory") or {}).get(
+                "weapon_attacks", []
+            )
+        )
+        attacks_by_id = {
+            str(item.get("item_id") or ""): dict(item)
+            for item in attacks
+            if isinstance(item, dict)
+        }
+        if any(
+            weapon_id not in attacks_by_id
+            or str(attacks_by_id[weapon_id].get("attack_type") or "") != "melee"
+            for weapon_id in weapon_ids
+        ):
+            raise ValueError(
+                f"source extra-damage ruling {index} requires recorded melee weapon ids"
+            )
+        if (
+            damage_type != "weapon"
+            and re.search(
+                rf"\b{re.escape(damage_type)}\b",
+                compact(source_excerpt),
+            )
+            is None
+        ):
+            raise ValueError(
+                f"source extra-damage ruling {index} damage type is absent from "
+                "the passive; use damage_type='weapon' for the triggering attack"
+            )
+        identities.add(identity)
+        normalized.setdefault(actor_id, []).append(
+            {
+                "actor_id": actor_id,
+                "feature_id": feature_id,
+                "weapon_ids": weapon_ids,
+                "rounds": sorted(rounds),
+                "max_applications": max_applications,
+                "damage_expression": expression,
+                "damage_type": damage_type,
+                "source_excerpt": source_excerpt,
+                "trigger_facts": deepcopy(trigger_facts),
+                "decision": decision,
+                "reason": reason,
+            }
+        )
+    return normalized
+
+
+def _source_extra_damage_action_rulings(
+    declarations: dict[str, list[dict[str, Any]]],
+    *,
+    actor_id: str,
+    weapon_id: str,
+    round_number: int,
+    applications: dict[tuple[str, str], int],
+) -> list[dict[str, Any]]:
+    rulings: list[dict[str, Any]] = []
+    for declaration in declarations.get(actor_id, []):
+        identity = (actor_id, str(declaration["feature_id"]))
+        if (
+            weapon_id not in declaration["weapon_ids"]
+            or round_number not in declaration["rounds"]
+            or applications.get(identity, 0) >= int(declaration["max_applications"])
+        ):
+            continue
+        rulings.append(
+            {
+                "source": "dm_ruling",
+                "kind": "source_conditional_extra_damage",
+                "application_id": (
+                    f"{actor_id}:{declaration['feature_id']}:{round_number}:"
+                    f"{applications.get(identity, 0) + 1}"
+                ),
+                "feature_id": declaration["feature_id"],
+                "source_excerpt": declaration["source_excerpt"],
+                "damage_expression": declaration["damage_expression"],
+                "damage_type": declaration["damage_type"],
+                "condition_satisfied": True,
+                "trigger_facts": deepcopy(declaration["trigger_facts"]),
+                "default_resolver": "agent",
+                "ruling_kind": "agent_dm_adjudication",
+                "decision": declaration["decision"],
+                "reason": declaration["reason"],
+            }
+        )
+    return rulings
+
+
 def _source_delayed_actions(
     values: list[dict[str, Any]],
     *,
@@ -3171,6 +3389,11 @@ async def _start(
         args.source_on_hit_ruling_json,
         participant_ids=[*party_ids, *all_hostile_ids],
     )
+    source_extra_damage_rulings = _source_extra_damage_rulings(
+        getattr(args, "source_extra_damage_ruling_json", []),
+        participant_ids=[*party_ids, *all_hostile_ids],
+        actors=actors,
+    )
     delayed_actions = _source_delayed_actions(
         args.source_delayed_action_json,
         participant_ids=initial_hostile_ids,
@@ -3553,6 +3776,11 @@ async def _start(
         "source_precombat_casts": precombat_cast_results,
         "source_opening_weapons": list(opening_weapons.values()),
         "source_on_hit_rulings": list(on_hit_rulings.values()),
+        "source_extra_damage_rulings": [
+            deepcopy(item)
+            for values in source_extra_damage_rulings.values()
+            for item in values
+        ],
         "source_delayed_actions": list(delayed_actions.values()),
         "source_passive_allies": list(passive_allies.values()),
         "source_random_activities": list(random_activities.values()),
@@ -4249,6 +4477,45 @@ def _source_flee_damage_history(
     return damage_taken_by_actor, critical_hit_actor_ids
 
 
+def _source_extra_damage_history(
+    combat: dict[str, Any],
+    declarations: dict[str, list[dict[str, Any]]],
+) -> dict[tuple[str, str], int]:
+    """Recover successful Agent-owned rider applications from the combat log."""
+
+    identities = {
+        (actor_id, str(declaration["feature_id"])): int(
+            declaration["max_applications"]
+        )
+        for actor_id, values in declarations.items()
+        for declaration in values
+    }
+    counts = {identity: 0 for identity in identities}
+    prefixes = {
+        identity: f"agent-ruling:{identity[0]}:{identity[1]}:"
+        for identity in identities
+    }
+    for event in combat.get("log", []):
+        if not isinstance(event, dict) or event.get("type") != "attack":
+            continue
+        result = dict(event.get("result") or {})
+        damage = dict(result.get("damage") or {})
+        for part in damage.get("roll_parts") or []:
+            if not isinstance(part, dict):
+                continue
+            source = str(part.get("source") or "")
+            for identity, prefix in prefixes.items():
+                if source.startswith(prefix):
+                    counts[identity] += 1
+    for identity, count in counts.items():
+        if count > identities[identity]:
+            raise RuntimeError(
+                "combat history exceeds the source conditional extra-damage "
+                f"application limit for {identity[0]}:{identity[1]}"
+            )
+    return {identity: count for identity, count in counts.items() if count}
+
+
 def _source_casualty_pools(
     declarations: list[dict[str, Any]],
     *,
@@ -4751,6 +5018,9 @@ async def _preflight_attack(
     action_context: dict[str, Any] | None = None,
     knock_out_target_ids: set[str] | None = None,
     agent_rulings: list[dict[str, Any]] | None = None,
+    source_extra_damage_rulings: dict[str, list[dict[str, Any]]] | None = None,
+    source_extra_damage_applications: dict[tuple[str, str], int] | None = None,
+    round_number: int = 1,
 ) -> tuple[str, dict[str, Any], dict[str, Any]] | None:
     knock_out_targets = set(knock_out_target_ids or set())
     weapons = list(
@@ -4787,6 +5057,15 @@ async def _preflight_attack(
                     action["context"] = dict(action_context)
                 if multiattack_option_id:
                     action["multiattack_option_id"] = multiattack_option_id
+                extra_damage = _source_extra_damage_action_rulings(
+                    source_extra_damage_rulings or {},
+                    actor_id=str(actor["id"]),
+                    weapon_id=str(weapon.get("item_id") or ""),
+                    round_number=round_number,
+                    applications=source_extra_damage_applications or {},
+                )
+                if extra_damage:
+                    action["rulings"] = extra_damage
                 try:
                     plan = await client.domain(
                         "combat_preflight_attack",
@@ -5174,6 +5453,11 @@ async def _auto_run(
         args.campaign_id,
         [*party_ids, *hostile_ids],
     )
+    source_extra_damage_rulings = _source_extra_damage_rulings(
+        getattr(args, "source_extra_damage_ruling_json", []),
+        participant_ids=[*party_ids, *hostile_ids],
+        actors=initial_actors,
+    )
     source_casualty_pools = _source_casualty_pools(
         args.source_casualty_pool_json,
         hostile_ids=hostile_ids,
@@ -5245,6 +5529,10 @@ async def _auto_run(
     )
     turns: list[dict[str, Any]] = []
     agent_preflight_rulings: list[dict[str, Any]] = []
+    source_extra_damage_applications = _source_extra_damage_history(
+        initial_combat,
+        source_extra_damage_rulings,
+    )
     completed_opening_casts: set[int] = set()
     completed_opening_weapon_actor_ids: set[str] = set()
     fled_hostile_ids: set[str] = set()
@@ -6593,6 +6881,9 @@ async def _auto_run(
                 knock_out_hostile_ids if actor_id in effective_party_ids else None
             ),
             agent_rulings=agent_preflight_rulings,
+            source_extra_damage_rulings=source_extra_damage_rulings,
+            source_extra_damage_applications=source_extra_damage_applications,
+            round_number=int(combat.get("round", 1) or 1),
         )
         source_separation_target = _source_separation_target(
             actor_id,
@@ -6648,6 +6939,9 @@ async def _auto_run(
                         knock_out_hostile_ids if actor_id in effective_party_ids else None
                     ),
                     agent_rulings=agent_preflight_rulings,
+                    source_extra_damage_rulings=source_extra_damage_rulings,
+                    source_extra_damage_applications=source_extra_damage_applications,
+                    round_number=int(combat.get("round", 1) or 1),
                 )
         if plan is None and source_separation_target is not None:
             turns.append(
@@ -6745,6 +7039,46 @@ async def _auto_run(
                         },
                     )
                 )
+            applied_extra_damage: list[dict[str, Any]] = []
+            attack_result = dict(resolved.get("result") or {})
+            if attack_result.get("hit") is True:
+                action_rulings = [
+                    dict(item)
+                    for item in action.get("rulings", [])
+                    if isinstance(item, dict)
+                    and item.get("kind") == "source_conditional_extra_damage"
+                ]
+                roll_parts = list(
+                    dict(attack_result.get("damage") or {}).get("roll_parts") or []
+                )
+                extra_roll_parts = roll_parts[-len(action_rulings) :] if action_rulings else []
+                if len(extra_roll_parts) != len(action_rulings):
+                    raise RuntimeError(
+                        "source conditional extra damage did not settle atomically "
+                        "with the triggering attack"
+                    )
+                for ruling, roll_part in zip(action_rulings, extra_roll_parts):
+                    expected_source = f"agent-ruling:{ruling['application_id']}"
+                    if (
+                        str(roll_part.get("expression") or "")
+                        != str(ruling["damage_expression"])
+                        or str(roll_part.get("source") or "") != expected_source
+                    ):
+                        raise RuntimeError(
+                            "source conditional extra damage lost its exact "
+                            "expression or Agent-ruling provenance"
+                        )
+                    identity = (actor_id, str(ruling["feature_id"]))
+                    source_extra_damage_applications[identity] = (
+                        source_extra_damage_applications.get(identity, 0) + 1
+                    )
+                    applied_extra_damage.append(
+                        {
+                            "ruling": ruling,
+                            "roll_part": deepcopy(roll_part),
+                            "application_count": source_extra_damage_applications[identity],
+                        }
+                    )
             turns.append(
                 {
                     "sequence": sequence,
@@ -6761,6 +7095,7 @@ async def _auto_run(
                     ),
                     "source_flee_observations": source_flee_observations,
                     "on_hit_settlement": on_hit_settlement,
+                    "source_extra_damage": applied_extra_damage,
                 }
             )
             settlement_combat = (
@@ -6835,6 +7170,21 @@ async def _auto_run(
         "source_opening_weapons": list(opening_weapons.values()),
         "completed_opening_weapon_actor_ids": sorted(completed_opening_weapon_actor_ids),
         "source_on_hit_rulings": list(on_hit_rulings.values()),
+        "source_extra_damage_rulings": [
+            deepcopy(item)
+            for values in source_extra_damage_rulings.values()
+            for item in values
+        ],
+        "source_extra_damage_applications": [
+            {
+                "actor_id": actor_id,
+                "feature_id": feature_id,
+                "count": count,
+            }
+            for (actor_id, feature_id), count in sorted(
+                source_extra_damage_applications.items()
+            )
+        ],
         "source_delayed_actions": list(delayed_actions.values()),
         "source_passive_allies": list(passive_allies.values()),
         "source_random_activities": list(random_activities.values()),

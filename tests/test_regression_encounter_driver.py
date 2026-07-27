@@ -60,6 +60,9 @@ from scripts.regression_encounter import (
     _source_declared_surprise,
     _source_delayed_actions,
     _source_departure_patch,
+    _source_extra_damage_action_rulings,
+    _source_extra_damage_history,
+    _source_extra_damage_rulings,
     _source_flee_damage_history,
     _source_flee_ready,
     _source_on_hit_rulings,
@@ -87,6 +90,12 @@ from scripts.regression_encounter import (
     _validate_hostile_attacks,
     _validate_source_flee_configuration,
     _wound_priority,
+)
+
+PERYTON_DIVE_ATTACK = (
+    "If the peryton is flying and dives at least 30 feet straight toward a target "
+    "and then hits it with a melee weapon attack, the attack deals an extra 9 "
+    "(2d8) damage to the target."
 )
 
 
@@ -217,6 +226,160 @@ def test_preflight_capture_uses_only_melee_and_declares_knockout() -> None:
     }
     assert plan["knock_out"] is True
     assert [call["action"] for call in client.calls] == [action]
+
+
+def test_source_extra_damage_ruling_binds_exact_agent_passive_and_application() -> None:
+    actor = {
+        "id": "peryton-1",
+        "sheet": {
+            "content": {
+                "features": [
+                    {
+                        "id": "dive-attack-passive",
+                        "name": "Dive Attack",
+                        "description": PERYTON_DIVE_ATTACK,
+                        "choices": {
+                            "manual_ruling": {
+                                "kind": "descriptive_passive",
+                                "default_resolver": "agent",
+                                "source_excerpt": PERYTON_DIVE_ATTACK,
+                            }
+                        },
+                    }
+                ]
+            }
+        },
+        "derived": {
+            "inventory": {
+                "weapon_attacks": [
+                    {"item_id": "gore", "attack_type": "melee"},
+                    {"item_id": "talons", "attack_type": "melee"},
+                ]
+            }
+        },
+    }
+    declaration = {
+        "actor_id": actor["id"],
+        "feature_id": "dive-attack-passive",
+        "weapon_ids": ["gore", "talons"],
+        "rounds": [1],
+        "max_applications": 1,
+        "damage_expression": "2d8",
+        "damage_type": "weapon",
+        "source_excerpt": PERYTON_DIVE_ATTACK,
+        "trigger_facts": {"flying": True, "straight_dive_ft": 30},
+        "decision": "The first round starts with the source-defined dive.",
+        "reason": "The encounter starts the peryton high above the road.",
+    }
+
+    normalized = _source_extra_damage_rulings(
+        [declaration],
+        participant_ids=[actor["id"]],
+        actors={actor["id"]: actor},
+    )
+    action_rulings = _source_extra_damage_action_rulings(
+        normalized,
+        actor_id=actor["id"],
+        weapon_id="gore",
+        round_number=1,
+        applications={},
+    )
+
+    assert len(action_rulings) == 1
+    assert action_rulings[0]["source"] == "dm_ruling"
+    assert action_rulings[0]["damage_expression"] == "2d8"
+    assert action_rulings[0]["trigger_facts"]["straight_dive_ft"] == 30
+    assert (
+        _source_extra_damage_action_rulings(
+            normalized,
+            actor_id=actor["id"],
+            weapon_id="gore",
+            round_number=1,
+            applications={(actor["id"], "dive-attack-passive"): 1},
+        )
+        == []
+    )
+
+    with pytest.raises(ValueError, match="exact Agent-owned passive"):
+        _source_extra_damage_rulings(
+            [{**declaration, "source_excerpt": "It dives and deals 2d8."}],
+            participant_ids=[actor["id"]],
+            actors={actor["id"]: actor},
+        )
+
+    different_excerpt = PERYTON_DIVE_ATTACK.replace("(2d8)", "(12d8)")
+    different_actor = {
+        **actor,
+        "sheet": {
+            "content": {
+                "features": [
+                    {
+                        **actor["sheet"]["content"]["features"][0],
+                        "description": different_excerpt,
+                        "choices": {
+                            "manual_ruling": {
+                                "kind": "descriptive_passive",
+                                "default_resolver": "agent",
+                                "source_excerpt": different_excerpt,
+                            }
+                        },
+                    }
+                ]
+            }
+        },
+    }
+    with pytest.raises(ValueError, match="printed dice expression"):
+        _source_extra_damage_rulings(
+            [
+                {
+                    **declaration,
+                    "source_excerpt": different_excerpt,
+                    "damage_expression": "2d8",
+                }
+            ],
+            participant_ids=[actor["id"]],
+            actors={actor["id"]: different_actor},
+        )
+
+
+def test_source_extra_damage_history_recovers_bounded_successes() -> None:
+    declarations = {
+        "peryton-1": [
+            {
+                "feature_id": "dive-attack-passive",
+                "max_applications": 1,
+            }
+        ]
+    }
+    combat = {
+        "log": [
+            {
+                "type": "attack",
+                "result": {
+                    "damage": {
+                        "roll_parts": [
+                            {
+                                "expression": "2d8",
+                                "source": (
+                                    "agent-ruling:peryton-1:"
+                                    "dive-attack-passive:1:1"
+                                ),
+                            }
+                        ]
+                    }
+                },
+            }
+        ]
+    }
+
+    assert _source_extra_damage_history(combat, declarations) == {
+        ("peryton-1", "dive-attack-passive"): 1
+    }
+    with pytest.raises(RuntimeError, match="exceeds"):
+        _source_extra_damage_history(
+            {"log": [*combat["log"], *combat["log"]]},
+            declarations,
+        )
 
 
 def test_preflight_tries_a_recorded_thrown_weapon_at_range() -> None:
