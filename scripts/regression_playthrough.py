@@ -227,6 +227,15 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--roll-expression", default="")
     parser.add_argument("--roll-reason", default="")
     parser.add_argument(
+        "--roll-count",
+        type=int,
+        default=1,
+        help=(
+            "Resolve this many independently identified source rolls in one MCP "
+            "process; each roll still uses the public server dice tool"
+        ),
+    )
+    parser.add_argument(
         "--damage-half",
         action="store_true",
         help="Apply half the rolled damage, rounded down, when the cited source requires it",
@@ -3807,6 +3816,64 @@ async def _roll_source_table(
         "progress": progress,
         "continuity": committed,
         "sync": synced,
+    }
+
+
+async def _roll_source_sequence(
+    client: ExposureClient,
+    *,
+    campaign_id: str,
+    run_id: str,
+    scene_id: str,
+    location_key: str,
+    source_excerpt: str,
+    source_ref: dict[str, Any] | None,
+    roll_id: str,
+    expression: str,
+    reason: str,
+    audience_scope: str,
+    count: int,
+    defer_checkpoint: bool = False,
+) -> dict[str, Any]:
+    if count < 2 or count > 1000:
+        raise ValueError("roll-source sequence count must be between 2 and 1000")
+    results: list[dict[str, Any]] = []
+    for index in range(1, count + 1):
+        item_roll_id = f"{roll_id}-{index:03d}"
+        item = await _roll_source_table(
+            client,
+            campaign_id=campaign_id,
+            run_id=run_id,
+            scene_id=scene_id,
+            location_key=location_key,
+            source_excerpt=source_excerpt,
+            source_ref=source_ref,
+            roll_id=item_roll_id,
+            expression=expression,
+            reason=f"{reason} ({index}/{count})",
+            audience_scope=audience_scope,
+            defer_checkpoint=defer_checkpoint or index < count,
+        )
+        results.append(
+            {
+                "roll_id": item_roll_id,
+                "roll": item["roll"],
+                "random_stream_receipt": item["random_stream_receipt"],
+                "progress_state_version": item["progress"].get("state_version"),
+                "continuity_event": item["continuity"].get("event"),
+                "snapshot": item["continuity"].get("snapshot"),
+                "campaign_revision": item["sync"].get("campaign_revision"),
+            }
+        )
+    return {
+        "scene": {
+            "scene_id": scene_id,
+            "location_key": location_key,
+            "source_ref": results[0]["roll"].get("source_ref") or source_ref,
+        },
+        "roll_count": count,
+        "rolls": results,
+        "checkpoint_deferred": defer_checkpoint,
     }
 
 
@@ -9829,20 +9896,30 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                 if phase != "play":
                     raise RuntimeError("roll-source requires the play phase")
                 await client.load("play.resolution")
-                report["result"] = await _roll_source_table(
-                    client,
-                    campaign_id=args.campaign_id,
-                    run_id=args.run_id,
-                    scene_id=str(args.scene_id or ""),
-                    location_key=args.location_key,
-                    source_excerpt=args.source_excerpt,
-                    source_ref=args.source_ref_json,
-                    roll_id=args.roll_id,
-                    expression=args.roll_expression,
-                    reason=args.roll_reason,
-                    audience_scope=args.event_audience_scope,
-                    defer_checkpoint=args.defer_checkpoint,
-                )
+                roll_arguments = {
+                    "campaign_id": args.campaign_id,
+                    "run_id": args.run_id,
+                    "scene_id": str(args.scene_id or ""),
+                    "location_key": args.location_key,
+                    "source_excerpt": args.source_excerpt,
+                    "source_ref": args.source_ref_json,
+                    "roll_id": args.roll_id,
+                    "expression": args.roll_expression,
+                    "reason": args.roll_reason,
+                    "audience_scope": args.event_audience_scope,
+                    "defer_checkpoint": args.defer_checkpoint,
+                }
+                if args.roll_count == 1:
+                    report["result"] = await _roll_source_table(
+                        client,
+                        **roll_arguments,
+                    )
+                else:
+                    report["result"] = await _roll_source_sequence(
+                        client,
+                        **roll_arguments,
+                        count=args.roll_count,
+                    )
             elif args.action == "resolve-check":
                 if phase != "play":
                     raise RuntimeError("resolve-check requires the play phase")

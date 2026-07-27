@@ -72,6 +72,7 @@ from scripts.regression_playthrough import (
     _remove_source_effect,
     _resolve_check,
     _restore_phase_after_failed_refresh,
+    _roll_source_sequence,
     _roll_source_table,
     _scene_progress_percent,
     _set_source_exhaustion,
@@ -3237,6 +3238,96 @@ def test_source_table_roll_is_public_replayable_and_deferred() -> None:
             if tool == tool_id
         )
         assert first_key != second_key
+
+
+def test_source_roll_sequence_keeps_independent_ids_and_one_final_checkpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict] = []
+
+    async def fake_roll(client, **arguments):
+        calls.append(dict(arguments))
+        index = len(calls)
+        return {
+            "roll": {"total": index, "rolls": [index]},
+            "random_stream_receipt": {
+                "position_before": index - 1,
+                "position_after": index,
+            },
+            "progress": {"state_version": index},
+            "continuity": {
+                "event": {"id": f"event-{index}"},
+                **(
+                    {}
+                    if arguments["defer_checkpoint"]
+                    else {"snapshot": {"slot": 10}}
+                ),
+            },
+            "sync": {"campaign_revision": 20 + index},
+        }
+
+    monkeypatch.setattr(
+        regression_playthrough,
+        "_roll_source_table",
+        fake_roll,
+    )
+    source_ref = {
+        "module_id": "module-1",
+        "scene_id": "scene-1",
+        "chunk_id": "chunk-1",
+        "page_start": 1,
+        "page_end": 1,
+        "heading_path": ["Road Events"],
+        "content_sha256": "a" * 64,
+    }
+    result = asyncio.run(
+        _roll_source_sequence(
+            object(),
+            campaign_id="campaign-1",
+            run_id="run-1",
+            scene_id="scene-1",
+            location_key="road",
+            source_excerpt="Roll once for each travel day.",
+            source_ref=source_ref,
+            roll_id="road-day",
+            expression="1d20",
+            reason="Daily road-event check.",
+            audience_scope="dm",
+            count=3,
+            defer_checkpoint=False,
+        )
+    )
+
+    assert [call["roll_id"] for call in calls] == [
+        "road-day-001",
+        "road-day-002",
+        "road-day-003",
+    ]
+    assert [call["defer_checkpoint"] for call in calls] == [True, True, False]
+    assert [item["roll"]["total"] for item in result["rolls"]] == [1, 2, 3]
+    assert result["rolls"][-1]["snapshot"] == {"slot": 10}
+    assert result["checkpoint_deferred"] is False
+
+
+@pytest.mark.parametrize("count", [0, 1, 1001])
+def test_source_roll_sequence_rejects_invalid_count_before_tools(count: int) -> None:
+    with pytest.raises(ValueError, match="between 2 and 1000"):
+        asyncio.run(
+            _roll_source_sequence(
+                object(),
+                campaign_id="campaign-1",
+                run_id="run-1",
+                scene_id="scene-1",
+                location_key="road",
+                source_excerpt="Roll once for each travel day.",
+                source_ref={},
+                roll_id="road-day",
+                expression="1d20",
+                reason="Daily road-event check.",
+                audience_scope="dm",
+                count=count,
+            )
+        )
 
 
 def test_stable_party_recovery_uses_one_public_campaign_transition() -> None:
