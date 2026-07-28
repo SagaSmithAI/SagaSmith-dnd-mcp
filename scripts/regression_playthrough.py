@@ -3975,46 +3975,114 @@ async def _record_outcome(
     branch = next((item for item in branches if item.get("is_current")), None)
     if branch is None:
         raise RuntimeError("campaign has no current branch")
-    campaign = await _campaign(client, campaign_id)
-    committed = await client.domain(
-        "memory_change",
-        {
-            "campaign_id": campaign_id,
-            "action": "commit",
+    continuity_payload = {
+        "event": {
+            "summary": summary.strip(),
+            "event_type": event_type,
+            "audience_scope": audience_scope,
             "payload": {
-                "event": {
-                    "summary": summary.strip(),
-                    "event_type": event_type,
-                    "audience_scope": audience_scope,
-                    "payload": {
-                        "outcome_id": outcome_id.strip(),
-                        "scene_id": scene_id,
-                        "source_scene_id": cited_scene_id,
-                        "location_key": location_key,
-                        "source_excerpt": (source_excerpt.strip() if has_source_ref else ""),
-                        "source_ref": exact_ref,
-                        "agent_ruling": normalized_agent_ruling,
-                    },
-                },
-                "facts": normalized_facts,
-                "actor_knowledge": [
-                    {
-                        "actor_id": actor_id,
-                        "knowledge_key": (
-                            f"playthrough.{_token(run_id)}.outcome.{_token(outcome_id.strip())}"
-                        ),
-                        "proposition": knowledge.strip(),
-                        "cause": knowledge_cause,
-                        "disclosure_scope": "owner",
-                    }
-                    for actor_id in recipients
-                ],
-                "branch_id": str(branch["id"]),
+                "outcome_id": outcome_id.strip(),
+                "scene_id": scene_id,
+                "source_scene_id": cited_scene_id,
+                "location_key": location_key,
+                "source_excerpt": (source_excerpt.strip() if has_source_ref else ""),
+                "source_ref": exact_ref,
+                "agent_ruling": normalized_agent_ruling,
             },
-            "expected_revision": campaign["revision"],
-            "idempotency_key": _mutation_key(run_id, "continuity-outcome", outcome_id),
         },
-    )
+        "facts": normalized_facts,
+        "actor_knowledge": [
+            {
+                "actor_id": actor_id,
+                "knowledge_key": (
+                    f"playthrough.{_token(run_id)}.outcome.{_token(outcome_id.strip())}"
+                ),
+                "proposition": knowledge.strip(),
+                "cause": knowledge_cause,
+                "disclosure_scope": "owner",
+            }
+            for actor_id in recipients
+        ],
+        "branch_id": str(branch["id"]),
+    }
+    recovered_continuity = None
+    recovered_checkpoint = None
+    if existing_outcome is not None:
+        event_rows = await client.domain(
+            "campaign_event",
+            {
+                "campaign_id": campaign_id,
+                "action": "list",
+                "payload": {"limit": 1000, "branch_id": str(branch["id"])},
+            },
+        )
+        recovered_continuity = next(
+            (
+                item
+                for item in event_rows
+                if str(item.get("event_type") or "") == event_type
+                and str(item.get("summary") or "") == summary.strip()
+                and str(dict(item.get("payload") or {}).get("outcome_id") or "")
+                == outcome_id.strip()
+                and str(dict(item.get("payload") or {}).get("scene_id") or "") == scene_id
+                and str(dict(item.get("payload") or {}).get("location_key") or "")
+                == location_key
+                and dict(item.get("payload") or {}).get("source_ref") == exact_ref
+                and dict(item.get("payload") or {}).get("agent_ruling")
+                == normalized_agent_ruling
+            ),
+            None,
+        )
+        if recovered_continuity is not None and not defer_checkpoint:
+            snapshots = await client.domain(
+                "snapshot_query",
+                {"campaign_id": campaign_id, "view": "list"},
+            )
+            recovered_checkpoint = next(
+                (
+                    item
+                    for item in snapshots
+                    if str(item.get("label") or "")
+                    == f"Full playthrough outcome: {outcome_id.strip()}"
+                ),
+                None,
+            )
+        if recovered_continuity is not None and (
+            defer_checkpoint or recovered_checkpoint is not None
+        ):
+            return {
+                "outcome_id": outcome_id.strip(),
+                "scene": {
+                    "scene_id": scene_id,
+                    "source_scene_id": cited_scene_id,
+                    "location_key": location_key,
+                    "source_ref": exact_ref,
+                    "agent_ruling": normalized_agent_ruling,
+                },
+                "progress": progress,
+                "continuity": {
+                    "event": recovered_continuity,
+                    "recovered": True,
+                },
+                "knowledge_actor_ids": recipients,
+                "manifest_replace": current_manifest,
+                "checkpoint": recovered_checkpoint,
+                "recovered": True,
+            }
+    if recovered_continuity is None:
+        campaign = await _campaign(client, campaign_id)
+        committed = await client.domain(
+            "memory_change",
+            {
+                "campaign_id": campaign_id,
+                "action": "commit",
+                "payload": continuity_payload,
+                "expected_revision": campaign["revision"],
+                "idempotency_key": _mutation_key(run_id, "continuity-outcome", outcome_id),
+            },
+        )
+    else:
+        committed = {"event": recovered_continuity, "recovered": True}
 
     replaced = await _manifest_mutation(
         client,
@@ -4049,6 +4117,7 @@ async def _record_outcome(
         "knowledge_actor_ids": recipients,
         "manifest_replace": replaced,
         "checkpoint": checkpoint,
+        "recovered": existing_outcome is not None,
     }
 
 

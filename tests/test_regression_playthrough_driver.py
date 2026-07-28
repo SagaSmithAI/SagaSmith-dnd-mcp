@@ -9003,6 +9003,143 @@ def test_record_outcome_resumes_after_matching_progress_was_already_saved() -> N
     assert client.progress_writes == 0
 
 
+def test_record_outcome_recovers_completed_retry_after_later_campaign_revisions() -> None:
+    source_ref = {
+        "module_id": "module-1",
+        "scene_id": "scene-1",
+        "chunk_id": "chunk-1",
+        "page_start": 10,
+        "page_end": 11,
+        "heading_path": ["Goblin Den"],
+        "content_sha256": "abc",
+    }
+    summary = "The hostage was released."
+    outcome_record = {
+        "event_type": "hostage_released",
+        "summary": summary,
+        "source_ref": source_ref,
+        "fact_keys": ["quest:hostage:status"],
+    }
+
+    class Client:
+        def __init__(self) -> None:
+            self.manifest = new_playthrough_manifest(
+                run_id="run-1",
+                campaign_line_id="line-1",
+                module_ids=["module-1"],
+                recommended_party_minimum=None,
+                recommended_party_maximum=None,
+                selected_party_size=None,
+                source_refs=[_manifest_source_ref()],
+            )
+            self.calls: list[str] = []
+
+        async def load(self, *_group_ids: str) -> None:
+            return None
+
+        async def core(self, tool_id: str, arguments: dict):
+            raise AssertionError(("completed outcome retry must not mutate", tool_id))
+
+        async def domain(self, tool_id: str, arguments: dict):
+            self.calls.append(tool_id)
+            if tool_id == "playthrough_manifest" and arguments["action"] == "get":
+                return {"manifest": deepcopy(self.manifest), "campaign_revision": 12}
+            if tool_id == "module_query" and arguments["view"] == "scene":
+                return {
+                    "module_id": "module-1",
+                    "scene_id": "scene-1",
+                    "content": "The hostage is released.",
+                    "locations": [{"key": "goblin-den"}],
+                }
+            if tool_id == "module_query" and arguments["view"] == "progress":
+                return [
+                    {
+                        "scene_id": "scene-1",
+                        "progress": 100,
+                        "state_version": 8,
+                        "state": {
+                            "full_playthrough_outcomes": {
+                                "hostage-released": outcome_record
+                            },
+                            "full_playthrough_events": {
+                                "later": {"event_type": "later_event"}
+                            },
+                        },
+                    }
+                ]
+            if tool_id == "memory_query":
+                return {
+                    "result": [
+                        {
+                            "fact_key": "quest:hostage:status",
+                            "content": "completed",
+                            "revision_id": "fact-revision-1",
+                        }
+                    ]
+                }
+            if tool_id == "branch_query":
+                return [{"id": "branch-1", "is_current": True}]
+            if tool_id == "campaign_event":
+                return [
+                    {
+                        "id": "event-1",
+                        "event_type": "hostage_released",
+                        "summary": summary,
+                        "payload": {
+                            "outcome_id": "hostage-released",
+                            "scene_id": "scene-1",
+                            "source_scene_id": "scene-1",
+                            "location_key": "goblin-den",
+                            "source_excerpt": "The hostage is released.",
+                            "source_ref": source_ref,
+                            "agent_ruling": None,
+                        },
+                    }
+                ]
+            if tool_id == "snapshot_query":
+                assert arguments == {"campaign_id": "campaign-1", "view": "list"}
+                return [
+                    {
+                        "slot": 7,
+                        "label": "Full playthrough outcome: hostage-released",
+                    }
+                ]
+            if tool_id in {"module_set_progress", "memory_change"}:
+                raise AssertionError(("completed outcome retry must not mutate", tool_id))
+            raise AssertionError((tool_id, arguments))
+
+    client = Client()
+    result = asyncio.run(
+        _record_outcome(
+            client,
+            campaign_id="campaign-1",
+            run_id="run-1",
+            outcome_id="hostage-released",
+            scene_id="scene-1",
+            location_key="goblin-den",
+            source_excerpt="The hostage is released.",
+            source_ref=source_ref,
+            event_type="hostage_released",
+            summary=summary,
+            knowledge="",
+            knowledge_actor_ids=[],
+            facts=[{"fact_key": "quest:hostage:status", "content": "completed"}],
+            npc_states=[],
+            quest_states=[],
+            clue_states=[],
+            world_state={},
+            objective="",
+            progress_percent=100,
+        )
+    )
+
+    assert result["recovered"] is True
+    assert result["continuity"]["recovered"] is True
+    assert result["checkpoint"]["slot"] == 7
+    assert "module_set_progress" not in client.calls
+    assert "memory_change" not in client.calls
+
+
 def test_start_play_uses_public_quality_gate_phase_and_scene_tools() -> None:
     source_excerpt = "The adventure begins here."
     source_ref = {
