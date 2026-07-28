@@ -205,7 +205,14 @@ def _arguments() -> argparse.Namespace:
     )
     parser.add_argument("--check-ability", default="")
     parser.add_argument("--check-dc", type=int)
-    parser.add_argument("--check-proficient", action="store_true")
+    parser.add_argument(
+        "--check-proficient",
+        action="store_true",
+        help=(
+            "Apply proficiency only to a raw ability check; named skills derive "
+            "none/half/proficient/expertise from the actor card"
+        ),
+    )
     parser.add_argument("--check-advantage", action="store_true")
     parser.add_argument("--check-disadvantage", action="store_true")
     parser.add_argument("--knowledge-actor-id", action="append", default=[])
@@ -1483,6 +1490,12 @@ def _committed_check_result(settled: dict[str, Any]) -> dict[str, Any]:
     if "success" in settled and ("total" in settled or settled.get("automatic_failure")):
         return dict(settled)
     raise RuntimeError("source-cited character check did not commit")
+
+
+def _actor_card_has_named_skill(actor: dict[str, Any], ability: str) -> bool:
+    normalized = str(ability).strip().casefold().replace(" ", "_")
+    sheet = dict(actor.get("sheet") or {})
+    return normalized in dict(sheet.get("skills") or {})
 
 
 def _matching_check_progress(
@@ -3062,6 +3075,11 @@ async def _resolve_check(
     )
     if actor.get("campaign_id") != campaign_id:
         raise ValueError("resolve-check actor does not belong to the campaign")
+    if _actor_card_has_named_skill(actor, ability) and proficient:
+        raise ValueError(
+            "resolve-check named skills derive proficiency, expertise, and bonuses "
+            "from the actor card; omit --check-proficient"
+        )
     progress_rows = await client.domain(
         "module_query",
         {"campaign_id": campaign_id, "view": "progress"},
@@ -3332,6 +3350,16 @@ async def _resolve_contest(
     for label, actor in (("source", source_actor), ("target", target_actor)):
         if actor.get("campaign_id") != campaign_id:
             raise ValueError(f"resolve-contest {label} actor does not belong to campaign")
+    if _actor_card_has_named_skill(source_actor, source_ability) and source_proficient:
+        raise ValueError(
+            "resolve-contest source named skill derives proficiency, expertise, "
+            "and bonuses from the actor card"
+        )
+    if _actor_card_has_named_skill(target_actor, target_ability) and target_proficient:
+        raise ValueError(
+            "resolve-contest target named skill derives proficiency, expertise, "
+            "and bonuses from the actor card"
+        )
     progress_rows = await client.domain(
         "module_query",
         {"campaign_id": campaign_id, "view": "progress"},

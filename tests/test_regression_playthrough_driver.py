@@ -5658,6 +5658,14 @@ def test_source_cited_check_persists_result_and_explicit_knowledge(
                     "name": "Scout",
                     "campaign_id": "campaign-1",
                     "revision": 2,
+                    "sheet": {
+                        "skills": {
+                            "survival": {
+                                "proficiency": "expertise",
+                                "bonus": 0,
+                            }
+                        }
+                    },
                 }
             if tool_id == "branch_query":
                 return [{"id": "branch-1", "is_current": True}]
@@ -5723,7 +5731,7 @@ def test_source_cited_check_persists_result_and_explicit_knowledge(
             kind="ability",
             ability="survival",
             dc=10,
-            proficient=True,
+            proficient=False,
             disadvantage=True,
             knowledge_actor_ids=["actor-2"],
             success_knowledge="The trail shows twelve goblins and two captives.",
@@ -5738,7 +5746,7 @@ def test_source_cited_check_persists_result_and_explicit_knowledge(
         "kind": "ability",
         "ability": "survival",
         "dc": 10,
-        "proficient": True,
+        "proficient": False,
         "advantage": False,
         "disadvantage": True,
     }
@@ -5771,6 +5779,63 @@ def test_source_cited_check_rejects_unsupported_kind_before_tools() -> None:
                 kind="survival",
                 ability="wisdom",
                 dc=10,
+                proficient=True,
+                knowledge_actor_ids=[],
+                success_knowledge="",
+                failure_knowledge="",
+            )
+        )
+
+
+def test_named_skill_check_rejects_client_proficiency_override() -> None:
+    class Client:
+        async def domain(self, tool_id: str, arguments: dict):
+            if tool_id == "module_query" and arguments["view"] == "scene":
+                return {
+                    "module_id": "module-1",
+                    "scene_id": "scene-1",
+                    "content": "Make a DC 20 Wisdom (Perception) check.",
+                    "locations": [{"key": "village"}],
+                }
+            if tool_id == "character_query":
+                return {
+                    "id": "actor-1",
+                    "name": "Watcher",
+                    "campaign_id": "campaign-1",
+                    "sheet": {
+                        "skills": {
+                            "perception": {
+                                "proficiency": "expertise",
+                                "bonus": 0,
+                            }
+                        }
+                    },
+                }
+            raise AssertionError((tool_id, arguments))
+
+    with pytest.raises(ValueError, match="derive proficiency, expertise"):
+        asyncio.run(
+            _resolve_check(
+                Client(),
+                campaign_id="campaign-1",
+                run_id="run-1",
+                scene_id="scene-1",
+                location_key="village",
+                source_excerpt="Make a DC 20 Wisdom (Perception) check.",
+                source_ref={
+                    "module_id": "module-1",
+                    "scene_id": "scene-1",
+                    "chunk_id": "chunk-1",
+                    "page_start": 1,
+                    "page_end": 1,
+                    "heading_path": ["Village"],
+                    "content_sha256": "abc",
+                },
+                occurrence_id="watch-village",
+                actor_id="actor-1",
+                kind="ability",
+                ability="perception",
+                dc=20,
                 proficient=True,
                 knowledge_actor_ids=[],
                 success_knowledge="",

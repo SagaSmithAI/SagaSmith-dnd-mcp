@@ -43,7 +43,7 @@ def test_character_check_contest_is_atomic_branch_scoped_and_replayable(
         )
         source_sheet = default_character_sheet()
         source_sheet["abilities"]["charisma"]["score"] = 16
-        source_sheet["skills"]["deception"]["proficiency"] = "proficient"
+        source_sheet["skills"]["deception"]["proficiency"] = "expertise"
         target_sheet = default_character_sheet()
         target_sheet["abilities"]["wisdom"]["score"] = 14
         target_sheet["skills"]["insight"]["proficiency"] = "proficient"
@@ -109,6 +109,37 @@ def test_character_check_contest_is_atomic_branch_scoped_and_replayable(
             "idempotency_key": "contest",
         }
 
+        with pytest.raises(Exception, match="skill checks derive proficiency, expertise"):
+            await _call(
+                server,
+                "character_check",
+                {
+                    "campaign_id": campaign["id"],
+                    "action": "check",
+                    "payload": {
+                        "actor_id": source["id"],
+                        "kind": "ability",
+                        "ability": "deception",
+                        "proficient": True,
+                    },
+                    "expected_revision": current["revision"],
+                    "branch_id": branch_id,
+                    "idempotency_key": "invalid-check-override",
+                },
+            )
+        with pytest.raises(Exception, match="contest source skill derives"):
+            await _call(
+                server,
+                "character_check",
+                {
+                    **arguments,
+                    "payload": {
+                        **arguments["payload"],
+                        "source_proficient": True,
+                    },
+                    "idempotency_key": "invalid-contest-override",
+                },
+            )
         settled = await _call(server, "character_check", arguments)
         replay = await _call(server, "character_check", arguments)
 
@@ -120,6 +151,10 @@ def test_character_check_contest_is_atomic_branch_scoped_and_replayable(
         assert len(settled["target_check"]["rolls"]) == 2
         assert "dc" not in settled["source_check"]
         assert "success" not in settled["target_check"]
+        assert (
+            settled["source_check"]["total"] - settled["source_check"]["natural"]
+            == 7
+        )
         source_total = settled["source_check"]["total"]
         target_total = settled["target_check"]["total"]
         assert settled["tie"] is (source_total == target_total)

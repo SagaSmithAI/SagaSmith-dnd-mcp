@@ -12869,6 +12869,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             raise CombatEngineError(
                 "narrative-only actors cannot make checks without an exact statblock"
             )
+        actor_snapshot = combat_actor_snapshot(actor_id)
+        normalized_ability = str(ability).strip().casefold().replace(" ", "_")
+        derived_skill = normalized_ability in dict(
+            actor_snapshot["derived"].get("skills") or {}
+        )
+        if kind in {"ability", "check"} and derived_skill and (proficient or bonus):
+            raise CombatEngineError(
+                "skill checks derive proficiency, expertise, and bonuses from the actor card"
+            )
         require_write_contract(expected_revision, idempotency_key)
         resolved_branch_id = require_current_branch(campaign_id, branch_id)
         settlement_facts = checked_rule_facts(rule_facts)
@@ -12897,7 +12906,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 f"expected {expected_revision}, found {campaign.revision}"
             )
         result = resolve_actor_check(
-            combat_actor_snapshot(actor_id),
+            actor_snapshot,
             kind=kind,
             ability=ability,
             dc=dc,
@@ -12984,6 +12993,33 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 raise CombatEngineError(
                     "narrative-only actors cannot make contests without an exact statblock"
                 )
+        source_snapshot = combat_actor_snapshot(source_actor_id)
+        target_snapshot = combat_actor_snapshot(target_actor_id)
+        for label, actor_snapshot, ability, proficient, bonus in (
+            (
+                "source",
+                source_snapshot,
+                source_ability,
+                source_proficient,
+                source_bonus,
+            ),
+            (
+                "target",
+                target_snapshot,
+                target_ability,
+                target_proficient,
+                target_bonus,
+            ),
+        ):
+            normalized_ability = str(ability).strip().casefold().replace(" ", "_")
+            derived_skill = normalized_ability in dict(
+                actor_snapshot["derived"].get("skills") or {}
+            )
+            if derived_skill and (proficient or bonus):
+                raise CombatEngineError(
+                    f"contest {label} skill derives proficiency, expertise, and "
+                    "bonuses from the actor card"
+                )
         campaign = campaigns.get(campaign_id)
         if campaign_rules_edition(campaign.id) != "2014":
             raise CombatEngineError("generic ability contests are a 2014 rules procedure")
@@ -13020,8 +13056,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 f"expected {expected_revision}, found {campaign.revision}"
             )
         result = resolve_actor_contest(
-            combat_actor_snapshot(source_actor_id),
-            combat_actor_snapshot(target_actor_id),
+            source_snapshot,
+            target_snapshot,
             source_ability=source_ability,
             target_ability=target_ability,
             source_proficient=source_proficient,
