@@ -9363,12 +9363,14 @@ async def _spend_source_item(
     quantity: int,
     reason: str,
     knowledge_actor_ids: list[str],
+    character_id: str = "",
     source_scene_id: str = "",
     defer_checkpoint: bool = False,
 ) -> dict[str, Any]:
     normalized_spend_id = spend_id.strip()
     normalized_item_id = item_id.strip()
     normalized_reason = reason.strip()
+    normalized_character_id = character_id.strip()
     cited_scene_id = source_scene_id.strip() or scene_id
     recipients = list(dict.fromkeys(knowledge_actor_ids))
     if not all(
@@ -9388,6 +9390,8 @@ async def _spend_source_item(
         raise ValueError("spend-item requires a positive item quantity")
     if not recipients or len(recipients) != len(knowledge_actor_ids):
         raise ValueError("spend-item requires unique actor knowledge recipients")
+    if normalized_character_id and normalized_character_id not in recipients:
+        raise ValueError("a character item owner must be one of the knowledge recipients")
 
     source_scene = await client.domain(
         "module_query",
@@ -9422,6 +9426,17 @@ async def _spend_source_item(
     )
 
     campaign = await _campaign(client, campaign_id)
+    character = None
+    if normalized_character_id:
+        character = await client.domain(
+            "character_query",
+            {
+                "view": "get",
+                "payload": {"character_id": normalized_character_id},
+            },
+        )
+        if character.get("campaign_id") != campaign_id:
+            raise ValueError("spend-item character owner does not belong to the campaign")
     prior = next(
         (
             dict(item)
@@ -9438,6 +9453,7 @@ async def _spend_source_item(
             "quantity": quantity,
             "reason": normalized_reason,
             "source_ref": serialized_source_ref,
+            "character_id": normalized_character_id or None,
         }
         if any(prior.get(key) != value for key, value in expected.items()):
             raise RuntimeError("existing item spend does not match this request")
@@ -9449,6 +9465,8 @@ async def _spend_source_item(
             "removed": deepcopy(prior.get("removed") or {}),
             "reason": normalized_reason,
             "source_ref": serialized_source_ref,
+            "character_id": normalized_character_id or None,
+            "owner": deepcopy(prior.get("owner") or {}),
         }
     else:
         spent = await client.domain(
@@ -9462,6 +9480,14 @@ async def _spend_source_item(
                     "quantity": quantity,
                     "reason": normalized_reason,
                     "source_ref": serialized_source_ref,
+                    **(
+                        {
+                            "character_id": normalized_character_id,
+                            "expected_character_revision": int(character["revision"]),
+                        }
+                        if character is not None
+                        else {}
+                    ),
                 },
                 "expected_revision": campaign["revision"],
                 "idempotency_key": _mutation_key(run_id, "item-spend", normalized_spend_id),
@@ -9489,6 +9515,11 @@ async def _spend_source_item(
                 "spend_id": normalized_spend_id,
                 "item_id": normalized_item_id,
                 "quantity": quantity,
+                **(
+                    {"character_id": normalized_character_id}
+                    if normalized_character_id
+                    else {}
+                ),
                 "removed": deepcopy(spent.get("removed") or {}),
                 "source_excerpt": source_excerpt.strip(),
                 "source_ref": exact_ref,
@@ -12044,6 +12075,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     quantity=args.spend_item_quantity,
                     reason=args.spend_reason,
                     knowledge_actor_ids=args.knowledge_actor_id,
+                    character_id=args.item_actor_id,
                     source_scene_id=args.source_scene_id,
                     defer_checkpoint=args.defer_checkpoint,
                 )

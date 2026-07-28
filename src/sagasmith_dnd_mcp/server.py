@@ -5797,12 +5797,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         quantity: int,
         reason: str,
         source_ref: str,
+        character_id: str | None = None,
+        expected_character_revision: int | None = None,
         principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         branch_id: str | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
-        """Atomically expend one source-bound item from the shared party inventory."""
+        """Atomically expend one source-bound item from party or character inventory."""
         access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         require_write_contract(expected_revision, idempotency_key)
         resolved_branch_id = require_current_branch(campaign_id, branch_id)
@@ -5817,6 +5819,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         normalized_spend_id = str(spend_id).strip()
         normalized_item_id = str(item_id).strip()
         normalized_reason = str(reason).strip()
+        normalized_character_id = str(character_id or "").strip()
         if not normalized_spend_id or len(normalized_spend_id) > 200:
             raise ValueError("spend_id must contain 1 to 200 characters")
         if not normalized_item_id or len(normalized_item_id) > 200:
@@ -5825,6 +5828,19 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             raise ValueError("quantity must be a positive integer")
         if not normalized_reason or len(normalized_reason) > 1000:
             raise ValueError("reason must contain 1 to 1000 characters")
+        if bool(normalized_character_id) != (expected_character_revision is not None):
+            raise ValueError(
+                "character_id and expected_character_revision must be provided together"
+            )
+        if (
+            expected_character_revision is not None
+            and (
+                isinstance(expected_character_revision, bool)
+                or not isinstance(expected_character_revision, int)
+                or expected_character_revision < 0
+            )
+        ):
+            raise ValueError("expected_character_revision must be a non-negative integer")
         normalized_source_ref, _, _ = managed_module_source_ref(
             campaign_id,
             source_ref,
@@ -5836,6 +5852,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "quantity": quantity,
             "reason": normalized_reason,
             "source_ref": normalized_source_ref,
+            "character_id": normalized_character_id or None,
+            "expected_character_revision": expected_character_revision,
             "branch_id": resolved_branch_id,
         }
         scope = f"campaign-item-spend:{campaign_id}:{resolved_branch_id}:{principal_id}"
@@ -5851,11 +5869,42 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         ):
             raise ValueError("item spend_id already exists on this branch")
 
-        sheet, removed = remove_inventory_item(
-            party_sheet(state),
-            normalized_item_id,
-            quantity,
-        )
+        character_update: CharacterStateUpdate | None = None
+        character_after: dict[str, Any] | None = None
+        if normalized_character_id:
+            current_character = characters.get(normalized_character_id)
+            if current_character.campaign_id != campaign_id:
+                raise ValueError("item owner must belong to the campaign")
+            character_sheet, removed = remove_inventory_item(
+                current_character.sheet,
+                normalized_item_id,
+                quantity,
+            )
+            normalized_character_sheet = validate_character_sheet(character_sheet)
+            character_update = CharacterStateUpdate(
+                character_id=current_character.id,
+                sheet=normalized_character_sheet,
+                notes=validate_character_notes(
+                    current_character.notes,
+                    character_type=current_character.character_type,
+                ),
+                expected_revision=expected_character_revision,
+            )
+            character_after = character_view(
+                replace(
+                    current_character,
+                    sheet=normalized_character_sheet,
+                    revision=current_character.revision + 1,
+                )
+            )
+            next_state = deepcopy(state)
+        else:
+            sheet, removed = remove_inventory_item(
+                party_sheet(state),
+                normalized_item_id,
+                quantity,
+            )
+            next_state = party_state(state, sheet)
         spends.append(
             {
                 "id": normalized_spend_id,
@@ -5863,10 +5912,20 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "quantity": quantity,
                 "reason": normalized_reason,
                 "source_ref": normalized_source_ref,
+                **(
+                    {
+                        "character_id": normalized_character_id,
+                        "owner": {
+                            "kind": "character",
+                            "character_id": normalized_character_id,
+                        },
+                    }
+                    if normalized_character_id
+                    else {}
+                ),
                 "removed": deepcopy(removed),
             }
         )
-        next_state = party_state(state, sheet)
         next_state["item_spends"] = spends
         normalized_next_state = validate_party_state(next_state)
         response = {
@@ -5877,7 +5936,16 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "removed": removed,
             "reason": normalized_reason,
             "source_ref": normalized_source_ref,
+            "owner": (
+                {
+                    "kind": "character",
+                    "character_id": normalized_character_id,
+                }
+                if normalized_character_id
+                else {"kind": "party"}
+            ),
             "party": party_view_from_state(normalized_next_state),
+            **({"character": character_after} if character_after is not None else {}),
             "campaign": asdict(
                 replace(
                     campaign,
@@ -5889,6 +5957,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         StateMutationService(storage.database).replace(
             campaign_id,
             campaign_state=normalized_next_state,
+            character_updates=(
+                [character_update] if character_update is not None else None
+            ),
             expected_campaign_revision=expected_revision,
             operation="campaign.item.spend",
             actor=principal_id,
@@ -27081,7 +27152,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 ("spend_id", "coins", "reason", "source_ref", "rule_ref"),
             ),
             "item_spend": (
-                {"spend_id", "item_id", "quantity", "reason", "source_ref"},
+                {
+                    "spend_id",
+                    "item_id",
+                    "quantity",
+                    "reason",
+                    "source_ref",
+                    "character_id",
+                    "expected_character_revision",
+                },
                 ("spend_id", "item_id", "quantity", "reason", "source_ref"),
             ),
             "consumable_use": (
@@ -27222,6 +27301,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 required(data, "quantity"),
                 required(data, "reason"),
                 required(data, "source_ref"),
+                data.get("character_id"),
+                data.get("expected_character_revision"),
                 principal_id,
                 expected_revision,
                 branch_id,

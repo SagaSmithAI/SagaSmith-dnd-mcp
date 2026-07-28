@@ -3230,8 +3230,10 @@ def test_source_currency_spend_driver_uses_one_public_atomic_campaign_transition
 
 
 @pytest.mark.parametrize("defer_checkpoint", [False, True])
+@pytest.mark.parametrize("character_owned", [False, True])
 def test_source_item_spend_driver_uses_one_public_atomic_campaign_transition(
     defer_checkpoint: bool,
+    character_owned: bool,
 ) -> None:
     source_ref = {
         "module_id": "module-1",
@@ -3268,10 +3270,27 @@ def test_source_item_spend_driver_uses_one_public_atomic_campaign_transition(
                     "content": "The nothic might betray the gang for a promise of food.",
                     "spatial": {"locations": [{"key": "crevasse", "title": "Crevasse"}]},
                 }
+            if tool_id == "character_query":
+                assert character_owned
+                assert arguments == {
+                    "view": "get",
+                    "payload": {"character_id": "actor-1"},
+                }
+                return {
+                    "id": "actor-1",
+                    "campaign_id": "campaign-1",
+                    "revision": 11,
+                }
             if tool_id == "campaign_change":
                 assert arguments["action"] == "item_spend"
                 assert arguments["payload"]["item_id"] == "severed-head"
                 assert arguments["payload"]["quantity"] == 1
+                if character_owned:
+                    assert arguments["payload"]["character_id"] == "actor-1"
+                    assert arguments["payload"]["expected_character_revision"] == 11
+                else:
+                    assert "character_id" not in arguments["payload"]
+                    assert "expected_character_revision" not in arguments["payload"]
                 self.revision += 1
                 return {
                     "status": "committed",
@@ -3310,6 +3329,7 @@ def test_source_item_spend_driver_uses_one_public_atomic_campaign_transition(
             quantity=1,
             reason="The party surrendered the severed head to secure the nothic's truce.",
             knowledge_actor_ids=["actor-1", "actor-2", "nothic"],
+            character_id="actor-1" if character_owned else "",
             defer_checkpoint=defer_checkpoint,
         )
     )
@@ -3317,6 +3337,7 @@ def test_source_item_spend_driver_uses_one_public_atomic_campaign_transition(
     assert result["spend"]["status"] == "committed"
     assert result["spend"]["removed"]["id"] == "severed-head"
     assert client.tools.count("campaign_change") == 1
+    assert client.tools.count("character_query") == int(character_owned)
     assert result["knowledge_actor_ids"] == ["actor-1", "actor-2", "nothic"]
     assert ("snapshot" in client.continuity_payload) is not defer_checkpoint
 

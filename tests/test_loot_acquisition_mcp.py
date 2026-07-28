@@ -46,6 +46,35 @@ def test_source_bound_loot_is_atomic_idempotent_and_branch_audited(tmp_path: Pat
             "campaign_create",
             {"name": "Loot acquisition", "idempotency_key": "campaign"},
         )
+        character = await _call(
+            server,
+            "character_create",
+            {
+                "campaign_id": campaign["id"],
+                "name": "Tribute owner",
+                "idempotency_key": "tribute-owner",
+            },
+        )
+        added_character_item = await _call(
+            server,
+            "inventory_change",
+            {
+                "owner": "character",
+                "action": "add",
+                "owner_id": character["id"],
+                "payload": {
+                    "item": {
+                        "id": "spare-cloak",
+                        "name": "Spare cloak",
+                        "kind": "equipment",
+                        "quantity": 2,
+                    }
+                },
+                "expected_revision": character["revision"],
+                "idempotency_key": "tribute-owner-cloak",
+            },
+        )
+        character = added_character_item["character"]
         staged = await _call(
             server,
             "module_import",
@@ -344,5 +373,67 @@ def test_source_bound_loot_is_atomic_idempotent_and_branch_audited(tmp_path: Pat
                     "idempotency_key": "duplicate-item-spend",
                 },
             )
+        character_item_spend_arguments = {
+            "campaign_id": campaign["id"],
+            "action": "item_spend",
+            "payload": {
+                "spend_id": "offer-spare-cloak",
+                "item_id": "spare-cloak",
+                "quantity": 1,
+                "reason": "The character surrendered one source-bound spare cloak.",
+                "source_ref": source_ref,
+                "character_id": character["id"],
+                "expected_character_revision": character["revision"],
+            },
+            "expected_revision": item_spent["campaign"]["revision"],
+            "idempotency_key": "character-item-spend",
+        }
+        with pytest.raises(
+            Exception,
+            match="character_id and expected_character_revision must be provided together",
+        ):
+            await _call(
+                server,
+                "campaign_change",
+                {
+                    **character_item_spend_arguments,
+                    "payload": {
+                        key: value
+                        for key, value in character_item_spend_arguments["payload"].items()
+                        if key != "expected_character_revision"
+                    },
+                    "idempotency_key": "character-item-spend-missing-revision",
+                },
+            )
+        character_item_spent = await _call(
+            server,
+            "campaign_change",
+            character_item_spend_arguments,
+        )
+
+        assert character_item_spent["status"] == "committed"
+        assert character_item_spent["owner"] == {
+            "kind": "character",
+            "character_id": character["id"],
+        }
+        remaining_cloak = next(
+            item
+            for item in character_item_spent["character"]["sheet"]["inventory"]["items"]
+            if item["id"] == "spare-cloak"
+        )
+        assert remaining_cloak["quantity"] == 1
+        assert character_item_spent["campaign"]["state"]["item_spends"][1] == {
+            "id": "offer-spare-cloak",
+            "item_id": "spare-cloak",
+            "quantity": 1,
+            "reason": "The character surrendered one source-bound spare cloak.",
+            "source_ref": source_ref,
+            "character_id": character["id"],
+            "owner": {
+                "kind": "character",
+                "character_id": character["id"],
+            },
+            "removed": character_item_spent["removed"],
+        }
 
     asyncio.run(exercise())
