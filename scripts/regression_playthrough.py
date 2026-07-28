@@ -84,6 +84,7 @@ def _arguments() -> argparse.Namespace:
             "status",
             "sync",
             "checkpoint",
+            "continue-segment",
             "advance-scene",
             "record-event",
             "record-outcome",
@@ -2567,6 +2568,264 @@ async def _advance_scene(
     return {
         **replaced,
         "scene_progress": progress_result,
+    }
+
+
+def _segment_completion_record(
+    manifest: dict[str, Any],
+    *,
+    condition_id: str,
+    next_module_id: str,
+) -> dict[str, Any]:
+    ending = deepcopy(dict(manifest.get("ending") or {}))
+    normalized_condition_id = condition_id.strip()
+    if (
+        manifest.get("status") != "completed"
+        or ending.get("status") != "completed"
+        or str(ending.get("achieved_condition_id") or "") != normalized_condition_id
+        or not list(ending.get("verification") or [])
+        or any(item.get("passed") is not True for item in ending["verification"])
+    ):
+        raise ValueError(
+            "continue-segment requires the exact completed ending with only passing "
+            "verification results"
+        )
+    current = deepcopy(dict(manifest.get("current") or {}))
+    completed_module_id = str(current.get("module_id") or "")
+    if (
+        not completed_module_id
+        or not next_module_id
+        or next_module_id == completed_module_id
+        or next_module_id not in set(manifest.get("module_ids") or [])
+    ):
+        raise ValueError(
+            "continue-segment requires a different next module already declared by "
+            "the campaign-line manifest"
+        )
+    dag = deepcopy(dict(manifest.get("snapshot_dag") or {}))
+    head_snapshot_id = str(dag.get("head_snapshot_id") or "")
+    head = next(
+        (
+            deepcopy(item)
+            for item in list(dag.get("nodes") or [])
+            if str(item.get("id") or "") == head_snapshot_id
+        ),
+        None,
+    )
+    if (
+        head is None
+        or head.get("is_head") is not True
+        or str(head.get("branch_id") or "") != str(dag.get("active_branch_id") or "")
+    ):
+        raise ValueError(
+            "continue-segment requires a verified terminal head on the active branch"
+        )
+    world_state = deepcopy(dict(manifest.get("world_state") or {}))
+    canonical = deepcopy(dict(world_state.get("_canonical") or {}))
+    condition = next(
+        (
+            deepcopy(item)
+            for item in list(ending.get("conditions") or [])
+            if str(item.get("id") or "") == normalized_condition_id
+        ),
+        None,
+    )
+    if condition is None:
+        raise ValueError("completed segment condition is missing from the ending manifest")
+    return {
+        "condition_id": normalized_condition_id,
+        "completed_module_id": completed_module_id,
+        "next_module_id": next_module_id,
+        "terminal_scene": current,
+        "ending": ending,
+        "condition": condition,
+        "terminal_snapshot": {
+            key: deepcopy(head.get(key))
+            for key in ("id", "parent_id", "branch_id", "slot", "label", "checksum")
+        },
+        "random_stream": deepcopy(dict(manifest.get("random_stream") or {})),
+        "game_time": deepcopy(dict(canonical.get("game_time") or {})),
+        "world_time": deepcopy(dict(canonical.get("world_time") or {})),
+    }
+
+
+def _prepare_segment_continuation(
+    manifest: dict[str, Any],
+    *,
+    condition_id: str,
+    next_module_id: str,
+) -> tuple[dict[str, Any], dict[str, Any], bool]:
+    """Archive one verified volume ending and reopen its continuous campaign line."""
+
+    updated = deepcopy(manifest)
+    world_state = deepcopy(dict(updated.get("world_state") or {}))
+    raw_history = world_state.get("completed_segments") or []
+    if not isinstance(raw_history, list) or any(
+        not isinstance(item, dict) for item in raw_history
+    ):
+        raise ValueError("world_state.completed_segments must be a list of objects")
+    history = [deepcopy(item) for item in raw_history]
+    normalized_condition_id = condition_id.strip()
+    existing = next(
+        (
+            item
+            for item in history
+            if str(item.get("condition_id") or "") == normalized_condition_id
+        ),
+        None,
+    )
+    if updated.get("status") == "completed":
+        if existing is not None:
+            raise ValueError(
+                "completed segment cannot already be archived before continuation"
+            )
+        record = _segment_completion_record(
+            updated,
+            condition_id=normalized_condition_id,
+            next_module_id=next_module_id,
+        )
+        history.append(record)
+        world_state["completed_segments"] = history
+        updated["world_state"] = world_state
+        updated["status"] = "in_progress"
+        updated["ending"] = {
+            "status": "pending",
+            "conditions": [],
+            "achieved_condition_id": "",
+            "verification": [],
+        }
+        return validate_playthrough_manifest(updated), record, False
+    if (
+        updated.get("status") != "in_progress"
+        or existing is None
+        or str(existing.get("next_module_id") or "") != next_module_id
+        or str(dict(updated.get("ending") or {}).get("status") or "") != "pending"
+        or str(dict(updated.get("ending") or {}).get("achieved_condition_id") or "")
+    ):
+        raise ValueError(
+            "continue-segment can resume only its exact archived in-progress transition"
+        )
+    return validate_playthrough_manifest(updated), deepcopy(existing), True
+
+
+def _party_continuity_projection(manifest: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        {
+            key: deepcopy(member.get(key))
+            for key in (
+                "actor_id",
+                "status",
+                "level",
+                "xp",
+                "hit_points",
+                "resources",
+                "wallet",
+                "equipment",
+                "knowledge_scope_actor_id",
+            )
+        }
+        for member in list(dict(manifest.get("party") or {}).get("members") or [])
+    ]
+
+
+async def _continue_completed_segment(
+    client: ExposureClient,
+    *,
+    campaign_id: str,
+    run_id: str,
+    condition_id: str,
+    occurrence_id: str,
+    scene_id: str,
+    source_scene_id: str,
+    occurrence_scene_id: str,
+    source_excerpt: str,
+    source_ref: dict[str, Any] | None,
+    objective: str,
+    location_key: str,
+    reachable_scene_ids: list[str],
+    checkpoint_label: str,
+) -> dict[str, Any]:
+    transition_identity = _occurrence_identity(occurrence_id, "continue-segment")
+    target_scene = await client.domain(
+        "module_query",
+        {
+            "campaign_id": campaign_id,
+            "view": "scene",
+            "payload": {"scene_id": scene_id},
+        },
+    )
+    next_module_id = str(target_scene.get("module_id") or "")
+    current = await _manifest_get(client, campaign_id)
+    before_manifest = deepcopy(dict(current["manifest"]))
+    before_party = _party_continuity_projection(before_manifest)
+    before_random_stream = deepcopy(dict(before_manifest.get("random_stream") or {}))
+    prepared, segment_record, recovered = _prepare_segment_continuation(
+        before_manifest,
+        condition_id=condition_id,
+        next_module_id=next_module_id,
+    )
+    archived = None
+    if not recovered:
+        archived = await _manifest_mutation(
+            client,
+            campaign_id=campaign_id,
+            action="replace",
+            run_id=run_id,
+            identity=(
+                f"continue-segment-archive:{transition_identity}:"
+                f"{condition_id}:{next_module_id}"
+            ),
+            payload={"manifest": prepared},
+        )
+    transition = await _advance_scene(
+        client,
+        campaign_id=campaign_id,
+        run_id=run_id,
+        occurrence_id=transition_identity,
+        scene_id=scene_id,
+        source_scene_id=source_scene_id,
+        source_excerpt=source_excerpt,
+        source_ref=source_ref,
+        objective=objective,
+        mark_visited=True,
+        reachable_scene_ids=reachable_scene_ids,
+        excluded_scenes=[],
+        occurrence_scene_id=occurrence_scene_id,
+        location_key=location_key,
+    )
+    checkpoint = await _checkpoint(
+        client,
+        campaign_id=campaign_id,
+        run_id=run_id,
+        label=(
+            checkpoint_label.strip()
+            or f"Campaign segment continuation: {condition_id} to {target_scene.get('title')}"
+        ),
+        checkpoint_id=f"continue-segment:{transition_identity}",
+    )
+    final = await _manifest_get(client, campaign_id)
+    final_manifest = deepcopy(dict(final["manifest"]))
+    if (
+        final_manifest.get("status") != "in_progress"
+        or str(dict(final_manifest.get("ending") or {}).get("status") or "") != "pending"
+        or str(dict(final_manifest.get("current") or {}).get("scene_id") or "") != scene_id
+        or str(dict(final_manifest.get("current") or {}).get("module_id") or "")
+        != next_module_id
+        or _party_continuity_projection(final_manifest) != before_party
+        or dict(final_manifest.get("random_stream") or {}) != before_random_stream
+        or segment_record
+        not in list(dict(final_manifest.get("world_state") or {}).get("completed_segments") or [])
+        or str(dict(final_manifest.get("snapshot_dag") or {}).get("head_snapshot_id") or "")
+        != str(dict(checkpoint.get("snapshot") or {}).get("id") or "")
+    ):
+        raise RuntimeError("campaign segment continuation failed its continuity audit")
+    return {
+        "segment": segment_record,
+        "archive": archived,
+        "archive_recovered": recovered,
+        "transition": transition,
+        "checkpoint": checkpoint,
+        "manifest": final_manifest,
     }
 
 
@@ -10764,6 +11023,28 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     client,
                     campaign_id=args.campaign_id,
                     scene_id=str(args.scene_id or ""),
+                )
+            elif args.action == "continue-segment":
+                if phase != "play":
+                    raise RuntimeError("continue-segment requires the play phase")
+                if not args.condition_id:
+                    raise ValueError("continue-segment requires --condition-id")
+                await client.load(*_scene_groups(phase))
+                report["result"] = await _continue_completed_segment(
+                    client,
+                    campaign_id=args.campaign_id,
+                    run_id=args.run_id,
+                    condition_id=args.condition_id,
+                    occurrence_id=args.occurrence_id,
+                    scene_id=str(args.scene_id or ""),
+                    source_scene_id=args.source_scene_id,
+                    occurrence_scene_id=args.occurrence_scene_id,
+                    source_excerpt=args.source_excerpt,
+                    source_ref=args.source_ref_json,
+                    objective=args.objective,
+                    location_key=args.location_key,
+                    reachable_scene_ids=args.reachable_scene_id,
+                    checkpoint_label=args.checkpoint_label,
                 )
             elif args.action == "advance-scene":
                 if phase != "play":

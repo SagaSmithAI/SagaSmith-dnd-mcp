@@ -57,6 +57,7 @@ from scripts.regression_playthrough import (
     _pool_character_currency,
     _preflight_level_completion,
     _prepare_narrative_npc,
+    _prepare_segment_continuation,
     _provision_source_item,
     _query_source,
     _read_scene,
@@ -75,6 +76,7 @@ from scripts.regression_playthrough import (
     _roll_source_sequence,
     _roll_source_table,
     _scene_progress_percent,
+    _segment_completion_record,
     _set_source_exhaustion,
     _short_rest,
     _source_groups,
@@ -600,6 +602,166 @@ def test_advance_scene_recovers_when_progress_commits_before_manifest() -> None:
         ]
         == "scene-old"
     )
+
+
+def _completed_segment_manifest() -> dict:
+    manifest = new_playthrough_manifest(
+        run_id="run-1",
+        campaign_line_id="line-1",
+        module_ids=["module-1", "module-2"],
+        recommended_party_minimum=1,
+        recommended_party_maximum=1,
+        selected_party_size=1,
+        source_refs=[_manifest_source_ref()],
+    )
+    manifest["status"] = "completed"
+    manifest["current"] = {
+        "module_id": "module-1",
+        "chapter_id": "chapter-1",
+        "chapter_title": "Volume 1",
+        "scene_id": "scene-ending",
+        "scene_title": "Victory",
+        "objective": "Verify the first volume ending.",
+    }
+    manifest["party"]["members"] = [
+        {
+            "actor_id": "pc-1",
+            "name": "Hero",
+            "status": "active",
+            "source": "generated",
+            "source_asset_path": "",
+            "level": 8,
+            "xp": 0,
+            "hit_points": {"current": 40, "maximum": 40, "temporary": 0},
+            "resources": {},
+            "wallet": {"gp": 100},
+            "equipment": ["sword"],
+            "knowledge_scope_actor_id": "pc-1",
+        }
+    ]
+    condition = {
+        "id": "volume-1-victory",
+        "label": "Volume 1 completed",
+        "source_ref": _manifest_source_ref(),
+        "all_of": [
+            {
+                "kind": "manifest_value",
+                "path": "world_state.volume_1_complete",
+                "actor_id": "",
+                "fact_key": "",
+                "operator": "equals",
+                "value": True,
+            }
+        ],
+    }
+    manifest["world_state"] = {
+        "volume_1_complete": True,
+        "_canonical": {
+            "game_time": {"schema_version": 1, "tick_seconds": 6, "elapsed_ticks": 9000},
+            "world_time": {
+                "schema_version": 2,
+                "tick_seconds": 6,
+                "calendar_offset_ticks": 0,
+                "day": 1,
+                "hour": 15,
+                "minute": 0,
+                "second": 0,
+                "elapsed_minutes": 900,
+                "round_remainder": 0,
+                "label": "Test",
+            },
+        },
+    }
+    manifest["snapshot_dag"] = {
+        "active_branch_id": "branch-1",
+        "head_snapshot_id": "snapshot-10",
+        "nodes": [
+            {
+                "id": "snapshot-10",
+                "parent_id": "snapshot-9",
+                "branch_id": "branch-1",
+                "slot": 10,
+                "label": "Volume 1 formal ending",
+                "checksum": "c" * 64,
+                "is_head": True,
+            }
+        ],
+    }
+    manifest["random_stream"] = {
+        "algorithm": "sha256-counter-v1",
+        "seed_fingerprint": "seed",
+        "position": 123,
+    }
+    manifest["ending"] = {
+        "status": "completed",
+        "conditions": [condition],
+        "achieved_condition_id": condition["id"],
+        "verification": [
+            {
+                "kind": "manifest_value",
+                "path": "world_state.volume_1_complete",
+                "operator": "equals",
+                "expected": True,
+                "actual": True,
+                "passed": True,
+            }
+        ],
+    }
+    return validate_playthrough_manifest(manifest)
+
+
+def test_prepare_segment_continuation_archives_terminal_evidence() -> None:
+    original = _completed_segment_manifest()
+
+    updated, record, recovered = _prepare_segment_continuation(
+        original,
+        condition_id="volume-1-victory",
+        next_module_id="module-2",
+    )
+
+    assert recovered is False
+    assert updated["status"] == "in_progress"
+    assert updated["ending"] == {
+        "status": "pending",
+        "conditions": [],
+        "achieved_condition_id": "",
+        "verification": [],
+    }
+    assert record["completed_module_id"] == "module-1"
+    assert record["next_module_id"] == "module-2"
+    assert record["terminal_snapshot"]["id"] == "snapshot-10"
+    assert record["random_stream"]["position"] == 123
+    assert updated["world_state"]["completed_segments"] == [record]
+    assert updated["world_state"]["volume_1_complete"] is True
+    assert original["status"] == "completed"
+
+    resumed, resumed_record, resumed_flag = _prepare_segment_continuation(
+        updated,
+        condition_id="volume-1-victory",
+        next_module_id="module-2",
+    )
+    assert resumed_flag is True
+    assert resumed == updated
+    assert resumed_record == record
+
+
+def test_segment_continuation_rejects_missing_terminal_head_or_same_module() -> None:
+    manifest = _completed_segment_manifest()
+    manifest["snapshot_dag"]["head_snapshot_id"] = "missing"
+    with pytest.raises(ValueError, match="verified terminal head"):
+        _segment_completion_record(
+            manifest,
+            condition_id="volume-1-victory",
+            next_module_id="module-2",
+        )
+
+    manifest = _completed_segment_manifest()
+    with pytest.raises(ValueError, match="different next module"):
+        _prepare_segment_continuation(
+            manifest,
+            condition_id="volume-1-victory",
+            next_module_id="module-1",
+        )
 
 
 def test_core_relock_driver_requires_current_checkpoint_and_public_profile() -> None:
