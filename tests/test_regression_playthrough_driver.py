@@ -9662,6 +9662,42 @@ def test_record_outcome_rejects_invalid_manifest_rows_before_mutation() -> None:
     assert client.loaded is False
 
 
+def test_record_outcome_rejects_unsupported_fact_action_before_tools() -> None:
+    with pytest.raises(
+        ValueError,
+        match="public continuity commit does not support deletion or retraction",
+    ):
+        asyncio.run(
+            _record_outcome(
+                object(),
+                campaign_id="campaign-1",
+                run_id="run-1",
+                outcome_id="hostage-released",
+                scene_id="scene-1",
+                location_key="goblin-den",
+                source_excerpt="The hostage is released.",
+                source_ref={},
+                event_type="hostage_released",
+                summary="The hostage was released.",
+                knowledge="",
+                knowledge_actor_ids=[],
+                facts=[
+                    {
+                        "fact_key": "quest:hostage:status",
+                        "content": "completed",
+                        "action": "retract",
+                    }
+                ],
+                npc_states=[],
+                quest_states=[],
+                clue_states=[],
+                world_state={},
+                objective="",
+                progress_percent=100,
+            )
+        )
+
+
 def test_record_outcome_resumes_after_matching_progress_was_already_saved() -> None:
     compact_source_ref = {
         "module_id": "module-1",

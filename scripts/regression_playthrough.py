@@ -4391,6 +4391,12 @@ async def _record_outcome(
             or not str(fact.get("content") or "").strip()
         ):
             raise ValueError(f"fact-json[{index}] requires fact_key and content")
+        action = str(fact.get("action", "upsert"))
+        if action not in {"add", "upsert"}:
+            raise ValueError(
+                f"fact-json[{index}].action must be add or upsert; "
+                "the public continuity commit does not support deletion or retraction"
+            )
         normalized_facts.append(fact)
 
     current_manifest = await _manifest_get(client, campaign_id)
