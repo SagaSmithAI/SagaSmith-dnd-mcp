@@ -391,6 +391,18 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--flee-destination-location-key", default="")
     parser.add_argument("--flee-source-excerpt", default="")
     parser.add_argument(
+        "--linked-flee-actor-id",
+        action="append",
+        default=[],
+        help=(
+            "Source-designated hostile that retreats after another hostile has "
+            "already fled; repeat for every linked survivor"
+        ),
+    )
+    parser.add_argument("--linked-flee-trigger-actor-id", default="")
+    parser.add_argument("--linked-flee-destination-location-key", default="")
+    parser.add_argument("--linked-flee-source-excerpt", default="")
+    parser.add_argument(
         "--source-casualty-pool-json",
         action="append",
         type=json.loads,
@@ -4781,6 +4793,29 @@ def _ready_immediate_source_flee_actor_ids(
     )
 
 
+def _ready_linked_source_flee_actor_ids(
+    *,
+    linked_flee_actor_ids: set[str],
+    trigger_fled_actor_id: str,
+    fled_hostile_ids: set[str],
+    actors: dict[str, dict[str, Any]],
+    active_combatant_ids: set[str],
+) -> list[str]:
+    """Select active survivors whose cited leader has already fled."""
+
+    if not trigger_fled_actor_id or trigger_fled_actor_id not in fled_hostile_ids:
+        return []
+    return sorted(
+        actor_id
+        for actor_id in linked_flee_actor_ids
+        if actor_id not in fled_hostile_ids
+        and actor_id in active_combatant_ids
+        and actor_id in actors
+        and _hit_points(actors[actor_id]) > 0
+        and "dead" not in _conditions(actors[actor_id])
+    )
+
+
 def _validate_source_flee_configuration(
     args: argparse.Namespace,
     *,
@@ -4788,10 +4823,21 @@ def _validate_source_flee_configuration(
 ) -> set[str]:
     """Validate source retreat triggers without widening encounter authority."""
 
+    linked_flee_actor_ids = {
+        str(actor_id) for actor_id in getattr(args, "linked_flee_actor_id", [])
+    } - {""}
+    linked_trigger_actor_id = str(
+        getattr(args, "linked_flee_trigger_actor_id", "") or ""
+    )
+    linked_source_excerpt = str(
+        getattr(args, "linked_flee_source_excerpt", "") or ""
+    ).strip()
     source_flee_ids = {
         *(str(actor_id) for actor_id in args.flee_actor_id),
         str(args.flee_trigger_defeated_actor_id or ""),
         str(args.flee_on_start_actor_id or ""),
+        *linked_flee_actor_ids,
+        linked_trigger_actor_id,
     } - {""}
     triggered_flee_configured = bool(
         args.flee_actor_id
@@ -4837,7 +4883,24 @@ def _validate_source_flee_configuration(
             "triggered and on-start source departures are mutually exclusive, and "
             "triggered actors must be distinct"
         )
-    return source_flee_ids
+    linked_configured = bool(linked_flee_actor_ids or linked_trigger_actor_id)
+    if linked_configured and (
+        not linked_flee_actor_ids
+        or not linked_trigger_actor_id
+        or linked_trigger_actor_id in linked_flee_actor_ids
+        or not linked_source_excerpt
+    ):
+        raise ValueError(
+            "linked source flee requires distinct linked actors and trigger actor "
+            "plus --linked-flee-source-excerpt"
+        )
+    if linked_source_excerpt and _normalized_source_text(linked_source_excerpt) not in (
+        _normalized_source_text(args.source_excerpt)
+    ):
+        raise ValueError(
+            "linked source flee excerpt must be contained in --source-excerpt"
+        )
+    return {str(actor_id) for actor_id in args.flee_actor_id} - {""}
 
 
 def _record_source_flee_damage(
@@ -6031,6 +6094,12 @@ async def _auto_run(
     completed_opening_casts: set[int] = set()
     completed_opening_weapon_actor_ids: set[str] = set()
     fled_hostile_ids: set[str] = set()
+    linked_flee_actor_ids = {
+        str(actor_id) for actor_id in getattr(args, "linked_flee_actor_id", [])
+    }
+    linked_flee_trigger_actor_id = str(
+        getattr(args, "linked_flee_trigger_actor_id", "") or ""
+    )
     damage_taken_by_flee_actor, critical_hit_flee_actor_ids = _source_flee_damage_history(
         initial_combat,
         flee_actor_ids=set(args.flee_actor_id),
@@ -6157,6 +6226,50 @@ async def _auto_run(
                     "source_excerpt": str(args.flee_source_excerpt).strip(),
                     "map_patch": escaped,
                 }
+            )
+        ready_linked_flee_actor_ids = _ready_linked_source_flee_actor_ids(
+            linked_flee_actor_ids=linked_flee_actor_ids,
+            trigger_fled_actor_id=linked_flee_trigger_actor_id,
+            fled_hostile_ids=fled_hostile_ids,
+            actors=actors,
+            active_combatant_ids=set(combatants_by_actor),
+        )
+        if ready_linked_flee_actor_ids:
+            campaign = await _campaign(client, args.campaign_id)
+            linked_escape = await client.domain(
+                "combat_map_patch",
+                {
+                    "campaign_id": args.campaign_id,
+                    "patches": [
+                        _source_departure_patch(
+                            actor_id,
+                            reason=str(args.linked_flee_source_excerpt),
+                            destination_location_key=(
+                                args.linked_flee_destination_location_key
+                            ),
+                        )
+                        for actor_id in ready_linked_flee_actor_ids
+                    ],
+                    "branch_id": branch["id"],
+                    "expected_revision": campaign["revision"],
+                    "idempotency_key": (
+                        "encounter-source-linked-flee-"
+                        + _operation_token(args, *ready_linked_flee_actor_ids)
+                    ),
+                },
+            )
+            fled_hostile_ids.update(ready_linked_flee_actor_ids)
+            turns.extend(
+                {
+                    "sequence": sequence,
+                    "kind": "source_flee",
+                    "actor_id": actor_id,
+                    "trigger": "source_actor_fled",
+                    "trigger_actor_id": linked_flee_trigger_actor_id,
+                    "source_excerpt": str(args.linked_flee_source_excerpt).strip(),
+                    "map_patch": linked_escape,
+                }
+                for actor_id in ready_linked_flee_actor_ids
             )
         unresolved_party = [
             actor_id
@@ -7709,6 +7822,13 @@ async def _auto_run(
         "fled_hostile_ids": sorted(fled_hostile_ids),
         "source_flee_damage_taken": dict(sorted(damage_taken_by_flee_actor.items())),
         "source_flee_critical_hit_actor_ids": sorted(critical_hit_flee_actor_ids),
+        "linked_source_flee": {
+            "actor_ids": sorted(linked_flee_actor_ids),
+            "trigger_actor_id": linked_flee_trigger_actor_id or None,
+            "source_excerpt": str(
+                getattr(args, "linked_flee_source_excerpt", "") or ""
+            ).strip(),
+        },
         "source_casualty_pools": list(source_casualty_pools.values()),
         "source_separations": list(source_separations.values()),
         "truce": (

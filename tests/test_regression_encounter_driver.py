@@ -48,6 +48,7 @@ from scripts.regression_encounter import (
     _primary_hostile_source_excerpt,
     _prioritize_targets,
     _ready_immediate_source_flee_actor_ids,
+    _ready_linked_source_flee_actor_ids,
     _record_source_flee_damage,
     _reinforcement_config,
     _require_live_active_party,
@@ -2027,6 +2028,28 @@ def test_immediate_source_flee_ignores_defeat_turn_triggers() -> None:
     ) == []
 
 
+def test_linked_source_flee_waits_for_cited_trigger_and_active_arrival() -> None:
+    actors = {
+        "troll-1": {"sheet": {"combat": {"hp": {"value": 84}}, "conditions": []}},
+        "troll-2": {"sheet": {"combat": {"hp": {"value": 84}}, "conditions": []}},
+    }
+
+    assert _ready_linked_source_flee_actor_ids(
+        linked_flee_actor_ids={"troll-1", "troll-2"},
+        trigger_fled_actor_id="dragon",
+        fled_hostile_ids=set(),
+        actors=actors,
+        active_combatant_ids={"troll-1", "troll-2"},
+    ) == []
+    assert _ready_linked_source_flee_actor_ids(
+        linked_flee_actor_ids={"troll-1", "troll-2"},
+        trigger_fled_actor_id="dragon",
+        fled_hostile_ids={"dragon"},
+        actors=actors,
+        active_combatant_ids={"troll-1"},
+    ) == ["troll-1"]
+
+
 def test_source_flee_configuration_allows_authored_damage_or_critical_alternatives() -> None:
     assert _validate_source_flee_configuration(
         SimpleNamespace(
@@ -2036,13 +2059,17 @@ def test_source_flee_configuration_allows_authored_damage_or_critical_alternativ
             flee_after_defeated=0,
             flee_after_damage=24,
             flee_on_critical=True,
+            linked_flee_actor_id=["troll-1", "troll-2"],
+            linked_flee_trigger_actor_id="lennithon",
+            linked_flee_source_excerpt="If the dragon flees, the trolls retreat as well.",
             flee_source_excerpt="After it has taken 24 damage or one critical hit, it leaves.",
             source_excerpt=(
                 "The dragon attacks the defenders. After it has taken 24 damage "
-                "or one critical hit, it leaves."
+                "or one critical hit, it leaves. If the dragon flees, the trolls "
+                "retreat as well."
             ),
         ),
-        hostile_ids=["lennithon"],
+        hostile_ids=["lennithon", "troll-1", "troll-2"],
     ) == {"lennithon"}
 
 
@@ -2066,6 +2093,9 @@ def test_source_flee_configuration_fails_closed(
         "flee_after_defeated": 0,
         "flee_after_damage": 24,
         "flee_on_critical": True,
+        "linked_flee_actor_id": [],
+        "linked_flee_trigger_actor_id": "",
+        "linked_flee_source_excerpt": "",
         "flee_source_excerpt": "After it has taken 24 damage or one critical hit, it leaves.",
         "source_excerpt": (
             "The dragon attacks the defenders. After it has taken 24 damage "
@@ -2090,6 +2120,9 @@ def test_source_flee_configuration_rejects_uncited_trigger_excerpt() -> None:
                 flee_after_defeated=0,
                 flee_after_damage=24,
                 flee_on_critical=True,
+                linked_flee_actor_id=[],
+                linked_flee_trigger_actor_id="",
+                linked_flee_source_excerpt="",
                 flee_source_excerpt="After 24 damage, the dragon leaves.",
                 source_excerpt="The dragon attacks the defenders.",
             ),
