@@ -318,6 +318,9 @@ def test_imported_rule_source_creates_a_source_bound_combat_actor(tmp_path: Path
                         "alignment": "chaotic evil",
                         "darkvision_ft": 60,
                         "languages": ["Common", "Elvish"],
+                        "damage_resistances": ["fire"],
+                        "damage_immunities": ["cold"],
+                        "damage_vulnerabilities": ["radiant"],
                         "relentless_endurance": {
                             "feature_id": "relentless-endurance",
                             "source_excerpt": (
@@ -347,6 +350,9 @@ def test_imported_rule_source_creates_a_source_bound_combat_actor(tmp_path: Path
         assert variant_actor["sheet"]["traits"]["alignment"] == "chaotic evil"
         assert variant_actor["sheet"]["traits"]["senses"]["darkvision"] == 60
         assert variant_actor["sheet"]["traits"]["languages"] == ["Common", "Elvish"]
+        assert variant_actor["sheet"]["traits"]["resistances"] == ["fire"]
+        assert variant_actor["sheet"]["traits"]["immunities"] == ["cold"]
+        assert variant_actor["sheet"]["traits"]["vulnerabilities"] == ["radiant"]
         feature = next(
             item
             for item in variant_actor["sheet"]["content"]["features"]
@@ -383,7 +389,7 @@ def test_imported_rule_source_creates_a_source_bound_combat_actor(tmp_path: Path
             {
                 "campaign_id": campaign["id"],
                 "target_id": variant_actor["id"],
-                "parts": [{"amount": 1, "damage_type": "cold"}],
+                "parts": [{"amount": 1, "damage_type": "force"}],
                 "expected_revision": current_campaign["revision"],
                 "idempotency_key": "variant-relentless-endurance",
             },
@@ -408,13 +414,32 @@ def test_imported_rule_source_creates_a_source_bound_combat_actor(tmp_path: Path
             "campaign_get",
             {"campaign_id": campaign["id"]},
         )
-        spent = await _call(
+        immune = await _call(
             server,
             "combat_apply_damage",
             {
                 "campaign_id": campaign["id"],
                 "target_id": variant_actor["id"],
                 "parts": [{"amount": 1, "damage_type": "cold"}],
+                "expected_revision": current_campaign["revision"],
+                "idempotency_key": "variant-cold-immunity",
+            },
+        )
+        assert immune["after_hp"] == 1
+        assert immune["applied_amount"] == 0
+
+        current_campaign = await _call(
+            server,
+            "campaign_get",
+            {"campaign_id": campaign["id"]},
+        )
+        spent = await _call(
+            server,
+            "combat_apply_damage",
+            {
+                "campaign_id": campaign["id"],
+                "target_id": variant_actor["id"],
+                "parts": [{"amount": 1, "damage_type": "force"}],
                 "expected_revision": current_campaign["revision"],
                 "idempotency_key": "variant-relentless-spent",
             },
