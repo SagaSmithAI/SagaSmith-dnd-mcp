@@ -2705,7 +2705,12 @@ def _source_avoidances(
         if (
             report.get("campaign_id") != campaign_id
             or report.get("passed") is not True
-            or event.get("event_type") not in {"trap_detected", "trap_locations_shared"}
+            or event.get("event_type")
+            not in {
+                "movement_hazard_marked",
+                "trap_detected",
+                "trap_locations_shared",
+            }
             or str(payload.get("scene_id") or "") != scene_id
             or not str(event.get("id") or "")
             or not source_excerpt
@@ -2713,7 +2718,7 @@ def _source_avoidances(
         ):
             raise ValueError(
                 f"source avoidance report {index} must be a passed public "
-                "trap knowledge event for this campaign and scene with marked cells"
+                "hazard-knowledge event for this campaign and scene with marked cells"
             )
         actor_ids: list[str] = []
         for item in knowledge:
@@ -6432,6 +6437,29 @@ async def _preflight_attack(
                         ),
                     )
                 return target_id, action, plan
+    if multiattack_option_id:
+        # A creature may always take one ordinary Attack instead of selecting its
+        # Multiattack action.  Keep the source-preferred option first, but do not
+        # move into a hazard merely because that option is illegal at the current
+        # range while one ordinary ranged attack is legal.
+        return await _preflight_attack(
+            client,
+            args,
+            actor,
+            target_ids,
+            preferred_weapon_id=preferred_weapon_id,
+            multiattack_option_id="",
+            action_context=action_context,
+            agent_attack_contexts=agent_attack_contexts,
+            agent_target_reaction_contexts=agent_target_reaction_contexts,
+            reaction_available_actor_ids=reaction_available_actor_ids,
+            knock_out_target_ids=knock_out_target_ids,
+            agent_rulings=agent_rulings,
+            source_extra_damage_rulings=source_extra_damage_rulings,
+            source_extra_damage_applications=source_extra_damage_applications,
+            source_ammunition_selections=source_ammunition_selections,
+            round_number=round_number,
+        )
     return None
 
 

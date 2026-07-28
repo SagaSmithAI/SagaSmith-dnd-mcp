@@ -491,6 +491,54 @@ def test_reaction_availability_and_preflight_limit_target_modifier() -> None:
     assert action["context"]["disadvantage"] is True
 
 
+def test_preflight_falls_back_from_illegal_multiattack_to_one_ordinary_attack() -> None:
+    class Client:
+        def __init__(self) -> None:
+            self.calls: list[dict] = []
+
+        async def domain(self, tool_id: str, arguments: dict) -> dict:
+            assert tool_id == "combat_preflight_attack"
+            action = dict(arguments["action"])
+            self.calls.append(action)
+            if action.get("multiattack_option_id") or action["attack_mode"] != "ranged":
+                raise RuntimeError("attack mode is illegal at this range")
+            return {"status": "ready", **action}
+
+    actor = {
+        "id": "lizardfolk",
+        "derived": {
+            "inventory": {
+                "weapon_attacks": [
+                    {
+                        "item_id": "javelin",
+                        "attack_type": "melee",
+                        "properties": ["thrown"],
+                        "range_ft": {"normal": 30, "long": 120},
+                    }
+                ]
+            }
+        },
+    }
+    client = Client()
+
+    target_id, action, plan = asyncio.run(
+        _preflight_attack(
+            client,
+            SimpleNamespace(campaign_id="campaign-1"),
+            actor,
+            ["pc-1"],
+            preferred_weapon_id="javelin",
+            multiattack_option_id="two-melee-attacks",
+        )
+    )
+
+    assert target_id == "pc-1"
+    assert action == {"weapon_id": "javelin", "attack_mode": "ranged"}
+    assert plan["status"] == "ready"
+    assert any("multiattack_option_id" in item for item in client.calls)
+    assert any("multiattack_option_id" not in item for item in client.calls)
+
+
 def test_consume_agent_target_reaction_uses_public_choice_facade() -> None:
     class Client:
         def __init__(self) -> None:
@@ -3583,8 +3631,13 @@ def test_source_attack_environment_requires_the_structured_actor_trait() -> None
         )
 
 
+@pytest.mark.parametrize(
+    "event_type",
+    ["movement_hazard_marked", "trap_detected", "trap_locations_shared"],
+)
 def test_source_avoidance_requires_public_actor_knowledge(
     tmp_path,
+    event_type,
 ) -> None:
     report_path = tmp_path / "trap-event.json"
     report_path.write_text(
@@ -3596,7 +3649,7 @@ def test_source_avoidance_requires_public_actor_knowledge(
                     "continuity": {
                         "event": {
                             "id": "event-1",
-                            "event_type": "trap_detected",
+                            "event_type": event_type,
                             "summary": (
                                 "The marked traps are at cells 3,3; 5,3; 6,3; 8,3; and 10,3."
                             ),
