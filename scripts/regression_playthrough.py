@@ -3279,7 +3279,7 @@ async def _record_event(
     state = deepcopy(dict((progress_before or {}).get("state") or {}))
     events = deepcopy(dict(state.get("full_playthrough_events") or {}))
     event_key = _token(f"{run_id}:{event_identity}", length=24)
-    events[event_key] = {
+    event_record = {
         "occurrence_id": event_identity,
         "event_type": event_type,
         "summary": summary.strip(),
@@ -3288,24 +3288,32 @@ async def _record_event(
             {"agent_ruling": normalized_agent_ruling} if normalized_agent_ruling is not None else {}
         ),
     }
-    state["full_playthrough_events"] = events
-    progress = await client.domain(
-        "module_set_progress",
-        {
-            "campaign_id": campaign_id,
-            "scene_id": scene_id,
-            "status": "completed" if progress_percent == 100 else "active",
-            "progress": (
-                progress_percent
-                if progress_percent is not None
-                else _scene_progress_percent(progress_before)
-            ),
-            "state": state,
-            "current_location_key": location_key,
-            "expected_state_version": int((progress_before or {}).get("state_version", 0) or 0),
-            "idempotency_key": _mutation_key(run_id, "scene-event-progress", event_identity),
-        },
-    )
+    existing_event = events.get(event_key)
+    if existing_event is not None and existing_event != event_record:
+        raise RuntimeError("record-event occurrence already exists with different evidence")
+    progress_recovered = existing_event == event_record
+    if progress_recovered:
+        progress = deepcopy(progress_before or {})
+    else:
+        events[event_key] = event_record
+        state["full_playthrough_events"] = events
+        progress = await client.domain(
+            "module_set_progress",
+            {
+                "campaign_id": campaign_id,
+                "scene_id": scene_id,
+                "status": "completed" if progress_percent == 100 else "active",
+                "progress": (
+                    progress_percent
+                    if progress_percent is not None
+                    else _scene_progress_percent(progress_before)
+                ),
+                "state": state,
+                "current_location_key": location_key,
+                "expected_state_version": int((progress_before or {}).get("state_version", 0) or 0),
+                "idempotency_key": _mutation_key(run_id, "scene-event-progress", event_identity),
+            },
+        )
     branches = await client.domain(
         "branch_query",
         {"campaign_id": campaign_id, "view": "list"},
@@ -3313,6 +3321,53 @@ async def _record_event(
     branch = next((item for item in branches if item.get("is_current")), None)
     if branch is None:
         raise RuntimeError("campaign has no current branch")
+    recovered_continuity = None
+    if progress_recovered:
+        event_rows = await client.domain(
+            "campaign_event",
+            {
+                "campaign_id": campaign_id,
+                "action": "list",
+                "payload": {"limit": 1000, "branch_id": str(branch["id"])},
+            },
+        )
+        recovered_continuity = next(
+            (
+                item
+                for item in event_rows
+                if str(item.get("event_type") or "") == event_type
+                and str(item.get("summary") or "") == summary.strip()
+                and str(dict(item.get("payload") or {}).get("occurrence_id") or "")
+                == event_identity
+                and str(dict(item.get("payload") or {}).get("scene_id") or "") == scene_id
+                and str(dict(item.get("payload") or {}).get("location_key") or "")
+                == location_key
+                and dict(item.get("payload") or {}).get("source_ref") == exact_ref
+                and dict(item.get("payload") or {}).get("agent_ruling")
+                == normalized_agent_ruling
+            ),
+            None,
+        )
+        if recovered_continuity is not None:
+            current_manifest = await _manifest_get(client, campaign_id)
+            return {
+                "scene": {
+                    "scene_id": scene_id,
+                    "source_scene_id": cited_scene_id,
+                    "location_key": location_key,
+                    "source_ref": exact_ref,
+                    "agent_ruling": normalized_agent_ruling,
+                },
+                "progress": progress,
+                "occurrence_id": event_identity,
+                "continuity": {
+                    "event": recovered_continuity,
+                    "recovered": True,
+                },
+                "knowledge_actor_ids": list(dict.fromkeys(knowledge_actor_ids)),
+                "sync": current_manifest,
+                "recovered": True,
+            }
     campaign = await _campaign(client, campaign_id)
     continuity_payload = {
         "event": {
@@ -3373,6 +3428,7 @@ async def _record_event(
         "continuity": committed,
         "knowledge_actor_ids": list(dict.fromkeys(knowledge_actor_ids)),
         "sync": synced,
+        "recovered": progress_recovered,
     }
 
 

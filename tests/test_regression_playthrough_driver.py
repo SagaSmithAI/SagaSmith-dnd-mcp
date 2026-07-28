@@ -8486,6 +8486,124 @@ def test_record_event_preserves_prior_scene_events_in_same_run() -> None:
     }
 
 
+def test_record_event_replays_after_later_scene_events_without_resubmitting_old_state() -> None:
+    source_ref = {
+        "module_id": "module-1",
+        "scene_id": "scene-1",
+        "chunk_id": "chunk-1",
+        "page_start": 7,
+        "page_end": 7,
+        "heading_path": ["Dungeon", "Crane"],
+        "content_sha256": "abc",
+    }
+    occurrence_id = _occurrence_identity("route-area9", "record-event")
+    event_key = regression_playthrough._token(f"run-1:{occurrence_id}", length=24)
+    event_record = {
+        "occurrence_id": occurrence_id,
+        "event_type": "dungeon_traversal",
+        "summary": "The party descended the fixed ladder.",
+        "source_ref": source_ref,
+    }
+
+    class Client:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        async def core(self, tool_id: str, arguments: dict):
+            raise AssertionError(("recovered event must not query a mutation revision", tool_id))
+
+        async def domain(self, tool_id: str, arguments: dict):
+            self.calls.append(tool_id)
+            if tool_id == "module_query" and arguments["view"] == "scene":
+                return {
+                    "module_id": "module-1",
+                    "scene_id": "scene-1",
+                    "content": "A wooden ladder is lashed to the ledge.",
+                    "locations": [{"key": "9-crane"}],
+                }
+            if tool_id == "module_query" and arguments["view"] == "progress":
+                return [
+                    {
+                        "scene_id": "scene-1",
+                        "progress": 100,
+                        "state_version": 9,
+                        "state": {
+                            "full_playthrough_events": {
+                                event_key: deepcopy(event_record),
+                                "later-event": {
+                                    "occurrence_id": "later-event",
+                                    "event_type": "portal_activated",
+                                    "summary": "The party activated the portal.",
+                                    "source_ref": source_ref,
+                                },
+                            }
+                        },
+                    }
+                ]
+            if tool_id == "branch_query":
+                return [{"id": "branch-1", "is_current": True}]
+            if tool_id == "campaign_event":
+                assert arguments == {
+                    "campaign_id": "campaign-1",
+                    "action": "list",
+                    "payload": {"limit": 1000, "branch_id": "branch-1"},
+                }
+                return [
+                    {
+                        "id": "event-1",
+                        "event_type": "dungeon_traversal",
+                        "summary": "The party descended the fixed ladder.",
+                        "payload": {
+                            "scene_id": "scene-1",
+                            "source_scene_id": "scene-1",
+                            "location_key": "9-crane",
+                            "occurrence_id": occurrence_id,
+                            "source_excerpt": "A wooden ladder is lashed to the ledge.",
+                            "source_ref": source_ref,
+                            "agent_ruling": None,
+                        },
+                    }
+                ]
+            if tool_id == "playthrough_manifest":
+                assert arguments == {
+                    "campaign_id": "campaign-1",
+                    "action": "get",
+                }
+                return {
+                    "manifest": {"status": "in_progress"},
+                    "campaign_revision": 12,
+                }
+            if tool_id in {"module_set_progress", "memory_change"}:
+                raise AssertionError(("recovered event must not mutate", tool_id))
+            raise AssertionError((tool_id, arguments))
+
+    client = Client()
+    result = asyncio.run(
+        _record_event(
+            client,
+            campaign_id="campaign-1",
+            run_id="run-1",
+            occurrence_id="route-area9",
+            scene_id="scene-1",
+            location_key="9-crane",
+            source_excerpt="A wooden ladder is lashed to the ledge.",
+            source_ref=source_ref,
+            event_type="dungeon_traversal",
+            summary="The party descended the fixed ladder.",
+            knowledge="The ladder provides a safe descent.",
+            knowledge_actor_ids=["actor-1"],
+            progress_percent=None,
+            defer_checkpoint=True,
+        )
+    )
+
+    assert result["recovered"] is True
+    assert result["continuity"]["recovered"] is True
+    assert result["progress"]["state_version"] == 9
+    assert "module_set_progress" not in client.calls
+    assert "memory_change" not in client.calls
+
+
 @pytest.mark.parametrize("defer_checkpoint", [False, True])
 def test_record_outcome_commits_facts_then_syncs_manifest_and_checkpoint(
     defer_checkpoint: bool,
