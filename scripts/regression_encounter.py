@@ -304,6 +304,15 @@ def _arguments() -> argparse.Namespace:
     )
     parser.add_argument("--source-surprised-actor-id", action="append", default=[])
     parser.add_argument(
+        "--source-surprise-report",
+        type=Path,
+        help=(
+            "Passed public record-event or record-outcome report containing the exact "
+            "source_ref and source_excerpt that grant --source-surprised-actor-id; use "
+            "when the surprise grant is cited in a different scene from the encounter"
+        ),
+    )
+    parser.add_argument(
         "--source-condition-json",
         action="append",
         type=json.loads,
@@ -1429,6 +1438,7 @@ def _source_declared_surprise(
     hostile_ids: list[str],
     surprised_actor_ids: list[str],
     source_excerpt: str,
+    source_evidence: dict[str, Any] | None = None,
 ) -> tuple[dict[str, bool], dict[str, Any]]:
     participants = [*party_ids, *hostile_ids]
     normalized = [str(item).strip() for item in surprised_actor_ids]
@@ -1443,14 +1453,67 @@ def _source_declared_surprise(
             "source-declared surprise requires unique participant actor ids "
             "and an exact source excerpt"
         )
-    return (
-        {actor_id: actor_id in normalized for actor_id in participants},
-        {
-            "mode": "source_declared_surprise",
-            "surprised_actor_ids": normalized,
-            "source_excerpt": source_excerpt.strip(),
-        },
-    )
+    basis = {
+        "mode": "source_declared_surprise",
+        "surprised_actor_ids": normalized,
+        "source_excerpt": source_excerpt.strip(),
+    }
+    if source_evidence is not None:
+        basis["source_evidence"] = deepcopy(source_evidence)
+    return {actor_id: actor_id in normalized for actor_id in participants}, basis
+
+
+def _source_surprise_evidence_from_report(
+    path: Path,
+    *,
+    campaign_id: str,
+) -> dict[str, Any]:
+    """Read exact surprise evidence already committed through public play tools."""
+
+    report = _read_report(path)
+    result = dict(report.get("result") or {})
+    scene = dict(result.get("scene") or {})
+    continuity = dict(result.get("continuity") or {})
+    event = dict(continuity.get("event") or {})
+    payload = dict(event.get("payload") or {})
+    source_ref = scene.get("source_ref")
+    source_excerpt = str(payload.get("source_excerpt") or "").strip()
+    source_scene_id = str(payload.get("source_scene_id") or payload.get("scene_id") or "")
+    required_source_ref_fields = {
+        "module_id",
+        "scene_id",
+        "chunk_id",
+        "page_start",
+        "page_end",
+        "heading_path",
+        "content_sha256",
+    }
+    if (
+        report.get("passed") is not True
+        or report.get("action") not in {"record-event", "record-outcome"}
+        or report.get("campaign_id") != campaign_id
+        or not isinstance(source_ref, dict)
+        or set(source_ref) != required_source_ref_fields
+        or payload.get("source_ref") != source_ref
+        or not source_excerpt
+        or not source_scene_id
+        or str(source_ref.get("scene_id") or "") != source_scene_id
+        or not str(event.get("event_type") or "")
+        or not str(event.get("summary") or "")
+    ):
+        raise ValueError(
+            "source surprise report must be a passed public source-bound "
+            "record-event or record-outcome for this campaign"
+        )
+    return {
+        "report_path": str(path.expanduser().resolve()),
+        "action": str(report["action"]),
+        "event_id": str(event.get("id") or ""),
+        "event_type": str(event["event_type"]),
+        "summary": str(event["summary"]),
+        "source_ref": deepcopy(source_ref),
+        "source_excerpt": source_excerpt,
+    }
 
 
 def _surprise_from_party_stealth_reports(
@@ -4077,6 +4140,11 @@ async def _start(
             "--party-stealth-check-report, and --source-surprised-actor-id "
             "are mutually exclusive"
         )
+    source_surprise_report = getattr(args, "source_surprise_report", None)
+    if source_surprise_report is not None and not args.source_surprised_actor_id:
+        raise ValueError(
+            "--source-surprise-report requires --source-surprised-actor-id"
+        )
     if args.no_surprise:
         surprise = {actor_id: False for actor_id in [*party_ids, *initial_hostile_ids]}
         surprise_basis = {
@@ -4135,11 +4203,24 @@ async def _start(
         )
         expected_revision = campaign["revision"]
     elif args.source_surprised_actor_id:
+        source_surprise_evidence = (
+            _source_surprise_evidence_from_report(
+                source_surprise_report,
+                campaign_id=args.campaign_id,
+            )
+            if source_surprise_report is not None
+            else None
+        )
         surprise, surprise_basis = _source_declared_surprise(
             party_ids=party_ids,
             hostile_ids=initial_hostile_ids,
             surprised_actor_ids=args.source_surprised_actor_id,
-            source_excerpt=str(args.source_excerpt or ""),
+            source_excerpt=(
+                str(source_surprise_evidence["source_excerpt"])
+                if source_surprise_evidence is not None
+                else str(args.source_excerpt or "")
+            ),
+            source_evidence=source_surprise_evidence,
         )
         expected_revision = campaign["revision"]
     else:

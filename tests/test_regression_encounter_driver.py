@@ -86,6 +86,7 @@ from scripts.regression_encounter import (
     _source_save_activities,
     _source_separation_target,
     _source_separations,
+    _source_surprise_evidence_from_report,
     _source_surrender_outcome,
     _source_target_priorities,
     _source_traits,
@@ -2960,6 +2961,73 @@ def test_source_declared_surprise_marks_only_cited_participants() -> None:
     assert surprise == {"pc-1": False, "pc-2": False, "iarno": True}
     assert basis["mode"] == "source_declared_surprise"
     assert basis["surprised_actor_ids"] == ["iarno"]
+
+
+def test_source_surprise_report_preserves_cross_scene_exact_evidence(
+    tmp_path,
+) -> None:
+    source_ref = {
+        "module_id": "module-1",
+        "scene_id": "source-scene",
+        "chunk_id": "chunk-1",
+        "page_start": 46,
+        "page_end": 46,
+        "heading_path": ["Crypt of Diderius"],
+        "content_sha256": "a" * 64,
+    }
+    report_path = tmp_path / "surprise-event.json"
+    report_path.write_text(
+        json.dumps(
+            {
+                "action": "record-event",
+                "campaign_id": "campaign-1",
+                "passed": True,
+                "result": {
+                    "scene": {
+                        "scene_id": "source-scene",
+                        "source_scene_id": "source-scene",
+                        "source_ref": source_ref,
+                    },
+                    "continuity": {
+                        "event": {
+                            "id": "event-1",
+                            "event_type": "source_boon_transition",
+                            "summary": "Diderius opens the way and grants surprise.",
+                            "payload": {
+                                "scene_id": "source-scene",
+                                "source_scene_id": "source-scene",
+                                "source_ref": source_ref,
+                                "source_excerpt": (
+                                    "The party gains a surprise round to act against "
+                                    "the guards there."
+                                ),
+                            },
+                        }
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    evidence = _source_surprise_evidence_from_report(
+        report_path,
+        campaign_id="campaign-1",
+    )
+    surprise, basis = _source_declared_surprise(
+        party_ids=["pc-1"],
+        hostile_ids=["guard-1", "guard-2"],
+        surprised_actor_ids=["guard-1", "guard-2"],
+        source_excerpt=evidence["source_excerpt"],
+        source_evidence=evidence,
+    )
+
+    assert surprise == {"pc-1": False, "guard-1": True, "guard-2": True}
+    assert basis["source_evidence"]["source_ref"] == source_ref
+    assert basis["source_evidence"]["event_id"] == "event-1"
+    assert basis["source_excerpt"] == (
+        "The party gains a surprise round to act against the guards there."
+    )
 
 
 def test_source_declared_conditions_are_scoped_to_cited_participants() -> None:
