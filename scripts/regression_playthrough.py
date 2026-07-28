@@ -2371,6 +2371,7 @@ async def _advance_scene(
     reachable_scene_ids: list[str],
     excluded_scenes: list[dict[str, Any]],
     occurrence_scene_id: str = "",
+    location_key: str = "",
 ) -> dict[str, Any]:
     scene_identity = _occurrence_identity(occurrence_id, "advance-scene")
     if not all((scene_id, source_scene_id, source_excerpt)):
@@ -2417,6 +2418,20 @@ async def _advance_scene(
         source_ref,
         excerpt=source_excerpt,
     )
+    scene_locations = {
+        str(item.get("key") or "") for item in _scene_locations(scene) if item.get("key")
+    }
+    selected_location_key = location_key.strip()
+    if selected_location_key and selected_location_key not in scene_locations:
+        raise ValueError("advance-scene location is not present in the target Scene Atlas")
+    progress_rows = await client.domain(
+        "module_query",
+        {"campaign_id": campaign_id, "view": "progress"},
+    )
+    progress_before = next(
+        (item for item in progress_rows if item.get("scene_id") == scene_id),
+        None,
+    )
     current_scene_id = str(dict(manifest.get("current") or {}).get("scene_id") or "")
     transitions = deepcopy(
         dict(dict(manifest.get("world_state") or {}).get("scene_transitions") or {})
@@ -2428,13 +2443,22 @@ async def _advance_scene(
         "source_ref": exact_ref,
     }
     existing_transition = transitions.get(scene_identity)
+    progress_state = deepcopy(dict((progress_before or {}).get("state") or {}))
+    progress_entries = deepcopy(
+        dict(progress_state.get("full_playthrough_scene_entries") or {})
+    )
+    existing_progress_transition = progress_entries.get(scene_identity)
     exact_retry = existing_transition == transition_record and current_scene_id == scene_id
+    interrupted_retry = (
+        existing_progress_transition == transition_record and current_scene_id == scene_id
+    )
     initial_scene_selection = (
         not current_scene_id and transition_from_scene_id == scene_id and not transitions
     )
     if (
         current_scene_id != transition_from_scene_id
         and not exact_retry
+        and not interrupted_retry
         and not initial_scene_selection
     ):
         raise ValueError(
@@ -2444,6 +2468,50 @@ async def _advance_scene(
     if existing_transition is not None and existing_transition != transition_record:
         raise ValueError(
             "advance-scene occurrence id already exists with different transition evidence"
+        )
+    if (
+        existing_progress_transition is not None
+        and existing_progress_transition != transition_record
+    ):
+        raise ValueError(
+            "advance-scene occurrence id already exists in SceneProgress with "
+            "different transition evidence"
+        )
+    if existing_progress_transition == transition_record:
+        progress_result = deepcopy(progress_before)
+    else:
+        progress_entries[scene_identity] = transition_record
+        current_progress = _scene_progress_percent(progress_before)
+        current_status = str((progress_before or {}).get("status") or "")
+        progress_result = await client.domain(
+            "module_set_progress",
+            {
+                "campaign_id": campaign_id,
+                "scene_id": scene_id,
+                "status": (
+                    "completed" if current_status == "completed" else "active"
+                ),
+                "progress": (
+                    100 if current_status == "completed" else max(current_progress, 1)
+                ),
+                "state": {
+                    **progress_state,
+                    "full_playthrough_scene_entries": progress_entries,
+                },
+                "current_location_key": (
+                    selected_location_key
+                    or str((progress_before or {}).get("current_location_key") or "")
+                    or None
+                ),
+                "expected_state_version": int(
+                    (progress_before or {}).get("state_version", 0) or 0
+                ),
+                "idempotency_key": _mutation_key(
+                    run_id,
+                    "scene-transition-progress",
+                    scene_identity,
+                ),
+            },
         )
     transitions[scene_identity] = transition_record
     manifest["world_state"] = {
@@ -2488,7 +2556,7 @@ async def _advance_scene(
     manifest["status"] = (
         "in_progress" if manifest["status"] in {"ready", "in_progress"} else manifest["status"]
     )
-    return await _manifest_mutation(
+    replaced = await _manifest_mutation(
         client,
         campaign_id=campaign_id,
         action="replace",
@@ -2496,6 +2564,10 @@ async def _advance_scene(
         identity=f"advance-scene:{scene_identity}",
         payload={"manifest": manifest},
     )
+    return {
+        **replaced,
+        "scene_progress": progress_result,
+    }
 
 
 async def _branch_from_snapshot(
@@ -10711,6 +10783,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     reachable_scene_ids=args.reachable_scene_id,
                     excluded_scenes=args.excluded_scene_json,
                     occurrence_scene_id=args.occurrence_scene_id,
+                    location_key=args.location_key,
                 )
             elif args.action == "branch-from-snapshot":
                 report["result"] = await _branch_from_snapshot(

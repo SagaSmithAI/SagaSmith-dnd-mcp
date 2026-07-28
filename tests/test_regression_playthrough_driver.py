@@ -309,6 +309,8 @@ def test_advance_scene_identity_supports_exact_retry_and_later_revisit() -> None
                 "objective": "Leave.",
             }
             self.replace_calls: list[dict] = []
+            self.progress: dict | None = None
+            self.progress_calls: list[dict] = []
 
         async def core(self, tool_id: str, arguments: dict):
             assert tool_id == "campaign_query"
@@ -316,6 +318,8 @@ def test_advance_scene_identity_supports_exact_retry_and_later_revisit() -> None
 
         async def domain(self, tool_id: str, arguments: dict):
             if tool_id == "module_query":
+                if arguments["view"] == "progress":
+                    return [deepcopy(self.progress)] if self.progress is not None else []
                 requested_scene_id = arguments["payload"]["scene_id"]
                 if requested_scene_id == "scene-old":
                     return {
@@ -343,6 +347,19 @@ def test_advance_scene_identity_supports_exact_retry_and_later_revisit() -> None
                     "scene_id": "scene-town",
                     "title": "Town",
                 }
+            if tool_id == "module_set_progress":
+                self.progress_calls.append(deepcopy(arguments))
+                self.progress = {
+                    "scene_id": arguments["scene_id"],
+                    "scope_id": "party",
+                    "status": arguments["status"],
+                    "progress": arguments["progress"],
+                    "state": deepcopy(arguments["state"]),
+                    "current_room": "",
+                    "current_location_key": arguments.get("current_location_key") or "",
+                    "state_version": len(self.progress_calls),
+                }
+                return deepcopy(self.progress)
             if tool_id == "playthrough_manifest" and arguments["action"] == "get":
                 return {
                     "manifest": deepcopy(self.manifest),
@@ -383,12 +400,16 @@ def test_advance_scene_identity_supports_exact_retry_and_later_revisit() -> None
         client.replace_calls[0]["payload"]["manifest"]
         == client.replace_calls[1]["payload"]["manifest"]
     )
+    assert len(client.progress_calls) == 1
+    assert client.progress_calls[0]["expected_state_version"] == 0
 
     client.manifest["world_state"]["visit_marker"] = 2
     client.manifest["current"]["scene_id"] = "scene-old"
     asyncio.run(advance(client, "town-visit-2"))
     revisit_key = client.replace_calls[2]["idempotency_key"]
     assert revisit_key != first_key
+    assert len(client.progress_calls) == 2
+    assert client.progress_calls[1]["expected_state_version"] == 1
     assert client.manifest["world_state"]["scene_transitions"] == {
         "town-visit-1": {
             "from_scene_id": "scene-old",
@@ -434,6 +455,151 @@ def test_advance_scene_identity_supports_exact_retry_and_later_revisit() -> None
         "source_excerpt": "The survivors carry the Stone to Town.",
         "source_ref": citation_ref,
     }
+    assert len(client.progress_calls) == 3
+
+
+def test_advance_scene_recovers_when_progress_commits_before_manifest() -> None:
+    source_excerpt = "The council summons the heroes back to Waterdeep."
+    source_ref = {
+        "module_id": "module-2",
+        "scene_id": "scene-citation",
+        "chunk_id": "chunk-transition",
+        "page_start": 20,
+        "page_end": 20,
+        "heading_path": ["Episode 1", "Starting the Adventure"],
+        "content_sha256": "b" * 64,
+    }
+
+    class Client:
+        def __init__(self) -> None:
+            self.revision = 4
+            self.failed_once = False
+            self.current_scene_id = "scene-old"
+            self.progress: dict | None = None
+            self.manifest = new_playthrough_manifest(
+                run_id="run-1",
+                campaign_line_id="line-1",
+                module_ids=["module-1", "module-2"],
+                recommended_party_minimum=None,
+                recommended_party_maximum=None,
+                selected_party_size=None,
+                source_refs=[_manifest_source_ref()],
+            )
+            self.manifest["current"] = {
+                "module_id": "module-1",
+                "chapter_id": "chapter-1",
+                "chapter_title": "Chapter",
+                "scene_id": "scene-old",
+                "scene_title": "Old scene",
+                "objective": "Finish the first volume.",
+            }
+
+        async def core(self, tool_id: str, arguments: dict):
+            assert tool_id == "campaign_query"
+            return {"result": {"id": "campaign-1", "revision": self.revision}}
+
+        async def domain(self, tool_id: str, arguments: dict):
+            if tool_id == "module_query" and arguments["view"] == "progress":
+                return [deepcopy(self.progress)] if self.progress is not None else []
+            if tool_id == "module_query":
+                requested = arguments["payload"]["scene_id"]
+                if requested == "scene-old":
+                    return {
+                        "module_id": "module-1",
+                        "chapter_id": "chapter-1",
+                        "chapter": "Chapter",
+                        "scene_id": requested,
+                        "title": "Old scene",
+                        "content": "The first volume ends.",
+                    }
+                if requested == "scene-citation":
+                    return {
+                        "module_id": "module-2",
+                        "chapter_id": "chapter-2",
+                        "chapter": "Episode 1",
+                        "scene_id": requested,
+                        "title": "Starting the Adventure",
+                        "content": source_excerpt,
+                    }
+                assert requested == "scene-new"
+                return {
+                    "module_id": "module-2",
+                    "chapter_id": "chapter-2",
+                    "chapter": "Episode 1",
+                    "scene_id": requested,
+                    "title": "Back in Waterdeep",
+                    "spatial": {
+                        "locations": [
+                            {"key": "back-in-waterdeep", "title": "Back in Waterdeep"}
+                        ]
+                    },
+                }
+            if tool_id == "module_set_progress":
+                self.progress = {
+                    "scene_id": arguments["scene_id"],
+                    "status": arguments["status"],
+                    "progress": arguments["progress"],
+                    "state": deepcopy(arguments["state"]),
+                    "current_location_key": arguments["current_location_key"],
+                    "state_version": 1,
+                }
+                self.current_scene_id = arguments["scene_id"]
+                return deepcopy(self.progress)
+            if tool_id == "playthrough_manifest" and arguments["action"] == "get":
+                projected = deepcopy(self.manifest)
+                if self.current_scene_id == "scene-new":
+                    projected["current"] = {
+                        "module_id": "module-2",
+                        "chapter_id": "chapter-2",
+                        "chapter_title": "Episode 1",
+                        "scene_id": "scene-new",
+                        "scene_title": "Back in Waterdeep",
+                        "objective": projected["current"]["objective"],
+                    }
+                return {"manifest": projected, "campaign_revision": self.revision}
+            if tool_id == "playthrough_manifest" and arguments["action"] == "replace":
+                if not self.failed_once:
+                    self.failed_once = True
+                    raise RuntimeError("response lost after SceneProgress commit")
+                self.manifest = deepcopy(arguments["payload"]["manifest"])
+                self.revision += 1
+                return {
+                    "manifest": deepcopy(self.manifest),
+                    "campaign_revision": self.revision,
+                }
+            raise AssertionError((tool_id, arguments))
+
+    async def advance(client: Client) -> dict:
+        return await _advance_scene(
+            client,
+            campaign_id="campaign-1",
+            run_id="run-1",
+            occurrence_id="continue-volume-2",
+            scene_id="scene-new",
+            source_scene_id="scene-citation",
+            source_excerpt=source_excerpt,
+            source_ref=source_ref,
+            objective="Attend the council.",
+            mark_visited=True,
+            reachable_scene_ids=[],
+            excluded_scenes=[],
+            occurrence_scene_id="scene-old",
+            location_key="back-in-waterdeep",
+        )
+
+    client = Client()
+    with pytest.raises(RuntimeError, match="response lost"):
+        asyncio.run(advance(client))
+    result = asyncio.run(advance(client))
+
+    assert result["manifest"]["current"]["scene_id"] == "scene-new"
+    assert result["scene_progress"]["state_version"] == 1
+    assert (
+        result["manifest"]["world_state"]["scene_transitions"]["continue-volume-2"][
+            "from_scene_id"
+        ]
+        == "scene-old"
+    )
 
 
 def test_core_relock_driver_requires_current_checkpoint_and_public_profile() -> None:
@@ -9192,6 +9358,8 @@ def test_start_play_uses_public_quality_gate_phase_and_scene_tools() -> None:
             if tool_id == "branch_query":
                 return [{"id": "branch-1", "is_current": True}]
             if tool_id == "module_query":
+                if arguments["view"] == "progress":
+                    return []
                 return {
                     "module_id": "module-1",
                     "scene_id": "scene-1",
@@ -9199,6 +9367,15 @@ def test_start_play_uses_public_quality_gate_phase_and_scene_tools() -> None:
                     "chapter": "Chapter 1",
                     "title": "Opening",
                     "content": source_excerpt,
+                }
+            if tool_id == "module_set_progress":
+                return {
+                    "scene_id": "scene-1",
+                    "status": "active",
+                    "progress": 1,
+                    "state": deepcopy(arguments["state"]),
+                    "current_location_key": "",
+                    "state_version": 1,
                 }
             raise AssertionError((tool_id, arguments))
 
