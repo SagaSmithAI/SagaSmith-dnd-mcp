@@ -15583,7 +15583,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             source_ref,
             allow_legacy_without_manifest=True,
         )
-        audit_source = f"{normalized_source_ref}: {normalized_reason}"
         branch_id = require_current_branch(current.campaign_id, None)
         mutation_payload = {
             "class_name": class_name,
@@ -15630,7 +15629,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             class_name=class_name,
             hp_method=hp_method,
             hp_per_level_bonus=int(context["hp_per_level_bonus"]),
-            source=audit_source,
+            source=f"{class_name} level {old_level + 1}",
+            source_ref=normalized_source_ref,
+            reason=normalized_reason,
         )
         applied["subclass_spell_grants"] = refresh_level_unlocked_subclass_spells(
             current.campaign_id,

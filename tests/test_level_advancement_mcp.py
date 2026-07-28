@@ -2137,6 +2137,7 @@ def test_lobby_level_advance_is_source_bound_and_reports_catalog_follow_up(
             },
         )
         assert plan["follow_up"]["prepared_spell_event"] is None
+        long_source_ref = "module:chapter-1:" + ("indexed-source-" * 25)
         arguments = {
             "character_id": actor["id"],
             "action": "level_advance",
@@ -2144,7 +2145,7 @@ def test_lobby_level_advance_is_source_bound_and_reports_catalog_follow_up(
                 "class_name": "Cleric",
                 "hp_method": "fixed",
                 "reason": "survived the opening encounter",
-                "source_ref": "module:chapter-1",
+                "source_ref": long_source_ref,
             },
             "expected_revision": actor["revision"],
             "idempotency_key": "level-2",
@@ -2160,6 +2161,10 @@ def test_lobby_level_advance_is_source_bound_and_reports_catalog_follow_up(
         assert sheet["combat"]["hp"] == {"value": 7, "max": 21, "temp": 0}
         assert [item["value"] for item in sheet["combat"]["hp_progression"]] == [12, 9]
         assert sum(item["value"] for item in sheet["combat"]["hp_progression"]) == 21
+        hp_gain = sheet["combat"]["hp_progression"][-1]
+        assert hp_gain["source"] == "Cleric level 2"
+        assert hp_gain["source_ref"] == long_source_ref
+        assert hp_gain["reason"] == "survived the opening encounter"
         assert sheet["spellcasting"]["spell_slots"]["1"]["value"] == 1
         assert sheet["spellcasting"]["spell_slots"]["1"]["max"] == 3
         assert advanced["advancement"]["hp_bonus_sources"][0]["amount"] == 1
