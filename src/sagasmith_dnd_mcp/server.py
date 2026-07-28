@@ -50,10 +50,14 @@ from sagasmith_core import (
 )
 from sagasmith_core.access import CAMPAIGN_DM_ROLES, LOCAL_SYSTEM_PRINCIPAL_ID
 from sagasmith_core.idempotency import request_hash
+from sagasmith_core.integrity import canonical_json
 from sagasmith_core.modules import MarkdownModuleParser, canonical_heading_path
 from sagasmith_core.rule_packs import RulePackError, RulesetUnavailableError, content_checksum
 from sagasmith_core.systems import SystemRegistry
-from sagasmith_core.visibility import PLAYER_OWNED_ACTOR_DISCLOSURE_SCOPES
+from sagasmith_core.visibility import (
+    PLAYER_MODULE_VISIBILITY_SCOPES,
+    PLAYER_OWNED_ACTOR_DISCLOSURE_SCOPES,
+)
 from sagasmith_dnd.abilities import ABILITY_IDS
 from sagasmith_dnd.ability_generation import (
     apply_ability_generation,
@@ -62,6 +66,7 @@ from sagasmith_dnd.ability_generation import (
     roll_ability_scores,
 )
 from sagasmith_dnd.activities import ActivityError, consume_activity
+from sagasmith_dnd.actor_types import NON_PLAYER_CHARACTER_TYPES
 from sagasmith_dnd.campaign_state import (
     merge_reviewed_campaign_settings,
     merge_reviewed_campaign_state,
@@ -92,6 +97,8 @@ from sagasmith_dnd.character_schema import (
 )
 from sagasmith_dnd.chase_engine import (
     CHASE_BOUNDARY_IDS,
+    CHASE_MANUAL_OUTCOME_STATUSES,
+    ChaseManualOutcomeStatus,
     advance_chase_turn,
     current_chase_participant,
     end_chase,
@@ -149,6 +156,7 @@ from sagasmith_dnd.combat_engine import (
     trigger_readied_spell,
 )
 from sagasmith_dnd.conditions import (
+    INCAPACITATING_STATE_IDS,
     STANDARD_BINARY_CONDITION_IDS,
     apply_condition_change,
     condition_ids,
@@ -215,6 +223,10 @@ from sagasmith_dnd.random_stream import (
     use_random_stream,
 )
 from sagasmith_dnd.rule_engine import (
+    AGENT_RULING_KIND_ORDER,
+    EXTERNAL_RULING_KIND_ORDER,
+    EXTERNAL_RULING_KINDS,
+    RULING_KINDS,
     ResolutionContext,
     RuleCompilationError,
     RuleEventRulingRequiredError,
@@ -223,6 +235,7 @@ from sagasmith_dnd.rule_engine import (
     context_with_facts,
     core_receipts,
     resolution_context,
+    rule_event_ruling_kind,
     run_mechanic_tests,
     validate_source_bound_mechanics,
 )
@@ -243,6 +256,7 @@ from sagasmith_dnd.spell_resolution import (
 from sagasmith_dnd.spells import (
     CORE_MAGIC_ITEM_LAST_CHARGE_MECHANIC_ID,
     CORE_MAGIC_ITEM_RECHARGE_MECHANIC_ID,
+    SLOT_PAYMENT_ECONOMIES,
     available_shield_attack_defenses,
     available_shield_magic_missile_defenses,
     consume_magic_item_spell_cast,
@@ -270,6 +284,12 @@ from sagasmith_dnd.statblocks import (
     source_save_effect_spec,
 )
 from sagasmith_dnd.system import DND5E
+from sagasmith_dnd.vocabulary import (
+    DENOMINATION_CP_VALUES,
+    DENOMINATIONS,
+    INVENTORY_OWNER_SCOPES,
+    PLAYER_GAMEPLAY_VISIBILITY_SCOPES,
+)
 from sqlalchemy.exc import NoResultFound
 
 from sagasmith_dnd_mcp.config import McpConfig
@@ -315,23 +335,21 @@ _SOURCE_EVIDENCE_TRANSLATION = str.maketrans(
         "\u2014": "-",
     }
 )
+MANAGED_MODULE_SOURCE_FIELDS = frozenset(
+    {"module_id", "scene_id", "chunk_id", "content_sha256"}
+)
+EXACT_MODULE_SOURCE_FIELD_ORDER = (
+    "module_id",
+    "scene_id",
+    "chunk_id",
+    "page_start",
+    "page_end",
+    "heading_path",
+    "content_sha256",
+)
+EXACT_MODULE_SOURCE_FIELDS = frozenset(EXACT_MODULE_SOURCE_FIELD_ORDER)
+PENDING_RULE_RESULT_STATUSES = frozenset({"pending_choice", "pending_ruling"})
 
-AGENT_RULING_KINDS = (
-    "agent_dm_adjudication",
-    "source_or_scene_fact",
-    "descriptive_activity",
-    "generic_spell_effect",
-    "ready_release_effect",
-    "environmental_consequence",
-    "module_specific_procedure",
-)
-EXTERNAL_RULING_INPUT_KINDS = (
-    "player_owned_choice",
-    "owner_approval",
-    "permission_escalation",
-    "missing_or_conflicting_source_review",
-)
-RULING_KINDS = frozenset((*AGENT_RULING_KINDS, *EXTERNAL_RULING_INPUT_KINDS))
 AGENT_RULING_TRANSACTION_RULES = (
     "inspect_existing_payment_before_settlement",
     "do_not_pay_twice",
@@ -347,8 +365,8 @@ def _agent_ruling_policy() -> dict[str, Any]:
 
     return {
         "default_dm_resolver": "agent",
-        "agent_adjudicates": list(AGENT_RULING_KINDS),
-        "requires_external_input": list(EXTERNAL_RULING_INPUT_KINDS),
+        "agent_adjudicates": list(AGENT_RULING_KIND_ORDER),
+        "requires_external_input": list(EXTERNAL_RULING_KIND_ORDER),
         "transaction_rules": list(AGENT_RULING_TRANSACTION_RULES),
     }
 
@@ -358,7 +376,7 @@ def _ruling_resolution_for_kind(ruling_kind: str) -> dict[str, Any]:
 
     if ruling_kind not in RULING_KINDS:
         ruling_kind = "agent_dm_adjudication"
-    if ruling_kind in EXTERNAL_RULING_INPUT_KINDS:
+    if ruling_kind in EXTERNAL_RULING_KINDS:
         return {
             "default_resolver": "external_input",
             "ruling_kind": ruling_kind,
@@ -368,7 +386,7 @@ def _ruling_resolution_for_kind(ruling_kind: str) -> dict[str, Any]:
         "default_resolver": "agent",
         "ruling_kind": ruling_kind,
         "policy_ref": "server_capabilities.ruling_policy",
-        "requires_external_input_only_for": list(EXTERNAL_RULING_INPUT_KINDS),
+        "requires_external_input_only_for": list(EXTERNAL_RULING_KIND_ORDER),
     }
 
 
@@ -434,7 +452,7 @@ def _pending_result_ruling_kind(
             collect(value.get(field))
         nested_result = value.get("result")
         if isinstance(nested_result, dict) and (
-            nested_result.get("status") in {"pending_choice", "pending_ruling"}
+            nested_result.get("status") in PENDING_RULE_RESULT_STATUSES
             or any(
                 field in nested_result
                 for field in (
@@ -449,11 +467,12 @@ def _pending_result_ruling_kind(
             collect(nested_result)
 
     collect(result)
-    external = [kind for kind in EXTERNAL_RULING_INPUT_KINDS if kind in kinds]
-    if external:
-        return external[0]
-    agent = [kind for kind in AGENT_RULING_KINDS if kind in kinds]
-    return agent[0] if agent else fallback if fallback in RULING_KINDS else "agent_dm_adjudication"
+    if kinds:
+        return rule_event_ruling_kind(
+            "pending_ruling",
+            ({"ruling_kind": kind} for kind in kinds),
+        )
+    return fallback if fallback in RULING_KINDS else "agent_dm_adjudication"
 
 
 def _facade_result(action: str, result: Any) -> dict[str, Any]:
@@ -1074,12 +1093,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     ) -> tuple[str, dict[str, Any] | None, dict[str, Any] | None]:
         """Resolve every module citation through one canonical indexed-chunk contract."""
         normalized = (
-            json.dumps(
-                value,
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
-            )
+            canonical_json(value)
             if isinstance(value, dict)
             else str(value).strip()
         )
@@ -1095,38 +1109,33 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             if allow_legacy_without_manifest and not exact_required:
                 return normalized, None, None
             raise ValueError("source_ref must be a JSON object") from exc
-        managed_fields = {
-            "module_id",
-            "scene_id",
-            "chunk_id",
-            "content_sha256",
-        }
-        exact_fields = {
-            *managed_fields,
-            "page_start",
-            "page_end",
-            "heading_path",
-        }
         if not isinstance(source, dict):
             if allow_legacy_without_manifest and not exact_required:
                 return normalized, None, None
             raise ValueError("source_ref must be a JSON object")
-        unknown_fields = sorted(set(source) - exact_fields)
+        unknown_fields = sorted(set(source) - EXACT_MODULE_SOURCE_FIELDS)
         if unknown_fields:
             raise ValueError("source_ref has unsupported fields: " + ", ".join(unknown_fields))
-        missing_managed = sorted(managed_fields - set(source))
+        missing_managed = sorted(MANAGED_MODULE_SOURCE_FIELDS - set(source))
         if missing_managed:
             if allow_legacy_without_manifest and not exact_required:
                 return normalized, None, None
-            raise ValueError("source_ref requires " + ", ".join(sorted(managed_fields)))
-        if any(not str(source.get(field) or "").strip() for field in managed_fields):
+            raise ValueError(
+                "source_ref requires " + ", ".join(sorted(MANAGED_MODULE_SOURCE_FIELDS))
+            )
+        if any(
+            not str(source.get(field) or "").strip()
+            for field in MANAGED_MODULE_SOURCE_FIELDS
+        ):
             raise ValueError("source_ref identifiers and content_sha256 must not be empty")
-        exact_only_fields = exact_fields - managed_fields
+        exact_only_fields = EXACT_MODULE_SOURCE_FIELDS - MANAGED_MODULE_SOURCE_FIELDS
         supplied_exact_fields = exact_only_fields & set(source)
         if exact_required or supplied_exact_fields:
             missing_exact = sorted(exact_only_fields - set(source))
             if missing_exact:
-                raise ValueError("source_ref requires " + ", ".join(sorted(exact_fields)))
+                raise ValueError(
+                    "source_ref requires " + ", ".join(sorted(EXACT_MODULE_SOURCE_FIELDS))
+                )
             heading_path = source["heading_path"]
             if not isinstance(heading_path, list) or any(
                 not isinstance(item, str) or not item.strip() for item in heading_path
@@ -1174,12 +1183,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "content_sha256": chunk_sha256,
         }
         return (
-            json.dumps(
-                normalized_source,
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
-            ),
+            canonical_json(normalized_source),
             normalized_source,
             expanded,
         )
@@ -1238,13 +1242,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 for index, candidate in enumerate(candidates):
                     if not isinstance(candidate, dict):
                         continue
-                    managed_fields = {
-                        "module_id",
-                        "scene_id",
-                        "chunk_id",
-                        "content_sha256",
-                    }
-                    if not (managed_fields & set(candidate)):
+                    if not (MANAGED_MODULE_SOURCE_FIELDS & set(candidate)):
                         continue
                     candidate_field = (
                         f"{item_field}[{index}]" if key == "source_refs" else item_field
@@ -1252,15 +1250,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     expected_scene_id = str(value.get("source_scene_id") or "").strip() or None
                     managed_candidate = {
                         name: candidate.get(name)
-                        for name in (
-                            "module_id",
-                            "scene_id",
-                            "chunk_id",
-                            "page_start",
-                            "page_end",
-                            "heading_path",
-                            "content_sha256",
-                        )
+                        for name in EXACT_MODULE_SOURCE_FIELD_ORDER
                     }
                     try:
                         _normalized, _source, expanded = managed_module_source_ref(
@@ -1304,15 +1294,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 raise ValueError(f"{field}.module_id is not declared by the manifest")
             managed_source = {
                 key: source_ref.get(key)
-                for key in (
-                    "module_id",
-                    "scene_id",
-                    "chunk_id",
-                    "page_start",
-                    "page_end",
-                    "heading_path",
-                    "content_sha256",
-                )
+                for key in EXACT_MODULE_SOURCE_FIELD_ORDER
             }
             try:
                 _normalized, _source, expanded = managed_module_source_ref(
@@ -1682,7 +1664,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         """Normalize actor notes and repair the legacy blank NPC summary once."""
 
         value = validate_character_notes(notes or default_character_notes())
-        if character_type in {"npc", "monster"} and not value["profile"]["summary"]:
+        if character_type in NON_PLAYER_CHARACTER_TYPES and not value["profile"]["summary"]:
             value["profile"]["summary"] = str(summary).strip() or str(name).strip()
         return validate_character_notes(value, character_type=character_type)
 
@@ -3600,7 +3582,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         payment="reaction",
                         spell_level=1,
                         casting_time="reaction",
-                        spent_slot=payment.get("economy") in {"slots", "pact_magic"},
+                        spent_slot=payment.get("economy") in SLOT_PAYMENT_ECONOMIES,
                     )
                 except CombatEngineError:
                     continue
@@ -3638,15 +3620,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if combatant is None:
             raise CombatEngineError(f"combatant not found: {target_id}")
         budget = dict(combatant.get("turn_budget") or {})
-        blocked = {
-            "dead",
-            "unconscious",
-            "stunned",
-            "incapacitated",
-            "paralyzed",
-            "petrified",
-        }
-        if int(budget.get("reaction", 0) or 0) <= 0 or blocked & {
+        if int(budget.get("reaction", 0) or 0) <= 0 or INCAPACITATING_STATE_IDS & {
             str(item).casefold() for item in combatant.get("conditions", [])
         }:
             return []
@@ -3673,7 +3647,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         payment="reaction",
                         spell_level=1,
                         casting_time="reaction",
-                        spent_slot=payment.get("economy") in {"slots", "pact_magic"},
+                        spent_slot=payment.get("economy") in SLOT_PAYMENT_ECONOMIES,
                     )
                 except CombatEngineError:
                     continue
@@ -4801,7 +4775,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "world_effects": [
                 deepcopy(effect)
                 for effect in state.get("world_effects", [])
-                if str(effect.get("visibility") or "party") in {"public", "party"}
+                if str(effect.get("visibility") or "party")
+                in PLAYER_GAMEPLAY_VISIBILITY_SCOPES
             ],
         }
         combat = combat_view(campaign_id, principal_id)
@@ -5553,8 +5528,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
 
         if not isinstance(coins, dict):
             raise ValueError("coins must be an object")
-        denominations = {"cp", "sp", "ep", "gp", "pp"}
-        unexpected_denominations = sorted(set(coins) - denominations)
+        unexpected_denominations = sorted(set(coins) - set(DENOMINATIONS))
         if unexpected_denominations:
             raise ValueError(f"coins has unsupported denominations: {unexpected_denominations}")
         normalized_coins: dict[str, int] = {}
@@ -5689,8 +5663,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
 
         if not isinstance(coins, dict):
             raise ValueError("coins must be an object")
-        denominations = {"cp", "sp", "ep", "gp", "pp"}
-        unexpected_denominations = sorted(set(coins) - denominations)
+        unexpected_denominations = sorted(set(coins) - set(DENOMINATIONS))
         if unexpected_denominations:
             raise ValueError(f"coins has unsupported denominations: {unexpected_denominations}")
         normalized_coins: dict[str, int] = {}
@@ -6466,12 +6439,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     @mcp.tool()
     def chase_end(
         campaign_id: str,
-        status: Literal[
-            "caught",
-            "destination_reached",
-            "quarry_escaped",
-            "pursuers_abandoned",
-        ],
+        status: ChaseManualOutcomeStatus,
         summary: str,
         source_ref: dict[str, Any],
         source_excerpt: str,
@@ -8624,12 +8592,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "structured trigger facts, and an explicit Agent-as-DM decision"
                 )
             try:
-                encoded_trigger_facts = json.dumps(
-                    trigger_facts,
-                    ensure_ascii=False,
-                    sort_keys=True,
-                    separators=(",", ":"),
-                )
+                encoded_trigger_facts = canonical_json(trigger_facts)
             except (TypeError, ValueError) as exc:
                 raise CombatEngineError(
                     "conditional extra-damage trigger facts must be JSON values"
@@ -10060,7 +10023,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     payment="reaction",
                     spell_level=1,
                     casting_time="reaction",
-                    spent_slot=cast_payment.get("economy") in {"slots", "pact_magic"},
+                    spent_slot=cast_payment.get("economy") in SLOT_PAYMENT_ECONOMIES,
                 )
                 spell_result = consume_shield_reaction(
                     target["sheet"],
@@ -10086,7 +10049,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     spell_level=1,
                     payment="reaction",
                     casting_time="reaction",
-                    spent_slot=cast_payment.get("economy") in {"slots", "pact_magic"},
+                    spent_slot=cast_payment.get("economy") in SLOT_PAYMENT_ECONOMIES,
                     cast_level=cast_level,
                 )
             elif defense_kind != "armor_class_bonus":
@@ -10598,7 +10561,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 payment="reaction",
                 spell_level=1,
                 casting_time="reaction",
-                spent_slot=payment.get("economy") in {"slots", "pact_magic"},
+                spent_slot=payment.get("economy") in SLOT_PAYMENT_ECONOMIES,
             )
             next_encounter = pay_activity_activation(
                 next_encounter,
@@ -10631,7 +10594,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 spell_level=1,
                 payment="reaction",
                 casting_time="reaction",
-                spent_slot=payment.get("economy") in {"slots", "pact_magic"},
+                spent_slot=payment.get("economy") in SLOT_PAYMENT_ECONOMIES,
                 cast_level=cast_level,
             )
             resolution["shielded_target_ids"] = sorted(
@@ -10932,7 +10895,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             source_item_id=source_item_id,
             rules=rules,
         )
-        if applied.get("status") in {"pending_choice", "pending_ruling"}:
+        if applied.get("status") in PENDING_RULE_RESULT_STATUSES:
             return {
                 **_ruling_status(
                     applied["status"],
@@ -10991,7 +10954,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             )
 
         spell_level = int(spell_entry.get("level", 0) or 0)
-        spent_slot = applied["payment"].get("economy") in {"slots", "pact_magic"}
+        spent_slot = applied["payment"].get("economy") in SLOT_PAYMENT_ECONOMIES
         require_combat_spell_turn_legal(
             encounter,
             actor_id=actor_id,
@@ -11603,7 +11566,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             if item.get("id") == spell_id
         )
         spell_level = int(spell_entry.get("level", 0) or 0)
-        spent_slot = applied["payment"].get("economy") in {"slots", "pact_magic"}
+        spent_slot = applied["payment"].get("economy") in SLOT_PAYMENT_ECONOMIES
         require_combat_spell_turn_legal(
             encounter,
             actor_id=actor_id,
@@ -12458,7 +12421,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             )
         except ActivityError as exc:
             raise CombatEngineError(str(exc)) from exc
-        if applied.get("status") in {"pending_choice", "pending_ruling"}:
+        if applied.get("status") in PENDING_RULE_RESULT_STATUSES:
             return {
                 **_ruling_status(
                     applied["status"],
@@ -16164,7 +16127,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             source_item_id=source_item_id,
             rules=rules,
         )
-        if applied.get("status") in {"pending_choice", "pending_ruling"}:
+        if applied.get("status") in PENDING_RULE_RESULT_STATUSES:
             return {
                 **_ruling_status(
                     applied["status"],
@@ -16885,7 +16848,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             )
         except ActivityError as exc:
             raise ValueError(str(exc)) from exc
-        if applied.get("status") in {"pending_choice", "pending_ruling"}:
+        if applied.get("status") in PENDING_RULE_RESULT_STATUSES:
             return {
                 **_ruling_status(
                     applied["status"],
@@ -19247,7 +19210,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         index = modules.scene_index(campaign_id, module_id=module_id)
         if membership.role in CAMPAIGN_DM_ROLES:
             return index
-        return [item for item in index if item.get("visibility", "keeper") in {"public", "party"}]
+        return [
+            item
+            for item in index
+            if item.get("visibility", "keeper") in PLAYER_MODULE_VISIBILITY_SCOPES
+        ]
 
     @mcp.tool()
     def module_expand(
@@ -19257,7 +19224,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         result = modules.expand(chunk_id)
         membership = access.require_campaign(result["campaign_id"], principal_id)
         visibility = result.get("scene", {}).get("visibility", "keeper")
-        if membership.role in CAMPAIGN_DM_ROLES or visibility in {"public", "party"}:
+        if membership.role in CAMPAIGN_DM_ROLES or visibility in PLAYER_MODULE_VISIBILITY_SCOPES:
             return result
         return {
             "chunk_id": result["chunk_id"],
@@ -19606,7 +19573,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         membership = access.require_campaign(campaign_id, principal_id)
         result = modules.read_scene(campaign_id, scene_id, scope_id=scope_id)
         visibility = result.get("visibility", "keeper")
-        if membership.role in CAMPAIGN_DM_ROLES or visibility in {"public", "party"}:
+        if membership.role in CAMPAIGN_DM_ROLES or visibility in PLAYER_MODULE_VISIBILITY_SCOPES:
             return result
         return {
             "campaign_id": campaign_id,
@@ -19788,7 +19755,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         result = modules.current_scene(campaign_id, scope_id=resolved_scope_id)
         if result is None or membership.role in CAMPAIGN_DM_ROLES:
             return result
-        if result.get("visibility", "keeper") in {"public", "party"}:
+        if result.get("visibility", "keeper") in PLAYER_MODULE_VISIBILITY_SCOPES:
             return result
         return {
             "campaign_id": campaign_id,
@@ -19917,7 +19884,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         return [
             asdict(hit)
             for hit in hits
-            if hit.metadata.get("visibility", "keeper") in {"public", "party"}
+            if hit.metadata.get("visibility", "keeper") in PLAYER_MODULE_VISIBILITY_SCOPES
         ]
 
     @mcp.tool()
@@ -20539,20 +20506,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if review_mode == "agent_text":
             evidence_identity = ",".join(str(item) for item in evidence_chunk_ids or [])
             review_identity = f"{review_identity}:{review_mode}:{evidence_identity}"
-            exclusions_identity = json.dumps(
-                evidence_exclusions,
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
-            )
+            exclusions_identity = canonical_json(evidence_exclusions)
             review_identity = f"{review_identity}:evidence-exclusions:{exclusions_identity}"
         if agent_fill is not None:
-            fill_identity = json.dumps(
-                agent_fill,
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
-            )
+            fill_identity = canonical_json(agent_fill)
             review_identity = f"{review_identity}:agent-fill:{fill_identity}"
         if derived_from_review_id is not None:
             review_identity = f"{review_identity}:derived-from:{derived_from_review_id}"
@@ -22299,13 +22256,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         """Validate an explicit coin payment without inventing currency exchange or change."""
         if not isinstance(payment, dict):
             raise ValueError("spellbook copy selection.payment must be a coin object")
-        multipliers = {"cp": 1, "sp": 10, "ep": 50, "gp": 100, "pp": 1000}
-        unknown = set(payment) - set(multipliers)
+        unknown = set(payment) - set(DENOMINATION_CP_VALUES)
         if unknown:
             raise ValueError(f"spellbook copy payment has unknown coins: {sorted(unknown)}")
         normalized: dict[str, int] = {}
         total_cp = 0
-        for denomination, multiplier in multipliers.items():
+        for denomination, multiplier in DENOMINATION_CP_VALUES.items():
             amount = payment.get(denomination, 0)
             if isinstance(amount, bool) or not isinstance(amount, int) or amount < 0:
                 raise ValueError("spellbook copy coin amounts must be non-negative integers")
@@ -22346,7 +22302,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if authoritative_phase(campaign_id) != PROFILE_PLAY:
             raise CombatEngineError("spellbook copying is available only during play")
         source_owner = str(selection.get("source_owner") or "party").strip().casefold()
-        if source_owner not in {"party", "character"}:
+        if source_owner not in INVENTORY_OWNER_SCOPES:
             raise ValueError("spellbook copy source_owner must be party or character")
         source_item_id = str(selection.get("source_item_id") or "").strip()
         if not source_item_id:
@@ -22419,7 +22375,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         minutes = (base_minutes * time_percent + 99) // 100
         hours = minutes / 60
         payment_owner = str(selection.get("payment_owner") or "character").strip().casefold()
-        if payment_owner not in {"party", "character"}:
+        if payment_owner not in INVENTORY_OWNER_SCOPES:
             raise ValueError("spellbook copy payment_owner must be party or character")
         payment_wallet = (
             next_state["party"]["inventory"]["wallet"]
@@ -24658,12 +24614,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 ),
             )
             status = data["status"]
-            if status not in {
-                "caught",
-                "destination_reached",
-                "quarry_escaped",
-                "pursuers_abandoned",
-            }:
+            if status not in CHASE_MANUAL_OUTCOME_STATUSES:
                 raise ValueError(
                     "payload.status must be caught, destination_reached, "
                     "quarry_escaped, or pursuers_abandoned"
@@ -25868,11 +25819,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             ]
             notes = default_character_notes()
             notes["profile"]["summary"] = role
-            notes["profile"]["dm_notes"] = "sagasmith:narrative-npc-source:" + json.dumps(
-                evidence,
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
+            notes["profile"]["dm_notes"] = (
+                "sagasmith:narrative-npc-source:" + canonical_json(evidence)
             )
             character = character_create(
                 name,
@@ -26000,7 +25948,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 variant,
             )
             character_type = str(data.get("character_type") or "monster")
-            if character_type not in {"npc", "monster"}:
+            if character_type not in NON_PLAYER_CHARACTER_TYPES:
                 raise ValueError(
                     "reviewed rule statblock import creates only npc or monster actors"
                 )
@@ -26144,7 +26092,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 variant,
             )
             character_type = str(data.get("character_type") or "monster")
-            if character_type not in {"npc", "monster"}:
+            if character_type not in NON_PLAYER_CHARACTER_TYPES:
                 raise ValueError("module statblock import creates only npc or monster actors")
             notes = source_bound_statblock_notes(
                 data=data,
@@ -26330,7 +26278,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 variant,
             )
             character_type = str(data.get("character_type") or "npc")
-            if character_type not in {"npc", "monster"}:
+            if character_type not in NON_PLAYER_CHARACTER_TYPES:
                 raise ValueError("statblock import creates only npc or monster actors")
             notes = source_bound_statblock_notes(
                 data=data,

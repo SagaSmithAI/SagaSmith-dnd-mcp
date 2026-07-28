@@ -10,10 +10,13 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
+from sagasmith_core.access import CAMPAIGN_DM_ROLES
+
 PROFILE_LOBBY = "lobby"
 PROFILE_PLAY = "play"
 PROFILE_COMBAT = "combat"
 PROFILES = (PROFILE_LOBBY, PROFILE_PLAY, PROFILE_COMBAT)
+CAMPAIGN_DM_ROLE_ORDER = tuple(sorted(CAMPAIGN_DM_ROLES))
 
 
 def campaign_phase(state: Mapping[str, Any] | None) -> str:
@@ -117,7 +120,7 @@ TOOL_GROUPS = (
         "state_revision",
         "campaign_rules",
         "playthrough_manifest",
-        roles=("owner", "dm"),
+        roles=CAMPAIGN_DM_ROLE_ORDER,
     ),
     _group(
         "lobby.characters",
@@ -157,7 +160,7 @@ TOOL_GROUPS = (
         "rule_search",
         "rule_expand",
         "campaign_rules",
-        roles=("owner", "dm"),
+        roles=CAMPAIGN_DM_ROLE_ORDER,
     ),
     _group(
         "lobby.modules",
@@ -171,7 +174,7 @@ TOOL_GROUPS = (
         "module_set_progress",
         "module_search",
         "module_expand",
-        roles=("owner", "dm"),
+        roles=CAMPAIGN_DM_ROLE_ORDER,
     ),
     _group(
         "lobby.memory",
@@ -192,7 +195,7 @@ TOOL_GROUPS = (
         "memory_change",
         "memory_query",
         "actor_knowledge_change",
-        roles=("owner", "dm"),
+        roles=CAMPAIGN_DM_ROLE_ORDER,
     ),
     _group(
         "lobby.storage_admin",
@@ -235,7 +238,7 @@ TOOL_GROUPS = (
         "state_revision",
         "campaign_rules",
         "playthrough_manifest",
-        roles=("owner", "dm"),
+        roles=CAMPAIGN_DM_ROLE_ORDER,
     ),
     _group(
         "play.characters",
@@ -272,7 +275,7 @@ TOOL_GROUPS = (
         "Start a structured encounter from reviewed canonical actors and scene evidence.",
         "write",
         "combat_start",
-        roles=("owner", "dm"),
+        roles=CAMPAIGN_DM_ROLE_ORDER,
     ),
     _group(
         "play.chase",
@@ -281,7 +284,7 @@ TOOL_GROUPS = (
         "Start, inspect, advance, and close a source-reviewed theater-of-the-mind chase.",
         "write",
         "chase",
-        roles=("owner", "dm"),
+        roles=CAMPAIGN_DM_ROLE_ORDER,
     ),
     _group(
         "combat.observe",
@@ -316,7 +319,7 @@ TOOL_GROUPS = (
         "write",
         "combat_join",
         "combat_end",
-        roles=("owner", "dm"),
+        roles=CAMPAIGN_DM_ROLE_ORDER,
     ),
     _group(
         "combat.actions",
@@ -349,7 +352,7 @@ TOOL_GROUPS = (
         "snapshot_query",
         "snapshot_restore",
         "playthrough_manifest",
-        roles=("owner", "dm"),
+        roles=CAMPAIGN_DM_ROLE_ORDER,
     ),
     _group(
         "combat.maintenance",
@@ -358,7 +361,7 @@ TOOL_GROUPS = (
         "Relock only the built-in Core after an explicit checkpointed runtime upgrade.",
         "admin",
         "campaign_rules",
-        roles=("owner", "dm"),
+        roles=CAMPAIGN_DM_ROLE_ORDER,
     ),
     _group(
         "combat.map",
@@ -367,7 +370,7 @@ TOOL_GROUPS = (
         "Patch the temporary combat map created for the current encounter.",
         "write",
         "combat_map_patch",
-        roles=("owner", "dm"),
+        roles=CAMPAIGN_DM_ROLE_ORDER,
     ),
 )
 

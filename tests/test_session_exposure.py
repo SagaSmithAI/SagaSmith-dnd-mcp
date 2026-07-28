@@ -13,6 +13,7 @@ from mcp.client.stdio import StdioServerParameters, stdio_client
 from mcp.types import ImageContent
 from pypdf import PdfWriter
 from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
+from sagasmith_core.access import CAMPAIGN_DM_ROLES
 from sagasmith_dnd.combat_engine import NeedsRulingError
 from sagasmith_dnd.engine import roll
 from sagasmith_dnd.random_stream import (
@@ -321,6 +322,18 @@ def test_nested_pending_results_default_to_agent_and_preserve_exceptions() -> No
         )
         == "missing_or_conflicting_source_review"
     )
+    assert (
+        _pending_result_ruling_kind(
+            {
+                "status": "pending_ruling",
+                "pending": [
+                    {"ruling_kind": "missing_or_conflicting_source_review"},
+                    {"ruling_kind": "player_owned_choice"},
+                ],
+            }
+        )
+        == "player_owned_choice"
+    )
     assert _pending_result_ruling_kind({"status": "pending_ruling"}) == (
         "agent_dm_adjudication"
     )
@@ -472,6 +485,10 @@ def test_unbound_exposure_only_loads_bootstrap_or_local_admin() -> None:
 
 
 def test_phase_groups_separate_player_reads_from_dm_control() -> None:
+    assert all(
+        not group.roles or group.roles == CAMPAIGN_DM_ROLES
+        for group in GROUP_BY_ID.values()
+    )
     assert GROUP_BY_ID["lobby.memory"].roles == frozenset()
     assert GROUP_BY_ID["lobby.memory_control"].roles == frozenset({"owner", "dm"})
     assert "memory_query" not in GROUP_BY_ID["lobby.memory"].tools
