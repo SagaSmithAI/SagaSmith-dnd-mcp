@@ -466,6 +466,18 @@ def _arguments() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--agent-attack-context-json",
+        action="append",
+        type=json.loads,
+        default=[],
+        help=(
+            "Source-bound Agent-as-DM attack context with actor_id, attack_mode, "
+            "exact source_ref and source_excerpt, exactly one true advantage or "
+            "disadvantage result, decision, and ruling_reason; repeat for distinct "
+            "actors or attack modes"
+        ),
+    )
+    parser.add_argument(
         "--source-avoidance-report",
         action="append",
         type=Path,
@@ -2063,6 +2075,112 @@ def _source_attack_environments(
     return normalized
 
 
+def _agent_attack_contexts(
+    values: list[dict[str, Any]],
+    *,
+    participant_ids: list[str],
+    scene_id: str,
+    encounter_source_excerpt: str,
+) -> dict[tuple[str, str], dict[str, Any]]:
+    """Validate generic source-bound Agent rulings for attack-roll context."""
+
+    normalized: dict[tuple[str, str], dict[str, Any]] = {}
+    compact_encounter = " ".join(encounter_source_excerpt.split()).casefold()
+    allowed = {
+        "actor_id",
+        "attack_mode",
+        "advantage",
+        "disadvantage",
+        "source_ref",
+        "source_excerpt",
+        "decision",
+        "ruling_reason",
+    }
+    for index, raw in enumerate(values):
+        if not isinstance(raw, dict):
+            raise ValueError(f"Agent attack context {index} must be an object")
+        unknown = set(raw) - allowed
+        if unknown:
+            raise ValueError(
+                f"Agent attack context {index} has unsupported fields: "
+                f"{', '.join(sorted(unknown))}"
+            )
+        actor_id = str(raw.get("actor_id") or "").strip()
+        attack_mode = str(raw.get("attack_mode") or "").strip().casefold()
+        source_ref = raw.get("source_ref")
+        source_excerpt = " ".join(str(raw.get("source_excerpt") or "").split())
+        decision = " ".join(str(raw.get("decision") or "").split())
+        ruling_reason = " ".join(str(raw.get("ruling_reason") or "").split())
+        advantage = raw.get("advantage")
+        disadvantage = raw.get("disadvantage")
+        identity = (actor_id, attack_mode)
+        if (
+            actor_id not in participant_ids
+            or attack_mode not in {"melee", "ranged"}
+            or identity in normalized
+            or not isinstance(advantage, bool)
+            or not isinstance(disadvantage, bool)
+            or advantage == disadvantage
+            or not isinstance(source_ref, dict)
+            or any(
+                not str(source_ref.get(key) or "").strip()
+                for key in ("module_id", "scene_id", "chunk_id", "content_sha256")
+            )
+            or str(source_ref.get("scene_id")) != scene_id
+            or not source_excerpt
+            or source_excerpt.casefold() not in compact_encounter
+            or len(decision) < 10
+            or len(ruling_reason) < 10
+        ):
+            raise ValueError(
+                f"Agent attack context {index} requires one participant and attack "
+                "mode, exactly one true advantage state, a source_ref for the current "
+                "scene, an exact encounter excerpt, and concrete Agent reasoning"
+            )
+        application_id = (
+            "attack-context-"
+            + _token(
+                json.dumps(
+                    {
+                        "actor_id": actor_id,
+                        "attack_mode": attack_mode,
+                        "source_ref": source_ref,
+                        "source_excerpt": source_excerpt,
+                        "decision": decision,
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ),
+                length=24,
+            )
+        )
+        source_key = f"agent-ruling:{application_id}"
+        context: dict[str, Any] = {
+            "advantage": advantage,
+            "disadvantage": disadvantage,
+        }
+        if advantage:
+            context["advantage_sources"] = [source_key]
+        else:
+            context["disadvantage_sources"] = [source_key]
+        normalized[identity] = {
+            "application_id": application_id,
+            "actor_id": actor_id,
+            "attack_mode": attack_mode,
+            "context": context,
+            "agent_ruling": {
+                "default_resolver": "agent",
+                "ruling_kind": "agent_dm_adjudication",
+                "decision": decision,
+                "reason": ruling_reason,
+                "source_ref": deepcopy(source_ref),
+                "source_excerpt": source_excerpt,
+            },
+        }
+    return normalized
+
+
 def _source_avoidances(
     paths: list[Path],
     *,
@@ -3579,6 +3697,12 @@ async def _start(
         participant_ids=[*party_ids, *all_hostile_ids],
         actors=actors,
     )
+    agent_attack_contexts = _agent_attack_contexts(
+        args.agent_attack_context_json,
+        participant_ids=[*party_ids, *all_hostile_ids],
+        scene_id=str(args.scene_id or ""),
+        encounter_source_excerpt=str(args.source_excerpt or ""),
+    )
     source_casualty_pools = _source_casualty_pools(
         args.source_casualty_pool_json,
         hostile_ids=initial_hostile_ids,
@@ -3944,6 +4068,7 @@ async def _start(
         "source_save_activities": list(save_activities.values()),
         "source_contest_activities": list(contest_activities.values()),
         "source_attack_environments": list(attack_environments.values()),
+        "agent_attack_contexts": list(agent_attack_contexts.values()),
         "source_casualty_pools": list(source_casualty_pools.values()),
         "source_separations": list(source_separations.values()),
         "agent_positions": list(agent_positions.values()),
@@ -4538,6 +4663,35 @@ def _source_flee_ready(
     ) >= flee_after_damage:
         return True
     return flee_on_critical and acting_actor_id in set(critical_hit_actor_ids or set())
+
+
+def _ready_immediate_source_flee_actor_ids(
+    *,
+    flee_actor_ids: set[str],
+    actors: dict[str, dict[str, Any]],
+    already_fled_actor_ids: set[str],
+    damage_taken_by_actor: dict[str, int],
+    flee_after_damage: int,
+    critical_hit_actor_ids: set[str],
+    flee_on_critical: bool,
+) -> list[str]:
+    """Select living actors whose source retreat resolves at damage settlement."""
+
+    return sorted(
+        actor_id
+        for actor_id in flee_actor_ids
+        if actor_id not in already_fled_actor_ids
+        and actor_id in actors
+        and _hit_points(actors[actor_id]) > 0
+        and (
+            (
+                flee_after_damage > 0
+                and int(damage_taken_by_actor.get(actor_id, 0) or 0)
+                >= flee_after_damage
+            )
+            or (flee_on_critical and actor_id in critical_hit_actor_ids)
+        )
+    )
 
 
 def _validate_source_flee_configuration(
@@ -5215,6 +5369,7 @@ async def _preflight_attack(
     preferred_weapon_id: str = "",
     multiattack_option_id: str = "",
     action_context: dict[str, Any] | None = None,
+    agent_attack_contexts: dict[tuple[str, str], dict[str, Any]] | None = None,
     knock_out_target_ids: set[str] | None = None,
     agent_rulings: list[dict[str, Any]] | None = None,
     source_extra_damage_rulings: dict[str, list[dict[str, Any]]] | None = None,
@@ -5252,8 +5407,17 @@ async def _preflight_attack(
                 }
                 if target_id in knock_out_targets:
                     action["knock_out"] = True
-                if action_context:
-                    action["context"] = dict(action_context)
+                context = dict(action_context or {})
+                agent_context = dict(
+                    (agent_attack_contexts or {}).get(
+                        (str(actor["id"]), attack_mode)
+                    )
+                    or {}
+                )
+                if agent_context:
+                    context.update(dict(agent_context["context"]))
+                if context:
+                    action["context"] = context
                 if multiattack_option_id:
                     action["multiattack_option_id"] = multiattack_option_id
                 extra_damage = _source_extra_damage_action_rulings(
@@ -5690,6 +5854,12 @@ async def _auto_run(
         participant_ids=[*party_ids, *hostile_ids],
         actors=initial_actors,
     )
+    agent_attack_contexts = _agent_attack_contexts(
+        args.agent_attack_context_json,
+        participant_ids=[*party_ids, *hostile_ids],
+        scene_id=str(args.scene_id or ""),
+        encounter_source_excerpt=str(args.source_excerpt or ""),
+    )
     avoided_cells_by_actor, source_avoidance_evidence = _source_avoidances(
         args.source_avoidance_report,
         campaign_id=args.campaign_id,
@@ -5809,6 +5979,60 @@ async def _auto_run(
                 )
             )
         ]
+        ready_flee_actor_ids = _ready_immediate_source_flee_actor_ids(
+            flee_actor_ids=set(args.flee_actor_id),
+            actors=actors,
+            already_fled_actor_ids=fled_hostile_ids,
+            damage_taken_by_actor=damage_taken_by_flee_actor,
+            flee_after_damage=args.flee_after_damage,
+            critical_hit_actor_ids=critical_hit_flee_actor_ids,
+            flee_on_critical=args.flee_on_critical,
+        )
+        for fleeing_actor_id in ready_flee_actor_ids:
+            campaign = await _campaign(client, args.campaign_id)
+            escaped = await client.domain(
+                "combat_map_patch",
+                {
+                    "campaign_id": args.campaign_id,
+                    "patches": [
+                        _source_departure_patch(
+                            fleeing_actor_id,
+                            reason=str(args.flee_source_excerpt),
+                            destination_location_key=args.flee_destination_location_key,
+                        )
+                    ],
+                    "branch_id": branch["id"],
+                    "expected_revision": campaign["revision"],
+                    "idempotency_key": (
+                        "encounter-source-immediate-flee-"
+                        + _operation_token(args, fleeing_actor_id)
+                    ),
+                },
+            )
+            fled_hostile_ids.add(fleeing_actor_id)
+            turns.append(
+                {
+                    "sequence": sequence,
+                    "kind": "source_flee",
+                    "actor_id": fleeing_actor_id,
+                    "trigger": "resolved_source_threshold",
+                    "trigger_actor_id": (args.flee_trigger_defeated_actor_id or None),
+                    "trigger_defeated_count": (args.flee_after_defeated or None),
+                    "trigger_damage_taken": (
+                        damage_taken_by_flee_actor.get(fleeing_actor_id)
+                        if args.flee_after_damage
+                        else None
+                    ),
+                    "trigger_damage_threshold": (args.flee_after_damage or None),
+                    "trigger_critical_hit": (
+                        fleeing_actor_id in critical_hit_flee_actor_ids
+                        if args.flee_on_critical
+                        else None
+                    ),
+                    "source_excerpt": str(args.flee_source_excerpt).strip(),
+                    "map_patch": escaped,
+                }
+            )
         unresolved_party = [
             actor_id
             for actor_id in effective_party_ids
@@ -7077,6 +7301,7 @@ async def _auto_run(
             preferred_weapon_id=preferred_weapon_id,
             multiattack_option_id=multiattack_option_id,
             action_context=attack_context,
+            agent_attack_contexts=agent_attack_contexts,
             knock_out_target_ids=(
                 knock_out_hostile_ids if actor_id in effective_party_ids else None
             ),
@@ -7135,6 +7360,7 @@ async def _auto_run(
                     preferred_weapon_id=preferred_weapon_id,
                     multiattack_option_id=multiattack_option_id,
                     action_context=attack_context,
+                    agent_attack_contexts=agent_attack_contexts,
                     knock_out_target_ids=(
                         knock_out_hostile_ids if actor_id in effective_party_ids else None
                     ),
@@ -7393,6 +7619,7 @@ async def _auto_run(
         "source_save_activities": list(save_activities.values()),
         "source_contest_activities": list(contest_activities.values()),
         "source_attack_environments": list(attack_environments.values()),
+        "agent_attack_contexts": list(agent_attack_contexts.values()),
         "agent_preflight_rulings": agent_preflight_rulings,
         "source_avoidances": source_avoidance_evidence,
         "source_zero_hp_finisher": source_zero_hp_finisher,

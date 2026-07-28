@@ -11,6 +11,7 @@ from scripts.regression_encounter import (
     HEALING_WORD_ID,
     MAGIC_MISSILE_ID,
     EncounterRulingRequiredError,
+    _agent_attack_contexts,
     _agent_party_absences,
     _agent_positions,
     _agent_target_priorities,
@@ -46,6 +47,7 @@ from scripts.regression_encounter import (
     _prepared_actor_ids,
     _primary_hostile_source_excerpt,
     _prioritize_targets,
+    _ready_immediate_source_flee_actor_ids,
     _record_source_flee_damage,
     _reinforcement_config,
     _require_live_active_party,
@@ -100,6 +102,71 @@ PERYTON_DIVE_ATTACK = (
     "and then hits it with a melee weapon attack, the attack deals an extra 9 "
     "(2d8) damage to the target."
 )
+
+
+def test_agent_attack_contexts_bind_source_and_attack_mode() -> None:
+    excerpt = (
+        "Clever characters can lure the dragon into a narrow tunnel where it is "
+        "unable to maneuver effectively. Under such circumstances, the dragon has "
+        "disadvantage on its melee attacks."
+    )
+    source_ref = {
+        "module_id": "module-1",
+        "scene_id": "scene-1",
+        "chunk_id": "chunk-1",
+        "content_sha256": "a" * 64,
+    }
+
+    contexts = _agent_attack_contexts(
+        [
+            {
+                "actor_id": "dragon-1",
+                "attack_mode": "melee",
+                "advantage": False,
+                "disadvantage": True,
+                "source_ref": source_ref,
+                "source_excerpt": excerpt,
+                "decision": "The party lures the dragon into the narrow tunnel.",
+                "ruling_reason": "The cited room procedure explicitly applies here.",
+            }
+        ],
+        participant_ids=["dragon-1", "pc-1"],
+        scene_id="scene-1",
+        encounter_source_excerpt=excerpt,
+    )
+
+    ruling = contexts[("dragon-1", "melee")]
+    assert ruling["context"]["disadvantage"] is True
+    assert ruling["context"]["disadvantage_sources"] == [
+        f"agent-ruling:{ruling['application_id']}"
+    ]
+    assert ruling["agent_ruling"]["source_ref"] == source_ref
+
+
+def test_agent_attack_contexts_reject_unbound_or_ambiguous_modifier() -> None:
+    with pytest.raises(ValueError, match="exactly one true advantage state"):
+        _agent_attack_contexts(
+            [
+                {
+                    "actor_id": "dragon-1",
+                    "attack_mode": "melee",
+                    "advantage": False,
+                    "disadvantage": False,
+                    "source_ref": {
+                        "module_id": "module-1",
+                        "scene_id": "other-scene",
+                        "chunk_id": "chunk-1",
+                        "content_sha256": "a" * 64,
+                    },
+                    "source_excerpt": "not in the encounter",
+                    "decision": "The attack has no contextual modifier.",
+                    "ruling_reason": "This should be rejected before combat begins.",
+                }
+            ],
+            participant_ids=["dragon-1"],
+            scene_id="scene-1",
+            encounter_source_excerpt="The actual encounter excerpt.",
+        )
 
 
 def test_encounter_operation_scope_separates_consecutive_encounters() -> None:
@@ -533,6 +600,58 @@ def test_preflight_tries_a_recorded_thrown_weapon_at_range() -> None:
         "melee",
         "ranged",
     ]
+
+
+def test_preflight_applies_agent_attack_context_only_to_its_mode() -> None:
+    class Client:
+        def __init__(self) -> None:
+            self.calls: list[dict] = []
+
+        async def domain(self, tool_id: str, arguments: dict) -> dict:
+            assert tool_id == "combat_preflight_attack"
+            self.calls.append(arguments)
+            if arguments["action"]["attack_mode"] == "melee":
+                raise RuntimeError("target is beyond melee reach")
+            return {"status": "ready", **arguments["action"]}
+
+    client = Client()
+    actor = {
+        "id": "dragon-1",
+        "derived": {
+            "inventory": {
+                "weapon_attacks": [
+                    {
+                        "item_id": "spear",
+                        "attack_type": "melee",
+                        "properties": ["thrown"],
+                        "range_ft": {"normal": 20, "long": 60},
+                    }
+                ]
+            }
+        },
+    }
+    contexts = {
+        ("dragon-1", "melee"): {
+            "context": {
+                "advantage": False,
+                "disadvantage": True,
+                "disadvantage_sources": ["agent-ruling:narrow-tunnel"],
+            }
+        }
+    }
+
+    asyncio.run(
+        _preflight_attack(
+            client,
+            SimpleNamespace(campaign_id="campaign-1"),
+            actor,
+            ["pc-1"],
+            agent_attack_contexts=contexts,
+        )
+    )
+
+    assert client.calls[0]["action"]["context"]["disadvantage"] is True
+    assert "context" not in client.calls[1]["action"]
 
 
 def test_preflight_returns_agent_ruling_instead_of_misclassifying_it_as_on_hit() -> None:
@@ -1803,6 +1922,57 @@ def test_source_flee_supports_damage_or_critical_hit_thresholds() -> None:
         critical_hit_actor_ids=set(),
         flee_on_critical=True,
     )
+
+
+def test_source_flee_becomes_ready_immediately_after_another_actors_damage() -> None:
+    actors = {
+        "glazhael": {
+            "sheet": {
+                "combat": {"hp": {"value": 39}},
+                "conditions": [],
+            }
+        }
+    }
+
+    assert _ready_immediate_source_flee_actor_ids(
+        flee_actor_ids={"glazhael"},
+        actors=actors,
+        already_fled_actor_ids=set(),
+        damage_taken_by_actor={"glazhael": 161},
+        flee_after_damage=161,
+        critical_hit_actor_ids=set(),
+        flee_on_critical=False,
+    ) == ["glazhael"]
+    assert _ready_immediate_source_flee_actor_ids(
+        flee_actor_ids={"glazhael"},
+        actors=actors,
+        already_fled_actor_ids={"glazhael"},
+        damage_taken_by_actor={"glazhael": 161},
+        flee_after_damage=161,
+        critical_hit_actor_ids=set(),
+        flee_on_critical=False,
+    ) == []
+
+
+def test_immediate_source_flee_ignores_defeat_turn_triggers() -> None:
+    actors = {
+        "runner": {
+            "sheet": {
+                "combat": {"hp": {"value": 12}},
+                "conditions": [],
+            }
+        }
+    }
+
+    assert _ready_immediate_source_flee_actor_ids(
+        flee_actor_ids={"runner"},
+        actors=actors,
+        already_fled_actor_ids=set(),
+        damage_taken_by_actor={"runner": 0},
+        flee_after_damage=0,
+        critical_hit_actor_ids=set(),
+        flee_on_critical=False,
+    ) == []
 
 
 def test_source_flee_configuration_allows_authored_damage_or_critical_alternatives() -> None:
