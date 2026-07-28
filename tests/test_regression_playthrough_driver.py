@@ -6164,7 +6164,7 @@ def test_source_damage_rolls_then_damages_and_knocks_prone_through_public_tools(
 ) -> None:
     source_ref = {
         "module_id": "module-1",
-        "scene_id": "scene-1",
+        "scene_id": "source-scene-1",
         "chunk_id": "chunk-1",
         "page_start": 8,
         "page_end": 9,
@@ -6193,11 +6193,20 @@ def test_source_damage_rolls_then_damages_and_knocks_prone_through_public_tools(
             if arguments.get("idempotency_key"):
                 self.keys.append(arguments["idempotency_key"])
             if tool_id == "module_query":
+                scene_id = arguments["payload"]["scene_id"]
+                if scene_id == "scene-1":
+                    return {
+                        "module_id": "module-1",
+                        "scene_id": "scene-1",
+                        "content": "The party is crossing into the next scene.",
+                        "locations": [{"key": "3-kennel"}],
+                    }
+                assert scene_id == "source-scene-1"
                 return {
                     "module_id": "module-1",
-                    "scene_id": "scene-1",
+                    "scene_id": "source-scene-1",
                     "content": "On a result of 5 or less, the character falls.",
-                    "locations": [{"key": "3-kennel"}],
+                    "locations": [{"key": "1-entrance"}],
                 }
             if tool_id == "character_query":
                 return {
@@ -6261,6 +6270,8 @@ def test_source_damage_rolls_then_damages_and_knocks_prone_through_public_tools(
                 assert event["payload"]["half_damage"] is half_damage
                 assert event["payload"]["damage_event_id"] == "chimney-fall-1"
                 assert event["payload"]["source_ref"] == source_ref
+                assert event["payload"]["scene_id"] == "scene-1"
+                assert event["payload"]["source_scene_id"] == "source-scene-1"
                 checkpoint_deferred = defer_checkpoint and not force_zero_hp
                 assert ("snapshot" in arguments["payload"]) is not checkpoint_deferred
                 self.campaign_revision += 1
@@ -6283,6 +6294,7 @@ def test_source_damage_rolls_then_damages_and_knocks_prone_through_public_tools(
             campaign_id="campaign-1",
             run_id="run-1",
             scene_id="scene-1",
+            source_scene_id="source-scene-1",
             location_key="3-kennel",
             source_excerpt="On a result of 5 or less, the character falls.",
             source_ref=source_ref,
@@ -6310,6 +6322,8 @@ def test_source_damage_rolls_then_damages_and_knocks_prone_through_public_tools(
         assert result["checkpoint_deferred"] is defer_checkpoint
         assert ("snapshot" in result["continuity"]) is not defer_checkpoint
     assert result["knowledge_actor_ids"] == ["actor-1", "actor-2"]
+    assert result["scene"]["scene_id"] == "scene-1"
+    assert result["scene"]["source_scene_id"] == "source-scene-1"
     assert _mutation_key("run-1", "source-damage-roll", "chimney-fall-1") in client.keys
     assert _mutation_key("run-1", "source-damage", "chimney-fall-1") in client.keys
     assert _mutation_key("run-1", "source-damage-continuity", "chimney-fall-1") in client.keys

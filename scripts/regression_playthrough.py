@@ -4982,6 +4982,7 @@ async def _apply_source_damage(
     campaign_id: str,
     run_id: str,
     scene_id: str,
+    source_scene_id: str,
     location_key: str,
     source_excerpt: str,
     source_ref: dict[str, Any] | None,
@@ -5014,7 +5015,7 @@ async def _apply_source_damage(
         )
     if len(normalized_event_id) > 200:
         raise ValueError("damage event id must not exceed 200 characters")
-    scene = await client.domain(
+    current_scene = await client.domain(
         "module_query",
         {
             "campaign_id": campaign_id,
@@ -5022,8 +5023,25 @@ async def _apply_source_damage(
             "payload": {"scene_id": scene_id},
         },
     )
-    exact_ref = await _validate_source_ref(client, scene, source_ref, excerpt=source_excerpt)
-    location_keys = {str(item.get("key") or "") for item in _scene_locations(scene)}
+    cited_scene_id = source_scene_id or scene_id
+    cited_scene = (
+        current_scene
+        if cited_scene_id == scene_id
+        else await client.domain(
+            "module_query",
+            {
+                "campaign_id": campaign_id,
+                "view": "scene",
+                "payload": {"scene_id": cited_scene_id},
+            },
+        )
+    )
+    exact_ref = await _validate_source_ref(
+        client, cited_scene, source_ref, excerpt=source_excerpt
+    )
+    location_keys = {
+        str(item.get("key") or "") for item in _scene_locations(current_scene)
+    }
     if location_key not in location_keys:
         raise ValueError("apply-damage location is not present in the scene atlas")
     actor = await client.domain(
@@ -5104,6 +5122,7 @@ async def _apply_source_damage(
             "audience_scope": "party",
             "payload": {
                 "scene_id": scene_id,
+                "source_scene_id": cited_scene_id,
                 "location_key": location_key,
                 "damage_event_id": normalized_event_id,
                 "actor_id": actor_id,
@@ -5161,6 +5180,7 @@ async def _apply_source_damage(
     return {
         "scene": {
             "scene_id": scene_id,
+            "source_scene_id": cited_scene_id,
             "location_key": location_key,
             "source_ref": exact_ref,
         },
@@ -11434,10 +11454,10 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     campaign_id=args.campaign_id,
                     run_id=args.run_id,
                     scene_id=str(args.scene_id or ""),
+                    source_scene_id=args.source_scene_id,
                     location_key=args.location_key,
                     source_excerpt=args.source_excerpt,
                     source_ref=args.source_ref_json,
-                    source_scene_id=args.source_scene_id,
                     occurrence_id=args.occurrence_id,
                     actor_id=args.check_actor_id,
                     kind=args.check_kind,
@@ -11542,6 +11562,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     campaign_id=args.campaign_id,
                     run_id=args.run_id,
                     scene_id=str(args.scene_id or ""),
+                    source_scene_id=args.source_scene_id,
                     location_key=args.location_key,
                     source_excerpt=args.source_excerpt,
                     source_ref=args.source_ref_json,
