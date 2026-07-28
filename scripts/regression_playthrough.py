@@ -143,6 +143,16 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--module-title", default="")
     parser.add_argument("--module-id", default="")
     parser.add_argument(
+        "--module-progress-remap-json",
+        action="append",
+        type=json.loads,
+        default=[],
+        help=(
+            "Agent-reviewed module revision progress remap with from_scene_id, "
+            "to_scene_id, and reason; repeat for each removed progressed scene"
+        ),
+    )
+    parser.add_argument(
         "--refresh-return-phase",
         choices=("lobby", "play"),
         default="",
@@ -735,6 +745,139 @@ def _scene_progress_percent(progress: dict[str, Any] | None) -> int:
     return int(value or 0)
 
 
+def _scene_revision_signature(scene: dict[str, Any]) -> tuple[str, str, int, int]:
+    return (
+        " ".join(str(scene.get("chapter") or "").casefold().split()),
+        " ".join(str(scene.get("title") or "").casefold().split()),
+        int(scene.get("page_start", 0) or 0),
+        int(scene.get("page_end", 0) or 0),
+    )
+
+
+def _module_progress_remap_rulings(
+    validation: dict[str, Any],
+    *,
+    old_index: list[dict[str, Any]],
+    new_index: list[dict[str, Any]],
+    supplied: list[dict[str, Any]] | None = None,
+) -> list[dict[str, str]]:
+    requirements = [
+        dict(item)
+        for item in list(validation.get("ruling_requirements") or [])
+        if isinstance(item, dict)
+    ]
+    required_scene_ids = {
+        str(item.get("scene_id") or "").strip()
+        for item in requirements
+        if str(item.get("scene_id") or "").strip()
+    }
+    old_by_id = {str(item.get("scene_id") or ""): item for item in old_index}
+    new_by_id = {str(item.get("scene_id") or ""): item for item in new_index}
+    normalized_supplied: dict[str, dict[str, str]] = {}
+    for index, raw in enumerate(supplied or []):
+        if not isinstance(raw, dict):
+            raise ValueError(f"module-progress-remap-json[{index}] must be an object")
+        unknown = set(raw) - {"from_scene_id", "to_scene_id", "reason"}
+        if unknown:
+            raise ValueError(
+                f"module-progress-remap-json[{index}] has unsupported fields: "
+                + ", ".join(sorted(unknown))
+            )
+        source_scene_id = str(raw.get("from_scene_id") or "").strip()
+        target_scene_id = str(raw.get("to_scene_id") or "").strip()
+        reason = str(raw.get("reason") or "").strip()
+        if (
+            source_scene_id not in required_scene_ids
+            or source_scene_id not in old_by_id
+            or target_scene_id not in new_by_id
+        ):
+            raise ValueError(
+                f"module-progress-remap-json[{index}] must map one required old scene "
+                "to a scene in the candidate revision"
+            )
+        if not reason or len(reason) > 1000:
+            raise ValueError(
+                f"module-progress-remap-json[{index}].reason must contain 1 to 1000 characters"
+            )
+        if source_scene_id in normalized_supplied:
+            raise ValueError("module progress remaps contain duplicate from_scene_id values")
+        normalized_supplied[source_scene_id] = {
+            "from_scene_id": source_scene_id,
+            "to_scene_id": target_scene_id,
+            "reason": reason,
+        }
+    unexpected_requirements = [
+        item
+        for item in requirements
+        if (
+            not str(item.get("scene_id") or "").strip()
+            or item.get("default_resolver") != "agent"
+            or item.get("ruling_kind") != "source_or_scene_fact"
+        )
+    ]
+    if unexpected_requirements:
+        raise RegressionRulingRequiredError(
+            {
+                "status": "pending_ruling",
+                "ruling_kind": "missing_or_conflicting_source_review",
+                "reason": "module revision validation returned a non-scene remap requirement",
+                "ruling_requirements": unexpected_requirements,
+            },
+            operation="module_import.activate",
+            retry_hint="Resolve the reported review requirement before retrying the refresh.",
+        )
+    candidates_by_signature: dict[
+        tuple[str, str, int, int], list[dict[str, Any]]
+    ] = {}
+    for scene in new_index:
+        candidates_by_signature.setdefault(_scene_revision_signature(scene), []).append(scene)
+    rulings: list[dict[str, str]] = []
+    for source_scene_id in sorted(required_scene_ids):
+        supplied_ruling = normalized_supplied.get(source_scene_id)
+        if supplied_ruling is not None:
+            rulings.append(supplied_ruling)
+            continue
+        source_scene = old_by_id.get(source_scene_id)
+        matches = (
+            candidates_by_signature.get(_scene_revision_signature(source_scene), [])
+            if source_scene is not None
+            else []
+        )
+        if len(matches) != 1:
+            raise RegressionRulingRequiredError(
+                {
+                    "status": "pending_ruling",
+                    "ruling_kind": "source_or_scene_fact",
+                    "reason": (
+                        "a removed progressed scene has no unique exact "
+                        "chapter/title/page match in the candidate module revision"
+                    ),
+                    "scene_id": source_scene_id,
+                    "source_scene": deepcopy(source_scene),
+                    "candidate_scenes": [deepcopy(item) for item in matches],
+                },
+                operation="module_import.activate",
+                context={"from_scene_id": source_scene_id},
+                retry_hint=(
+                    "Inspect the candidate index and retry with "
+                    "--module-progress-remap-json."
+                ),
+            )
+        target = matches[0]
+        rulings.append(
+            {
+                "from_scene_id": source_scene_id,
+                "to_scene_id": str(target["scene_id"]),
+                "reason": (
+                    "The Agent acting as DM maps the removed progress scene to "
+                    "the candidate scene with the exact same chapter, title, "
+                    "and source page range."
+                ),
+            }
+        )
+    return rulings
+
+
 def _extend_manifest_for_module_revision(
     manifest: dict[str, Any],
     *,
@@ -742,6 +885,7 @@ def _extend_manifest_for_module_revision(
     new_module_id: str,
     old_index: list[dict[str, Any]],
     new_index: list[dict[str, Any]],
+    scene_remaps: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     value = deepcopy(manifest)
     if old_module_id not in value["module_ids"]:
@@ -758,6 +902,11 @@ def _extend_manifest_for_module_revision(
         replacement = new_by_key.get(stable_key)
         if replacement is not None:
             scene_map[scene_id] = replacement
+    new_by_id = {str(item["scene_id"]): item for item in new_index}
+    for source_scene_id, target_scene_id in dict(scene_remaps or {}).items():
+        if source_scene_id not in old_by_id or target_scene_id not in new_by_id:
+            raise ValueError("module revision scene remap references an unknown scene")
+        scene_map[source_scene_id] = new_by_id[target_scene_id]
     current_scene_id = str(value["current"].get("scene_id") or "")
     replacement = scene_map.get(current_scene_id)
     if replacement is None:
@@ -10656,6 +10805,7 @@ async def _refresh_module(
     source_key: str,
     title: str,
     return_phase: str = "",
+    progress_remaps: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     if initial_phase not in {"lobby", "play"}:
         raise RuntimeError("refresh-module cannot run during active combat")
@@ -10808,12 +10958,22 @@ async def _refresh_module(
             "payload": {"module_id": new_module_id},
         },
     )
+    progress_remap_rulings = _module_progress_remap_rulings(
+        dict(validated["validation"]),
+        old_index=old_index,
+        new_index=new_index,
+        supplied=progress_remaps,
+    )
+    progress_remap_targets = {
+        item["from_scene_id"]: item["to_scene_id"] for item in progress_remap_rulings
+    }
     refreshed_manifest = _extend_manifest_for_module_revision(
         manifest,
         old_module_id=old_module_id,
         new_module_id=new_module_id,
         old_index=old_index,
         new_index=new_index,
+        scene_remaps=progress_remap_targets,
     )
     refreshed_manifest = await _remap_ending_sources_for_module_revision(
         client,
@@ -10828,7 +10988,14 @@ async def _refresh_module(
         {
             "campaign_id": campaign_id,
             "action": "activate",
-            "payload": {"job_id": job_id},
+            "payload": {
+                "job_id": job_id,
+                **(
+                    {"progress_remaps": progress_remap_rulings}
+                    if progress_remap_rulings
+                    else {}
+                ),
+            },
             "expected_revision": campaign["revision"],
             "idempotency_key": _mutation_key(run_id, "module-refresh-activate", job_id),
         },
@@ -10894,6 +11061,7 @@ async def _refresh_module(
             "scene_count": ingested.get("scene_count"),
         },
         "activation": activated["activation"],
+        "progress_remap_rulings": progress_remap_rulings,
         "manifest": extended["manifest"],
         "phase_changes": phase_changes,
         "return_phase": target_phase,
@@ -11105,6 +11273,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                         source_key=args.module_source_key,
                         title=args.module_title,
                         return_phase=args.refresh_return_phase,
+                        progress_remaps=args.module_progress_remap_json,
                     )
                 except Exception:
                     await _restore_phase_after_failed_refresh(

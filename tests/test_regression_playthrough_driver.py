@@ -46,6 +46,7 @@ from scripts.regression_playthrough import (
     _long_rest,
     _matching_check_progress,
     _matching_contest_progress,
+    _module_progress_remap_rulings,
     _module_refresh_identity,
     _module_refresh_manifest_action,
     _module_refresh_manifest_identity,
@@ -4008,6 +4009,162 @@ def test_module_revision_extension_remaps_current_and_traversed_scenes() -> None
         "scene-v2",
     ]
     assert manifest["module_ids"] == ["module-v1"]
+
+
+def test_module_progress_remap_uses_exact_source_scene_signature() -> None:
+    rulings = _module_progress_remap_rulings(
+        {
+            "valid": True,
+            "ruling_requirements": [
+                {
+                    "scope_id": "party",
+                    "scene_id": "removed-v1",
+                    "default_resolver": "agent",
+                    "ruling_kind": "source_or_scene_fact",
+                }
+            ],
+        },
+        old_index=[
+            {
+                "scene_id": "removed-v1",
+                "stable_key": "chapter-duplicate-title",
+                "chapter": "Episode 2",
+                "title": "Episode 2",
+                "page_start": 25,
+                "page_end": 26,
+            }
+        ],
+        new_index=[
+            {
+                "scene_id": "replacement-v2",
+                "stable_key": "episode-2",
+                "chapter": "Episode 2",
+                "title": "Episode 2",
+                "page_start": 25,
+                "page_end": 26,
+            },
+            {
+                "scene_id": "next-v2",
+                "stable_key": "episode-2-next",
+                "chapter": "Episode 2",
+                "title": "Next Scene",
+                "page_start": 26,
+                "page_end": 28,
+            },
+        ],
+    )
+
+    assert rulings == [
+        {
+            "from_scene_id": "removed-v1",
+            "to_scene_id": "replacement-v2",
+            "reason": (
+                "The Agent acting as DM maps the removed progress scene to "
+                "the candidate scene with the exact same chapter, title, "
+                "and source page range."
+            ),
+        }
+    ]
+
+
+def test_module_progress_remap_requires_review_when_source_signature_is_ambiguous() -> None:
+    with pytest.raises(
+        regression_playthrough.RegressionRulingRequiredError,
+        match="returns to agent",
+    ):
+        _module_progress_remap_rulings(
+            {
+                "ruling_requirements": [
+                    {
+                        "scope_id": "party",
+                        "scene_id": "removed-v1",
+                        "default_resolver": "agent",
+                        "ruling_kind": "source_or_scene_fact",
+                    }
+                ]
+            },
+            old_index=[
+                {
+                    "scene_id": "removed-v1",
+                    "chapter": "Episode 2",
+                    "title": "Crossroads",
+                    "page_start": 25,
+                    "page_end": 25,
+                }
+            ],
+            new_index=[
+                {
+                    "scene_id": "candidate-a",
+                    "chapter": "Episode 2",
+                    "title": "Crossroads",
+                    "page_start": 25,
+                    "page_end": 25,
+                },
+                {
+                    "scene_id": "candidate-b",
+                    "chapter": "Episode 2",
+                    "title": "Crossroads",
+                    "page_start": 25,
+                    "page_end": 25,
+                },
+            ],
+        )
+
+
+def test_module_revision_extension_applies_progress_remap_to_traversal() -> None:
+    manifest = {
+        "module_ids": ["module-v1"],
+        "current": {
+            "module_id": "module-v1",
+            "chapter_id": "chapter-v1",
+            "chapter_title": "Chapter",
+            "scene_id": "current-v1",
+            "scene_title": "Current",
+        },
+        "traversal": {
+            "reachable_scene_ids": ["removed-v1", "current-v1"],
+            "visited_scene_ids": ["removed-v1", "current-v1"],
+        },
+    }
+    updated = _extend_manifest_for_module_revision(
+        manifest,
+        old_module_id="module-v1",
+        new_module_id="module-v2",
+        old_index=[
+            {"scene_id": "removed-v1", "stable_key": "removed"},
+            {"scene_id": "current-v1", "stable_key": "current"},
+        ],
+        new_index=[
+            {
+                "scene_id": "replacement-v2",
+                "stable_key": "replacement",
+                "chapter_id": "chapter-v2",
+                "chapter": "Chapter",
+                "title": "Replacement",
+            },
+            {
+                "scene_id": "current-v2",
+                "stable_key": "current",
+                "chapter_id": "chapter-v2",
+                "chapter": "Chapter",
+                "title": "Current",
+            },
+        ],
+        scene_remaps={"removed-v1": "replacement-v2"},
+    )
+
+    assert updated["traversal"]["reachable_scene_ids"] == [
+        "removed-v1",
+        "current-v1",
+        "replacement-v2",
+        "current-v2",
+    ]
+    assert updated["traversal"]["visited_scene_ids"] == [
+        "removed-v1",
+        "current-v1",
+        "replacement-v2",
+        "current-v2",
+    ]
 
 
 def test_module_revision_remaps_exact_ending_source_and_scene_check() -> None:
