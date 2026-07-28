@@ -595,8 +595,19 @@ def _arguments() -> argparse.Namespace:
         action="append",
         default=[],
         help=(
-            "Hostile to capture with the public 2014/2024 melee knockout rule; "
-            "repeat for multiple source-required prisoners"
+            "Hostile eligible for capture with the public 2014/2024 melee knockout "
+            "rule; repeat to constrain a minimum objective to selected hostiles, or "
+            "omit --minimum-hostile-knockouts to require every selected hostile"
+        ),
+    )
+    parser.add_argument(
+        "--minimum-hostile-knockouts",
+        type=int,
+        default=None,
+        help=(
+            "Agent-selected minimum number of hostiles that must finish alive and "
+            "unconscious; when no eligible hostile ids are supplied, every encounter "
+            "hostile is eligible"
         ),
     )
     parser.add_argument(
@@ -3963,6 +3974,48 @@ def _conditions(actor: dict[str, Any]) -> set[str]:
     return {str(item).casefold() for item in dict(actor.get("sheet") or {}).get("conditions", [])}
 
 
+def _knockout_objective(
+    args: argparse.Namespace,
+    *,
+    hostile_ids: list[str],
+) -> tuple[set[str], int | None]:
+    requested_values = list(getattr(args, "knock_out_hostile_id", []) or [])
+    requested = {
+        str(actor_id).strip() for actor_id in requested_values if str(actor_id).strip()
+    }
+    if len(requested) != len(requested_values) or not requested <= set(hostile_ids):
+        raise ValueError("knockout targets must be distinct encounter hostiles")
+    minimum = getattr(args, "minimum_hostile_knockouts", None)
+    if minimum is None:
+        return requested, None
+    if isinstance(minimum, bool) or not isinstance(minimum, int) or minimum <= 0:
+        raise ValueError("--minimum-hostile-knockouts must be a positive integer")
+    candidates = requested or set(hostile_ids)
+    if minimum > len(candidates):
+        raise ValueError(
+            "--minimum-hostile-knockouts cannot exceed the eligible hostile count"
+        )
+    return candidates, minimum
+
+
+def _captured_hostile_ids(
+    actors: dict[str, dict[str, Any]],
+    *,
+    candidate_ids: set[str],
+) -> set[str]:
+    captured: set[str] = set()
+    for actor_id in candidate_ids:
+        actor = actors[actor_id]
+        conditions = _conditions(actor)
+        if (
+            _hit_points(actor) == 0
+            and "unconscious" in conditions
+            and "dead" not in conditions
+        ):
+            captured.add(actor_id)
+    return captured
+
+
 def _should_stand(actor: dict[str, Any], available_actions: set[str]) -> bool:
     return _hit_points(actor) > 0 and "prone" in _conditions(actor) and "move" in available_actions
 
@@ -5502,13 +5555,10 @@ async def _auto_run(
         raise ValueError(
             "source truce actor must be an encounter hostile and require --truce-source-excerpt"
         )
-    knock_out_hostile_ids = {
-        str(actor_id).strip() for actor_id in args.knock_out_hostile_id if str(actor_id).strip()
-    }
-    if len(knock_out_hostile_ids) != len(args.knock_out_hostile_id) or not (
-        knock_out_hostile_ids <= set(hostile_ids)
-    ):
-        raise ValueError("knockout targets must be distinct encounter hostiles")
+    knock_out_hostile_ids, minimum_hostile_knockouts = _knockout_objective(
+        args,
+        hostile_ids=hostile_ids,
+    )
     opening_casts = _source_opening_casts(
         args.source_opening_cast_json,
         participant_ids=[*party_ids, *hostile_ids],
@@ -7285,15 +7335,17 @@ async def _auto_run(
     )
     final_actor_ids = [*party_ids, *hostile_ids]
     final_actor_values = await _characters(client, args.campaign_id, final_actor_ids)
-    for captured_actor_id in knock_out_hostile_ids:
-        captured_actor = final_actor_values[captured_actor_id]
-        captured_conditions = _conditions(captured_actor)
-        if (
-            _hit_points(captured_actor) > 1
-            or "unconscious" not in captured_conditions
-            or "dead" in captured_conditions
-        ):
+    captured_hostile_ids = _captured_hostile_ids(
+        final_actor_values,
+        candidate_ids=knock_out_hostile_ids,
+    )
+    if minimum_hostile_knockouts is None:
+        if captured_hostile_ids != knock_out_hostile_ids:
             raise RuntimeError("designated knockout hostile was not captured unconscious and alive")
+    elif len(captured_hostile_ids) < minimum_hostile_knockouts:
+        raise RuntimeError(
+            "encounter did not satisfy the Agent-selected minimum hostile knockout objective"
+        )
     final_actors = [
         _character_summary(final_actor_values[actor_id]) for actor_id in final_actor_ids
     ]
@@ -7368,7 +7420,9 @@ async def _auto_run(
             if surrender_configured
             else None
         ),
-        "knocked_out_hostile_ids": sorted(knock_out_hostile_ids),
+        "knock_out_candidate_ids": sorted(knock_out_hostile_ids),
+        "minimum_hostile_knockouts": minimum_hostile_knockouts,
+        "knocked_out_hostile_ids": sorted(captured_hostile_ids),
         "outcome": ended,
         "play_exposure": opened_play,
         "checkpoint": checkpoint,

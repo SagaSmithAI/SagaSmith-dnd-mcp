@@ -20,6 +20,7 @@ from scripts.regression_encounter import (
     _apply_source_separations,
     _body_thief_sides,
     _body_thief_target_ids,
+    _captured_hostile_ids,
     _character_summary,
     _characters,
     _choose_destination,
@@ -31,6 +32,7 @@ from scripts.regression_encounter import (
     _has_action_budget,
     _has_blocking_pending,
     _has_multiattack_followup,
+    _knockout_objective,
     _observable_target_ids,
     _operation_token,
     _participant_config,
@@ -268,6 +270,64 @@ def test_preflight_capture_uses_only_melee_and_declares_knockout() -> None:
     }
     assert plan["knock_out"] is True
     assert [call["action"] for call in client.calls] == [action]
+
+
+def test_knockout_objective_supports_agent_selected_minimum_without_naming_targets() -> None:
+    candidates, minimum = _knockout_objective(
+        SimpleNamespace(
+            knock_out_hostile_id=[],
+            minimum_hostile_knockouts=1,
+        ),
+        hostile_ids=["lizardfolk-1", "lizardfolk-2", "lizardfolk-3"],
+    )
+
+    assert candidates == {"lizardfolk-1", "lizardfolk-2", "lizardfolk-3"}
+    assert minimum == 1
+
+
+def test_knockout_objective_keeps_exact_target_compatibility() -> None:
+    candidates, minimum = _knockout_objective(
+        SimpleNamespace(
+            knock_out_hostile_id=["cultist-1", "cultist-2"],
+            minimum_hostile_knockouts=None,
+        ),
+        hostile_ids=["cultist-1", "cultist-2", "cultist-3"],
+    )
+
+    assert candidates == {"cultist-1", "cultist-2"}
+    assert minimum is None
+
+
+def test_knockout_objective_rejects_impossible_minimum() -> None:
+    with pytest.raises(ValueError, match="eligible hostile count"):
+        _knockout_objective(
+            SimpleNamespace(
+                knock_out_hostile_id=["cultist-1"],
+                minimum_hostile_knockouts=2,
+            ),
+            hostile_ids=["cultist-1", "cultist-2"],
+        )
+
+
+def test_captured_hostile_ids_uses_actual_public_character_state() -> None:
+    def actor(hit_points: int, *conditions: str) -> dict:
+        return {
+            "sheet": {
+                "combat": {"hp": {"value": hit_points}},
+                "conditions": list(conditions),
+            }
+        }
+
+    captured = _captured_hostile_ids(
+        {
+            "stable-1": actor(0, "prone", "stable", "unconscious"),
+            "dead-1": actor(0, "dead", "prone"),
+            "awake-1": actor(1),
+        },
+        candidate_ids={"stable-1", "dead-1", "awake-1"},
+    )
+
+    assert captured == {"stable-1"}
 
 
 def test_source_extra_damage_ruling_binds_exact_agent_passive_and_application() -> None:
