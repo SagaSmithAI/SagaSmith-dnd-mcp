@@ -89,24 +89,38 @@ def test_stable_recovery_is_rolled_atomic_idempotent_and_audited(
                 "idempotency_key": "actor",
             },
         )
+        current_campaign = await _call(
+            server,
+            "campaign_query",
+            {"view": "get", "payload": {"campaign_id": campaign["id"]}},
+        )
         arguments = {
-            "character_id": actor["id"],
+            "campaign_id": campaign["id"],
             "action": "stable_recovery",
-            "payload": {},
-            "expected_revision": actor["revision"],
+            "payload": {
+                "members": [
+                    {
+                        "character_id": actor["id"],
+                        "expected_revision": actor["revision"],
+                    }
+                ]
+            },
+            "expected_revision": current_campaign["revision"],
             "idempotency_key": "recover",
         }
 
-        recovered = await _call(server, "character_state_change", arguments)
-        replay = await _call(server, "character_state_change", arguments)
+        recovered = await _call(server, "campaign_change", arguments)
+        replay = await _call(server, "campaign_change", arguments)
 
         assert recovered["status"] == "recovered"
-        assert recovered["recovery_roll"]["expression"] == "1d4"
-        assert recovered["recovery_hours"] == 4
+        actor_recovery = recovered["recoveries"][actor["id"]]
+        assert actor_recovery["recovery_roll"]["expression"] == "1d4"
+        assert actor_recovery["recovery_hours"] == 4
         assert recovered["world_time"]["day"] == 1
         assert recovered["world_time"]["hour"] == 4
-        assert recovered["character"]["sheet"]["combat"]["hp"]["value"] == 1
-        assert recovered["character"]["sheet"]["conditions"] == ["prone"]
+        recovered_actor = recovered["characters"][actor["id"]]
+        assert recovered_actor["sheet"]["combat"]["hp"]["value"] == 1
+        assert recovered_actor["sheet"]["conditions"] == ["prone"]
         assert recovered["world_expired"] == ["recovery-light"]
         assert replay == recovered
         receipt = await _call(
@@ -283,15 +297,27 @@ def test_stable_recovery_rejects_a_healthy_actor(tmp_path: Path) -> None:
                 "idempotency_key": "actor",
             },
         )
+        current_campaign = await _call(
+            server,
+            "campaign_query",
+            {"view": "get", "payload": {"campaign_id": campaign["id"]}},
+        )
         with pytest.raises(Exception, match="Stable creature at 0"):
             await _call(
                 server,
-                "character_state_change",
+                "campaign_change",
                 {
-                    "character_id": actor["id"],
+                    "campaign_id": campaign["id"],
                     "action": "stable_recovery",
-                    "payload": {},
-                    "expected_revision": actor["revision"],
+                    "payload": {
+                        "members": [
+                            {
+                                "character_id": actor["id"],
+                                "expected_revision": actor["revision"],
+                            }
+                        ]
+                    },
+                    "expected_revision": current_campaign["revision"],
                     "idempotency_key": "recover",
                 },
             )
@@ -339,19 +365,31 @@ def test_stable_recovery_advances_unanchored_game_time(tmp_path: Path, monkeypat
                 "idempotency_key": "actor",
             },
         )
+        current_campaign = await _call(
+            server,
+            "campaign_query",
+            {"view": "get", "payload": {"campaign_id": campaign["id"]}},
+        )
 
         recovered = await _call(
             server,
-            "character_state_change",
+            "campaign_change",
             {
-                "character_id": actor["id"],
+                "campaign_id": campaign["id"],
                 "action": "stable_recovery",
-                "payload": {},
-                "expected_revision": actor["revision"],
+                "payload": {
+                    "members": [
+                        {
+                            "character_id": actor["id"],
+                            "expected_revision": actor["revision"],
+                        }
+                    ]
+                },
+                "expected_revision": current_campaign["revision"],
                 "idempotency_key": "recover",
             },
         )
-        assert recovered["recovery_hours"] == 4
+        assert recovered["recoveries"][actor["id"]]["recovery_hours"] == 4
         assert recovered["game_time"]["elapsed_ticks"] == 2400
         assert recovered["world_time"] is None
         persisted = await _call(
@@ -416,16 +454,28 @@ def test_stable_recovery_validates_character_revision_before_rolling(
                 "idempotency_key": "actor",
             },
         )
+        current_campaign = await _call(
+            server,
+            "campaign_query",
+            {"view": "get", "payload": {"campaign_id": campaign["id"]}},
+        )
 
         with pytest.raises(Exception, match="character revision conflict"):
             await _call(
                 server,
-                "character_state_change",
+                "campaign_change",
                 {
-                    "character_id": actor["id"],
+                    "campaign_id": campaign["id"],
                     "action": "stable_recovery",
-                    "payload": {},
-                    "expected_revision": actor["revision"] + 1,
+                    "payload": {
+                        "members": [
+                            {
+                                "character_id": actor["id"],
+                                "expected_revision": actor["revision"] + 1,
+                            }
+                        ]
+                    },
+                    "expected_revision": current_campaign["revision"],
                     "idempotency_key": "recover",
                 },
             )

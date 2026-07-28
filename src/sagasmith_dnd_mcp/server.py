@@ -52,6 +52,7 @@ from sagasmith_core.idempotency import request_hash
 from sagasmith_core.modules import MarkdownModuleParser
 from sagasmith_core.rule_packs import RulePackError, RulesetUnavailableError, content_checksum
 from sagasmith_core.systems import SystemRegistry
+from sagasmith_dnd.abilities import ABILITY_IDS
 from sagasmith_dnd.ability_generation import (
     apply_ability_generation,
     apply_pending_rolled_ability_generation,
@@ -59,11 +60,14 @@ from sagasmith_dnd.ability_generation import (
     roll_ability_scores,
 )
 from sagasmith_dnd.activities import ActivityError, consume_activity
+from sagasmith_dnd.campaign_state import (
+    merge_reviewed_campaign_settings,
+    merge_reviewed_campaign_state,
+)
 from sagasmith_dnd.character_import import inspect_character_document
 from sagasmith_dnd.character_schema import (
     add_effect,
     add_inventory_item,
-    add_memory,
     adjust_wallet,
     attune_inventory_item,
     consume_weapon_ammunition,
@@ -74,12 +78,12 @@ from sagasmith_dnd.character_schema import (
     receive_inventory_item,
     remove_effect,
     remove_inventory_item,
-    resolve_memory,
     set_exhaustion_level,
     set_resource_value,
     set_spell_prepared,
     update_inventory_item,
     validate_character_notes,
+    validate_character_notes_update,
     validate_character_sheet,
     validate_party_state,
     validate_world_effect,
@@ -142,6 +146,11 @@ from sagasmith_dnd.combat_engine import (
     trigger_readied_action,
     trigger_readied_spell,
 )
+from sagasmith_dnd.conditions import (
+    STANDARD_BINARY_CONDITION_IDS,
+    apply_condition_change,
+    condition_ids,
+)
 from sagasmith_dnd.consumables import HEALING_POTION_MECHANIC_ID, healing_potion_formula
 from sagasmith_dnd.content_import import (
     compiled_artifacts_from_candidates,
@@ -154,11 +163,14 @@ from sagasmith_dnd.core_content import PACK_ID as CORE_CONTENT_PACK_ID
 from sagasmith_dnd.core_content import PACK_VERSION as CORE_CONTENT_PACK_VERSION
 from sagasmith_dnd.core_content import build_srd2014_content
 from sagasmith_dnd.core_rule_pack import get_core_rule_pack
+from sagasmith_dnd.editions import normalize_dnd_edition
 from sagasmith_dnd.engine import resolve_attack, resolve_check, roll
 from sagasmith_dnd.game_time import (
+    TICKS_PER_MINUTE,
     advance_game_time,
     anchor_world_time,
     game_time_ticks,
+    rules_day_from_ticks,
 )
 from sagasmith_dnd.lifecycle import (
     advance_effect_durations,
@@ -454,16 +466,11 @@ def _needs_ruling_kind(
 ) -> str:
     """Keep source defects out of the Agent's ordinary adjudication lane."""
 
-    explicit_kind = str(
-        getattr(error, "ruling_kind", "") or "agent_dm_adjudication"
-    )
+    explicit_kind = str(getattr(error, "ruling_kind", "") or "agent_dm_adjudication")
     if explicit_kind != "agent_dm_adjudication":
         return explicit_kind
     message = str(error).casefold()
-    missing = {
-        str(item).casefold()
-        for item in getattr(error, "missing", ())
-    }
+    missing = {str(item).casefold() for item in getattr(error, "missing", ())}
     if (
         any(item.startswith(("weapon.range:", "spell.range:")) for item in missing)
         or "unresolved rules" in message
@@ -497,11 +504,7 @@ def _agent_ruling_boundary(function: _RULING_FUNCTION) -> _RULING_FUNCTION:
                 **resolution,
                 "reason": str(exc),
                 "missing": list(getattr(exc, "missing", ())),
-                **(
-                    {"ruling_requirements": requirements}
-                    if requirements
-                    else {}
-                ),
+                **({"ruling_requirements": requirements} if requirements else {}),
                 "committed": False,
                 "retry_contract": {
                     "resolver": resolution["default_resolver"],
@@ -898,14 +901,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             },
         }
 
-    def effective_rule_context(
-        campaign_id: str,
+    def effective_rule_context_from(
+        effective: Any,
+        profile: Any,
         *,
         facts: dict[str, Any] | None = None,
-        branch_id: str | None = None,
     ) -> Any:
-        """Compile the exact current branch lock for one pure runtime call."""
-        effective = rule_packs.effective_ruleset(campaign_id, branch_id=branch_id)
+        """Compile a fetched lock without introducing a second state read."""
+
         value = asdict(effective)
         enabled_pack_ids = {str(item["pack_id"]) for item in effective.lock}
         native = [
@@ -932,7 +935,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             raise RulesetUnavailableError(
                 "campaign requires an unsupported built-in core edition"
             ) from error
-        profile = rule_profiles.get(campaign_id)
         expected_core = dict((profile.options if profile else {}).get("_core_rule_pack_lock") or {})
         if not expected_core:
             raise RulesetUnavailableError(
@@ -950,9 +952,173 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             )
         return context
 
-    def effective_ruleset_view(campaign_id: str, *, branch_id: str | None = None) -> dict[str, Any]:
+    def effective_rule_context(
+        campaign_id: str,
+        *,
+        facts: dict[str, Any] | None = None,
+        branch_id: str | None = None,
+    ) -> Any:
+        """Compile the exact current branch lock for one pure runtime call."""
         effective = rule_packs.effective_ruleset(campaign_id, branch_id=branch_id)
-        context = effective_rule_context(campaign_id, branch_id=branch_id)
+        return effective_rule_context_from(
+            effective,
+            rule_profiles.get(campaign_id),
+            facts=facts,
+        )
+
+    def campaign_rules_edition(campaign_id: str) -> str:
+        """Read the sole campaign-edition authority."""
+        profile = rule_profiles.get(campaign_id)
+        if profile is not None and str(profile.edition).strip():
+            return normalize_dnd_edition(profile.edition)
+        raise RulesetUnavailableError("campaign has no authoritative rule profile")
+
+    def managed_module_source_ref(
+        campaign_id: str,
+        value: str | dict[str, Any],
+        *,
+        allow_legacy_without_manifest: bool = False,
+        require_exact: bool = False,
+        expected_scene_id: str | None = None,
+        require_active_module: bool = False,
+    ) -> tuple[str, dict[str, Any] | None, dict[str, Any] | None]:
+        """Resolve every module citation through one canonical indexed-chunk contract."""
+        normalized = (
+            json.dumps(
+                value,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            if isinstance(value, dict)
+            else str(value).strip()
+        )
+        if not normalized or len(normalized) > 8192:
+            raise ValueError("source_ref must contain 1 to 8192 characters")
+        campaign = campaigns.get(campaign_id)
+        exact_required = require_exact or isinstance(
+            dict(campaign.state or {}).get("playthrough_manifest"), dict
+        )
+        try:
+            source = json.loads(normalized)
+        except json.JSONDecodeError as exc:
+            if allow_legacy_without_manifest and not exact_required:
+                return normalized, None, None
+            raise ValueError("source_ref must be a JSON object") from exc
+        managed_fields = {
+            "module_id",
+            "scene_id",
+            "chunk_id",
+            "content_sha256",
+        }
+        exact_fields = {
+            *managed_fields,
+            "page_start",
+            "page_end",
+            "heading_path",
+        }
+        if not isinstance(source, dict):
+            if allow_legacy_without_manifest and not exact_required:
+                return normalized, None, None
+            raise ValueError("source_ref must be a JSON object")
+        unknown_fields = sorted(set(source) - exact_fields)
+        if unknown_fields:
+            raise ValueError("source_ref has unsupported fields: " + ", ".join(unknown_fields))
+        missing_managed = sorted(managed_fields - set(source))
+        if missing_managed:
+            if allow_legacy_without_manifest and not exact_required:
+                return normalized, None, None
+            raise ValueError("source_ref requires " + ", ".join(sorted(managed_fields)))
+        if any(not str(source.get(field) or "").strip() for field in managed_fields):
+            raise ValueError("source_ref identifiers and content_sha256 must not be empty")
+        exact_only_fields = exact_fields - managed_fields
+        supplied_exact_fields = exact_only_fields & set(source)
+        if exact_required or supplied_exact_fields:
+            missing_exact = sorted(exact_only_fields - set(source))
+            if missing_exact:
+                raise ValueError("source_ref requires " + ", ".join(sorted(exact_fields)))
+            heading_path = source["heading_path"]
+            if not isinstance(heading_path, list) or any(
+                not isinstance(item, str) or not item.strip() for item in heading_path
+            ):
+                raise ValueError("source_ref heading_path must be a string list")
+        expanded = modules.expand(str(source["chunk_id"]))
+        if str(expanded.get("campaign_id")) != campaign_id:
+            raise ValueError("source_ref chunk does not belong to the campaign")
+        if str(dict(expanded.get("module") or {}).get("id")) != str(source["module_id"]):
+            raise ValueError("source_ref module_id does not match its chunk")
+        if str(dict(expanded.get("scene") or {}).get("id")) != str(source["scene_id"]):
+            raise ValueError("source_ref scene_id does not match its chunk")
+        if expected_scene_id is not None and str(source["scene_id"]) != str(expected_scene_id):
+            raise ValueError("source_ref scene_id does not match the requested scene")
+        if require_active_module and str(source["module_id"]) not in {
+            str(item["id"]) for item in modules.list(campaign_id)
+        }:
+            raise ValueError("source_ref module is not active")
+        chunk_sha256 = hashlib.sha256(
+            str(expanded.get("content") or "").encode("utf-8")
+        ).hexdigest()
+        if str(source["content_sha256"]).casefold() != chunk_sha256:
+            raise ValueError("source_ref content_sha256 does not match its chunk")
+        if exact_required or supplied_exact_fields:
+            for field in ("page_start", "page_end"):
+                if source[field] != expanded.get(field):
+                    raise ValueError(f"source_ref {field} does not match its chunk")
+            if [str(item) for item in source["heading_path"]] != [
+                str(item) for item in expanded.get("heading_path") or []
+            ]:
+                raise ValueError("source_ref heading_path does not match its chunk")
+        normalized_source = {
+            "module_id": str(source["module_id"]),
+            "scene_id": str(source["scene_id"]),
+            "chunk_id": str(source["chunk_id"]),
+            **(
+                {
+                    "page_start": source["page_start"],
+                    "page_end": source["page_end"],
+                    "heading_path": [str(item) for item in source["heading_path"]],
+                }
+                if exact_required or supplied_exact_fields
+                else {}
+            ),
+            "content_sha256": chunk_sha256,
+        }
+        return (
+            json.dumps(
+                normalized_source,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+            normalized_source,
+            expanded,
+        )
+
+    def managed_module_source_excerpt(
+        expanded: dict[str, Any],
+        value: Any,
+        *,
+        field: str = "source_excerpt",
+        minimum_length: int = 1,
+        maximum_length: int = 2000,
+    ) -> str:
+        """Normalize and verify cited text against the already-resolved chunk."""
+        display = str(value or "").replace("\x02", "").replace("\u00ad", "")
+        display = " ".join(display.translate(_SOURCE_EVIDENCE_TRANSLATION).split())
+        normalized = display.casefold()
+        if not minimum_length <= len(display) <= maximum_length:
+            raise ValueError(
+                f"{field} must contain {minimum_length} to {maximum_length} characters"
+            )
+        chunk_content = _normalize_source_evidence_text(expanded.get("content"))
+        if normalized not in chunk_content:
+            raise ValueError(f"{field} is not present in its cited chunk")
+        return display
+
+    def effective_ruleset_view_from(effective: Any, profile: Any) -> dict[str, Any]:
+        """Render one already-resolved lock, including its built-in core."""
+
+        context = effective_rule_context_from(effective, profile)
         value = asdict(effective)
         value["extension_fingerprint"] = value["fingerprint"]
         value["fingerprint"] = context.fingerprint
@@ -963,6 +1129,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "fingerprint": context.core_pack.fingerprint,
         }
         return value
+
+    def effective_ruleset_view(campaign_id: str, *, branch_id: str | None = None) -> dict[str, Any]:
+        effective = rule_packs.effective_ruleset(campaign_id, branch_id=branch_id)
+        return effective_ruleset_view_from(effective, rule_profiles.get(campaign_id))
 
     def save_rule_pack_draft(
         *,
@@ -1273,6 +1443,20 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "revision": character.revision,
         }
 
+    def canonical_character_notes(
+        notes: dict[str, Any] | None,
+        *,
+        character_type: str,
+        name: str,
+        summary: str = "",
+    ) -> dict[str, Any]:
+        """Normalize actor notes and repair the legacy blank NPC summary once."""
+
+        value = validate_character_notes(notes or default_character_notes())
+        if character_type in {"npc", "monster"} and not value["profile"]["summary"]:
+            value["profile"]["summary"] = str(summary).strip() or str(name).strip()
+        return validate_character_notes(value, character_type=character_type)
+
     def library_character_view(character: Any, principal_id: str) -> dict[str, Any]:
         """Keep reusable sheets usable without exposing campaign-less private notes."""
         if principal_id == "system:local":
@@ -1416,8 +1600,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             ):
                 if _has_source_defined_positional_targeting(attack_item.get("description")):
                     reason = (
-                        f"{attack_name}: source-defined positional targeting "
-                        "requires a DM ruling"
+                        f"{attack_name}: source-defined positional targeting requires a DM ruling"
                     )
                 else:
                     reason = f"{attack_name}: ranged weapon range is missing"
@@ -1572,7 +1755,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             if kind == "rule-chunk":
                 expanded = rules.expand(identifier)
                 rule_source = rules.source(str(expanded["source"]["id"]))
-                campaign_edition = str(campaigns.get(campaign_id).settings.get("edition") or "2024")
+                campaign_edition = campaign_rules_edition(campaign_id)
                 if str(rule_source.get("system_id") or "") != "dnd5e":
                     raise ValueError("statblock variant rule chunk must belong to D&D")
                 if str(rule_source.get("edition") or "") != campaign_edition:
@@ -1655,9 +1838,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "weapon_id": str(item.get("id") or ""),
                     "name": str(item.get("name") or ""),
                     "attack_type": str(mechanics.get("attack_type") or "melee"),
-                    "properties": sorted(
-                        str(value) for value in mechanics.get("properties") or []
-                    ),
+                    "properties": sorted(str(value) for value in mechanics.get("properties") or []),
                 }
             )
         return {
@@ -1669,9 +1850,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "multiattack_options": [
                 {
                     "activity_id": str(activity.get("id") or ""),
-                    "source_excerpt": " ".join(
-                        str(activity.get("description") or "").split()
-                    ),
+                    "source_excerpt": " ".join(str(activity.get("description") or "").split()),
                 }
                 for activity in activities
             ],
@@ -1692,17 +1871,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             )
         declarations = agent_fill.get("multiattack_options")
         if not isinstance(declarations, list):
-            raise ValueError(
-                "reviewed statblock Agent fill must contain multiattack_options"
-            )
-        expected_ids = {
-            str(item["activity_id"])
-            for item in requirements["multiattack_options"]
-        }
+            raise ValueError("reviewed statblock Agent fill must contain multiattack_options")
+        expected_ids = {str(item["activity_id"]) for item in requirements["multiattack_options"]}
         submitted_ids = {
-            str(item.get("activity_id") or "")
-            for item in declarations
-            if isinstance(item, dict)
+            str(item.get("activity_id") or "") for item in declarations if isinstance(item, dict)
         }
         if submitted_ids != expected_ids or len(declarations) != len(expected_ids):
             raise ValueError(
@@ -1760,7 +1932,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "settlement": (
                 "automatic"
                 if not requirements
-                else "source_review_required" if has_source_review else "mixed"
+                else "source_review_required"
+                if has_source_review
+                else "mixed"
             ),
             "ruling_requirements": requirements,
             "default_dm_resolver": "agent",
@@ -1806,13 +1980,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if not idempotency_key:
             raise ValueError("replacement statblock actor requires idempotency_key")
         if name != existing.name:
-            raise ValueError(
-                "replacement statblock must preserve the existing actor name"
-            )
+            raise ValueError("replacement statblock must preserve the existing actor name")
         if summary != str(existing.summary or ""):
-            raise ValueError(
-                "replacement statblock must preserve the existing actor summary"
-            )
+            raise ValueError("replacement statblock must preserve the existing actor summary")
         return update_character(
             existing,
             operation="character.statblock.replace",
@@ -2030,7 +2200,22 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         encounter = dict(campaign.state or {}).get("combat")
         if not isinstance(encounter, dict) or not encounter.get("active", False):
             raise CombatEngineError("combat is not active")
+        encounter_rules_edition(campaign_id, encounter)
         return campaign, encounter
+
+    def encounter_rules_edition(
+        campaign_id: str,
+        encounter: dict[str, Any],
+    ) -> str:
+        """Verify the immutable encounter projection against the campaign profile."""
+
+        authoritative = campaign_rules_edition(campaign_id)
+        projected = str(encounter.get("ruleset") or "")
+        if not projected:
+            raise RuntimeError("active encounter has no ruleset projection")
+        if projected != authoritative:
+            raise RuntimeError("active encounter ruleset diverges from the campaign rule profile")
+        return authoritative
 
     def require_encounter_combatant(
         encounter: dict[str, Any], actor_id: str, *, role: str = "actor"
@@ -2192,18 +2377,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         normalized_rulings = [
             deepcopy(item)
             for item in result.get("rulings") or []
-            if not (
-                isinstance(item, dict)
-                and item.get("kind") == supported_kind
-            )
+            if not (isinstance(item, dict) and item.get("kind") == supported_kind)
         ]
         application_ids: set[str] = set()
         feature_ids: set[str] = set()
         features = [
             dict(item)
-            for item in dict(attacker.get("sheet") or {})
-            .get("content", {})
-            .get("features", [])
+            for item in dict(attacker.get("sheet") or {}).get("content", {}).get("features", [])
             if isinstance(item, dict)
         ]
 
@@ -2251,9 +2431,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 raise CombatEngineError(
                     "source conditional extra-damage feature is absent from the attacker card"
                 )
-            manual_ruling = dict(
-                dict(feature.get("choices") or {}).get("manual_ruling") or {}
-            )
+            manual_ruling = dict(dict(feature.get("choices") or {}).get("manual_ruling") or {})
             recorded_excerpt = str(manual_ruling.get("source_excerpt") or "").strip()
 
             def compact(value: Any) -> str:
@@ -2280,8 +2458,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 is None
             ):
                 raise CombatEngineError(
-                    "source conditional extra-damage expression is absent from "
-                    "the recorded passive"
+                    "source conditional extra-damage expression is absent from the recorded passive"
                 )
             resolved_damage_type = (
                 str(result.get("damage_type") or "").strip().casefold()
@@ -2414,13 +2591,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         ):
                             effect["active"] = False
                             effect["ended_reason"] = "host_zero_hit_points"
-                    sheet["conditions"] = sorted(
-                        {
-                            *(str(item).casefold() for item in sheet.get("conditions", [])),
-                            "dead",
-                        }
-                        - {"unconscious", "stable", "stunned", "incapacitated"}
-                    )
+                    for condition in ("unconscious", "stable", "stunned", "incapacitated"):
+                        apply_condition_change(sheet, condition_id=condition, add=False)
+                    apply_condition_change(sheet, condition_id="dead", add=True)
                     encounter["log"] = [
                         *list(encounter.get("log") or []),
                         {
@@ -3754,6 +3927,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         operation: str,
         sheet: dict[str, Any] | None = None,
         notes: dict[str, Any] | None = None,
+        name: str | None = None,
+        player_name: str | None = None,
+        summary: str | None = None,
         principal_id: str = "system:local",
         expected_revision: int | None = None,
         idempotency_key: str | None = None,
@@ -3767,7 +3943,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             return {"character": character, **response_extra}
 
         if before.campaign_id is None:
-            updated = characters.update(before.id, sheet=sheet, notes=notes)
+            updated = characters.update(
+                before.id,
+                sheet=sheet,
+                notes=notes,
+                name=name,
+                player_name=player_name,
+                summary=summary,
+                expected_revision=expected_revision,
+            )
             record_character_revision(before, updated, operation)
             return response_for(character_view(updated))
         if expected_revision is None or not idempotency_key:
@@ -3784,30 +3968,131 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         replay = replay_idempotent(scope, idempotency_key, request_payload)
         if replay is not None:
             return replay
+        normalized_sheet = validate_character_sheet(sheet if sheet is not None else before.sheet)
+        normalized_notes = (
+            validate_character_notes_update(
+                before.notes,
+                canonical_character_notes(
+                    notes,
+                    character_type=before.character_type,
+                    name=name if name is not None else before.name,
+                    summary=summary if summary is not None else before.summary,
+                ),
+                character_type=before.character_type,
+            )
+            if notes is not None
+            else canonical_character_notes(
+                before.notes,
+                character_type=before.character_type,
+                name=name if name is not None else before.name,
+                summary=summary if summary is not None else before.summary,
+            )
+        )
+        response = response_for(
+            character_view(
+                replace(
+                    before,
+                    name=name if name is not None else before.name,
+                    player_name=(player_name if player_name is not None else before.player_name),
+                    summary=summary if summary is not None else before.summary,
+                    sheet=normalized_sheet,
+                    notes=normalized_notes,
+                    revision=before.revision + 1,
+                )
+            )
+        )
+        stream = active_random_stream()
+        if stream is not None and stream.draw_count > 0:
+            response = deepcopy(response)
+            response.setdefault("random_stream_receipt", stream.receipt())
         StateMutationService(storage.database).replace(
             before.campaign_id,
             character_updates=[
                 CharacterStateUpdate(
                     character_id=before.id,
-                    sheet=validate_character_sheet(sheet if sheet is not None else before.sheet),
-                    notes=validate_character_notes(notes if notes is not None else before.notes),
+                    sheet=normalized_sheet,
+                    notes=normalized_notes,
                     expected_revision=expected_revision,
+                    name=name,
+                    player_name=player_name,
+                    summary=summary,
                 )
             ],
             operation=operation,
             actor=principal_id,
             branch_id=branch_id,
             idempotency_key=idempotency_key,
+            idempotency_write=IdempotencyWrite(
+                scope=scope,
+                payload=request_payload,
+                response=response,
+            ),
             rule_receipts=rule_receipts,
         )
-        response = response_for(character_view(characters.get(before.id)))
-        return remember_idempotent(
-            scope,
-            idempotency_key,
-            request_payload,
-            response,
-            campaign_id=before.campaign_id,
+        return response
+
+    def commit_campaign_state(
+        campaign: Any,
+        campaign_state: dict[str, Any] | None,
+        *,
+        operation: str,
+        principal_id: str,
+        branch_id: str,
+        idempotency_key: str,
+        scope: str,
+        payload: dict[str, Any],
+        response_fields: dict[str, Any],
+        character_updates: list[CharacterStateUpdate] | None = None,
+        actor_knowledge_transfers: list[ActorKnowledgeTransfer] | None = None,
+        rule_receipts: list[dict[str, Any]] | None = None,
+        include_campaign_revision: bool = True,
+        include_revisions: bool = True,
+        expected_campaign_revision: int | None = None,
+    ) -> dict[str, Any]:
+        """Commit one public state result and its exact retry response atomically."""
+
+        stream_before_commit = active_random_stream()
+        persists_campaign = campaign_state is not None or (
+            stream_before_commit is not None
+            and stream_before_commit.campaign_id == campaign.id
+            and stream_before_commit.has_unpersisted_draws
         )
+
+        def response_for(revisions: list[Any]) -> dict[str, Any]:
+            stream = active_random_stream()
+            response = dict(response_fields)
+            if include_campaign_revision:
+                response["campaign_revision"] = campaign.revision + (1 if persists_campaign else 0)
+            if include_revisions:
+                response["revisions"] = [asdict(item) for item in revisions]
+            if stream is not None and stream.draw_count > 0:
+                response["random_stream_receipt"] = stream.receipt()
+            return response
+
+        revisions_result = StateMutationService(storage.database).replace(
+            campaign.id,
+            campaign_state=(
+                validate_party_state(campaign_state) if campaign_state is not None else None
+            ),
+            character_updates=character_updates,
+            actor_knowledge_transfers=actor_knowledge_transfers,
+            expected_campaign_revision=(
+                campaign.revision
+                if expected_campaign_revision is None
+                else expected_campaign_revision
+            ),
+            operation=operation,
+            actor=principal_id,
+            branch_id=branch_id,
+            idempotency_key=idempotency_key,
+            idempotency_write=IdempotencyWrite(
+                scope=scope,
+                payload=payload,
+                response=response_for,
+            ),
+            rule_receipts=rule_receipts,
+        )
+        return response_for(list(revisions_result or []))
 
     def party_sheet(state: dict[str, Any]) -> dict[str, Any]:
         value = validate_party_state(state)
@@ -3819,6 +4104,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         value = validate_party_state(state)
         value["party"]["inventory"] = sheet["inventory"]
         return validate_party_state(value)
+
+    def party_view_from_state(state: dict[str, Any]) -> dict[str, Any]:
+        value = validate_party_state(state)
+        sheet = party_sheet(value)
+        return {
+            "inventory": sheet["inventory"],
+            "derived": derive_character_sheet(sheet)["inventory"],
+            "notes": value["party"]["notes"],
+        }
 
     def advance_state_game_time(
         state: dict[str, Any],
@@ -3841,6 +4135,42 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if transition["world_time_after"] is not None:
             next_state["world_time"] = transition["world_time_after"]
         return next_state, transition
+
+    def advance_world_effect_clocks(
+        state: dict[str, Any],
+        *,
+        elapsed_ticks: int = 0,
+        period_steps: dict[str, int] | None = None,
+    ) -> dict[str, Any]:
+        """Advance every world-effect clock through one shared settlement path."""
+
+        next_state = state
+        advanced: list[str] = []
+        expired: list[str] = []
+        if elapsed_ticks:
+            elapsed = advance_elapsed_world_effect_durations(
+                next_state,
+                elapsed_ticks=elapsed_ticks,
+            )
+            next_state = elapsed["state"]
+            advanced.extend(elapsed["advanced"])
+            expired.extend(elapsed["expired"])
+        for period, amount in dict(period_steps or {}).items():
+            if not amount:
+                continue
+            stepped = advance_world_effect_durations(
+                next_state,
+                period=period,
+                amount=amount,
+            )
+            next_state = stepped["state"]
+            advanced.extend(stepped["advanced"])
+            expired.extend(stepped["expired"])
+        return {
+            "state": next_state,
+            "advanced": list(dict.fromkeys(advanced)),
+            "expired": list(dict.fromkeys(expired)),
+        }
 
     def completed_spell_cast_ticks(
         spell: dict[str, Any],
@@ -4173,6 +4503,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         """Create a D&D 5e campaign inside the MCP-owned SQLite database."""
         if not idempotency_key:
             raise ValueError("idempotency_key is required for campaign creation")
+        try:
+            edition = normalize_dnd_edition(edition)
+        except ValueError as exc:
+            raise ValueError(f"unsupported D&D core edition: {edition!r}") from exc
         if random_seed is not None and (not random_seed or len(random_seed) > 512):
             raise ValueError("random_seed must contain between 1 and 512 characters")
         normalized_mode = normalized_advancement_mode(advancement_mode)
@@ -4186,8 +4520,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             idempotency_key=idempotency_key,
             description=description,
             settings={
-                "edition": edition,
-                "locale": locale,
                 "advancement": {"mode": normalized_mode},
             },
             state=validate_party_state(
@@ -4201,15 +4533,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     )
                 }
             ),
+            rule_profile={
+                "edition": edition,
+                "locale": locale,
+                "publications": [],
+                "options": profile_options_with_core_lock(edition),
+            },
         )
-        if rule_profiles.get(created.id) is None:
-            rule_profiles.set(
-                created.id,
-                edition=edition,
-                locale=locale,
-                options=profile_options_with_core_lock(edition),
-            )
-        return asdict(campaigns.get(created.id))
+        return asdict(created)
 
     @mcp.tool()
     def campaign_list(
@@ -4281,14 +4612,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         """Return the authoritative tool profile for this campaign."""
         access.require_campaign(campaign_id, principal_id)
         campaign = campaigns.get(campaign_id)
-        state = dict(campaign.state or {})
-        combat = state.get("combat")
-        if isinstance(combat, dict) and combat.get("active", False):
-            profile = PROFILE_COMBAT
-        else:
-            profile = str(state.get("game_phase") or PROFILE_LOBBY)
-            if profile not in {PROFILE_LOBBY, PROFILE_PLAY}:
-                profile = PROFILE_LOBBY
+        profile = authoritative_phase(campaign_id)
         return {
             "campaign_id": campaign_id,
             "tool_profile": profile,
@@ -4334,6 +4658,16 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     character.id for character in characters.list(campaign_id=campaign_id)
                 )
             state["adventure_started"] = True
+
+        def phase_response(revisions: list[Any]) -> dict[str, Any]:
+            return {
+                "campaign_id": campaign_id,
+                "tool_profile": profile,
+                "combat_active": False,
+                "campaign_revision": campaign.revision + 1,
+                "revisions": [asdict(item) for item in revisions],
+            }
+
         revisions_result = StateMutationService(storage.database).replace(
             campaign_id,
             campaign_state=validate_party_state(state),
@@ -4342,17 +4676,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             actor=principal_id,
             branch_id=resolved_branch_id,
             idempotency_key=idempotency_key,
+            idempotency_write=IdempotencyWrite(
+                scope=scope,
+                payload=payload,
+                response=phase_response,
+            ),
         )
-        response = {
-            "campaign_id": campaign_id,
-            "tool_profile": profile,
-            "combat_active": False,
-            "campaign_revision": mutation_revision(campaign_id),
-            "revisions": [asdict(item) for item in revisions_result or []],
-        }
-        return remember_idempotent(
-            scope, idempotency_key, payload, response, campaign_id=campaign_id
-        )
+        return phase_response(list(revisions_result or []))
 
     @mcp.tool()
     def import_job_get(
@@ -4390,8 +4720,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     ) -> dict[str, Any]:
         """Create a reviewable rulebook import job for an already staged artifact."""
         access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
-        if edition not in {"2014", "2024"}:
-            raise ValueError("imported D&D rulebooks require edition 2014 or 2024")
+        edition = normalize_dnd_edition(edition)
         if not idempotency_key:
             raise ValueError("idempotency_key is required for an import job")
         payload = {
@@ -4415,11 +4744,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             artifact=artifact,
             artifact_checksum=storage.rulebook_checksum(artifact),
             payload=payload,
+            idempotency_key=idempotency_key,
+            idempotency_write=IdempotencyWrite(
+                scope=scope,
+                payload=payload,
+                response=lambda result: {"job": import_job_view(result)},
+            ),
         )
-        response = {"job": import_job_view(job)}
-        return remember_idempotent(
-            scope, idempotency_key, payload, response, campaign_id=campaign_id
-        )
+        return {"job": import_job_view(job)}
 
     @mcp.tool()
     def rule_import_job_inspect(
@@ -4442,11 +4774,21 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             storage.artifact_rulebook_path(job.artifact),
             **rule_document_options(job.artifact_checksum),
         )
-        updated = import_jobs.record_inspection(job_id, inspection)
-        response = {"job": import_job_view(updated), "inspection": inspection}
-        return remember_idempotent(
-            scope, idempotency_key, payload, response, campaign_id=campaign_id
+        updated = import_jobs.record_inspection(
+            job_id,
+            inspection,
+            expected_revision=job.revision,
+            idempotency_key=idempotency_key,
+            idempotency_write=IdempotencyWrite(
+                scope=scope,
+                payload=payload,
+                response=lambda result: {
+                    "job": import_job_view(result),
+                    "inspection": inspection,
+                },
+            ),
         )
+        return {"job": import_job_view(updated), "inspection": inspection}
 
     @mcp.tool()
     @_agent_ruling_boundary
@@ -4503,11 +4845,19 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             {"ingest": asdict(result), "source": source},
             state="extracted",
             source_id=result.source_id,
+            expected_revision=job.revision,
+            idempotency_key=idempotency_key,
+            idempotency_write=IdempotencyWrite(
+                scope=scope,
+                payload=payload,
+                response=lambda updated_job: {
+                    "job": import_job_view(updated_job),
+                    "source": source,
+                    **asdict(result),
+                },
+            ),
         )
-        response = {"job": import_job_view(updated), "source": source, **asdict(result)}
-        return remember_idempotent(
-            scope, idempotency_key, payload, response, campaign_id=campaign_id
-        )
+        return {"job": import_job_view(updated), "source": source, **asdict(result)}
 
     @mcp.tool()
     def rule_content_candidates_extract(
@@ -4538,12 +4888,22 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 rules.citation(chunk_id, source_id=job.source_id)
                 for chunk_id in candidate["source_chunk_ids"]
             ]
-        updated = import_jobs.set_candidates(job_id, candidates)
-        candidate_views = [import_candidate_view(item) for item in updated.candidates]
-        response = {"job": import_job_view(updated), "candidates": candidate_views}
-        return remember_idempotent(
-            scope, idempotency_key, payload, response, campaign_id=campaign_id
+        updated = import_jobs.set_candidates(
+            job_id,
+            candidates,
+            expected_revision=job.revision,
+            idempotency_key=idempotency_key,
+            idempotency_write=IdempotencyWrite(
+                scope=scope,
+                payload=payload,
+                response=lambda result: {
+                    "job": import_job_view(result),
+                    "candidates": [import_candidate_view(item) for item in result.candidates],
+                },
+            ),
         )
+        candidate_views = [import_candidate_view(item) for item in updated.candidates]
+        return {"job": import_job_view(updated), "candidates": candidate_views}
 
     @mcp.tool()
     def import_job_review_candidates(
@@ -4557,18 +4917,28 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
         if not idempotency_key:
             raise ValueError("idempotency_key is required for candidate review")
-        require_import_job(campaign_id, job_id)
+        job = require_import_job(campaign_id, job_id)
         payload = {"job_id": job_id, "operation": "review", "decisions": decisions}
         scope = f"import-job:{campaign_id}:{job_id}:{principal_id}"
         replay = replay_idempotent(scope, idempotency_key, payload)
         if replay is not None:
             return replay
-        updated = import_jobs.review_candidates(job_id, decisions)
-        candidate_views = [import_candidate_view(item) for item in updated.candidates]
-        response = {"job": import_job_view(updated), "candidates": candidate_views}
-        return remember_idempotent(
-            scope, idempotency_key, payload, response, campaign_id=campaign_id
+        updated = import_jobs.review_candidates(
+            job_id,
+            decisions,
+            expected_revision=job.revision,
+            idempotency_key=idempotency_key,
+            idempotency_write=IdempotencyWrite(
+                scope=scope,
+                payload=payload,
+                response=lambda result: {
+                    "job": import_job_view(result),
+                    "candidates": [import_candidate_view(item) for item in result.candidates],
+                },
+            ),
         )
+        candidate_views = [import_candidate_view(item) for item in updated.candidates]
+        return {"job": import_job_view(updated), "candidates": candidate_views}
 
     @mcp.tool()
     def campaign_member_grant(
@@ -4624,22 +4994,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             raise ValueError(
                 "expected_revision and idempotency_key are required for campaign updates"
             )
-        system_owned_state_fields = {
-            "combat",
-            "game_phase",
-            "game_time",
-            "playthrough_manifest",
-            "random_stream",
-            "world_effects",
-            "world_time",
-        }
-        if state is not None:
-            protected = sorted(set(state) & system_owned_state_fields)
-            if protected:
-                raise ValueError(
-                    "campaign update cannot write system-owned state fields: "
-                    + ", ".join(protected)
-                )
         branch_id = require_current_branch(campaign_id, None)
         payload = {
             "name": name,
@@ -4654,19 +5008,28 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if replay is not None:
             return replay
         before = campaigns.get(campaign_id)
+        normalized_settings = (
+            merge_reviewed_campaign_settings(
+                before.settings,
+                settings,
+            )
+            if settings is not None
+            else None
+        )
         normalized_state = None
         if state is not None:
-            normalized_patch = validate_party_state(state)
-            normalized_state = deepcopy(dict(before.state or {}))
-            for key in state:
-                normalized_state[key] = deepcopy(normalized_patch[key])
-            normalized_state = validate_party_state(normalized_state)
+            normalized_state = validate_party_state(
+                merge_reviewed_campaign_state(
+                    before.state,
+                    state,
+                )
+            )
         after = campaigns.update_audited(
             campaign_id,
             name=name,
             status=status,
             description=description,
-            settings=settings,
+            settings=normalized_settings,
             state=normalized_state,
             expected_revision=expected_revision,
             operation="campaign.update",
@@ -4674,14 +5037,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             branch_id=branch_id,
             idempotency_key=idempotency_key,
             request_hash=request_hash(payload),
+            idempotency_write=IdempotencyWrite(
+                scope=scope,
+                payload=payload,
+                response=lambda result: asdict(result),
+            ),
         )
-        return remember_idempotent(
-            scope,
-            idempotency_key,
-            payload,
-            asdict(after),
-            campaign_id=campaign_id,
-        )
+        return asdict(after)
 
     def campaign_advancement_configure(
         campaign_id: str,
@@ -4697,11 +5059,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         normalized_mode = normalized_advancement_mode(mode)
         resolved_branch_id = require_current_branch(campaign_id, branch_id)
         before = campaigns.get(campaign_id)
-        state = dict(before.state or {})
-        if state.get("game_phase", PROFILE_LOBBY) != PROFILE_LOBBY:
-            raise CombatEngineError("switch to lobby before changing advancement mode")
-        if isinstance(state.get("combat"), dict) and state["combat"].get("active", False):
+        phase = authoritative_phase(campaign_id)
+        if phase == PROFILE_COMBAT:
             raise CombatEngineError("end active combat before changing advancement mode")
+        if phase != PROFILE_LOBBY:
+            raise CombatEngineError("switch to lobby before changing advancement mode")
         payload = {
             "mode": normalized_mode,
             "expected_revision": expected_revision,
@@ -4722,19 +5084,22 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             branch_id=resolved_branch_id,
             idempotency_key=idempotency_key,
             request_hash=request_hash(payload),
+            idempotency_write=IdempotencyWrite(
+                scope=scope,
+                payload=payload,
+                response=lambda result: {
+                    "status": "committed",
+                    "advancement": {"mode": normalized_mode},
+                    "campaign": asdict(result),
+                },
+            ),
         )
         response = {
             "status": "committed",
             "advancement": {"mode": normalized_mode},
             "campaign": asdict(after),
         }
-        return remember_idempotent(
-            scope,
-            idempotency_key,
-            payload,
-            response,
-            campaign_id=campaign_id,
-        )
+        return response
 
     def campaign_experience_award(
         campaign_id: str,
@@ -4757,13 +5122,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if isinstance(state.get("combat"), dict) and state["combat"].get("active", False):
             raise CombatEngineError("end active combat before awarding experience")
         normalized_reason = str(reason).strip()
-        normalized_source_ref = str(source_ref).strip()
-        if not normalized_reason or not normalized_source_ref:
+        if not normalized_reason:
             raise ValueError("reason and source_ref are required for audited experience awards")
         if len(normalized_reason) > 1000:
             raise ValueError("experience award reason must not exceed 1000 characters")
-        if len(normalized_source_ref) > 8192:
-            raise ValueError("experience award source_ref must not exceed 8192 characters")
+        normalized_source_ref, _, _ = managed_module_source_ref(
+            campaign_id,
+            source_ref,
+            allow_legacy_without_manifest=True,
+        )
         if not isinstance(awards, list) or not awards:
             raise ValueError("awards must be a non-empty array")
 
@@ -4813,6 +5180,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
 
         updates: list[CharacterStateUpdate] = []
         results: list[dict[str, Any]] = []
+        recipient_after_views: dict[str, dict[str, Any]] = {}
         for award in normalized_awards:
             current = characters.get(award["character_id"])
             if current.campaign_id != campaign_id:
@@ -4828,6 +5196,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         current.notes, character_type=current.character_type
                     ),
                     expected_revision=award["expected_revision"],
+                )
+            )
+            recipient_after_views[current.id] = character_view(
+                replace(
+                    current,
+                    sheet=validate_character_sheet(applied["sheet"]),
+                    revision=current.revision + 1,
                 )
             )
             results.append(
@@ -4868,17 +5243,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             ["dnd5e.core.progression.experience"],
             "campaign.experience.award",
         )
-        StateMutationService(storage.database).replace(
-            campaign_id,
-            campaign_state=validate_party_state(next_state),
-            character_updates=updates,
-            expected_campaign_revision=expected_revision,
-            operation="campaign.experience.award",
-            actor=principal_id,
-            branch_id=resolved_branch_id,
-            idempotency_key=idempotency_key,
-            rule_receipts=receipts,
-        )
+        normalized_next_state = validate_party_state(next_state)
         response = {
             "status": "committed",
             "award_id": award_id,
@@ -4888,20 +5253,36 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "awards": [
                 {
                     **item,
-                    "character": character_view(characters.get(item["character_id"])),
+                    "character": recipient_after_views[item["character_id"]],
                 }
                 for item in results
             ],
-            "campaign": asdict(campaigns.get(campaign_id)),
+            "campaign": asdict(
+                replace(
+                    campaign,
+                    state=normalized_next_state,
+                    revision=campaign.revision + 1,
+                )
+            ),
             "rule_receipts": receipts,
         }
-        return remember_idempotent(
-            scope,
-            idempotency_key,
-            payload,
-            response,
-            campaign_id=campaign_id,
+        StateMutationService(storage.database).replace(
+            campaign_id,
+            campaign_state=normalized_next_state,
+            character_updates=updates,
+            expected_campaign_revision=expected_revision,
+            operation="campaign.experience.award",
+            actor=principal_id,
+            branch_id=resolved_branch_id,
+            idempotency_key=idempotency_key,
+            idempotency_write=IdempotencyWrite(
+                scope=scope,
+                payload=payload,
+                response=response,
+            ),
+            rule_receipts=receipts,
         )
+        return response
 
     def campaign_loot_acquire(
         campaign_id: str,
@@ -4921,48 +5302,22 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         resolved_branch_id = require_current_branch(campaign_id, branch_id)
         campaign = campaigns.get(campaign_id)
         state = dict(campaign.state or {})
-        if state.get("game_phase", PROFILE_LOBBY) != PROFILE_PLAY:
-            raise CombatEngineError("source-bound loot can be acquired only in play")
-        if isinstance(state.get("combat"), dict) and state["combat"].get("active", False):
+        phase = authoritative_phase(campaign_id)
+        if phase == PROFILE_COMBAT:
             raise CombatEngineError("end active combat before acquiring loot")
+        if phase != PROFILE_PLAY:
+            raise CombatEngineError("source-bound loot can be acquired only in play")
 
         normalized_acquisition_id = str(acquisition_id).strip()
         normalized_reason = str(reason).strip()
-        normalized_source_ref = str(source_ref).strip()
         if not normalized_acquisition_id or len(normalized_acquisition_id) > 200:
             raise ValueError("acquisition_id must contain 1 to 200 characters")
         if not normalized_reason or len(normalized_reason) > 1000:
             raise ValueError("reason must contain 1 to 1000 characters")
-        if not normalized_source_ref or len(normalized_source_ref) > 8192:
-            raise ValueError("source_ref must contain 1 to 8192 characters")
-        try:
-            source = json.loads(normalized_source_ref)
-        except json.JSONDecodeError as exc:
-            raise ValueError("source_ref must be a JSON object") from exc
-        if not isinstance(source, dict):
-            raise ValueError("source_ref must be a JSON object")
-        required_source_fields = {
-            "module_id",
-            "scene_id",
-            "chunk_id",
-            "content_sha256",
-        }
-        if any(not str(source.get(field) or "").strip() for field in required_source_fields):
-            raise ValueError(
-                "source_ref requires module_id, scene_id, chunk_id, and content_sha256"
-            )
-        expanded = modules.expand(str(source["chunk_id"]))
-        if str(expanded.get("campaign_id")) != campaign_id:
-            raise ValueError("source_ref chunk does not belong to the campaign")
-        if str(dict(expanded.get("module") or {}).get("id")) != str(source["module_id"]):
-            raise ValueError("source_ref module_id does not match its chunk")
-        if str(dict(expanded.get("scene") or {}).get("id")) != str(source["scene_id"]):
-            raise ValueError("source_ref scene_id does not match its chunk")
-        chunk_content_sha256 = hashlib.sha256(
-            str(expanded.get("content") or "").encode("utf-8")
-        ).hexdigest()
-        if str(source["content_sha256"]).casefold() != chunk_content_sha256:
-            raise ValueError("source_ref content_sha256 does not match its chunk")
+        normalized_source_ref, _, _ = managed_module_source_ref(
+            campaign_id,
+            source_ref,
+        )
 
         if not isinstance(coins, dict):
             raise ValueError("coins must be an object")
@@ -5028,15 +5383,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         next_state = party_state(state, sheet)
         next_state["loot_acquisitions"] = acquisitions
-        StateMutationService(storage.database).replace(
-            campaign_id,
-            campaign_state=validate_party_state(next_state),
-            expected_campaign_revision=expected_revision,
-            operation="campaign.loot.acquire",
-            actor=principal_id,
-            branch_id=resolved_branch_id,
-            idempotency_key=idempotency_key,
-        )
+        normalized_next_state = validate_party_state(next_state)
         response = {
             "status": "committed",
             "acquisition_id": normalized_acquisition_id,
@@ -5045,16 +5392,30 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "item_ids": item_ids,
             "reason": normalized_reason,
             "source_ref": normalized_source_ref,
-            "party": party_show(campaign_id, principal_id=principal_id),
-            "campaign": asdict(campaigns.get(campaign_id)),
+            "party": party_view_from_state(normalized_next_state),
+            "campaign": asdict(
+                replace(
+                    campaign,
+                    state=normalized_next_state,
+                    revision=campaign.revision + 1,
+                )
+            ),
         }
-        return remember_idempotent(
-            scope,
-            idempotency_key,
-            request_payload,
-            response,
-            campaign_id=campaign_id,
+        StateMutationService(storage.database).replace(
+            campaign_id,
+            campaign_state=normalized_next_state,
+            expected_campaign_revision=expected_revision,
+            operation="campaign.loot.acquire",
+            actor=principal_id,
+            branch_id=resolved_branch_id,
+            idempotency_key=idempotency_key,
+            idempotency_write=IdempotencyWrite(
+                scope=scope,
+                payload=request_payload,
+                response=response,
+            ),
         )
+        return response
 
     def campaign_currency_spend(
         campaign_id: str,
@@ -5074,51 +5435,25 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         resolved_branch_id = require_current_branch(campaign_id, branch_id)
         campaign = campaigns.get(campaign_id)
         state = dict(campaign.state or {})
-        if state.get("game_phase", PROFILE_LOBBY) != PROFILE_PLAY:
-            raise CombatEngineError("source-bound currency can be spent only in play")
-        if isinstance(state.get("combat"), dict) and state["combat"].get("active", False):
+        phase = authoritative_phase(campaign_id)
+        if phase == PROFILE_COMBAT:
             raise CombatEngineError("end active combat before spending party currency")
+        if phase != PROFILE_PLAY:
+            raise CombatEngineError("source-bound currency can be spent only in play")
 
         normalized_spend_id = str(spend_id).strip()
         normalized_reason = str(reason).strip()
-        normalized_source_ref = str(source_ref).strip()
         normalized_rule_ref = str(rule_ref).strip()
         if not normalized_spend_id or len(normalized_spend_id) > 200:
             raise ValueError("spend_id must contain 1 to 200 characters")
         if not normalized_reason or len(normalized_reason) > 1000:
             raise ValueError("reason must contain 1 to 1000 characters")
-        if not normalized_source_ref or len(normalized_source_ref) > 8192:
-            raise ValueError("source_ref must contain 1 to 8192 characters")
         if not normalized_rule_ref or len(normalized_rule_ref) > 2048:
             raise ValueError("rule_ref must contain 1 to 2048 characters")
-        try:
-            source = json.loads(normalized_source_ref)
-        except json.JSONDecodeError as exc:
-            raise ValueError("source_ref must be a JSON object") from exc
-        if not isinstance(source, dict):
-            raise ValueError("source_ref must be a JSON object")
-        required_source_fields = {
-            "module_id",
-            "scene_id",
-            "chunk_id",
-            "content_sha256",
-        }
-        if any(not str(source.get(field) or "").strip() for field in required_source_fields):
-            raise ValueError(
-                "source_ref requires module_id, scene_id, chunk_id, and content_sha256"
-            )
-        expanded = modules.expand(str(source["chunk_id"]))
-        if str(expanded.get("campaign_id")) != campaign_id:
-            raise ValueError("source_ref chunk does not belong to the campaign")
-        if str(dict(expanded.get("module") or {}).get("id")) != str(source["module_id"]):
-            raise ValueError("source_ref module_id does not match its chunk")
-        if str(dict(expanded.get("scene") or {}).get("id")) != str(source["scene_id"]):
-            raise ValueError("source_ref scene_id does not match its chunk")
-        chunk_content_sha256 = hashlib.sha256(
-            str(expanded.get("content") or "").encode("utf-8")
-        ).hexdigest()
-        if str(source["content_sha256"]).casefold() != chunk_content_sha256:
-            raise ValueError("source_ref content_sha256 does not match its chunk")
+        normalized_source_ref, _, _ = managed_module_source_ref(
+            campaign_id,
+            source_ref,
+        )
 
         if not isinstance(coins, dict):
             raise ValueError("coins must be an object")
@@ -5171,15 +5506,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         next_state = party_state(state, sheet)
         next_state["currency_spends"] = spends
-        StateMutationService(storage.database).replace(
-            campaign_id,
-            campaign_state=validate_party_state(next_state),
-            expected_campaign_revision=expected_revision,
-            operation="campaign.currency.spend",
-            actor=principal_id,
-            branch_id=resolved_branch_id,
-            idempotency_key=idempotency_key,
-        )
+        normalized_next_state = validate_party_state(next_state)
         response = {
             "status": "committed",
             "spend_id": normalized_spend_id,
@@ -5187,16 +5514,30 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "reason": normalized_reason,
             "source_ref": normalized_source_ref,
             "rule_ref": normalized_rule_ref,
-            "party": party_show(campaign_id, principal_id=principal_id),
-            "campaign": asdict(campaigns.get(campaign_id)),
+            "party": party_view_from_state(normalized_next_state),
+            "campaign": asdict(
+                replace(
+                    campaign,
+                    state=normalized_next_state,
+                    revision=campaign.revision + 1,
+                )
+            ),
         }
-        return remember_idempotent(
-            scope,
-            idempotency_key,
-            request_payload,
-            response,
-            campaign_id=campaign_id,
+        StateMutationService(storage.database).replace(
+            campaign_id,
+            campaign_state=normalized_next_state,
+            expected_campaign_revision=expected_revision,
+            operation="campaign.currency.spend",
+            actor=principal_id,
+            branch_id=resolved_branch_id,
+            idempotency_key=idempotency_key,
+            idempotency_write=IdempotencyWrite(
+                scope=scope,
+                payload=request_payload,
+                response=response,
+            ),
         )
+        return response
 
     def campaign_item_spend(
         campaign_id: str,
@@ -5216,15 +5557,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         resolved_branch_id = require_current_branch(campaign_id, branch_id)
         campaign = campaigns.get(campaign_id)
         state = dict(campaign.state or {})
-        if state.get("game_phase", PROFILE_LOBBY) != PROFILE_PLAY:
-            raise CombatEngineError("source-bound items can be spent only in play")
-        if isinstance(state.get("combat"), dict) and state["combat"].get("active", False):
+        phase = authoritative_phase(campaign_id)
+        if phase == PROFILE_COMBAT:
             raise CombatEngineError("end active combat before spending a party item")
+        if phase != PROFILE_PLAY:
+            raise CombatEngineError("source-bound items can be spent only in play")
 
         normalized_spend_id = str(spend_id).strip()
         normalized_item_id = str(item_id).strip()
         normalized_reason = str(reason).strip()
-        normalized_source_ref = str(source_ref).strip()
         if not normalized_spend_id or len(normalized_spend_id) > 200:
             raise ValueError("spend_id must contain 1 to 200 characters")
         if not normalized_item_id or len(normalized_item_id) > 200:
@@ -5233,36 +5574,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             raise ValueError("quantity must be a positive integer")
         if not normalized_reason or len(normalized_reason) > 1000:
             raise ValueError("reason must contain 1 to 1000 characters")
-        if not normalized_source_ref or len(normalized_source_ref) > 8192:
-            raise ValueError("source_ref must contain 1 to 8192 characters")
-        try:
-            source = json.loads(normalized_source_ref)
-        except json.JSONDecodeError as exc:
-            raise ValueError("source_ref must be a JSON object") from exc
-        if not isinstance(source, dict):
-            raise ValueError("source_ref must be a JSON object")
-        required_source_fields = {
-            "module_id",
-            "scene_id",
-            "chunk_id",
-            "content_sha256",
-        }
-        if any(not str(source.get(field) or "").strip() for field in required_source_fields):
-            raise ValueError(
-                "source_ref requires module_id, scene_id, chunk_id, and content_sha256"
-            )
-        expanded = modules.expand(str(source["chunk_id"]))
-        if str(expanded.get("campaign_id")) != campaign_id:
-            raise ValueError("source_ref chunk does not belong to the campaign")
-        if str(dict(expanded.get("module") or {}).get("id")) != str(source["module_id"]):
-            raise ValueError("source_ref module_id does not match its chunk")
-        if str(dict(expanded.get("scene") or {}).get("id")) != str(source["scene_id"]):
-            raise ValueError("source_ref scene_id does not match its chunk")
-        chunk_content_sha256 = hashlib.sha256(
-            str(expanded.get("content") or "").encode("utf-8")
-        ).hexdigest()
-        if str(source["content_sha256"]).casefold() != chunk_content_sha256:
-            raise ValueError("source_ref content_sha256 does not match its chunk")
+        normalized_source_ref, _, _ = managed_module_source_ref(
+            campaign_id,
+            source_ref,
+        )
 
         request_payload = {
             "spend_id": normalized_spend_id,
@@ -5302,15 +5617,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         next_state = party_state(state, sheet)
         next_state["item_spends"] = spends
-        StateMutationService(storage.database).replace(
-            campaign_id,
-            campaign_state=validate_party_state(next_state),
-            expected_campaign_revision=expected_revision,
-            operation="campaign.item.spend",
-            actor=principal_id,
-            branch_id=resolved_branch_id,
-            idempotency_key=idempotency_key,
-        )
+        normalized_next_state = validate_party_state(next_state)
         response = {
             "status": "committed",
             "spend_id": normalized_spend_id,
@@ -5319,16 +5626,30 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "removed": removed,
             "reason": normalized_reason,
             "source_ref": normalized_source_ref,
-            "party": party_show(campaign_id, principal_id=principal_id),
-            "campaign": asdict(campaigns.get(campaign_id)),
+            "party": party_view_from_state(normalized_next_state),
+            "campaign": asdict(
+                replace(
+                    campaign,
+                    state=normalized_next_state,
+                    revision=campaign.revision + 1,
+                )
+            ),
         }
-        return remember_idempotent(
-            scope,
-            idempotency_key,
-            request_payload,
-            response,
-            campaign_id=campaign_id,
+        StateMutationService(storage.database).replace(
+            campaign_id,
+            campaign_state=normalized_next_state,
+            expected_campaign_revision=expected_revision,
+            operation="campaign.item.spend",
+            actor=principal_id,
+            branch_id=resolved_branch_id,
+            idempotency_key=idempotency_key,
+            idempotency_write=IdempotencyWrite(
+                scope=scope,
+                payload=request_payload,
+                response=response,
+            ),
         )
+        return response
 
     def campaign_consumable_use(
         campaign_id: str,
@@ -5377,10 +5698,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
 
         campaign = campaigns.get(campaign_id)
         state = dict(campaign.state or {})
-        if state.get("game_phase", PROFILE_LOBBY) != PROFILE_PLAY:
-            raise CombatEngineError("shared consumables can be used only in play")
-        if isinstance(state.get("combat"), dict) and state["combat"].get("active", False):
+        phase = authoritative_phase(campaign_id)
+        if phase == PROFILE_COMBAT:
             raise CombatEngineError("use combat actions for consumables during combat")
+        if phase != PROFILE_PLAY:
+            raise CombatEngineError("shared consumables can be used only in play")
         uses = list(state.get("consumable_uses") or [])
         if any(
             str(dict(item).get("id") or "") == normalized_use_id
@@ -5404,7 +5726,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         if item is None:
             raise LookupError(normalized_item_id)
-        edition = str(campaign.settings.get("edition") or target.sheet.get("edition") or "")
+        edition = campaign_rules_edition(campaign.id)
         expression = healing_potion_formula(item, edition=edition)
         healing_roll = asdict(roll(expression))
         healed = apply_healing_to_sheet(target.sheet, amount=int(healing_roll["total"]))
@@ -5437,13 +5759,41 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             [HEALING_POTION_MECHANIC_ID],
             "campaign.consumable.healing_potion",
         )
+        normalized_next_state = validate_party_state(next_state)
+        normalized_target_sheet = validate_character_sheet(healed["sheet"])
+        response = {
+            "status": "committed",
+            "use_id": normalized_use_id,
+            "item": removed,
+            "target_character_id": normalized_target_id,
+            "reason": normalized_reason,
+            "formula": expression,
+            "roll": healing_roll,
+            "healing": healing_result,
+            "party": party_view_from_state(normalized_next_state),
+            "character": character_view(
+                replace(
+                    target,
+                    sheet=normalized_target_sheet,
+                    revision=target.revision + 1,
+                )
+            ),
+            "campaign": asdict(
+                replace(
+                    campaign,
+                    state=normalized_next_state,
+                    revision=campaign.revision + 1,
+                )
+            ),
+            "rule_receipts": receipts,
+        }
         StateMutationService(storage.database).replace(
             campaign_id,
-            campaign_state=validate_party_state(next_state),
+            campaign_state=normalized_next_state,
             character_updates=[
                 CharacterStateUpdate(
                     character_id=target.id,
-                    sheet=validate_character_sheet(healed["sheet"]),
+                    sheet=normalized_target_sheet,
                     notes=validate_character_notes(
                         target.notes, character_type=target.character_type
                     ),
@@ -5455,29 +5805,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             actor=principal_id,
             branch_id=resolved_branch_id,
             idempotency_key=idempotency_key,
+            idempotency_write=IdempotencyWrite(
+                scope=scope,
+                payload=request_payload,
+                response=response,
+            ),
             rule_receipts=receipts,
         )
-        response = {
-            "status": "committed",
-            "use_id": normalized_use_id,
-            "item": removed,
-            "target_character_id": normalized_target_id,
-            "reason": normalized_reason,
-            "formula": expression,
-            "roll": healing_roll,
-            "healing": healing_result,
-            "party": party_show(campaign_id, principal_id=principal_id),
-            "character": character_view(characters.get(normalized_target_id)),
-            "campaign": asdict(campaigns.get(campaign_id)),
-            "rule_receipts": receipts,
-        }
-        return remember_idempotent(
-            scope,
-            idempotency_key,
-            request_payload,
-            response,
-            campaign_id=campaign_id,
-        )
+        return response
 
     def reviewed_chase_source(
         campaign_id: str,
@@ -5487,48 +5822,21 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         source_excerpt: str,
     ) -> dict[str, Any]:
         """Resolve an exact managed module citation for a chase mutation."""
-        if not isinstance(source_ref, dict):
-            raise ValueError("chase source_ref must be an object")
-        required = {
-            "module_id",
-            "scene_id",
-            "chunk_id",
-            "page_start",
-            "page_end",
-            "heading_path",
-            "content_sha256",
-        }
-        missing = sorted(required - set(source_ref))
-        if missing:
-            raise ValueError("chase source_ref is missing: " + ", ".join(missing))
-        expanded = modules.expand(str(source_ref["chunk_id"]))
-        if str(expanded.get("campaign_id") or "") != campaign_id:
-            raise ValueError("chase source chunk does not belong to the campaign")
-        expanded_module_id = str(dict(expanded.get("module") or {}).get("id") or "")
-        expanded_scene_id = str(dict(expanded.get("scene") or {}).get("id") or "")
-        if str(source_ref["module_id"]) != expanded_module_id:
-            raise ValueError("chase source_ref module_id does not match its chunk")
-        if str(source_ref["scene_id"]) != expanded_scene_id or expanded_scene_id != scene_id:
-            raise ValueError("chase source_ref scene_id does not match the chase scene")
-        chunk_content = str(expanded.get("content") or "")
-        chunk_sha256 = hashlib.sha256(chunk_content.encode("utf-8")).hexdigest()
-        if str(source_ref["content_sha256"]).casefold() != chunk_sha256:
-            raise ValueError("chase source_ref content_sha256 does not match its chunk")
-        if source_ref["page_start"] != expanded.get("page_start") or source_ref[
-            "page_end"
-        ] != expanded.get("page_end"):
-            raise ValueError("chase source_ref pages do not match its chunk")
-        if [str(item) for item in source_ref["heading_path"]] != [
-            str(item) for item in expanded.get("heading_path", [])
-        ]:
-            raise ValueError("chase source_ref heading_path does not match its chunk")
-        normalized_excerpt = _normalize_source_evidence_text(source_excerpt)
-        if not normalized_excerpt:
-            raise ValueError("chase source_excerpt is required")
-        if normalized_excerpt not in _normalize_source_evidence_text(chunk_content):
-            raise ValueError("chase source_excerpt is not present in the cited chunk")
+        _, normalized_source, expanded = managed_module_source_ref(
+            campaign_id,
+            source_ref,
+            require_exact=True,
+            expected_scene_id=scene_id,
+        )
+        if normalized_source is None or expanded is None:
+            raise AssertionError("exact chase citations always resolve to a managed chunk")
+        normalized_excerpt = managed_module_source_excerpt(
+            expanded,
+            source_excerpt,
+            field="chase source_excerpt",
+        )
         return {
-            **deepcopy(source_ref),
+            **normalized_source,
             "source_excerpt": normalized_excerpt,
         }
 
@@ -5649,7 +5957,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             actor_snapshots,
             quarry_ids=quarry_ids,
             initial_distance_ft=initial_distance_ft,
-            ruleset=str(campaign.settings.get("edition") or "2014"),
+            ruleset=campaign_rules_edition(campaign.id),
             scene_id=scene_id,
             name=name,
             close_transition=(
@@ -5671,6 +5979,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             list(chase["rule_boundary_ids"]),
             "chase.start",
         )
+        response = {
+            "status": "committed",
+            "chase": chase,
+            "campaign_revision": campaign.revision + 1,
+            "rule_receipts": receipts,
+        }
         StateMutationService(storage.database).replace(
             campaign_id,
             campaign_state=validate_party_state(next_state),
@@ -5679,21 +5993,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             actor=principal_id,
             branch_id=resolved_branch_id,
             idempotency_key=idempotency_key,
+            idempotency_write=IdempotencyWrite(
+                scope=scope,
+                payload=payload,
+                response=response,
+            ),
             rule_receipts=receipts,
         )
-        response = {
-            "status": "committed",
-            "chase": chase,
-            "campaign_revision": campaigns.get(campaign_id).revision,
-            "rule_receipts": receipts,
-        }
-        return remember_idempotent(
-            scope,
-            idempotency_key,
-            payload,
-            response,
-            campaign_id=campaign_id,
-        )
+        return response
 
     @mcp.tool()
     def chase_query(
@@ -5794,10 +6101,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         next_state = validate_party_state(deepcopy(campaign.state))
         next_state["chase"] = settled["chase"]
-        round_changed = int(settled["chase"].get("round", 1) or 1) > int(
-            chase.get("round", 1) or 1
-        )
+        round_changed = int(settled["chase"].get("round", 1) or 1) > int(chase.get("round", 1) or 1)
         time_transition: dict[str, Any] | None = None
+        elapsed_ticks = 0
         elapsed_minutes = 0
         world_advanced: list[str] = []
         world_expired: list[str] = []
@@ -5806,34 +6112,23 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 next_state,
                 period="round",
             )
+            elapsed_ticks = int(time_transition["elapsed_ticks"])
             elapsed_minutes = int(time_transition["elapsed_minutes"])
-            world_round = advance_world_effect_durations(
+            world_duration = advance_world_effect_clocks(
                 next_state,
-                period="round",
-                amount=1,
+                elapsed_ticks=elapsed_ticks,
+                period_steps={"round": 1},
             )
-            next_state = world_round["state"]
-            world_advanced.extend(world_round["advanced"])
-            world_expired.extend(world_round["expired"])
-            if elapsed_minutes:
-                world_elapsed = advance_elapsed_world_effect_durations(
-                    next_state,
-                    elapsed_minutes=elapsed_minutes,
-                )
-                next_state = world_elapsed["state"]
-                world_advanced.extend(world_elapsed["advanced"])
-                world_expired.extend(world_elapsed["expired"])
+            next_state = world_duration["state"]
+            world_advanced.extend(world_duration["advanced"])
+            world_expired.extend(world_duration["expired"])
         character_updates: list[CharacterStateUpdate] = []
         expired: dict[str, list[str]] = {}
         advanced: dict[str, list[str]] = {}
         receipts: list[dict[str, Any]] = []
         all_characters = characters.list(campaign_id=campaign_id)
         for character in all_characters:
-            sheet = (
-                settled["sheet"]
-                if character.id == current_actor.id
-                else character.sheet
-            )
+            sheet = settled["sheet"] if character.id == current_actor.id else character.sheet
             actor_advanced: list[str] = []
             actor_expired: list[str] = []
             if round_changed:
@@ -5844,14 +6139,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 sheet = round_duration["sheet"]
                 actor_advanced.extend(round_duration["advanced"])
                 actor_expired.extend(round_duration["expired"])
-                if elapsed_minutes:
-                    elapsed_duration = advance_elapsed_effect_durations(
-                        sheet,
-                        elapsed_minutes=elapsed_minutes,
-                    )
-                    sheet = elapsed_duration["sheet"]
-                    actor_advanced.extend(elapsed_duration["advanced"])
-                    actor_expired.extend(elapsed_duration["expired"])
+                elapsed_duration = advance_elapsed_effect_durations(
+                    sheet,
+                    elapsed_ticks=elapsed_ticks,
+                )
+                sheet = elapsed_duration["sheet"]
+                actor_advanced.extend(elapsed_duration["advanced"])
+                actor_expired.extend(elapsed_duration["expired"])
                 duration_extension = apply_rule_event(
                     sheet,
                     "duration.advance",
@@ -5860,6 +6154,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         actor_id=character.id,
                         period="round",
                         amount=1,
+                        elapsed_ticks=elapsed_ticks,
                         elapsed_minutes=elapsed_minutes,
                     ),
                 )
@@ -5892,6 +6187,32 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "chase.turn",
             )
         )
+        updated_actor = current_actor
+        for character_update in character_updates:
+            if character_update.character_id == current_actor.id:
+                updated_actor = replace(
+                    current_actor,
+                    sheet=character_update.sheet,
+                    notes=character_update.notes,
+                    revision=current_actor.revision + 1,
+                )
+                break
+        response = {
+            "status": "committed",
+            "chase": settled["chase"],
+            "turn": settled["turn"],
+            "character": character_view(updated_actor),
+            "game_time": (
+                time_transition["after"] if time_transition is not None else next_state["game_time"]
+            ),
+            "world_time": deepcopy(next_state.get("world_time")),
+            "advanced": advanced,
+            "expired": expired,
+            "world_advanced": list(dict.fromkeys(world_advanced)),
+            "world_expired": list(dict.fromkeys(world_expired)),
+            "campaign_revision": campaign.revision + 1,
+            "rule_receipts": receipts,
+        }
         StateMutationService(storage.database).replace(
             campaign_id,
             campaign_state=validate_party_state(next_state),
@@ -5901,31 +6222,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             actor=principal_id,
             branch_id=resolved_branch_id,
             idempotency_key=idempotency_key,
+            idempotency_write=IdempotencyWrite(
+                scope=scope,
+                payload=payload,
+                response=response,
+            ),
             rule_receipts=receipts,
         )
-        response = {
-            "status": "committed",
-            "chase": settled["chase"],
-            "turn": settled["turn"],
-            "character": character_view(characters.get(actor_id)),
-            "game_time": (
-                time_transition["after"] if time_transition is not None else next_state["game_time"]
-            ),
-            "world_time": deepcopy(next_state.get("world_time")),
-            "advanced": advanced,
-            "expired": expired,
-            "world_advanced": list(dict.fromkeys(world_advanced)),
-            "world_expired": list(dict.fromkeys(world_expired)),
-            "campaign_revision": campaigns.get(campaign_id).revision,
-            "rule_receipts": receipts,
-        }
-        return remember_idempotent(
-            scope,
-            idempotency_key,
-            payload,
-            response,
-            campaign_id=campaign_id,
-        )
+        return response
 
     @mcp.tool()
     def chase_end(
@@ -5985,6 +6289,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             ["dnd5e.core.chase.ending"],
             "chase.end",
         )
+        response = {
+            "status": "committed",
+            "chase": closed,
+            "campaign_revision": campaign.revision + 1,
+            "rule_receipts": receipts,
+        }
         StateMutationService(storage.database).replace(
             campaign_id,
             campaign_state=validate_party_state(next_state),
@@ -5993,21 +6303,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             actor=principal_id,
             branch_id=resolved_branch_id,
             idempotency_key=idempotency_key,
+            idempotency_write=IdempotencyWrite(
+                scope=scope,
+                payload=payload,
+                response=response,
+            ),
             rule_receipts=receipts,
         )
-        response = {
-            "status": "committed",
-            "chase": closed,
-            "campaign_revision": campaigns.get(campaign_id).revision,
-            "rule_receipts": receipts,
-        }
-        return remember_idempotent(
-            scope,
-            idempotency_key,
-            payload,
-            response,
-            campaign_id=campaign_id,
-        )
+        return response
 
     @mcp.tool()
     @_agent_ruling_boundary
@@ -6031,6 +6334,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         require_write_contract(expected_revision, idempotency_key)
         resolved_branch_id = require_current_branch(campaign_id, branch_id)
         participant_config = participant_config or []
+        campaign = campaigns.get(campaign_id)
+        authoritative_ruleset = campaign_rules_edition(campaign_id)
+        if ruleset is not None and str(ruleset) != authoritative_ruleset:
+            raise CombatEngineError(
+                "combat ruleset must match the authoritative campaign rule profile"
+            )
         payload = {
             "participant_ids": list(participant_ids),
             "participant_config": participant_config,
@@ -6039,14 +6348,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "scene_id": scene_id,
             "scope_id": scope_id,
             "battle_map": battle_map,
-            "ruleset": ruleset,
+            "ruleset": authoritative_ruleset,
             "branch_id": resolved_branch_id,
         }
         scope = f"combat-start:{campaign_id}:{resolved_branch_id}:{principal_id}"
         replay = replay_idempotent(scope, idempotency_key, payload)
         if replay is not None:
             return combat_response(campaign_id, principal_id, replay)
-        campaign = campaigns.get(campaign_id)
         if expected_revision is not None and campaign.revision != expected_revision:
             raise ValueError(
                 "campaign revision conflict: "
@@ -6260,22 +6568,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 ):
                     raise ValueError("source traits must identify unique actor feature records")
                 source_trait_records.append(trait)
-        supported_source_conditions = {
-            "blinded",
-            "charmed",
-            "deafened",
-            "frightened",
-            "grappled",
-            "incapacitated",
-            "invisible",
-            "paralyzed",
-            "petrified",
-            "poisoned",
-            "prone",
-            "restrained",
-            "stunned",
-            "unconscious",
-        }
         for actor_id_value, config_entry in config_by_actor.items():
             for raw_condition in config_entry.get("source_conditions") or []:
                 allowed_condition_fields = {
@@ -6293,84 +6585,50 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 duration = str(raw_condition.get("duration") or "encounter").strip().casefold()
                 excerpt = str(raw_condition.get("source_excerpt") or "").strip()
                 source_ref = raw_condition.get("source_ref")
-                if condition not in supported_source_conditions:
+                if condition not in STANDARD_BINARY_CONDITION_IDS:
                     raise ValueError(
                         f"unsupported source-declared combat condition: {condition or '<empty>'}"
                     )
                 if duration != "encounter":
                     raise ValueError("source-declared combat condition duration must be encounter")
-                if not excerpt:
-                    raise ValueError("source-declared combat condition needs an exact excerpt")
                 if resolved_scene_id is None:
                     raise ValueError(
                         "source-declared combat conditions require an encounter scene_id"
                     )
-                if not isinstance(source_ref, dict):
-                    raise ValueError("source-declared combat condition needs a source_ref object")
-                required_source_fields = {
-                    "module_id",
-                    "scene_id",
-                    "chunk_id",
-                    "page_start",
-                    "page_end",
-                    "heading_path",
-                    "content_sha256",
-                }
-                missing_source_fields = sorted(required_source_fields - set(source_ref))
-                if missing_source_fields:
-                    raise ValueError(
-                        "source-declared combat condition source_ref is missing: "
-                        + ", ".join(missing_source_fields)
+                _, normalized_source_ref, expanded = managed_module_source_ref(
+                    campaign_id,
+                    source_ref,
+                    require_exact=True,
+                    expected_scene_id=resolved_scene_id,
+                )
+                if normalized_source_ref is None or expanded is None:
+                    raise AssertionError(
+                        "exact source conditions always resolve to a managed chunk"
                     )
-                expanded = modules.expand(str(source_ref["chunk_id"]))
-                if str(expanded.get("campaign_id")) != campaign_id:
-                    raise ValueError("source condition chunk does not belong to the campaign")
-                if str(dict(expanded.get("module") or {}).get("id")) != str(
-                    source_ref["module_id"]
-                ):
-                    raise ValueError("source condition module_id does not match its chunk")
-                if str(dict(expanded.get("scene") or {}).get("id")) != str(source_ref["scene_id"]):
-                    raise ValueError("source condition scene_id does not match its chunk")
-                if str(source_ref["scene_id"]) != str(resolved_scene_id):
-                    raise ValueError("source condition scene_id does not match the encounter scene")
-                chunk_content = str(expanded.get("content") or "")
-                chunk_content_sha256 = hashlib.sha256(chunk_content.encode("utf-8")).hexdigest()
-                if str(source_ref["content_sha256"]).casefold() != chunk_content_sha256:
-                    raise ValueError("source condition content_sha256 does not match its chunk")
-                cited_page_range = (
-                    None if source_ref["page_start"] is None else int(source_ref["page_start"]),
-                    None if source_ref["page_end"] is None else int(source_ref["page_end"]),
+                normalized_excerpt = managed_module_source_excerpt(
+                    expanded,
+                    excerpt,
+                    field="source condition source_excerpt",
                 )
-                expanded_page_range = (
-                    None if expanded.get("page_start") is None else int(expanded["page_start"]),
-                    None if expanded.get("page_end") is None else int(expanded["page_end"]),
-                )
-                if cited_page_range != expanded_page_range:
-                    raise ValueError("source condition page range does not match its chunk")
-                if [str(item) for item in source_ref["heading_path"]] != [
-                    str(item) for item in expanded.get("heading_path") or []
-                ]:
-                    raise ValueError("source condition heading_path does not match its chunk")
-                normalized_excerpt = " ".join(excerpt.split())
-                if normalized_excerpt not in " ".join(chunk_content.split()):
-                    raise ValueError("source condition excerpt is not contained in its cited chunk")
                 actor = source_condition_characters[actor_id_value]
                 sheet = source_condition_sheets.setdefault(actor_id_value, deepcopy(actor.sheet))
-                existing_conditions = {
-                    str(item).strip().casefold() for item in sheet.get("conditions", [])
-                }
-                added_by_encounter = condition not in existing_conditions
+                existing_conditions = condition_ids(sheet.get("conditions"))
+                apply_condition_change(sheet, condition_id=condition, add=True)
+                applied_conditions = condition_ids(sheet.get("conditions"))
+                added_by_encounter = (
+                    condition not in existing_conditions and condition in applied_conditions
+                )
                 if added_by_encounter:
-                    sheet.setdefault("conditions", []).append(condition)
                     end_concentration_for_incapacitating_conditions(sheet)
                 source_condition_records.append(
                     {
                         "actor_id": actor_id_value,
                         "condition": condition,
                         "duration": duration,
-                        "source_ref": deepcopy(source_ref),
-                        "source_excerpt": excerpt,
+                        "source_ref": normalized_source_ref,
+                        "source_excerpt": normalized_excerpt,
                         "added_by_encounter": added_by_encounter,
+                        "resisted_by_immunity": condition not in applied_conditions,
                     }
                 )
         actors = []
@@ -6394,7 +6652,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             actors.append(actor)
         encounter = start_encounter(
             actors,
-            ruleset=ruleset or str(campaign.settings.get("edition") or "2024"),
+            ruleset=authoritative_ruleset,
             scene_id=resolved_scene_id,
             name=name,
             battle_map=compiled_map,
@@ -6437,7 +6695,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         updated_state = dict(campaign.state or {})
         updated_state["combat"] = encounter
-        updated_state["game_phase"] = PROFILE_COMBAT
+        # The active encounter is the sole Combat authority.  ``game_phase``
+        # records only the non-combat Lobby/Play lifecycle.
+        updated_state["game_phase"] = PROFILE_PLAY
         updated_state = validate_party_state(updated_state)
         source_start_updates = [
             CharacterStateUpdate(
@@ -6452,6 +6712,16 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             for actor_id_value, sheet in initial_sheets.items()
             if sheet != source_condition_characters[actor_id_value].sheet
         ]
+
+        def start_response(revisions: list[Any]) -> dict[str, Any]:
+            return {
+                "combat": encounter,
+                "source_turn_start": initial_source_turn,
+                "tool_profile": PROFILE_COMBAT,
+                "campaign_revision": campaign.revision + 1,
+                "revisions": [asdict(item) for item in revisions],
+            }
+
         revisions_result = StateMutationService(storage.database).replace(
             campaign_id,
             campaign_state=updated_state,
@@ -6461,19 +6731,17 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             actor=principal_id,
             branch_id=resolved_branch_id,
             idempotency_key=idempotency_key,
+            idempotency_write=IdempotencyWrite(
+                scope=scope,
+                payload=payload,
+                response=start_response,
+            ),
             rule_receipts=start_receipts,
         )
-        response = {
-            "combat": encounter,
-            "source_turn_start": initial_source_turn,
-            "tool_profile": PROFILE_COMBAT,
-            "campaign_revision": mutation_revision(campaign_id),
-            "revisions": [asdict(item) for item in revisions_result or []],
-        }
         return combat_response(
             campaign_id,
             principal_id,
-            remember_idempotent(scope, idempotency_key, payload, response, campaign_id=campaign_id),
+            start_response(list(revisions_result or [])),
         )
 
     @mcp.tool()
@@ -6548,13 +6816,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             except BattleMapError as error:
                 raise NeedsRulingError(str(error), missing=("position",)) from error
         join_round = config_value.pop("join_round", None)
-        if (
-            join_round is not None
-            and (
-                isinstance(join_round, bool)
-                or not isinstance(join_round, int)
-                or join_round <= int(encounter.get("round", 1) or 1)
-            )
+        if join_round is not None and (
+            isinstance(join_round, bool)
+            or not isinstance(join_round, int)
+            or join_round <= int(encounter.get("round", 1) or 1)
         ):
             raise ValueError("join_round must be an integer after the current combat round")
         actor = combat_actor_snapshot(actor_id)
@@ -6586,6 +6851,16 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "combat.join",
         )
         next_state = {**dict(campaign.state or {}), "combat": next_encounter}
+
+        def join_response(revisions: list[Any]) -> dict[str, Any]:
+            return {
+                "status": "committed",
+                "queued": deepcopy(queued),
+                "combat": next_encounter,
+                "campaign_revision": campaign.revision + 1,
+                "revisions": [asdict(item) for item in revisions],
+            }
+
         revisions_result = StateMutationService(storage.database).replace(
             campaign_id,
             campaign_state=validate_party_state(next_state),
@@ -6594,19 +6869,17 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             actor=principal_id,
             branch_id=resolved_branch_id,
             idempotency_key=idempotency_key,
+            idempotency_write=IdempotencyWrite(
+                scope=scope,
+                payload=payload,
+                response=join_response,
+            ),
             rule_receipts=receipts,
         )
-        response = {
-            "status": "committed",
-            "queued": deepcopy(queued),
-            "combat": next_encounter,
-            "campaign_revision": mutation_revision(campaign_id),
-            "revisions": [asdict(item) for item in revisions_result or []],
-        }
         return combat_response(
             campaign_id,
             principal_id,
-            remember_idempotent(scope, idempotency_key, payload, response, campaign_id),
+            join_response(list(revisions_result or [])),
         )
 
     @mcp.tool()
@@ -6686,9 +6959,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 attacker,
                 plan,
                 action,
-                authorized=access.require_campaign(
-                    campaign_id, principal_id
-                ).role
+                authorized=access.require_campaign(campaign_id, principal_id).role
                 in {"owner", "dm"},
             )
             pay_attack_action(
@@ -6845,9 +7116,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     attacker,
                     plan,
                     action_payload,
-                    authorized=access.require_campaign(
-                        campaign_id, principal_id
-                    ).role
+                    authorized=access.require_campaign(campaign_id, principal_id).role
                     in {"owner", "dm"},
                 )
         except NeedsRulingError:
@@ -6977,6 +7246,21 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         expected_revision=characters.get(actor_id).revision,
                     )
                 )
+
+            def pending_attack_response(revisions: list[Any]) -> dict[str, Any]:
+                response = {
+                    "status": "pending_reaction",
+                    "result": result,
+                    "choice": window,
+                    "combat": next_encounter,
+                    "campaign_revision": campaign.revision + 1,
+                    "revisions": [asdict(item) for item in revisions],
+                }
+                stream = active_random_stream()
+                if stream is not None and stream.draw_count > 0:
+                    response["random_stream_receipt"] = stream.receipt()
+                return response
+
             revisions_result = StateMutationService(storage.database).replace(
                 campaign_id,
                 campaign_state=validate_party_state(next_state),
@@ -6986,6 +7270,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 actor=principal_id,
                 branch_id=resolved_branch_id,
                 idempotency_key=idempotency_key,
+                idempotency_write=IdempotencyWrite(
+                    scope=scope,
+                    payload=payload,
+                    response=pending_attack_response,
+                ),
                 rule_receipts=core_receipts(
                     rule_context,
                     ["dnd5e.core.reaction.post_hit_defense"],
@@ -6993,24 +7282,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 )
                 + attack_payment_receipts,
             )
-            response = {
-                "status": "pending_reaction",
-                "result": result,
-                "choice": window,
-                "combat": next_encounter,
-                "campaign_revision": mutation_revision(campaign_id),
-                "revisions": [asdict(item) for item in revisions_result or []],
-            }
             return combat_response(
                 campaign_id,
                 principal_id,
-                remember_idempotent(
-                    scope,
-                    idempotency_key,
-                    payload,
-                    response,
-                    campaign_id=campaign_id,
-                ),
+                pending_attack_response(list(revisions_result or [])),
             )
         updated_attacker, updated_target, result = resolve_attack_damage(
             updated_attacker,
@@ -7187,6 +7462,23 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     expected_revision=record.revision,
                 )
             )
+
+        def attack_response(revisions: list[Any]) -> dict[str, Any]:
+            response = {
+                **_ruling_status(
+                    "pending_ruling" if pending_on_hit_ruling else "committed",
+                    "source_or_scene_fact",
+                ),
+                "result": result,
+                "combat": next_encounter,
+                "campaign_revision": campaign.revision + 1,
+                "revisions": [asdict(item) for item in revisions],
+            }
+            stream = active_random_stream()
+            if stream is not None and stream.draw_count > 0:
+                response["random_stream_receipt"] = stream.receipt()
+            return response
+
         revisions_result = StateMutationService(storage.database).replace(
             campaign_id,
             campaign_state=validate_party_state(next_state),
@@ -7196,22 +7488,17 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             actor=principal_id,
             branch_id=resolved_branch_id,
             idempotency_key=idempotency_key,
+            idempotency_write=IdempotencyWrite(
+                scope=scope,
+                payload=payload,
+                response=attack_response,
+            ),
             rule_receipts=list(result.get("rule_receipts") or []),
         )
-        response = {
-            **_ruling_status(
-                "pending_ruling" if pending_on_hit_ruling else "committed",
-                "source_or_scene_fact",
-            ),
-            "result": result,
-            "combat": next_encounter,
-            "campaign_revision": mutation_revision(campaign_id),
-            "revisions": [asdict(item) for item in revisions_result or []],
-        }
         return combat_response(
             campaign_id,
             principal_id,
-            remember_idempotent(scope, idempotency_key, payload, response, campaign_id=campaign_id),
+            attack_response(list(revisions_result or [])),
         )
 
     @mcp.tool()
@@ -7304,8 +7591,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             )
         has_explicit_saving_throw = re.search(r"(?i)\bsaving throw\b", effect) is not None
         has_explicit_save_damage = (
-            has_explicit_saving_throw
-            and re.search(r"(?i)\bdamage\b", effect) is not None
+            has_explicit_saving_throw and re.search(r"(?i)\bdamage\b", effect) is not None
         )
         has_explicit_conditional_damage = (
             re.search(r"(?i)\bdamage\b", effect) is not None
@@ -7413,9 +7699,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             source_attachment_effect(effect)
         elif selection_id == "conditional_extra_damage":
             if not has_explicit_conditional_damage:
-                raise CombatEngineError(
-                    "the reviewed attack does not state conditional damage"
-                )
+                raise CombatEngineError("the reviewed attack does not state conditional damage")
             candidates = list(window.get("candidates") or [])
             if not any(
                 str(item.get("id") or "") == "conditional_extra_damage"
@@ -7543,20 +7827,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "unsupported on-hit ruling fields: " + ", ".join(sorted(unknown_fields))
                 )
             condition = str(normalized_selection.get("condition") or "").strip().casefold()
-            supported_conditions = {
-                "blinded",
-                "charmed",
-                "deafened",
-                "frightened",
-                "grappled",
-                "incapacitated",
-                "paralyzed",
-                "poisoned",
-                "prone",
-                "restrained",
-                "stunned",
-                "unconscious",
-            }
             escape_dc = normalized_selection.get("escape_dc")
             escape_abilities = [
                 str(item).strip().casefold()
@@ -7564,7 +7834,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 if str(item).strip()
             ]
             source_excerpt = str(normalized_selection.get("source_excerpt") or "").strip()
-            if condition not in supported_conditions:
+            if condition not in STANDARD_BINARY_CONDITION_IDS:
                 raise CombatEngineError("on-hit ruling condition is unsupported")
             if re.search(rf"(?i)\b{re.escape(condition)}\b", effect) is None:
                 raise CombatEngineError(
@@ -7578,15 +7848,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 or not escape_abilities
                 or len(escape_abilities) != len(set(escape_abilities))
                 or any(
-                    ability
-                    not in {
-                        "strength",
-                        "dexterity",
-                        "constitution",
-                        "intelligence",
-                        "wisdom",
-                        "charisma",
-                    }
+                    ability not in ABILITY_IDS
                     for ability in escape_abilities
                 )
                 or not source_excerpt
@@ -7600,31 +7862,36 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 for ability in escape_abilities
             ):
                 raise CombatEngineError("escape DC or ability is not stated by the reviewed attack")
-            conditions = {
-                str(item).strip().casefold() for item in updated_sheet.get("conditions", [])
-            }
-            if condition not in conditions:
-                updated_sheet.setdefault("conditions", []).append(condition)
-            end_concentration_for_incapacitating_conditions(updated_sheet)
-            sync_combatant_conditions(next_encounter, target_id, updated_sheet)
-            reconcile_readied_spells(next_encounter, target_id, updated_sheet)
-            ongoing_effect = {
-                "id": str(choice_id),
-                "kind": "on_hit_condition",
-                "source_actor_id": str(window.get("attacker_id") or ""),
-                "target_id": target_id,
-                "weapon_id": str(window.get("weapon_id") or ""),
+            apply_condition_change(updated_sheet, condition_id=condition, add=True)
+            condition_applied = condition in condition_ids(
+                updated_sheet.get("conditions")
+            )
+            if condition_applied:
+                end_concentration_for_incapacitating_conditions(updated_sheet)
+                sync_combatant_conditions(next_encounter, target_id, updated_sheet)
+                reconcile_readied_spells(next_encounter, target_id, updated_sheet)
+                ongoing_effect = {
+                    "id": str(choice_id),
+                    "kind": "on_hit_condition",
+                    "source_actor_id": str(window.get("attacker_id") or ""),
+                    "target_id": target_id,
+                    "weapon_id": str(window.get("weapon_id") or ""),
+                    "condition": condition,
+                    "escape_dc": escape_dc,
+                    "escape_abilities": escape_abilities,
+                    "source_excerpt": source_excerpt,
+                    "effect": effect,
+                    "active": True,
+                }
+                next_encounter["ongoing_effects"] = [
+                    *list(next_encounter.get("ongoing_effects") or []),
+                    ongoing_effect,
+                ]
+            settlement_result = {
                 "condition": condition,
-                "escape_dc": escape_dc,
-                "escape_abilities": escape_abilities,
-                "source_excerpt": source_excerpt,
-                "effect": effect,
-                "active": True,
+                "condition_applied": condition_applied,
+                "resisted_by_immunity": not condition_applied,
             }
-            next_encounter["ongoing_effects"] = [
-                *list(next_encounter.get("ongoing_effects") or []),
-                ongoing_effect,
-            ]
         elif selection_id == "saving_throw_condition":
             allowed_fields = {
                 "id",
@@ -7638,41 +7905,16 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             unknown_fields = set(normalized_selection) - allowed_fields
             if unknown_fields:
                 raise CombatEngineError(
-                    "unsupported on-hit save-condition fields: "
-                    + ", ".join(sorted(unknown_fields))
+                    "unsupported on-hit save-condition fields: " + ", ".join(sorted(unknown_fields))
                 )
             condition = str(normalized_selection.get("condition") or "").strip().casefold()
-            save_ability = str(
-                normalized_selection.get("save_ability") or ""
-            ).strip().casefold()
+            save_ability = str(normalized_selection.get("save_ability") or "").strip().casefold()
             save_dc = normalized_selection.get("save_dc")
-            repeat_save_timing = str(
-                normalized_selection.get("repeat_save_timing") or ""
-            ).strip().casefold()
+            repeat_save_timing = (
+                str(normalized_selection.get("repeat_save_timing") or "").strip().casefold()
+            )
             raw_duration = normalized_selection.get("duration")
             source_excerpt = str(normalized_selection.get("source_excerpt") or "").strip()
-            supported_conditions = {
-                "blinded",
-                "charmed",
-                "deafened",
-                "frightened",
-                "grappled",
-                "incapacitated",
-                "paralyzed",
-                "poisoned",
-                "prone",
-                "restrained",
-                "stunned",
-                "unconscious",
-            }
-            supported_abilities = {
-                "strength",
-                "dexterity",
-                "constitution",
-                "intelligence",
-                "wisdom",
-                "charisma",
-            }
             if not isinstance(raw_duration, dict):
                 raise CombatEngineError(
                     "on-hit save condition requires a structured source duration"
@@ -7682,8 +7924,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             duration_remaining = duration.get("remaining")
             if (
                 set(duration) - {"period", "remaining"}
-                or condition not in supported_conditions
-                or save_ability not in supported_abilities
+                or condition not in STANDARD_BINARY_CONDITION_IDS
+                or save_ability not in ABILITY_IDS
                 or isinstance(save_dc, bool)
                 or not isinstance(save_dc, int)
                 or not 1 <= save_dc <= 40
@@ -7726,9 +7968,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 )
                 is None
             ):
-                raise CombatEngineError(
-                    "condition duration is not stated by the reviewed attack"
-                )
+                raise CombatEngineError("condition duration is not stated by the reviewed attack")
             normalized_duration = {
                 "period": duration_period,
                 "remaining": duration_remaining,
@@ -7754,6 +7994,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             )
             rule_receipts.extend(saved.get("rule_receipts") or [])
             effect_id: str | None = None
+            condition_applied = False
             if not saved["success"]:
                 effect_id = f"{choice_id}:save-condition"
                 updated_sheet, _ = add_effect(
@@ -7775,32 +8016,41 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         "description": source_excerpt,
                     },
                 )
-                end_concentration_for_incapacitating_conditions(updated_sheet)
-                ongoing_effect = {
-                    "id": effect_id,
-                    "kind": "on_hit_save_condition",
-                    "source_actor_id": str(window.get("attacker_id") or ""),
-                    "target_id": target_id,
-                    "weapon_id": str(window.get("weapon_id") or ""),
-                    "condition": condition,
-                    "save_ability": save_ability,
-                    "save_dc": save_dc,
-                    "repeat_save_timing": repeat_save_timing,
-                    "duration": normalized_duration,
-                    "source_excerpt": source_excerpt,
-                    "effect": effect,
-                    "active": True,
-                }
-                next_encounter["ongoing_effects"] = [
-                    *list(next_encounter.get("ongoing_effects") or []),
-                    ongoing_effect,
-                ]
-                sync_combatant_conditions(next_encounter, target_id, updated_sheet)
-                reconcile_readied_spells(next_encounter, target_id, updated_sheet)
+                condition_applied = condition in condition_ids(
+                    updated_sheet.get("conditions")
+                )
+                if condition_applied:
+                    end_concentration_for_incapacitating_conditions(updated_sheet)
+                    ongoing_effect = {
+                        "id": effect_id,
+                        "kind": "on_hit_save_condition",
+                        "source_actor_id": str(window.get("attacker_id") or ""),
+                        "target_id": target_id,
+                        "weapon_id": str(window.get("weapon_id") or ""),
+                        "condition": condition,
+                        "save_ability": save_ability,
+                        "save_dc": save_dc,
+                        "repeat_save_timing": repeat_save_timing,
+                        "duration": normalized_duration,
+                        "source_excerpt": source_excerpt,
+                        "effect": effect,
+                        "active": True,
+                    }
+                    next_encounter["ongoing_effects"] = [
+                        *list(next_encounter.get("ongoing_effects") or []),
+                        ongoing_effect,
+                    ]
+                    sync_combatant_conditions(next_encounter, target_id, updated_sheet)
+                    reconcile_readied_spells(next_encounter, target_id, updated_sheet)
+                else:
+                    updated_sheet = remove_effect(updated_sheet, effect_id)
+                    effect_id = None
             settlement_result = {
                 "save": saved,
                 "condition": condition,
-                "condition_applied": not saved["success"],
+                "condition_applied": condition_applied,
+                "resisted_by_immunity": not saved["success"]
+                and not condition_applied,
                 "effect_id": effect_id,
             }
         elif selection_id == "saving_throw_damage":
@@ -7831,16 +8081,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             half_on_success = normalized_selection.get("half_on_success")
             source_excerpt = str(normalized_selection.get("source_excerpt") or "").strip()
             zero_hp_effect = normalized_selection.get("zero_hp_effect")
-            supported_abilities = {
-                "strength",
-                "dexterity",
-                "constitution",
-                "intelligence",
-                "wisdom",
-                "charisma",
-            }
             if (
-                save_ability not in supported_abilities
+                save_ability not in ABILITY_IDS
                 or isinstance(save_dc, bool)
                 or not isinstance(save_dc, int)
                 or not 1 <= save_dc <= 40
@@ -8041,25 +8283,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     and int(damaged.get("after_hp", 0) or 0) == 0
                     and int(damaged.get("applied_amount", 0) or 0) > 0
                 ):
-                    zero_conditions = {
-                        str(item).strip().casefold() for item in updated_sheet.get("conditions", [])
-                    }
-                    zero_conditions.discard("dead")
-                    zero_conditions.discard("stable")
-                    zero_conditions.add("unconscious")
-                    updated_sheet["conditions"] = sorted(zero_conditions)
+                    apply_condition_change(updated_sheet, condition_id="dead", add=False)
+                    apply_condition_change(updated_sheet, condition_id="stable", add=False)
+                    apply_condition_change(updated_sheet, condition_id="unconscious", add=True)
                     stabilized = stabilize_sheet(updated_sheet)
                     updated_sheet = stabilized["sheet"]
-                    before_special_conditions = {
-                        str(item).strip().casefold() for item in updated_sheet.get("conditions", [])
-                    }
-                    added_conditions = [
-                        condition
-                        for condition in normalized_zero_hp_effect["conditions"]
-                        if condition not in before_special_conditions
-                    ]
-                    updated_sheet["conditions"] = sorted(
-                        before_special_conditions | set(normalized_zero_hp_effect["conditions"])
+                    before_special_conditions = condition_ids(
+                        updated_sheet.get("conditions")
                     )
                     effect_id = f"{choice_id}:zero-hp"
                     updated_sheet, _ = add_effect(
@@ -8075,11 +8305,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                                 {
                                     "path": "conditions",
                                     "mode": "add",
-                                    "value": added_conditions,
+                                    "value": normalized_zero_hp_effect["conditions"],
                                 }
                             ],
                             "description": source_excerpt,
                         },
+                    )
+                    added_conditions = sorted(
+                        condition_ids(updated_sheet.get("conditions"))
+                        - before_special_conditions
                     )
                     applied_zero_hp_effect = {
                         **normalized_zero_hp_effect,
@@ -8140,15 +8374,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 .casefold()
                 .replace(" ", "")
             )
-            damage_type = str(
-                normalized_selection.get("damage_type") or ""
-            ).strip().casefold()
+            damage_type = str(normalized_selection.get("damage_type") or "").strip().casefold()
             trigger_facts = normalized_selection.get("trigger_facts")
             decision = str(normalized_selection.get("decision") or "").strip()
             reason = str(normalized_selection.get("reason") or "").strip()
-            source_excerpt = str(
-                normalized_selection.get("source_excerpt") or ""
-            ).strip()
+            source_excerpt = str(normalized_selection.get("source_excerpt") or "").strip()
             if (
                 not has_explicit_conditional_damage
                 or not isinstance(applies, bool)
@@ -8156,9 +8386,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 or not trigger_facts
                 or len(trigger_facts) > 32
                 or any(
-                    not isinstance(key, str)
-                    or not key.strip()
-                    or len(key) > 100
+                    not isinstance(key, str) or not key.strip() or len(key) > 100
                     for key in trigger_facts
                 )
                 or normalized_selection.get("default_resolver") != "agent"
@@ -8186,21 +8414,20 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "conditional extra-damage trigger facts must be JSON values"
                 ) from exc
             if len(encoded_trigger_facts) > 10000:
-                raise CombatEngineError(
-                    "conditional extra-damage trigger facts are too large"
-                )
+                raise CombatEngineError("conditional extra-damage trigger facts are too large")
 
-            target_size = str(
-                dict(target_record.sheet.get("traits") or {}).get("size") or ""
-            ).strip().casefold()
+            target_size = (
+                str(dict(target_record.sheet.get("traits") or {}).get("size") or "")
+                .strip()
+                .casefold()
+            )
             if "target_size" in trigger_facts:
-                recorded_target_size = str(
-                    trigger_facts.get("target_size") or ""
-                ).strip().casefold()
+                recorded_target_size = (
+                    str(trigger_facts.get("target_size") or "").strip().casefold()
+                )
                 if recorded_target_size != target_size:
                     raise CombatEngineError(
-                        "conditional extra-damage target_size does not match "
-                        "the target actor card"
+                        "conditional extra-damage target_size does not match the target actor card"
                     )
             bound_fact_values = {
                 "target_id": target_id,
@@ -8208,13 +8435,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "weapon_id": str(window.get("weapon_id") or ""),
             }
             for fact_key, expected_value in bound_fact_values.items():
-                if (
-                    fact_key in trigger_facts
-                    and str(trigger_facts[fact_key]) != expected_value
-                ):
+                if fact_key in trigger_facts and str(trigger_facts[fact_key]) != expected_value:
                     raise CombatEngineError(
-                        f"conditional extra-damage {fact_key} does not match "
-                        "the pending attack"
+                        f"conditional extra-damage {fact_key} does not match the pending attack"
                     )
 
             size_condition = re.search(
@@ -8272,8 +8495,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     )
             elif damage_formula or damage_type:
                 raise CombatEngineError(
-                    "non-applicable conditional extra damage must not roll or "
-                    "declare damage terms"
+                    "non-applicable conditional extra damage must not roll or declare damage terms"
                 )
 
             damage_roll: dict[str, Any] | None = None
@@ -8304,9 +8526,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     actor_id=target_id,
                     sheet=updated_sheet,
                 )
-                damaged_result = {
-                    key: value for key, value in damaged.items() if key != "sheet"
-                }
+                damaged_result = {key: value for key, value in damaged.items() if key != "sheet"}
                 add_concentration_window(
                     next_encounter,
                     target_id,
@@ -8325,9 +8545,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "reason": reason,
                 },
                 "damage_roll": damage_roll,
-                "damage_amount": (
-                    int(damage_roll["total"]) if damage_roll is not None else 0
-                ),
+                "damage_amount": (int(damage_roll["total"]) if damage_roll is not None else 0),
                 "damage": damaged_result,
             }
         next_encounter["log"] = [
@@ -8352,6 +8570,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     expected_revision=target_record.revision,
                 )
             )
+
         def on_hit_ruling_response(revisions: list[Any]) -> dict[str, Any]:
             response = {
                 "status": "committed",
@@ -8437,19 +8656,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 (
                     effect
                     for effect in current_sheet.get("effects", [])
-                    if str(effect.get("id") or "") == effect_id
-                    and effect.get("active", True)
+                    if str(effect.get("id") or "") == effect_id and effect.get("active", True)
                 ),
                 None,
             )
-            if (
-                sheet_effect is None
-                or condition
-                not in {
-                    str(item).strip().casefold()
-                    for item in current_sheet.get("conditions", [])
-                }
-            ):
+            if sheet_effect is None or condition not in {
+                str(item).strip().casefold() for item in current_sheet.get("conditions", [])
+            }:
                 continue
             save_ability = str(ongoing.get("save_ability") or "").strip().casefold()
             save_dc = int(ongoing.get("save_dc", 0) or 0)
@@ -8526,23 +8739,22 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 next_state,
                 period="round",
             )
+        elapsed_ticks = int(time_transition["elapsed_ticks"]) if time_transition is not None else 0
         elapsed_minutes = (
-            int(time_transition["elapsed_minutes"])
-            if time_transition is not None
-            else 0
+            int(time_transition["elapsed_minutes"]) if time_transition is not None else 0
         )
         minute_changed = elapsed_minutes > 0
         world_advanced: list[str] = []
         world_expired: list[str] = []
         world_time = deepcopy(dict(next_state.get("world_time") or {}))
-        if minute_changed:
-            world_result = advance_elapsed_world_effect_durations(
-                next_state,
-                elapsed_minutes=elapsed_minutes,
-            )
-            next_state = world_result["state"]
-            world_advanced.extend(world_result["advanced"])
-            world_expired.extend(world_result["expired"])
+        world_duration = advance_world_effect_clocks(
+            next_state,
+            elapsed_ticks=elapsed_ticks,
+            period_steps={"round": 1} if round_changed else None,
+        )
+        next_state = world_duration["state"]
+        world_advanced.extend(world_duration["advanced"])
+        world_expired.extend(world_duration["expired"])
         source_sheets = {
             str(item.get("actor_id")): deepcopy(
                 duration["sheet"]
@@ -8616,10 +8828,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 rounded = advance_effect_durations(sheet, period="round")
                 sheet = rounded["sheet"]
                 expired.extend(rounded["expired"])
-            if minute_changed:
+            if elapsed_ticks:
                 minutes = advance_elapsed_effect_durations(
                     sheet,
-                    elapsed_minutes=elapsed_minutes,
+                    elapsed_ticks=elapsed_ticks,
                 )
                 sheet = minutes["sheet"]
                 expired.extend(minutes["expired"])
@@ -8657,14 +8869,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         expected_revision=target.revision,
                     )
                 )
-        if minute_changed:
+        if elapsed_ticks:
             combatant_ids = set(source_sheets)
             for target in characters.list(campaign_id=campaign_id):
                 if target.id in combatant_ids:
                     continue
                 minutes = advance_elapsed_effect_durations(
                     target.sheet,
-                    elapsed_minutes=elapsed_minutes,
+                    elapsed_ticks=elapsed_ticks,
                 )
                 extension = apply_rule_event(
                     minutes["sheet"],
@@ -8674,7 +8886,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         actor_id=target.id,
                         ended_actor_id=actor_id,
                         round_changed=round_changed,
-                        minute_changed=True,
+                        minute_changed=minute_changed,
+                        elapsed_ticks=elapsed_ticks,
                     ),
                 )
                 rule_receipts.extend(extension.receipts)
@@ -8702,6 +8915,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "actor_id": actor_id,
                     "round": int(next_state["combat"].get("round", 1) or 1),
                 }
+
         def turn_end_response(revisions: list[Any]) -> dict[str, Any]:
             response = {
                 "status": "committed",
@@ -8711,9 +8925,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "world_time": world_time or None,
                 "world_advanced": list(dict.fromkeys(world_advanced)),
                 "world_expired": list(dict.fromkeys(world_expired)),
-                "readied_spells_expired": sorted(
-                    str(item.get("id")) for item in expired_readied
-                ),
+                "readied_spells_expired": sorted(str(item.get("id")) for item in expired_readied),
                 "source_turn_start": source_turn_start,
                 "repeat_saves": repeat_saves,
                 "rule_receipts": rule_receipts,
@@ -8787,10 +8999,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             raw_effect = deepcopy(required(payload, "effect"))
             elapsed_ticks = int(state["game_time"]["elapsed_ticks"])
             raw_effect.setdefault("created_at_elapsed_ticks", elapsed_ticks)
-            raw_effect.setdefault(
-                "created_at_elapsed_minutes",
-                elapsed_ticks // game_time_ticks("minute"),
-            )
             effect = validate_world_effect(raw_effect)
             if any(item["id"] == effect["id"] for item in effects):
                 raise ValueError("world effect id is already present")
@@ -8809,6 +9017,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "ended_reason": str(payload.get("reason") or "dismissed"),
             }
         state["world_effects"] = effects
+
+        def world_effect_response(revisions: list[Any]) -> dict[str, Any]:
+            return {
+                "status": "committed",
+                "effect": effect,
+                "campaign_revision": campaign.revision + 1,
+                "revisions": [asdict(item) for item in revisions],
+            }
+
         revisions_result = StateMutationService(storage.database).replace(
             campaign_id,
             campaign_state=state,
@@ -8817,20 +9034,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             actor=principal_id,
             branch_id=resolved_branch_id,
             idempotency_key=idempotency_key,
+            idempotency_write=IdempotencyWrite(
+                scope=scope,
+                payload=request_payload,
+                response=world_effect_response,
+            ),
         )
-        response = {
-            "status": "committed",
-            "effect": effect,
-            "campaign_revision": mutation_revision(campaign_id),
-            "revisions": [asdict(item) for item in revisions_result or []],
-        }
-        return remember_idempotent(
-            scope,
-            idempotency_key,
-            request_payload,
-            response,
-            campaign_id=campaign_id,
-        )
+        return world_effect_response(list(revisions_result or []))
 
     @mcp.tool()
     def campaign_clock_set(
@@ -8891,6 +9101,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "stay synchronized"
             )
         state["world_time"] = world_time
+
         def clock_set_response(revisions: list[Any]) -> dict[str, Any]:
             return {
                 "status": "committed",
@@ -8925,6 +9136,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         branch_id: str | None = None,
         idempotency_key: str | None = None,
         expected_world_time: dict[str, Any] | None = None,
+        expected_elapsed_ticks: int | None = None,
     ) -> dict[str, Any]:
         """Advance the campaign clock and matching timed effects atomically."""
         access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
@@ -8936,6 +9148,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if isinstance(count, bool) or not isinstance(count, int) or count < 1:
             raise ValueError("count must be a positive integer")
         normalized_expected_world_time: dict[str, int] | None = None
+        if expected_elapsed_ticks is not None and (
+            isinstance(expected_elapsed_ticks, bool)
+            or not isinstance(expected_elapsed_ticks, int)
+            or expected_elapsed_ticks < 0
+        ):
+            raise ValueError("expected_elapsed_ticks must be a nonnegative integer")
         if expected_world_time is not None:
             if not isinstance(expected_world_time, dict):
                 raise ValueError("expected_world_time must be an object")
@@ -8987,16 +9205,21 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if (
             normalized_period in narrative_time_periods
             and normalized_expected_world_time is None
+            and expected_elapsed_ticks is None
         ):
             raise ValueError(
-                "minute, hour, and day advances require expected_world_time"
+                "minute, hour, and day advances require expected_elapsed_ticks "
+                "or legacy expected_world_time"
             )
         if (
             normalized_period not in narrative_time_periods
             and normalized_expected_world_time is not None
         ):
+            raise ValueError("expected_world_time is valid only for minute, hour, and day advances")
+        if normalized_period == "encounter" and expected_elapsed_ticks is not None:
             raise ValueError(
-                "expected_world_time is valid only for minute, hour, and day advances"
+                "expected_elapsed_ticks is invalid for an encounter advance "
+                "because it has no fixed elapsed duration"
             )
         payload = {
             "period": normalized_period,
@@ -9005,6 +9228,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         }
         if normalized_expected_world_time is not None:
             payload["expected_world_time"] = normalized_expected_world_time
+        if expected_elapsed_ticks is not None:
+            payload["expected_elapsed_ticks"] = expected_elapsed_ticks
         scope = f"campaign-advance-effects:{campaign_id}:{resolved_branch_id}:{principal_id}"
         replay = replay_idempotent(scope, idempotency_key, payload)
         if replay is not None:
@@ -9018,18 +9243,29 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         next_state = validate_party_state(deepcopy(campaign.state or {}))
         if bool(dict(next_state.get("combat") or {}).get("active")):
             raise CombatEngineError("campaign time cannot advance during active combat")
+        if normalized_expected_world_time is not None and not next_state.get("world_time"):
+            raise ValueError(
+                "expected_world_time requires an anchored calendar; "
+                "use expected_elapsed_ticks for an unanchored campaign"
+            )
         time_minutes = {"minute": 1, "hour": 60, "day": 1440}
         world_time: dict[str, Any] | None = None
         time_transition: dict[str, Any] | None = None
         if normalized_period in {*time_minutes, "round"}:
-            if normalized_period in time_minutes and not next_state.get("world_time"):
-                raise ValueError("set the campaign clock before advancing narrative time")
             next_state, time_transition = advance_state_game_time(
                 next_state,
                 period=normalized_period,
                 count=count,
             )
             world_time = time_transition["world_time_after"]
+            if (
+                expected_elapsed_ticks is not None
+                and int(time_transition["after"]["elapsed_ticks"]) != expected_elapsed_ticks
+            ):
+                raise ValueError(
+                    "clock advance does not reach expected_elapsed_ticks: "
+                    f"computed {time_transition['after']['elapsed_ticks']}"
+                )
             if (
                 normalized_expected_world_time is not None
                 and world_time is not None
@@ -9045,33 +9281,23 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     f"{world_time['hour']:02}:{world_time['minute']:02}, "
                     f"elapsed {world_time['elapsed_minutes']}"
                 )
+        elapsed_ticks = int(time_transition["elapsed_ticks"]) if time_transition is not None else 0
         elapsed_minutes = (
-            int(time_transition["elapsed_minutes"])
-            if time_transition is not None
-            else 0
+            int(time_transition["elapsed_minutes"]) if time_transition is not None else 0
         )
         effect_steps = (
             {"round": int(time_transition["elapsed_ticks"])}
             if time_transition is not None
             else {"encounter": count}
         )
-        world_advanced: list[str] = []
-        world_expired: list[str] = []
-        if elapsed_minutes:
-            world_result = advance_elapsed_world_effect_durations(
-                next_state,
-                elapsed_minutes=elapsed_minutes,
-            )
-            next_state = world_result["state"]
-            world_advanced.extend(world_result["advanced"])
-            world_expired.extend(world_result["expired"])
-        for effect_period, amount in effect_steps.items():
-            world_result = advance_world_effect_durations(
-                next_state, period=effect_period, amount=amount
-            )
-            next_state = world_result["state"]
-            world_advanced.extend(world_result["advanced"])
-            world_expired.extend(world_result["expired"])
+        world_duration = advance_world_effect_clocks(
+            next_state,
+            elapsed_ticks=elapsed_ticks,
+            period_steps=effect_steps,
+        )
+        next_state = world_duration["state"]
+        world_advanced = world_duration["advanced"]
+        world_expired = world_duration["expired"]
         world_state_changed = bool(world_advanced or world_expired)
         updates: list[CharacterStateUpdate] = []
         advanced: dict[str, list[str]] = {}
@@ -9082,10 +9308,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             sheet = character.sheet
             character_advanced: list[str] = []
             character_expired: list[str] = []
-            if elapsed_minutes:
+            if elapsed_ticks:
                 result = advance_elapsed_effect_durations(
                     sheet,
-                    elapsed_minutes=elapsed_minutes,
+                    elapsed_ticks=elapsed_ticks,
                 )
                 extension = apply_rule_event(
                     result["sheet"],
@@ -9093,8 +9319,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     context_with_facts(
                         rule_context,
                         actor_id=character.id,
-                        period="minute",
-                        amount=elapsed_minutes,
+                        period="tick",
+                        amount=elapsed_ticks,
+                        elapsed_minutes=elapsed_minutes,
                     ),
                 )
                 rule_receipts.extend(extension.receipts)
@@ -9133,20 +9360,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             )
             advanced[character.id] = list(dict.fromkeys(character_advanced))
             expired[character.id] = list(dict.fromkeys(character_expired))
-        mutation_required = bool(
-            updates
-            or time_transition is not None
-            or world_state_changed
-        )
+        mutation_required = bool(updates or time_transition is not None or world_state_changed)
 
         def clock_advance_response(revisions: list[Any]) -> dict[str, Any]:
             return {
                 "status": "committed" if mutation_required else "no_change",
                 "period": normalized_period,
                 "count": count,
-                "game_time": (
-                    time_transition["after"] if time_transition is not None else None
-                ),
+                "game_time": (time_transition["after"] if time_transition is not None else None),
                 "world_time": world_time,
                 "advanced": advanced,
                 "expired": expired,
@@ -9163,9 +9384,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             revisions_result = StateMutationService(storage.database).replace(
                 campaign_id,
                 campaign_state=(
-                    next_state
-                    if time_transition is not None or world_state_changed
-                    else None
+                    next_state if time_transition is not None or world_state_changed else None
                 ),
                 character_updates=updates,
                 expected_campaign_revision=campaign.revision,
@@ -9404,15 +9623,22 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         expected_revision=characters.get(actor_id).revision,
                     )
                 )
-            revisions_result = StateMutationService(storage.database).replace(
-                campaign_id,
-                campaign_state=validate_party_state(next_state),
-                character_updates=updates,
-                expected_campaign_revision=campaign.revision,
+            response = commit_campaign_state(
+                campaign,
+                next_state,
                 operation="combat.reaction.attack.roll",
-                actor=principal_id,
+                principal_id=principal_id,
                 branch_id=resolved_branch_id,
                 idempotency_key=idempotency_key,
+                scope=scope,
+                payload=payload,
+                response_fields={
+                    "status": "pending_reaction",
+                    "result": result,
+                    "choice": defense_window,
+                    "combat": next_encounter,
+                },
+                character_updates=updates,
                 rule_receipts=core_receipts(
                     rule_context,
                     [
@@ -9422,25 +9648,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "reaction.opportunity_attack.hit",
                 ),
             )
-            response = {
-                "status": "pending_reaction",
-                "result": result,
-                "choice": defense_window,
-                "combat": next_encounter,
-                "campaign_revision": mutation_revision(campaign_id),
-                "revisions": [asdict(item) for item in revisions_result or []],
-            }
-            return combat_response(
-                campaign_id,
-                principal_id,
-                remember_idempotent(
-                    scope,
-                    idempotency_key,
-                    payload,
-                    response,
-                    campaign_id=campaign_id,
-                ),
-            )
+            return combat_response(campaign_id, principal_id, response)
         updated_attacker, updated_target, result = resolve_attack_damage(
             updated_attacker,
             target,
@@ -9494,9 +9702,27 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             {"type": "reaction_attack", "choice_id": choice_id, "result": result},
         ][-100:]
         next_state = {**dict(campaign.state or {}), "combat": next_encounter}
-        revisions_result = StateMutationService(storage.database).replace(
-            campaign_id,
-            campaign_state=validate_party_state(next_state),
+        response = commit_campaign_state(
+            campaign,
+            next_state,
+            operation="combat.reaction.attack",
+            principal_id=principal_id,
+            branch_id=resolved_branch_id,
+            idempotency_key=idempotency_key,
+            scope=scope,
+            payload=payload,
+            response_fields={
+                **_ruling_status(
+                    (
+                        "pending_ruling"
+                        if on_hit_window is not None or critical_followup_window is not None
+                        else "committed"
+                    ),
+                    "source_or_scene_fact",
+                ),
+                "result": result,
+                "combat": next_encounter,
+            },
             character_updates=[
                 CharacterStateUpdate(
                     character_id=actor_id,
@@ -9511,11 +9737,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     expected_revision=characters.get(target_id).revision,
                 ),
             ],
-            expected_campaign_revision=campaign.revision,
-            operation="combat.reaction.attack",
-            actor=principal_id,
-            branch_id=resolved_branch_id,
-            idempotency_key=idempotency_key,
             rule_receipts=[
                 *list(result.get("rule_receipts") or []),
                 *core_receipts(
@@ -9525,25 +9746,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 ),
             ],
         )
-        response = {
-            **_ruling_status(
-                (
-                    "pending_ruling"
-                    if on_hit_window is not None or critical_followup_window is not None
-                    else "committed"
-                ),
-                "source_or_scene_fact",
-            ),
-            "result": result,
-            "combat": next_encounter,
-            "campaign_revision": mutation_revision(campaign_id),
-            "revisions": [asdict(item) for item in revisions_result or []],
-        }
-        return combat_response(
-            campaign_id,
-            principal_id,
-            remember_idempotent(scope, idempotency_key, payload, response, campaign_id=campaign_id),
-        )
+        return combat_response(campaign_id, principal_id, response)
 
     @_agent_ruling_boundary
     def combat_reaction_defense(
@@ -9780,9 +9983,27 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             },
         ][-100:]
         next_state = {**dict(campaign.state or {}), "combat": next_encounter}
-        revisions_result = StateMutationService(storage.database).replace(
-            campaign_id,
-            campaign_state=validate_party_state(next_state),
+        response = commit_campaign_state(
+            campaign,
+            next_state,
+            operation="combat.reaction.defense",
+            principal_id=principal_id,
+            branch_id=resolved_branch_id,
+            idempotency_key=idempotency_key,
+            scope=scope,
+            payload=payload,
+            response_fields={
+                **_ruling_status(
+                    (
+                        "pending_ruling"
+                        if on_hit_window is not None or critical_followup_window is not None
+                        else "committed"
+                    ),
+                    "source_or_scene_fact",
+                ),
+                "result": result,
+                "combat": next_encounter,
+            },
             character_updates=[
                 CharacterStateUpdate(
                     character_id=attacker_id,
@@ -9797,11 +10018,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     expected_revision=characters.get(actor_id).revision,
                 ),
             ],
-            expected_campaign_revision=campaign.revision,
-            operation="combat.reaction.defense",
-            actor=principal_id,
-            branch_id=resolved_branch_id,
-            idempotency_key=idempotency_key,
             rule_receipts=[
                 *list(result.get("rule_receipts") or []),
                 *core_receipts(
@@ -9818,31 +10034,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 ),
             ],
         )
-        response = {
-            **_ruling_status(
-                (
-                    "pending_ruling"
-                    if on_hit_window is not None or critical_followup_window is not None
-                    else "committed"
-                ),
-                "source_or_scene_fact",
-            ),
-            "result": result,
-            "combat": next_encounter,
-            "campaign_revision": mutation_revision(campaign_id),
-            "revisions": [asdict(item) for item in revisions_result or []],
-        }
-        return combat_response(
-            campaign_id,
-            principal_id,
-            remember_idempotent(
-                scope,
-                idempotency_key,
-                payload,
-                response,
-                campaign_id=campaign_id,
-            ),
-        )
+        return combat_response(campaign_id, principal_id, response)
 
     @mcp.tool()
     @_agent_ruling_boundary
@@ -9929,27 +10121,22 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "movement.spend",
         )
         next_state = {**dict(campaign.state or {}), "combat": next_encounter}
-        revisions_result = StateMutationService(storage.database).replace(
-            campaign_id,
-            campaign_state=validate_party_state(next_state),
-            expected_campaign_revision=campaign.revision,
+        response = commit_campaign_state(
+            campaign,
+            next_state,
             operation="combat.movement.spend",
-            actor=principal_id,
+            principal_id=principal_id,
             branch_id=resolved_branch_id,
             idempotency_key=idempotency_key,
+            scope=scope,
+            payload=payload,
+            response_fields={
+                "status": "committed",
+                "combat": next_encounter,
+            },
             rule_receipts=movement_receipts,
         )
-        response = {
-            "status": "committed",
-            "combat": next_encounter,
-            "campaign_revision": mutation_revision(campaign_id),
-            "revisions": [asdict(item) for item in revisions_result or []],
-        }
-        return combat_response(
-            campaign_id,
-            principal_id,
-            remember_idempotent(scope, idempotency_key, payload, response, campaign_id),
-        )
+        return combat_response(campaign_id, principal_id, response)
 
     @mcp.tool()
     def combat_stand(
@@ -9983,15 +10170,23 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "movement.stand",
         )
         current = characters.get(actor_id)
-        combatant = next(
-            item for item in next_encounter["combatants"] if item.get("actor_id") == actor_id
-        )
         updated_sheet = deepcopy(current.sheet)
-        updated_sheet["conditions"] = list(combatant.get("conditions") or [])
+        apply_condition_change(updated_sheet, condition_id="prone", add=False)
+        sync_combatant_conditions(next_encounter, actor_id, updated_sheet)
         next_state = {**dict(campaign.state or {}), "combat": next_encounter}
-        revisions_result = StateMutationService(storage.database).replace(
-            campaign_id,
-            campaign_state=validate_party_state(next_state),
+        response = commit_campaign_state(
+            campaign,
+            next_state,
+            operation="combat.stand",
+            principal_id=principal_id,
+            branch_id=resolved_branch_id,
+            idempotency_key=idempotency_key,
+            scope=scope,
+            payload=payload,
+            response_fields={
+                "status": "committed",
+                "combat": next_encounter,
+            },
             character_updates=[
                 CharacterStateUpdate(
                     character_id=actor_id,
@@ -10000,24 +10195,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     expected_revision=current.revision,
                 )
             ],
-            expected_campaign_revision=campaign.revision,
-            operation="combat.stand",
-            actor=principal_id,
-            branch_id=resolved_branch_id,
-            idempotency_key=idempotency_key,
             rule_receipts=stand_receipts,
         )
-        response = {
-            "status": "committed",
-            "combat": next_encounter,
-            "campaign_revision": mutation_revision(campaign_id),
-            "revisions": [asdict(item) for item in revisions_result or []],
-        }
-        return combat_response(
-            campaign_id,
-            principal_id,
-            remember_idempotent(scope, idempotency_key, payload, response, campaign_id),
-        )
+        return combat_response(campaign_id, principal_id, response)
 
     @mcp.tool()
     def combat_common_action(
@@ -10092,28 +10272,23 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             f"action.{normalized_action}",
         )
         next_state = {**dict(campaign.state or {}), "combat": next_encounter}
-        revisions_result = StateMutationService(storage.database).replace(
-            campaign_id,
-            campaign_state=validate_party_state(next_state),
-            expected_campaign_revision=campaign.revision,
+        response = commit_campaign_state(
+            campaign,
+            next_state,
             operation=f"combat.common.{action}",
-            actor=principal_id,
+            principal_id=principal_id,
             branch_id=resolved_branch_id,
             idempotency_key=idempotency_key,
+            scope=scope,
+            payload=payload_value,
+            response_fields={
+                "status": "committed",
+                "action": action,
+                "combat": next_encounter,
+            },
             rule_receipts=action_receipts,
         )
-        response = {
-            "status": "committed",
-            "action": action,
-            "combat": next_encounter,
-            "campaign_revision": mutation_revision(campaign_id),
-            "revisions": [asdict(item) for item in revisions_result or []],
-        }
-        return combat_response(
-            campaign_id,
-            principal_id,
-            remember_idempotent(scope, idempotency_key, payload_value, response, campaign_id),
-        )
+        return combat_response(campaign_id, principal_id, response)
 
     @_agent_ruling_boundary
     def combat_magic_missile_defense(
@@ -10268,9 +10443,29 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             if sheet_override:
                 sync_combatant_conditions(next_encounter, actor_id, sheet_override[actor_id])
             next_state = {**dict(campaign.state or {}), "combat": next_encounter}
-            revisions_result = StateMutationService(storage.database).replace(
-                campaign_id,
-                campaign_state=validate_party_state(next_state),
+            response = commit_campaign_state(
+                campaign,
+                next_state,
+                operation="combat.spell.magic_missile.defense",
+                principal_id=principal_id,
+                branch_id=resolved_branch_id,
+                idempotency_key=idempotency_key,
+                scope=scope,
+                payload=payload,
+                response_fields={
+                    "status": "pending_reaction",
+                    "result": {
+                        "kind": "magic_missile",
+                        "spell_id": resolution["spell_id"],
+                        "reaction_defense": {
+                            "used": used,
+                            "spell_id": selection_id if used else None,
+                            "effect_id": (spell_result or {}).get("effect_id"),
+                        },
+                    },
+                    "choices": remaining,
+                    "combat": next_encounter,
+                },
                 character_updates=[
                     CharacterStateUpdate(
                         character_id=target_id,
@@ -10280,29 +10475,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     )
                     for target_id, sheet in sheet_override.items()
                 ],
-                expected_campaign_revision=campaign.revision,
-                operation="combat.spell.magic_missile.defense",
-                actor=principal_id,
-                branch_id=resolved_branch_id,
-                idempotency_key=idempotency_key,
                 rule_receipts=rule_receipts,
             )
-            response = {
-                "status": "pending_reaction",
-                "result": {
-                    "kind": "magic_missile",
-                    "spell_id": resolution["spell_id"],
-                    "reaction_defense": {
-                        "used": used,
-                        "spell_id": selection_id if used else None,
-                        "effect_id": (spell_result or {}).get("effect_id"),
-                    },
-                },
-                "choices": remaining,
-                "combat": next_encounter,
-                "campaign_revision": mutation_revision(campaign_id),
-                "revisions": [asdict(item) for item in revisions_result or []],
-            }
         else:
             next_encounter, resolved_sheets, result = settle_magic_missile_damage(
                 campaign_id,
@@ -10312,9 +10486,27 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 sheet_overrides=sheet_override,
             )
             next_state = {**dict(campaign.state or {}), "combat": next_encounter}
-            revisions_result = StateMutationService(storage.database).replace(
-                campaign_id,
-                campaign_state=validate_party_state(next_state),
+            response = commit_campaign_state(
+                campaign,
+                next_state,
+                operation="combat.spell.magic_missile.resolve",
+                principal_id=principal_id,
+                branch_id=resolved_branch_id,
+                idempotency_key=idempotency_key,
+                scope=scope,
+                payload=payload,
+                response_fields={
+                    "status": "committed",
+                    "result": {
+                        **result,
+                        "reaction_defense": {
+                            "used": used,
+                            "spell_id": selection_id if used else None,
+                            "effect_id": (spell_result or {}).get("effect_id"),
+                        },
+                    },
+                    "combat": next_encounter,
+                },
                 character_updates=[
                     CharacterStateUpdate(
                         character_id=target_id,
@@ -10324,32 +10516,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     )
                     for target_id, sheet in resolved_sheets.items()
                 ],
-                expected_campaign_revision=campaign.revision,
-                operation="combat.spell.magic_missile.resolve",
-                actor=principal_id,
-                branch_id=resolved_branch_id,
-                idempotency_key=idempotency_key,
                 rule_receipts=rule_receipts,
             )
-            response = {
-                "status": "committed",
-                "result": {
-                    **result,
-                    "reaction_defense": {
-                        "used": used,
-                        "spell_id": selection_id if used else None,
-                        "effect_id": (spell_result or {}).get("effect_id"),
-                    },
-                },
-                "combat": next_encounter,
-                "campaign_revision": mutation_revision(campaign_id),
-                "revisions": [asdict(item) for item in revisions_result or []],
-            }
-        return combat_response(
-            campaign_id,
-            principal_id,
-            remember_idempotent(scope, idempotency_key, payload, response, campaign_id),
-        )
+        return combat_response(campaign_id, principal_id, response)
 
     @mcp.tool()
     def combat_reactions(
@@ -10704,9 +10873,28 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     },
                 ][-100:]
                 next_state = {**dict(campaign.state or {}), "combat": next_encounter}
-                revisions_result = StateMutationService(storage.database).replace(
-                    campaign_id,
-                    campaign_state=validate_party_state(next_state),
+                response = commit_campaign_state(
+                    campaign,
+                    next_state,
+                    operation="combat.spell.attack.cast",
+                    principal_id=principal_id,
+                    branch_id=resolved_branch_id,
+                    idempotency_key=idempotency_key,
+                    scope=scope,
+                    payload=payload,
+                    response_fields={
+                        "status": "pending_resolution",
+                        "result": {
+                            "kind": structured_kind,
+                            "resolution_id": resolution_id,
+                            "spell_id": spell_id,
+                            "cast_level": resolved_cast_level,
+                            "attack_count": total_attacks,
+                            "remaining_attacks": total_attacks,
+                            "payment": deepcopy(applied.get("payment") or {}),
+                        },
+                        "combat": next_encounter,
+                    },
                     character_updates=[
                         CharacterStateUpdate(
                             character_id=actor_id,
@@ -10715,33 +10903,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                             expected_revision=current.revision,
                         )
                     ],
-                    expected_campaign_revision=campaign.revision,
-                    operation="combat.spell.attack.cast",
-                    actor=principal_id,
-                    branch_id=resolved_branch_id,
-                    idempotency_key=idempotency_key,
                     rule_receipts=structured_receipts,
                 )
-                response = {
-                    "status": "pending_resolution",
-                    "result": {
-                        "kind": structured_kind,
-                        "resolution_id": resolution_id,
-                        "spell_id": spell_id,
-                        "cast_level": resolved_cast_level,
-                        "attack_count": total_attacks,
-                        "remaining_attacks": total_attacks,
-                        "payment": deepcopy(applied.get("payment") or {}),
-                    },
-                    "combat": next_encounter,
-                    "campaign_revision": mutation_revision(campaign_id),
-                    "revisions": [asdict(item) for item in revisions_result or []],
-                }
-                return combat_response(
-                    campaign_id,
-                    principal_id,
-                    remember_idempotent(scope, idempotency_key, payload, response, campaign_id),
-                )
+                return combat_response(campaign_id, principal_id, response)
 
             if structured_kind == "healing":
                 assert structured_target is not None
@@ -10798,9 +10962,20 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     {"type": "spell_healing", "actor_id": actor_id, "result": result},
                 ][-100:]
                 next_state = {**dict(campaign.state or {}), "combat": next_encounter}
-                revisions_result = StateMutationService(storage.database).replace(
-                    campaign_id,
-                    campaign_state=validate_party_state(next_state),
+                response = commit_campaign_state(
+                    campaign,
+                    next_state,
+                    operation="combat.spell.healing",
+                    principal_id=principal_id,
+                    branch_id=resolved_branch_id,
+                    idempotency_key=idempotency_key,
+                    scope=scope,
+                    payload=payload,
+                    response_fields={
+                        "status": "committed",
+                        "result": result,
+                        "combat": next_encounter,
+                    },
                     character_updates=[
                         CharacterStateUpdate(
                             character_id=target_actor_id,
@@ -10810,25 +10985,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         )
                         for target_actor_id, sheet in final_sheets.items()
                     ],
-                    expected_campaign_revision=campaign.revision,
-                    operation="combat.spell.healing",
-                    actor=principal_id,
-                    branch_id=resolved_branch_id,
-                    idempotency_key=idempotency_key,
                     rule_receipts=structured_receipts,
                 )
-                response = {
-                    "status": "committed",
-                    "result": result,
-                    "combat": next_encounter,
-                    "campaign_revision": mutation_revision(campaign_id),
-                    "revisions": [asdict(item) for item in revisions_result or []],
-                }
-                return combat_response(
-                    campaign_id,
-                    principal_id,
-                    remember_idempotent(scope, idempotency_key, payload, response, campaign_id),
-                )
+                return combat_response(campaign_id, principal_id, response)
 
             assert structured_kind == "saving_throw" and structured_target is not None
             save_spec = dict(structured_resolution.get("save") or {})
@@ -10957,9 +11116,23 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 {"type": "spell_save", "actor_id": actor_id, "result": result},
             ][-100:]
             next_state = {**dict(campaign.state or {}), "combat": next_encounter}
-            revisions_result = StateMutationService(storage.database).replace(
-                campaign_id,
-                campaign_state=validate_party_state(next_state),
+            response = commit_campaign_state(
+                campaign,
+                next_state,
+                operation="combat.spell.save",
+                principal_id=principal_id,
+                branch_id=resolved_branch_id,
+                idempotency_key=idempotency_key,
+                scope=scope,
+                payload=payload,
+                response_fields={
+                    **_ruling_status(
+                        "pending_ruling" if pending_rulings else "committed",
+                        "generic_spell_effect",
+                    ),
+                    "result": result,
+                    "combat": next_encounter,
+                },
                 character_updates=[
                     CharacterStateUpdate(
                         character_id=target_actor_id,
@@ -10969,28 +11142,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     )
                     for target_actor_id, sheet in final_sheets.items()
                 ],
-                expected_campaign_revision=campaign.revision,
-                operation="combat.spell.save",
-                actor=principal_id,
-                branch_id=resolved_branch_id,
-                idempotency_key=idempotency_key,
                 rule_receipts=resolution_receipts,
             )
-            response = {
-                **_ruling_status(
-                    "pending_ruling" if pending_rulings else "committed",
-                    "generic_spell_effect",
-                ),
-                "result": result,
-                "combat": next_encounter,
-                "campaign_revision": mutation_revision(campaign_id),
-                "revisions": [asdict(item) for item in revisions_result or []],
-            }
-            return combat_response(
-                campaign_id,
-                principal_id,
-                remember_idempotent(scope, idempotency_key, payload, response, campaign_id),
-            )
+            return combat_response(campaign_id, principal_id, response)
         if magic_missile:
             assert normalized_allocations is not None
             resolution_id = f"spell-resolution-{uuid4().hex}"
@@ -11050,9 +11204,28 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     },
                 ][-100:]
                 next_state = {**dict(campaign.state or {}), "combat": next_encounter}
-                revisions_result = StateMutationService(storage.database).replace(
-                    campaign_id,
-                    campaign_state=validate_party_state(next_state),
+                response = commit_campaign_state(
+                    campaign,
+                    next_state,
+                    operation="combat.spell.magic_missile.target",
+                    principal_id=principal_id,
+                    branch_id=resolved_branch_id,
+                    idempotency_key=idempotency_key,
+                    scope=scope,
+                    payload=payload,
+                    response_fields={
+                        "status": "pending_reaction",
+                        "result": {
+                            "kind": "magic_missile",
+                            "spell_id": spell_id,
+                            "cast_level": resolution["cast_level"],
+                            "dart_count": sum(item["darts"] for item in normalized_allocations),
+                            "allocations": normalized_allocations,
+                            "payment": deepcopy(applied.get("payment") or {}),
+                        },
+                        "choices": defense_windows,
+                        "combat": next_encounter,
+                    },
                     character_updates=[
                         CharacterStateUpdate(
                             character_id=actor_id,
@@ -11061,11 +11234,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                             expected_revision=current.revision,
                         )
                     ],
-                    expected_campaign_revision=campaign.revision,
-                    operation="combat.spell.magic_missile.target",
-                    actor=principal_id,
-                    branch_id=resolved_branch_id,
-                    idempotency_key=idempotency_key,
                     rule_receipts=[
                         *list(applied.get("rule_receipts") or []),
                         *core_receipts(
@@ -11078,26 +11246,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         ),
                     ],
                 )
-                response = {
-                    "status": "pending_reaction",
-                    "result": {
-                        "kind": "magic_missile",
-                        "spell_id": spell_id,
-                        "cast_level": resolution["cast_level"],
-                        "dart_count": sum(item["darts"] for item in normalized_allocations),
-                        "allocations": normalized_allocations,
-                        "payment": deepcopy(applied.get("payment") or {}),
-                    },
-                    "choices": defense_windows,
-                    "combat": next_encounter,
-                    "campaign_revision": mutation_revision(campaign_id),
-                    "revisions": [asdict(item) for item in revisions_result or []],
-                }
-                return combat_response(
-                    campaign_id,
-                    principal_id,
-                    remember_idempotent(scope, idempotency_key, payload, response, campaign_id),
-                )
+                return combat_response(campaign_id, principal_id, response)
             next_encounter, resolved_sheets, result = settle_magic_missile_damage(
                 campaign_id,
                 next_encounter,
@@ -11115,15 +11264,24 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 )
                 for target_id, sheet in resolved_sheets.items()
             ]
-            revisions_result = StateMutationService(storage.database).replace(
-                campaign_id,
-                campaign_state=validate_party_state(next_state),
-                character_updates=updates,
-                expected_campaign_revision=campaign.revision,
+            response = commit_campaign_state(
+                campaign,
+                next_state,
                 operation="combat.spell.magic_missile.resolve",
-                actor=principal_id,
+                principal_id=principal_id,
                 branch_id=resolved_branch_id,
                 idempotency_key=idempotency_key,
+                scope=scope,
+                payload=payload,
+                response_fields={
+                    "status": "committed",
+                    "result": {
+                        **result,
+                        "payment": deepcopy(applied.get("payment") or {}),
+                    },
+                    "combat": next_encounter,
+                },
+                character_updates=updates,
                 rule_receipts=[
                     *list(applied.get("rule_receipts") or []),
                     *core_receipts(
@@ -11136,23 +11294,26 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     ),
                 ],
             )
-            response = {
-                "status": "committed",
-                "result": {**result, "payment": deepcopy(applied.get("payment") or {})},
-                "combat": next_encounter,
-                "campaign_revision": mutation_revision(campaign_id),
-                "revisions": [asdict(item) for item in revisions_result or []],
-            }
-            return combat_response(
-                campaign_id,
-                principal_id,
-                remember_idempotent(scope, idempotency_key, payload, response, campaign_id),
-            )
+            return combat_response(campaign_id, principal_id, response)
         sync_combatant_conditions(next_encounter, actor_id, applied["sheet"])
         next_state = {**dict(campaign.state or {}), "combat": next_encounter}
-        revisions_result = StateMutationService(storage.database).replace(
-            campaign_id,
-            campaign_state=validate_party_state(next_state),
+        response = commit_campaign_state(
+            campaign,
+            next_state,
+            operation=("combat.magic_item.spell.cast" if source_item_id else "combat.spell.cast"),
+            principal_id=principal_id,
+            branch_id=resolved_branch_id,
+            idempotency_key=idempotency_key,
+            scope=scope,
+            payload=payload,
+            response_fields={
+                **_ruling_status(
+                    "committed" if applied.get("automatic_effect") else "pending_ruling",
+                    "generic_spell_effect",
+                ),
+                "result": {key: value for key, value in applied.items() if key != "sheet"},
+                "combat": next_encounter,
+            },
             character_updates=[
                 CharacterStateUpdate(
                     character_id=actor_id,
@@ -11161,11 +11322,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     expected_revision=current.revision,
                 )
             ],
-            expected_campaign_revision=campaign.revision,
-            operation=("combat.magic_item.spell.cast" if source_item_id else "combat.spell.cast"),
-            actor=principal_id,
-            branch_id=resolved_branch_id,
-            idempotency_key=idempotency_key,
             rule_receipts=[
                 *list(applied.get("rule_receipts") or []),
                 *core_receipts(
@@ -11175,21 +11331,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 ),
             ],
         )
-        response = {
-            **_ruling_status(
-                "committed" if applied.get("automatic_effect") else "pending_ruling",
-                "generic_spell_effect",
-            ),
-            "result": {key: value for key, value in applied.items() if key != "sheet"},
-            "combat": next_encounter,
-            "campaign_revision": mutation_revision(campaign_id),
-            "revisions": [asdict(item) for item in revisions_result or []],
-        }
-        return combat_response(
-            campaign_id,
-            principal_id,
-            remember_idempotent(scope, idempotency_key, payload, response, campaign_id),
-        )
+        return combat_response(campaign_id, principal_id, response)
 
     @mcp.tool()
     @_agent_ruling_boundary
@@ -11280,9 +11422,22 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         sync_combatant_conditions(next_encounter, actor_id, applied["sheet"])
         reconcile_readied_spells(next_encounter, actor_id, applied["sheet"])
         next_state = {**dict(campaign.state or {}), "combat": next_encounter}
-        revisions_result = StateMutationService(storage.database).replace(
-            campaign_id,
-            campaign_state=validate_party_state(next_state),
+        readied = next_encounter["readied"][-1]
+        response = commit_campaign_state(
+            campaign,
+            next_state,
+            operation="combat.spell.ready",
+            principal_id=principal_id,
+            branch_id=resolved_branch_id,
+            idempotency_key=idempotency_key,
+            scope=scope,
+            payload=payload,
+            response_fields={
+                "status": "armed",
+                "readied": readied,
+                "result": {key: item for key, item in applied.items() if key != "sheet"},
+                "combat": next_encounter,
+            },
             character_updates=[
                 CharacterStateUpdate(
                     character_id=actor_id,
@@ -11291,27 +11446,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     expected_revision=current.revision,
                 )
             ],
-            expected_campaign_revision=campaign.revision,
-            operation="combat.spell.ready",
-            actor=principal_id,
-            branch_id=resolved_branch_id,
-            idempotency_key=idempotency_key,
             rule_receipts=list(applied.get("rule_receipts") or []),
         )
-        readied = next_encounter["readied"][-1]
-        response = {
-            "status": "armed",
-            "readied": readied,
-            "result": {key: item for key, item in applied.items() if key != "sheet"},
-            "combat": next_encounter,
-            "campaign_revision": mutation_revision(campaign_id),
-            "revisions": [asdict(item) for item in revisions_result or []],
-        }
-        return combat_response(
-            campaign_id,
-            principal_id,
-            remember_idempotent(scope, idempotency_key, payload, response, campaign_id),
-        )
+        return combat_response(campaign_id, principal_id, response)
 
     @mcp.tool()
     def combat_readied_spell_trigger(
@@ -11354,50 +11491,40 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             next_encounter = deepcopy(encounter)
             expired = reconcile_readied_spells(next_encounter, actor.id, actor.sheet)
             next_state = {**dict(campaign.state or {}), "combat": next_encounter}
-            revisions_result = StateMutationService(storage.database).replace(
-                campaign_id,
-                campaign_state=validate_party_state(next_state),
-                expected_campaign_revision=campaign.revision,
+            response = commit_campaign_state(
+                campaign,
+                next_state,
                 operation="combat.spell.ready.dissipate",
-                actor=principal_id,
+                principal_id=principal_id,
                 branch_id=resolved_branch_id,
                 idempotency_key=idempotency_key,
+                scope=scope,
+                payload=payload,
+                response_fields={
+                    "status": "dissipated",
+                    "readied_spells_expired": expired,
+                    "combat": next_encounter,
+                },
             )
-            response = {
-                "status": "dissipated",
-                "readied_spells_expired": expired,
-                "combat": next_encounter,
-                "campaign_revision": mutation_revision(campaign_id),
-                "revisions": [asdict(item) for item in revisions_result or []],
-            }
-            return combat_response(
-                campaign_id,
-                principal_id,
-                remember_idempotent(scope, idempotency_key, payload, response, campaign_id),
-            )
+            return combat_response(campaign_id, principal_id, response)
         next_encounter = trigger_readied_spell(encounter, readied_id=readied_id, event=event)
         next_state = {**dict(campaign.state or {}), "combat": next_encounter}
-        revisions_result = StateMutationService(storage.database).replace(
-            campaign_id,
-            campaign_state=validate_party_state(next_state),
-            expected_campaign_revision=campaign.revision,
+        response = commit_campaign_state(
+            campaign,
+            next_state,
             operation="combat.spell.ready.trigger",
-            actor=principal_id,
+            principal_id=principal_id,
             branch_id=resolved_branch_id,
             idempotency_key=idempotency_key,
+            scope=scope,
+            payload=payload,
+            response_fields={
+                "status": "pending",
+                "choice": next_encounter["pending"][-1],
+                "combat": next_encounter,
+            },
         )
-        response = {
-            "status": "pending",
-            "choice": next_encounter["pending"][-1],
-            "combat": next_encounter,
-            "campaign_revision": mutation_revision(campaign_id),
-            "revisions": [asdict(item) for item in revisions_result or []],
-        }
-        return combat_response(
-            campaign_id,
-            principal_id,
-            remember_idempotent(scope, idempotency_key, payload, response, campaign_id),
-        )
+        return combat_response(campaign_id, principal_id, response)
 
     @mcp.tool()
     def combat_readied_spell_resolve(
@@ -11460,27 +11587,22 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             next_encounter = deepcopy(encounter)
             expired = reconcile_readied_spells(next_encounter, actor_id, sheet)
             next_state = {**dict(campaign.state or {}), "combat": next_encounter}
-            revisions_result = StateMutationService(storage.database).replace(
-                campaign_id,
-                campaign_state=validate_party_state(next_state),
-                expected_campaign_revision=campaign.revision,
+            response = commit_campaign_state(
+                campaign,
+                next_state,
                 operation="combat.spell.ready.dissipate",
-                actor=principal_id,
+                principal_id=principal_id,
                 branch_id=resolved_branch_id,
                 idempotency_key=idempotency_key,
+                scope=scope,
+                payload=payload,
+                response_fields={
+                    "status": "dissipated",
+                    "readied_spells_expired": expired,
+                    "combat": next_encounter,
+                },
             )
-            response = {
-                "status": "dissipated",
-                "readied_spells_expired": expired,
-                "combat": next_encounter,
-                "campaign_revision": mutation_revision(campaign_id),
-                "revisions": [asdict(item) for item in revisions_result or []],
-            }
-            return combat_response(
-                campaign_id,
-                principal_id,
-                remember_idempotent(scope, idempotency_key, payload, response, campaign_id),
-            )
+            return combat_response(campaign_id, principal_id, response)
         if release and choice_id not in {
             str(item.get("id")) for item in available_reactions(encounter, actor_id)
         }:
@@ -11519,33 +11641,28 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             },
         ][-100:]
         next_state = {**dict(campaign.state or {}), "combat": next_encounter}
-        revisions_result = StateMutationService(storage.database).replace(
-            campaign_id,
-            campaign_state=validate_party_state(next_state),
-            character_updates=updates,
-            expected_campaign_revision=campaign.revision,
-            operation="combat.spell.ready.release" if release else "combat.spell.ready.decline",
-            actor=principal_id,
+        response = commit_campaign_state(
+            campaign,
+            next_state,
+            operation=("combat.spell.ready.release" if release else "combat.spell.ready.decline"),
+            principal_id=principal_id,
             branch_id=resolved_branch_id,
             idempotency_key=idempotency_key,
+            scope=scope,
+            payload=payload,
+            response_fields={
+                **_ruling_status(
+                    "pending_ruling" if release else "armed",
+                    "ready_release_effect",
+                ),
+                "released": release,
+                "spell_id": resolved.get("spell_id"),
+                "declaration": declaration or {},
+                "combat": next_encounter,
+            },
+            character_updates=updates,
         )
-        response = {
-            **_ruling_status(
-                "pending_ruling" if release else "armed",
-                "ready_release_effect",
-            ),
-            "released": release,
-            "spell_id": resolved.get("spell_id"),
-            "declaration": declaration or {},
-            "combat": next_encounter,
-            "campaign_revision": mutation_revision(campaign_id),
-            "revisions": [asdict(item) for item in revisions_result or []],
-        }
-        return combat_response(
-            campaign_id,
-            principal_id,
-            remember_idempotent(scope, idempotency_key, payload, response, campaign_id),
-        )
+        return combat_response(campaign_id, principal_id, response)
 
     @mcp.tool()
     def combat_readied_action_trigger(
@@ -11574,26 +11691,21 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             )
         next_encounter = trigger_readied_action(encounter, readied_id=readied_id, event=event)
         next_state = {**dict(campaign.state or {}), "combat": next_encounter}
-        revisions_result = StateMutationService(storage.database).replace(
-            campaign_id,
-            campaign_state=validate_party_state(next_state),
-            expected_campaign_revision=campaign.revision,
+        response = commit_campaign_state(
+            campaign,
+            next_state,
             operation="combat.ready.action.trigger",
-            actor=principal_id,
+            principal_id=principal_id,
             branch_id=resolved_branch_id,
             idempotency_key=idempotency_key,
+            scope=scope,
+            payload=payload,
+            response_fields={
+                "status": "triggered",
+                "combat": next_encounter,
+            },
         )
-        response = {
-            "status": "triggered",
-            "combat": next_encounter,
-            "campaign_revision": mutation_revision(campaign_id),
-            "revisions": [asdict(item) for item in revisions_result or []],
-        }
-        return combat_response(
-            campaign_id,
-            principal_id,
-            remember_idempotent(scope, idempotency_key, payload, response, campaign_id),
-        )
+        return combat_response(campaign_id, principal_id, response)
 
     @mcp.tool()
     def combat_readied_action_resolve(
@@ -11645,31 +11757,26 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             },
         ][-100:]
         next_state = {**dict(campaign.state or {}), "combat": next_encounter}
-        revisions_result = StateMutationService(storage.database).replace(
-            campaign_id,
-            campaign_state=validate_party_state(next_state),
-            expected_campaign_revision=campaign.revision,
-            operation="combat.ready.action.release" if release else "combat.ready.action.decline",
-            actor=principal_id,
+        response = commit_campaign_state(
+            campaign,
+            next_state,
+            operation=("combat.ready.action.release" if release else "combat.ready.action.decline"),
+            principal_id=principal_id,
             branch_id=resolved_branch_id,
             idempotency_key=idempotency_key,
+            scope=scope,
+            payload=payload,
+            response_fields={
+                **_ruling_status(
+                    "pending_ruling" if release else "armed",
+                    "ready_release_effect",
+                ),
+                "released": release,
+                "declaration": declaration or {},
+                "combat": next_encounter,
+            },
         )
-        response = {
-            **_ruling_status(
-                "pending_ruling" if release else "armed",
-                "ready_release_effect",
-            ),
-            "released": release,
-            "declaration": declaration or {},
-            "combat": next_encounter,
-            "campaign_revision": mutation_revision(campaign_id),
-            "revisions": [asdict(item) for item in revisions_result or []],
-        }
-        return combat_response(
-            campaign_id,
-            principal_id,
-            remember_idempotent(scope, idempotency_key, payload, response, campaign_id),
-        )
+        return combat_response(campaign_id, principal_id, response)
 
     @mcp.tool()
     @_agent_ruling_boundary
@@ -12483,9 +12590,25 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             },
         ][-100:]
         next_state = {**dict(campaign.state or {}), "combat": next_encounter}
-        revisions_result = StateMutationService(storage.database).replace(
-            campaign_id,
-            campaign_state=validate_party_state(next_state),
+        result = {key: value for key, value in applied.items() if key != "sheet"}
+        result["declaration"] = declaration or {}
+        response = commit_campaign_state(
+            campaign,
+            next_state,
+            operation="combat.activity.use",
+            principal_id=principal_id,
+            branch_id=resolved_branch_id,
+            idempotency_key=idempotency_key,
+            scope=scope,
+            payload=payload,
+            response_fields={
+                **_ruling_status(
+                    "pending_ruling" if applied["requires_ruling"] else "committed",
+                    "descriptive_activity",
+                ),
+                "result": result,
+                "combat": next_encounter,
+            },
             character_updates=[
                 CharacterStateUpdate(
                     character_id=actor_id,
@@ -12496,30 +12619,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 *additional_updates,
             ],
             actor_knowledge_transfers=actor_knowledge_transfers,
-            expected_campaign_revision=campaign.revision,
-            operation="combat.activity.use",
-            actor=principal_id,
-            branch_id=resolved_branch_id,
-            idempotency_key=idempotency_key,
             rule_receipts=list(applied.get("rule_receipts") or []),
         )
-        result = {key: value for key, value in applied.items() if key != "sheet"}
-        result["declaration"] = declaration or {}
-        response = {
-            **_ruling_status(
-                "pending_ruling" if applied["requires_ruling"] else "committed",
-                "descriptive_activity",
-            ),
-            "result": result,
-            "combat": next_encounter,
-            "campaign_revision": mutation_revision(campaign_id),
-            "revisions": [asdict(item) for item in revisions_result or []],
-        }
-        return combat_response(
-            campaign_id,
-            principal_id,
-            remember_idempotent(scope, idempotency_key, payload, response, campaign_id),
-        )
+        return combat_response(campaign_id, principal_id, response)
 
     @mcp.tool()
     @_agent_ruling_boundary
@@ -12599,6 +12701,19 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             *list(next_state.get("resolution_log") or []),
             {"type": kind, "actor_id": actor_id, "result": result},
         ][-100:]
+
+        def check_response(revisions: list[Any]) -> dict[str, Any]:
+            response = {
+                "status": "committed",
+                "result": result,
+                "campaign_revision": campaign.revision + 1,
+                "revisions": [asdict(item) for item in revisions],
+            }
+            stream = active_random_stream()
+            if stream is not None and stream.draw_count > 0:
+                response["random_stream_receipt"] = stream.receipt()
+            return response
+
         revisions_result = StateMutationService(storage.database).replace(
             campaign_id,
             campaign_state=validate_party_state(next_state),
@@ -12607,17 +12722,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             actor=principal_id,
             branch_id=resolved_branch_id,
             idempotency_key=idempotency_key,
+            idempotency_write=IdempotencyWrite(
+                scope=scope,
+                payload=payload,
+                response=check_response,
+            ),
             rule_receipts=list(result.get("rule_receipts") or []),
         )
-        response = {
-            "status": "committed",
-            "result": result,
-            "campaign_revision": mutation_revision(campaign_id),
-            "revisions": [asdict(item) for item in revisions_result or []],
-        }
-        return remember_idempotent(
-            scope, idempotency_key, payload, response, campaign_id=campaign_id
-        )
+        return check_response(list(revisions_result or []))
 
     @mcp.tool()
     @_agent_ruling_boundary
@@ -12652,7 +12764,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "narrative-only actors cannot make contests without an exact statblock"
                 )
         campaign = campaigns.get(campaign_id)
-        if str(campaign.settings.get("edition") or "2024") != "2014":
+        if campaign_rules_edition(campaign.id) != "2014":
             raise CombatEngineError("generic ability contests are a 2014 rules procedure")
         require_write_contract(expected_revision, idempotency_key)
         resolved_branch_id = require_current_branch(campaign_id, branch_id)
@@ -12734,6 +12846,19 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             *list(result["source_check"].get("rule_receipts") or []),
             *list(result["target_check"].get("rule_receipts") or []),
         ]
+
+        def contest_response(revisions: list[Any]) -> dict[str, Any]:
+            response = {
+                "status": "committed",
+                "result": result,
+                "campaign_revision": campaign.revision + 1,
+                "revisions": [asdict(item) for item in revisions],
+            }
+            stream = active_random_stream()
+            if stream is not None and stream.draw_count > 0:
+                response["random_stream_receipt"] = stream.receipt()
+            return response
+
         revisions_result = StateMutationService(storage.database).replace(
             campaign_id,
             campaign_state=validate_party_state(next_state),
@@ -12742,17 +12867,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             actor=principal_id,
             branch_id=resolved_branch_id,
             idempotency_key=idempotency_key,
+            idempotency_write=IdempotencyWrite(
+                scope=scope,
+                payload=payload,
+                response=contest_response,
+            ),
             rule_receipts=rule_receipts,
         )
-        response = {
-            "status": "committed",
-            "result": result,
-            "campaign_revision": mutation_revision(campaign_id),
-            "revisions": [asdict(item) for item in revisions_result or []],
-        }
-        return remember_idempotent(
-            scope, idempotency_key, payload, response, campaign_id=campaign_id
-        )
+        return contest_response(list(revisions_result or []))
 
     @mcp.tool()
     def character_source_object_attack(
@@ -12818,23 +12940,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             or hit_point_maximum < 1
         ):
             raise ValueError("source object hit_points must be a positive integer")
-        exact_source = deepcopy(dict(source_ref or {}))
-        required_source_fields = {
-            "module_id",
-            "scene_id",
-            "chunk_id",
-            "page_start",
-            "page_end",
-            "heading_path",
-            "content_sha256",
-        }
-        if set(exact_source) != required_source_fields or not all(
-            exact_source.get(field)
-            for field in ("module_id", "scene_id", "chunk_id", "content_sha256")
-        ):
-            raise ValueError("source object attack requires one complete exact source_ref")
-        if str(exact_source["scene_id"]) != scene_id:
-            raise ValueError("source object scene_id must match source_ref.scene_id")
+        _, exact_source, _ = managed_module_source_ref(
+            campaign_id,
+            source_ref,
+            require_exact=True,
+            expected_scene_id=scene_id,
+        )
+        if exact_source is None:
+            raise AssertionError("exact source object citations always resolve to a managed chunk")
         payload = {
             "character_id": character_id,
             "object_state": requested,
@@ -12905,10 +13018,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         else:
             hit_points_before = hit_point_maximum
 
+        campaign_edition = campaign_rules_edition(campaign_id)
         exhaustion = int(dict(attacker["sheet"].get("combat") or {}).get("exhaustion", 0) or 0)
         attack_bonus = int(attack["attack_bonus"])
         attack_disadvantage = bool(disadvantage)
-        if str(attacker["sheet"].get("edition") or "2014") == "2014":
+        if campaign_edition == "2014":
             attack_disadvantage = attack_disadvantage or exhaustion >= 3
         else:
             attack_bonus -= 2 * exhaustion
@@ -12919,7 +13033,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             disadvantage=attack_disadvantage,
         )
         object_sheet = default_character_sheet()
-        object_sheet["edition"] = str(attacker["sheet"].get("edition") or "2014")
+        object_sheet["edition"] = campaign_edition
         object_sheet["combat"]["hp"] = {
             "value": hit_points_before,
             "max": hit_point_maximum,
@@ -13005,6 +13119,34 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     expected_revision=current.revision,
                 )
             )
+        updated_character = (
+            replace(
+                current,
+                sheet=validate_character_sheet(next_attacker_sheet),
+                notes=validate_character_notes(current.notes),
+                revision=current.revision + 1,
+            )
+            if character_updates
+            else current
+        )
+        updated_character_view = character_view(updated_character)
+
+        def source_object_response(revisions: list[Any]) -> dict[str, Any]:
+            response = {
+                "status": "committed",
+                "character": updated_character_view,
+                "object": object_after,
+                "attack": attack_roll,
+                "damage": settled.get("damage"),
+                "ammunition": ammunition,
+                "campaign_revision": campaign.revision + 1,
+                "revisions": [asdict(item) for item in revisions],
+            }
+            stream = active_random_stream()
+            if stream is not None and stream.draw_count > 0:
+                response["random_stream_receipt"] = stream.receipt()
+            return response
+
         revisions_result = StateMutationService(storage.database).replace(
             campaign_id,
             campaign_state=validate_party_state(next_campaign_state),
@@ -13014,25 +13156,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             actor=principal_id,
             branch_id=resolved_branch_id,
             idempotency_key=idempotency_key,
+            idempotency_write=IdempotencyWrite(
+                scope=scope,
+                payload=payload,
+                response=source_object_response,
+            ),
             rule_receipts=list(settled.get("rule_receipts") or []),
         )
-        response = {
-            "status": "committed",
-            "character": character_view(characters.get(character_id)),
-            "object": object_after,
-            "attack": attack_roll,
-            "damage": settled.get("damage"),
-            "ammunition": ammunition,
-            "campaign_revision": mutation_revision(campaign_id),
-            "revisions": [asdict(item) for item in revisions_result or []],
-        }
-        return remember_idempotent(
-            scope,
-            idempotency_key,
-            payload,
-            response,
-            campaign_id=campaign_id,
-        )
+        return source_object_response(list(revisions_result or []))
 
     @mcp.tool()
     @_agent_ruling_boundary
@@ -13061,17 +13192,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         settlement_facts = checked_rule_facts(rule_facts)
         if not is_dm(campaign_id, principal_id):
             if kind != "death_save":
-                raise CombatEngineError(
-                    "checks and saves require an Agent-as-DM issued resolution"
-                )
+                raise CombatEngineError("checks and saves require an Agent-as-DM issued resolution")
             if advantage or disadvantage or proficient or bonus:
-                raise CombatEngineError(
-                    "death-save modifiers require Agent-as-DM adjudication"
-                )
+                raise CombatEngineError("death-save modifiers require Agent-as-DM adjudication")
             if settlement_facts:
-                raise CombatEngineError(
-                    "rule facts require an Agent-as-DM issued resolution"
-                )
+                raise CombatEngineError("rule facts require an Agent-as-DM issued resolution")
         if kind == "death_save" and settlement_facts:
             raise CombatEngineError("rule facts are not accepted for death saves")
         if kind == "death_save" and target_id is not None:
@@ -13202,7 +13327,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         updates: list[CharacterStateUpdate] = []
         if kind == "death_save":
             exhaustion = int(actor["sheet"].get("combat", {}).get("exhaustion", 0) or 0)
-            ruleset = str(encounter.get("ruleset") or actor["sheet"].get("edition") or "2014")
+            ruleset = encounter_rules_edition(campaign_id, encounter)
             death_save_bonus = -2 * exhaustion if ruleset == "2024" else 0
             if ruleset == "2014" and exhaustion >= 3:
                 disadvantage = True
@@ -13394,11 +13519,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     result["escaped"] = bool(result["success"])
                     if result["success"]:
                         escaped_sheet = deepcopy(actor["sheet"])
-                        escaped_sheet["conditions"] = [
-                            item
-                            for item in escaped_sheet.get("conditions", [])
-                            if str(item).casefold() != condition
-                        ]
+                        apply_condition_change(
+                            escaped_sheet,
+                            condition_id=condition,
+                            add=False,
+                        )
                         current_actor = characters.get(actor_id)
                         updates.append(
                             CharacterStateUpdate(
@@ -13433,29 +13558,24 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 {"type": kind, "actor_id": actor_id, "result": result},
             ][-100:]
             next_state["combat"] = encounter
-        revisions_result = StateMutationService(storage.database).replace(
-            campaign_id,
-            campaign_state=validate_party_state(next_state),
-            character_updates=updates,
-            expected_campaign_revision=campaign.revision,
+        response = commit_campaign_state(
+            campaign,
+            next_state,
             operation=f"combat.{kind}",
-            actor=principal_id,
+            principal_id=principal_id,
             branch_id=resolved_branch_id,
             idempotency_key=idempotency_key,
+            scope=scope,
+            payload=payload,
+            response_fields={
+                "status": "committed",
+                "result": result,
+                "combat": next_state.get("combat"),
+            },
+            character_updates=updates,
             rule_receipts=list(result.get("rule_receipts") or []),
         )
-        response = {
-            "status": "committed",
-            "result": result,
-            "combat": next_state.get("combat"),
-            "campaign_revision": mutation_revision(campaign_id),
-            "revisions": [asdict(item) for item in revisions_result or []],
-        }
-        return combat_response(
-            campaign_id,
-            principal_id,
-            remember_idempotent(scope, idempotency_key, payload, response, campaign_id),
-        )
+        return combat_response(campaign_id, principal_id, response)
 
     @mcp.tool()
     @_agent_ruling_boundary
@@ -13554,9 +13674,20 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 {"type": "concentration", "actor_id": target_id, "result": result},
             ][-100:]
             next_state["combat"] = encounter
-        revisions_result = StateMutationService(storage.database).replace(
-            campaign_id,
-            campaign_state=validate_party_state(next_state),
+        response = commit_campaign_state(
+            campaign,
+            next_state,
+            operation="combat.concentration.check",
+            principal_id=principal_id,
+            branch_id=resolved_branch_id,
+            idempotency_key=idempotency_key,
+            scope=scope,
+            payload=payload,
+            response_fields={
+                "status": "committed",
+                "result": result,
+                "effects_active": result["success"],
+            },
             character_updates=[
                 CharacterStateUpdate(
                     character_id=target_id,
@@ -13565,24 +13696,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     expected_revision=current.revision,
                 )
             ],
-            expected_campaign_revision=campaign.revision,
-            operation="combat.concentration.check",
-            actor=principal_id,
-            branch_id=resolved_branch_id,
-            idempotency_key=idempotency_key,
         )
-        response = {
-            "status": "committed",
-            "result": result,
-            "effects_active": result["success"],
-            "campaign_revision": mutation_revision(campaign_id),
-            "revisions": [asdict(item) for item in revisions_result or []],
-        }
-        return combat_response(
-            campaign_id,
-            principal_id,
-            remember_idempotent(scope, idempotency_key, payload, response, campaign_id),
-        )
+        return combat_response(campaign_id, principal_id, response)
 
     @_agent_ruling_boundary
     def combat_source_stabilize(
@@ -13655,11 +13770,20 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             {"type": "source_stabilization", "result": result},
         ][-100:]
         current = characters.get(target_id)
-        revisions_result = StateMutationService(storage.database).replace(
-            campaign_id,
-            campaign_state=validate_party_state(
-                {**dict(campaign.state or {}), "combat": next_encounter}
-            ),
+        response = commit_campaign_state(
+            campaign,
+            {**dict(campaign.state or {}), "combat": next_encounter},
+            operation="combat.source.stabilize",
+            principal_id=principal_id,
+            branch_id=resolved_branch_id,
+            idempotency_key=idempotency_key,
+            scope=scope,
+            payload=payload,
+            response_fields={
+                "status": "committed",
+                "result": result,
+                "combat": next_encounter,
+            },
             character_updates=[
                 CharacterStateUpdate(
                     character_id=target_id,
@@ -13668,11 +13792,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     expected_revision=current.revision,
                 )
             ],
-            expected_campaign_revision=campaign.revision,
-            operation="combat.source.stabilize",
-            actor=principal_id,
-            branch_id=resolved_branch_id,
-            idempotency_key=idempotency_key,
             rule_receipts=core_receipts(
                 effective_rule_context(
                     campaign_id,
@@ -13686,24 +13805,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "combat.source.stabilize",
             ),
         )
-        response = {
-            "status": "committed",
-            "result": result,
-            "combat": next_encounter,
-            "campaign_revision": mutation_revision(campaign_id),
-            "revisions": [asdict(item) for item in revisions_result or []],
-        }
-        return combat_response(
-            campaign_id,
-            principal_id,
-            remember_idempotent(
-                scope,
-                idempotency_key,
-                payload,
-                response,
-                campaign_id,
-            ),
-        )
+        return combat_response(campaign_id, principal_id, response)
 
     @mcp.tool()
     @_agent_ruling_boundary
@@ -13745,10 +13847,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         target = combat_actor_snapshot(target_id)
         existing_encounter = dict(campaign.state or {}).get("combat")
         target_uses_death_saves = target.get("character_type") == "pc"
-        ruleset = str(target["sheet"].get("edition") or "2014")
+        ruleset = campaign_rules_edition(campaign_id)
         if isinstance(existing_encounter, dict) and existing_encounter.get("active", False):
             require_no_blocking_pending(existing_encounter)
-            ruleset = str(existing_encounter.get("ruleset") or ruleset)
+            ruleset = encounter_rules_edition(campaign_id, existing_encounter)
             target_combatant = require_encounter_combatant(
                 existing_encounter, target_id, role="damage target"
             )
@@ -13796,9 +13898,20 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             ][-100:]
             next_state["combat"] = encounter
         current = characters.get(target_id)
-        revisions_result = StateMutationService(storage.database).replace(
-            campaign_id,
-            campaign_state=validate_party_state(next_state),
+        response = commit_campaign_state(
+            campaign,
+            next_state,
+            operation="combat.damage.apply",
+            principal_id=principal_id,
+            branch_id=resolved_branch_id,
+            idempotency_key=idempotency_key,
+            scope=scope,
+            payload=payload,
+            response_fields={
+                "status": "committed",
+                "result": applied_result,
+                "combat": next_state.get("combat"),
+            },
             character_updates=[
                 CharacterStateUpdate(
                     character_id=target_id,
@@ -13807,25 +13920,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     expected_revision=current.revision,
                 )
             ],
-            expected_campaign_revision=campaign.revision,
-            operation="combat.damage.apply",
-            actor=principal_id,
-            branch_id=resolved_branch_id,
-            idempotency_key=idempotency_key,
             rule_receipts=damage_receipts,
         )
-        response = {
-            "status": "committed",
-            "result": applied_result,
-            "combat": next_state.get("combat"),
-            "campaign_revision": mutation_revision(campaign_id),
-            "revisions": [asdict(item) for item in revisions_result or []],
-        }
-        return combat_response(
-            campaign_id,
-            principal_id,
-            remember_idempotent(scope, idempotency_key, payload, response, campaign_id),
-        )
+        return combat_response(campaign_id, principal_id, response)
 
     @mcp.tool()
     @_agent_ruling_boundary
@@ -13891,9 +13988,20 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if isinstance(encounter, dict) and encounter.get("active", False):
             sync_combatant_conditions(encounter, target_id, applied["sheet"])
             next_state = {**dict(campaign.state or {}), "combat": encounter}
-        revisions_result = StateMutationService(storage.database).replace(
-            campaign_id,
-            campaign_state=validate_party_state(next_state) if next_state is not None else None,
+        response = commit_campaign_state(
+            campaign,
+            next_state,
+            operation="combat.heal.apply",
+            principal_id=principal_id,
+            branch_id=resolved_branch_id,
+            idempotency_key=idempotency_key,
+            scope=scope,
+            payload=payload,
+            response_fields={
+                "status": "committed",
+                "result": {key: value for key, value in applied.items() if key != "sheet"},
+                "combat": next_state.get("combat") if next_state else None,
+            },
             character_updates=[
                 CharacterStateUpdate(
                     character_id=target_id,
@@ -13902,24 +14010,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     expected_revision=current.revision,
                 )
             ],
-            expected_campaign_revision=campaign.revision,
-            operation="combat.heal.apply",
-            actor=principal_id,
-            branch_id=resolved_branch_id,
-            idempotency_key=idempotency_key,
         )
-        response = {
-            "status": "committed",
-            "result": {key: value for key, value in applied.items() if key != "sheet"},
-            "combat": next_state.get("combat") if next_state else None,
-            "campaign_revision": mutation_revision(campaign_id),
-            "revisions": [asdict(item) for item in revisions_result or []],
-        }
-        return combat_response(
-            campaign_id,
-            principal_id,
-            remember_idempotent(scope, idempotency_key, payload, response, campaign_id),
-        )
+        return combat_response(campaign_id, principal_id, response)
 
     @mcp.tool()
     def combat_choice_open(
@@ -13964,27 +14056,22 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             candidates=candidates or [],
         )
         next_state = {**dict(campaign.state or {}), "combat": next_encounter}
-        revisions_result = StateMutationService(storage.database).replace(
-            campaign_id,
-            campaign_state=validate_party_state(next_state),
-            expected_campaign_revision=campaign.revision,
+        window = next_encounter["pending"][-1]
+        response = commit_campaign_state(
+            campaign,
+            next_state,
             operation="combat.choice.open",
-            actor=principal_id,
+            principal_id=principal_id,
             branch_id=resolved_branch_id,
             idempotency_key=idempotency_key,
+            scope=scope,
+            payload=payload,
+            response_fields={
+                "status": "pending",
+                "choice": window,
+            },
         )
-        window = next_encounter["pending"][-1]
-        response = {
-            "status": "pending",
-            "choice": window,
-            "campaign_revision": mutation_revision(campaign_id),
-            "revisions": [asdict(item) for item in revisions_result or []],
-        }
-        return combat_response(
-            campaign_id,
-            principal_id,
-            remember_idempotent(scope, idempotency_key, payload, response, campaign_id),
-        )
+        return combat_response(campaign_id, principal_id, response)
 
     @mcp.tool()
     def combat_choice_resolve(
@@ -14060,26 +14147,21 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             budget["reaction"] = int(budget["reaction"]) - 1
             combatant["turn_budget"] = budget
         next_state = {**dict(campaign.state or {}), "combat": next_encounter}
-        revisions_result = StateMutationService(storage.database).replace(
-            campaign_id,
-            campaign_state=validate_party_state(next_state),
-            expected_campaign_revision=campaign.revision,
+        response = commit_campaign_state(
+            campaign,
+            next_state,
             operation="combat.choice.resolve",
-            actor=principal_id,
+            principal_id=principal_id,
             branch_id=resolved_branch_id,
             idempotency_key=idempotency_key,
+            scope=scope,
+            payload=payload,
+            response_fields={
+                "status": "committed",
+                "combat": next_encounter,
+            },
         )
-        response = {
-            "status": "committed",
-            "combat": next_encounter,
-            "campaign_revision": mutation_revision(campaign_id),
-            "revisions": [asdict(item) for item in revisions_result or []],
-        }
-        return combat_response(
-            campaign_id,
-            principal_id,
-            remember_idempotent(scope, idempotency_key, payload, response, campaign_id),
-        )
+        return combat_response(campaign_id, principal_id, response)
 
     @mcp.tool()
     def branch_list(campaign_id: str, principal_id: str = "system:local") -> list[dict[str, Any]]:
@@ -14147,19 +14229,28 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             campaign_id,
             name=name,
             from_snapshot_id=from_snapshot_id,
-            checkout=False,
+            checkout=checkout,
+            idempotency_key=idempotency_key,
+            idempotency_write=IdempotencyWrite(
+                scope=scope,
+                payload=request_payload,
+                response=lambda value: {
+                    **asdict(value["branch"]),
+                    **(
+                        {"snapshot": asdict(value["snapshot"])}
+                        if value["snapshot"] is not None
+                        else {}
+                    ),
+                },
+            ),
         )
-        snapshot = snapshots.checkout_branch(campaign_id, created.id) if checkout else None
-        response = asdict(branches.get(campaign_id, created.id))
-        if checkout:
-            response["snapshot"] = asdict(snapshot) if snapshot else None
-        return remember_idempotent(
-            scope,
-            idempotency_key,
-            request_payload,
-            response,
-            campaign_id=campaign_id,
-        )
+        response = asdict(created)
+        if checkout and created.head_snapshot_id:
+            snapshot = next(
+                item for item in snapshots.list(campaign_id) if item.id == created.head_snapshot_id
+            )
+            response["snapshot"] = asdict(snapshot)
+        return response
 
     @mcp.tool()
     def branch_checkout(
@@ -14198,18 +14289,35 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             assert_snapshot_core_available(
                 snapshots.get_by_id(campaign_id, target_branch.head_snapshot_id)
             )
-        snapshot = snapshots.checkout_branch(campaign_id, branch_id)
+        checked_out = branches.checkout(
+            campaign_id,
+            branch_id,
+            idempotency_key=idempotency_key,
+            idempotency_write=IdempotencyWrite(
+                scope=scope,
+                payload=request_payload,
+                response=lambda value: {
+                    "branch": asdict(value["branch"]),
+                    "snapshot": (
+                        asdict(value["snapshot"]) if value["snapshot"] is not None else None
+                    ),
+                },
+            ),
+        )
+        snapshot = (
+            next(
+                item
+                for item in snapshots.list(campaign_id)
+                if item.id == checked_out.head_snapshot_id
+            )
+            if checked_out.head_snapshot_id
+            else None
+        )
         response = {
-            "branch": asdict(branches.current(campaign_id)),
+            "branch": asdict(checked_out),
             "snapshot": asdict(snapshot) if snapshot else None,
         }
-        return remember_idempotent(
-            scope,
-            idempotency_key,
-            request_payload,
-            response,
-            campaign_id=campaign_id,
-        )
+        return response
 
     @mcp.tool()
     def snapshot_create(
@@ -14244,14 +14352,19 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         branch = branches.current(campaign_id)
         if (branch.head_snapshot_id or "") != expected_head_snapshot_id:
             raise ValueError("branch head changed before snapshot creation")
-        response = asdict(snapshots.create(campaign_id, label=label))
-        return remember_idempotent(
-            scope,
-            idempotency_key,
-            request_payload,
-            response,
-            campaign_id=campaign_id,
+        response = asdict(
+            snapshots.create(
+                campaign_id,
+                label=label,
+                idempotency_key=idempotency_key,
+                idempotency_write=IdempotencyWrite(
+                    scope=scope,
+                    payload=request_payload,
+                    response=lambda result: asdict(result),
+                ),
+            )
         )
+        return response
 
     @mcp.tool()
     def snapshot_list(campaign_id: str, principal_id: str = "system:local") -> list[dict[str, Any]]:
@@ -14291,14 +14404,19 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if current_branch_id(campaign_id) != expected_branch_id:
             raise ValueError("active branch changed before snapshot restore")
         assert_snapshot_core_available(snapshots.get(campaign_id, slot))
-        response = asdict(snapshots.restore(campaign_id, slot))
-        return remember_idempotent(
-            scope,
-            idempotency_key,
-            request_payload,
-            response,
-            campaign_id=campaign_id,
+        response = asdict(
+            snapshots.restore(
+                campaign_id,
+                slot,
+                idempotency_key=idempotency_key,
+                idempotency_write=IdempotencyWrite(
+                    scope=scope,
+                    payload=request_payload,
+                    response=lambda result: asdict(result),
+                ),
+            )
         )
+        return response
 
     @mcp.tool()
     def snapshot_core_lock(
@@ -14426,30 +14544,35 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 user_options,
             ),
         }
-        converted = snapshots.restore_with_rule_profile_conversion(
+
+        def conversion_response(result: dict[str, Any]) -> dict[str, Any]:
+            return {
+                "status": "converted",
+                "reason": normalized_reason,
+                "source_snapshot": lock_view["snapshot"],
+                "previous_core_pack": previous,
+                "core_pack": latest,
+                "branch": asdict(result["branch"]),
+                "snapshot": asdict(result["snapshot"]),
+                "campaign_revision": result["campaign_revision"],
+            }
+
+        snapshots.restore_with_rule_profile_conversion(
             campaign_id,
             slot,
             rule_profile=converted_profile,
             branch_name=normalized_name,
             label=f"Converted Core for slot {slot}: {normalized_reason}",
+            idempotency_key=idempotency_key,
+            idempotency_write=IdempotencyWrite(
+                scope=scope,
+                payload=request_payload,
+                response=conversion_response,
+            ),
         )
-        response = {
-            "status": "converted",
-            "reason": normalized_reason,
-            "source_snapshot": lock_view["snapshot"],
-            "previous_core_pack": previous,
-            "core_pack": latest,
-            "branch": asdict(branches.current(campaign_id)),
-            "snapshot": asdict(converted),
-            "campaign_revision": mutation_revision(campaign_id),
-        }
-        return remember_idempotent(
-            scope,
-            idempotency_key,
-            request_payload,
-            response,
-            campaign_id=campaign_id,
-        )
+        committed = idempotency.lookup(scope, str(idempotency_key), request_payload)
+        assert committed is not None and committed.response is not None
+        return committed.response
 
     @mcp.tool()
     def snapshot_verify(
@@ -14497,14 +14620,17 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             raise ValueError("idempotency_key is required for character creation")
         sheet_value = deepcopy(sheet or default_character_sheet())
         if campaign_id is not None:
-            sheet_value["edition"] = str(
-                campaigns.get(campaign_id).settings.get("edition") or "2024"
-            )
+            sheet_value["edition"] = campaign_rules_edition(campaign_id)
         normalized_sheet = validate_character_sheet(
             sheet_value,
             rules=(effective_rule_context(campaign_id) if campaign_id else None),
         )
-        normalized_notes = validate_character_notes(notes or default_character_notes())
+        normalized_notes = canonical_character_notes(
+            notes,
+            character_type=character_type,
+            name=name,
+            summary=summary,
+        )
         return character_view(
             characters.create_idempotent(
                 system_id="dnd5e",
@@ -14557,7 +14683,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
         template = characters.get(template_id)
         sheet = deepcopy(template.sheet)
-        sheet["edition"] = str(campaigns.get(campaign_id).settings.get("edition") or "2024")
+        sheet["edition"] = campaign_rules_edition(campaign_id)
+        instance_name = name if name is not None else template.name
+        notes = canonical_character_notes(
+            template.notes,
+            character_type=template.character_type,
+            name=instance_name,
+            summary=template.summary,
+        )
         return character_view(
             characters.instantiate(
                 template_id,
@@ -14565,6 +14698,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 name=name,
                 player_name=player_name,
                 sheet=validate_character_sheet(sheet, rules=effective_rule_context(campaign_id)),
+                notes=notes,
             )
         )
 
@@ -14585,7 +14719,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if not idempotency_key:
             raise ValueError("idempotency_key is required for character build")
         sheet_value = deepcopy(sheet or default_character_sheet())
-        sheet_value["edition"] = str(campaigns.get(campaign_id).settings.get("edition") or "2024")
+        sheet_value["edition"] = campaign_rules_edition(campaign_id)
         normalized_sheet = validate_character_sheet(
             sheet_value,
             rules=effective_rule_context(campaign_id),
@@ -14635,9 +14769,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         current = characters.get(character_id)
         sheet_value = deepcopy(sheet)
         if current.campaign_id is not None:
-            sheet_value["edition"] = str(
-                campaigns.get(current.campaign_id).settings.get("edition") or "2024"
-            )
+            sheet_value["edition"] = campaign_rules_edition(current.campaign_id)
         normalized_sheet = validate_character_sheet(
             sheet_value,
             rules=(effective_rule_context(current.campaign_id) if current.campaign_id else None),
@@ -14670,9 +14802,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         require_outside_active_combat(current, "character sheet replacement")
         sheet_value = deepcopy(sheet)
         if current.campaign_id is not None:
-            sheet_value["edition"] = str(
-                campaigns.get(current.campaign_id).settings.get("edition") or "2024"
-            )
+            sheet_value["edition"] = campaign_rules_edition(current.campaign_id)
         normalized_sheet = validate_character_sheet(
             sheet_value,
             rules=(effective_rule_context(current.campaign_id) if current.campaign_id else None),
@@ -14726,7 +14856,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         require_outside_active_combat(current, "inventory changes")
         campaign = campaigns.get(current.campaign_id) if current.campaign_id else None
         phase = (
-            str(dict(campaign.state or {}).get("game_phase") or PROFILE_LOBBY)
+            authoritative_phase(current.campaign_id)
             if campaign is not None
             else PROFILE_LOBBY
         )
@@ -14786,7 +14916,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if "attunement" in normalized_patch:
             campaign = campaigns.get(current.campaign_id) if current.campaign_id else None
             phase = (
-                str(dict(campaign.state or {}).get("game_phase") or PROFILE_LOBBY)
+                authoritative_phase(current.campaign_id)
                 if campaign is not None
                 else PROFILE_LOBBY
             )
@@ -14993,12 +15123,34 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             return replay
         access.require_actor(source.campaign_id, source.id, principal_id, control=True)
         access.require_actor(source.campaign_id, target.id, principal_id, control=True)
+        campaign = campaigns.get(source.campaign_id)
         source_sheet, moved = remove_inventory_item(source.sheet, item_id, quantity)
         moved = inventory_item_for_receipt(target.sheet, moved)
         target_sheet = receive_inventory_item(target.sheet, moved)
-        mutations = StateMutationService(storage.database)
-        mutations.replace(
-            source.campaign_id,
+        source_after = replace(
+            source,
+            sheet=source_sheet,
+            revision=source.revision + 1,
+        )
+        target_after = replace(
+            target,
+            sheet=target_sheet,
+            revision=target.revision + 1,
+        )
+        response = commit_campaign_state(
+            campaign,
+            None,
+            operation="character.inventory.transfer",
+            principal_id=principal_id,
+            branch_id=branch_id,
+            idempotency_key=idempotency_key,
+            scope=scope,
+            payload=payload,
+            response_fields={
+                "source": visible_character_view(source_after, principal_id),
+                "target": visible_character_view(target_after, principal_id),
+                "item": moved,
+            },
             character_updates=[
                 CharacterStateUpdate(
                     source.id, source_sheet, source.notes, expected_source_revision
@@ -15007,26 +15159,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     target.id, target_sheet, target.notes, expected_target_revision
                 ),
             ],
+            include_campaign_revision=False,
+            include_revisions=False,
             expected_campaign_revision=expected_campaign_revision,
-            operation="character.inventory.transfer",
-            actor=principal_id,
-            branch_id=branch_id,
-            idempotency_key=idempotency_key,
         )
-        source_after = characters.get(source.id)
-        target_after = characters.get(target.id)
-        response = {
-            "source": visible_character_view(source_after, principal_id),
-            "target": visible_character_view(target_after, principal_id),
-            "item": moved,
-        }
-        return remember_idempotent(
-            scope,
-            idempotency_key,
-            payload,
-            response,
-            campaign_id=source.campaign_id,
-        )
+        return response
 
     @mcp.tool()
     def character_effect_add(
@@ -15073,424 +15210,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             idempotency_key=idempotency_key,
             payload={"effect_id": effect_id},
         )
-
-    @mcp.tool()
-    @_agent_ruling_boundary
-    def character_rest(
-        character_id: str,
-        rest_type: str,
-        prepared_spell_ids: list[str] | None = None,
-        hit_dice_spends: list[dict[str, Any]] | None = None,
-        hit_dice_recovery: dict[str, int] | None = None,
-        arcane_recovery: dict[str, int] | None = None,
-        natural_recovery: dict[str, int] | None = None,
-        song_of_rest_source_actor_id: str | None = None,
-        attune_item_id: str | None = None,
-        attunement_prerequisite_confirmed: bool | None = None,
-        rest_activity_minutes: dict[str, int] | None = None,
-        rest_schedule: dict[str, int] | None = None,
-        started_elapsed_minutes: int | None = None,
-        food_and_drink: bool = False,
-        principal_id: str = "system:local",
-        expected_revision: int | None = None,
-        idempotency_key: str | None = None,
-    ) -> dict[str, Any]:
-        """Apply rest recovery and, on a long rest, atomically replace prepared spells."""
-        current = characters.get(character_id)
-        require_character_control(current, principal_id)
-        require_outside_active_combat(current, "rest")
-        if current.campaign_id is None:
-            raise ValueError("rest requires a campaign-bound character")
-        campaign = campaigns.get(current.campaign_id)
-        combat = dict(campaign.state or {}).get("combat")
-        if isinstance(combat, dict) and combat.get("active", False):
-            raise CombatEngineError("rest is not allowed while combat is active")
-        if expected_revision is None or not idempotency_key:
-            raise ValueError("expected_revision and idempotency_key are required for rest")
-        normalized_rest_type = str(rest_type).strip().lower().replace("-", "_")
-        if normalized_rest_type not in {"short_rest", "long_rest"}:
-            raise CombatEngineError("rest_type must be short_rest or long_rest")
-        if normalized_rest_type == "long_rest":
-            raise CombatEngineError(
-                "long rests must use campaign_change(action='party_rest') so campaign time, "
-                "all actor effects, and the 24-hour limit settle atomically"
-            )
-        if prepared_spell_ids is not None and normalized_rest_type != "long_rest":
-            raise CombatEngineError("prepared spells can be changed only as part of a long rest")
-        song_source_actor_id = str(song_of_rest_source_actor_id or "").strip() or None
-        song_source = None
-        song_die_sides = None
-        if song_source_actor_id is not None:
-            song_source = characters.get(song_source_actor_id)
-            if song_source.campaign_id != current.campaign_id:
-                raise CombatEngineError(
-                    "Song of Rest source must belong to the resting character's campaign"
-                )
-            song_die_sides = validate_song_of_rest_source(song_source.sheet)
-        if attune_item_id:
-            if attunement_prerequisite_confirmed is not True:
-                raise NeedsRulingError(
-                    "attunement requires explicit DM confirmation that the actor "
-                    "satisfies every source-defined prerequisite",
-                    missing=("attunement_prerequisite",),
-                    ruling_kind="source_or_scene_fact",
-                )
-            if not is_dm(current.campaign_id, principal_id):
-                raise PermissionError(
-                    "attunement prerequisite confirmation requires the Agent in the DM role"
-                )
-            attune_inventory_item(current.sheet, str(attune_item_id))
-        elif attunement_prerequisite_confirmed is not None:
-            raise CombatEngineError("attunement_prerequisite_confirmed requires attune_item_id")
-        payload = {
-            "character_id": character_id,
-            "rest_type": rest_type,
-            "prepared_spell_ids": prepared_spell_ids,
-            "hit_dice_spends": hit_dice_spends or [],
-            "hit_dice_recovery": hit_dice_recovery or {},
-            "arcane_recovery": arcane_recovery or {},
-            "natural_recovery": natural_recovery or {},
-            "song_of_rest_source_actor_id": song_source_actor_id,
-            "attune_item_id": attune_item_id,
-            "attunement_prerequisite_confirmed": attunement_prerequisite_confirmed,
-            "rest_activity_minutes": rest_activity_minutes or {},
-            "rest_schedule": rest_schedule,
-            "started_elapsed_minutes": started_elapsed_minutes,
-            "food_and_drink": food_and_drink,
-        }
-        branch_id = require_current_branch(current.campaign_id, None)
-        scope = f"character-rest:{current.campaign_id}:{branch_id}:{principal_id}"
-        replay = replay_idempotent(scope, idempotency_key, payload)
-        if replay is not None:
-            return replay
-        if current.revision != expected_revision:
-            raise ValueError(f"character revision conflict: {character_id}")
-        world_time = dict(dict(campaign.state or {}).get("world_time") or {})
-        completed_elapsed_minutes = world_time.get("elapsed_minutes")
-        if (
-            started_elapsed_minutes is None
-            or isinstance(started_elapsed_minutes, bool)
-            or not isinstance(started_elapsed_minutes, int)
-        ):
-            raise CombatEngineError(
-                "short rest requires started_elapsed_minutes from the campaign clock"
-            )
-        if isinstance(completed_elapsed_minutes, bool) or not isinstance(
-            completed_elapsed_minutes, int
-        ):
-            raise CombatEngineError("short rest requires a current campaign clock")
-        if song_source is not None and song_source.id != current.id:
-            source_history = dict(
-                dict(song_source.sheet.get("combat") or {}).get("rest_history") or {}
-            )
-            if (
-                source_history.get("last_rest_type") != "short_rest"
-                or source_history.get("last_rest_started_elapsed_minutes")
-                != started_elapsed_minutes
-                or source_history.get("last_rest_completed_elapsed_minutes")
-                != completed_elapsed_minutes
-            ):
-                raise CombatEngineError(
-                    "Song of Rest source must have completed the same short rest"
-                )
-        timed_sheet = record_rest_completion(
-            current.sheet,
-            rest_type=normalized_rest_type,
-            started_elapsed_minutes=started_elapsed_minutes,
-            completed_elapsed_minutes=completed_elapsed_minutes,
-            rest_schedule=rest_schedule,
-        )
-        hp = int(dict(current.sheet.get("combat", {}).get("hp") or {}).get("value", 0) or 0)
-        conditions = {str(item).casefold() for item in current.sheet.get("conditions", [])}
-        if hp <= 0 or "dead" in conditions:
-            raise CombatEngineError("a creature at 0 hit points or dead cannot benefit from a rest")
-        rest_rules = effective_rule_context(
-            current.campaign_id,
-            facts={"actor_id": character_id, "rest_type": normalized_rest_type},
-        )
-        applied = apply_rest(
-            timed_sheet,
-            rest_type=normalized_rest_type,
-            hit_dice_spends=hit_dice_spends,
-            hit_dice_recovery=hit_dice_recovery,
-            arcane_recovery=arcane_recovery,
-            natural_recovery=natural_recovery,
-            rest_activity_minutes=rest_activity_minutes,
-            food_and_drink=food_and_drink,
-            song_of_rest_source_sheet=(song_source.sheet if song_source is not None else None),
-            rules=rest_rules,
-            world_day=int(
-                dict(dict(campaign.state or {}).get("world_time") or {}).get("day", 0) or 0
-            ),
-        )
-        if applied.get("status") in {"pending_choice", "pending_ruling"}:
-            response = {
-                **_ruling_status(
-                    applied["status"],
-                    _pending_result_ruling_kind(
-                        applied,
-                        fallback="environmental_consequence",
-                    ),
-                ),
-                "result": {
-                    key: value
-                    for key, value in applied.items()
-                    if key not in {"sheet", "hit_dice_rolls"}
-                },
-                "hit_dice_rolls": list(applied.get("hit_dice_rolls") or []),
-                "character": character_view(current),
-            }
-            return remember_idempotent(
-                scope,
-                idempotency_key,
-                payload,
-                response,
-                campaign_id=current.campaign_id,
-            )
-        if attune_item_id:
-            applied["sheet"] = attune_inventory_item(
-                applied["sheet"],
-                str(attune_item_id),
-            )
-            applied["attuned_item_id"] = str(attune_item_id)
-        preparation_result = None
-        if prepared_spell_ids is not None:
-            preparation_result = replace_prepared_spells(
-                applied["sheet"], spell_ids=prepared_spell_ids, event="long_rest"
-            )
-            applied["sheet"] = preparation_result["sheet"]
-        StateMutationService(storage.database).replace(
-            current.campaign_id,
-            character_updates=[
-                CharacterStateUpdate(
-                    character_id=current.id,
-                    sheet=validate_character_sheet(applied["sheet"]),
-                    notes=validate_character_notes(current.notes),
-                    expected_revision=expected_revision,
-                )
-            ],
-            operation=f"character.rest.{normalized_rest_type}",
-            actor=principal_id,
-            branch_id=branch_id,
-            idempotency_key=idempotency_key,
-            rule_receipts=[
-                *list(applied.get("rule_receipts") or []),
-                *(
-                    core_receipts(
-                        rest_rules,
-                        ["dnd5e.core.spell.preparation"],
-                        "spell.prepare.long_rest",
-                    )
-                    if prepared_spell_ids is not None
-                    else []
-                ),
-            ],
-        )
-        response = {
-            "status": applied["status"],
-            "result": {
-                key: value
-                for key, value in applied.items()
-                if key not in {"sheet", "hit_dice_rolls"}
-            },
-            "hit_dice_rolls": list(applied.get("hit_dice_rolls") or []),
-            "preparation": (
-                {key: value for key, value in preparation_result.items() if key != "sheet"}
-                if preparation_result is not None
-                else None
-            ),
-            "song_of_rest_source": (
-                {
-                    "actor_id": song_source_actor_id,
-                    "die": f"1d{song_die_sides}",
-                }
-                if song_source_actor_id is not None and song_die_sides is not None
-                else None
-            ),
-            "character": character_view(characters.get(character_id)),
-        }
-        return remember_idempotent(
-            scope,
-            idempotency_key,
-            payload,
-            response,
-            campaign_id=current.campaign_id,
-        )
-
-    def character_stable_recovery(
-        character_id: str,
-        principal_id: str = "system:local",
-        expected_revision: int | None = None,
-        idempotency_key: str | None = None,
-    ) -> dict[str, Any]:
-        """Roll and settle an unhealed Stable creature's automatic 1 HP recovery."""
-        current = characters.get(character_id)
-        require_character_control(current, principal_id)
-        require_outside_active_combat(current, "stable recovery")
-        if current.campaign_id is None:
-            raise ValueError("stable recovery requires a campaign-bound character")
-        access.require_campaign(current.campaign_id, principal_id, roles={"owner", "dm"})
-        if expected_revision is None or not idempotency_key:
-            raise ValueError(
-                "expected_revision and idempotency_key are required for stable recovery"
-            )
-        branch_id = require_current_branch(current.campaign_id, None)
-        payload = {"character_id": character_id, "operation": "stable_recovery"}
-        scope = f"character-write:{current.campaign_id}:{branch_id}:{principal_id}:{character_id}"
-        request_payload = {
-            "operation": "character.stable_recovery",
-            "character_id": character_id,
-            **payload,
-        }
-        replay = replay_idempotent(scope, idempotency_key, request_payload)
-        if replay is not None:
-            return replay
-        if current.revision != expected_revision:
-            raise ValueError(f"character revision conflict: {character_id}")
-        # Validate the actor before touching RNG; the actual rolled duration is
-        # applied to a fresh sheet inside the atomic mutation below.
-        recover_stable_creature(current.sheet, recovery_hours=1)
-        campaign = campaigns.get(current.campaign_id)
-        next_state = validate_party_state(deepcopy(campaign.state or {}))
-        recovery_roll = asdict(roll("1d4"))
-        recovery_hours = int(recovery_roll["total"])
-        next_state, time_transition = advance_state_game_time(
-            next_state,
-            period="hour",
-            count=recovery_hours,
-        )
-        next_world_time = time_transition["world_time_after"]
-        world_advanced: list[str] = []
-        world_expired: list[str] = []
-        elapsed_minutes = recovery_hours * 60
-        world_result = advance_elapsed_world_effect_durations(
-            next_state,
-            elapsed_minutes=elapsed_minutes,
-        )
-        next_state = world_result["state"]
-        world_advanced.extend(world_result["advanced"])
-        world_expired.extend(world_result["expired"])
-        world_rounds = advance_world_effect_durations(
-            next_state,
-            period="round",
-            amount=int(time_transition["elapsed_ticks"]),
-        )
-        next_state = world_rounds["state"]
-        world_advanced.extend(world_rounds["advanced"])
-        world_expired.extend(world_rounds["expired"])
-        rules = effective_rule_context(
-            current.campaign_id,
-            facts={"actor_id": character_id, "recovery_hours": recovery_hours},
-        )
-        receipts: list[dict[str, Any]] = []
-        updates: list[CharacterStateUpdate] = []
-        advanced: dict[str, list[str]] = {}
-        expired: dict[str, list[str]] = {}
-        applied: dict[str, Any] | None = None
-        for character in characters.list(campaign_id=current.campaign_id):
-            sheet = character.sheet
-            character_advanced: list[str] = []
-            character_expired: list[str] = []
-            duration_result = advance_elapsed_effect_durations(
-                sheet,
-                elapsed_minutes=elapsed_minutes,
-            )
-            round_result = advance_effect_durations(
-                duration_result["sheet"],
-                period="round",
-                amount=int(time_transition["elapsed_ticks"]),
-            )
-            extension = apply_rule_event(
-                round_result["sheet"],
-                "duration.advance",
-                context_with_facts(
-                    rules,
-                    actor_id=character.id,
-                    period="minute",
-                    amount=elapsed_minutes,
-                ),
-            )
-            receipts.extend(extension.receipts)
-            sheet = extension.sheet
-            character_advanced.extend(duration_result["advanced"])
-            character_expired.extend(duration_result["expired"])
-            character_advanced.extend(round_result["advanced"])
-            character_expired.extend(round_result["expired"])
-            if character.id == character_id:
-                applied = recover_stable_creature(sheet, recovery_hours=recovery_hours)
-                sheet = applied["sheet"]
-            if sheet != character.sheet:
-                updates.append(
-                    CharacterStateUpdate(
-                        character_id=character.id,
-                        sheet=validate_character_sheet(sheet),
-                        notes=validate_character_notes(character.notes),
-                        expected_revision=(
-                            expected_revision
-                            if character.id == character_id
-                            else character.revision
-                        ),
-                    )
-                )
-            if character_advanced:
-                advanced[character.id] = list(dict.fromkeys(character_advanced))
-            if character_expired:
-                expired[character.id] = list(dict.fromkeys(character_expired))
-        assert applied is not None
-        receipts.extend(
-            core_receipts(
-                rules,
-                ["dnd5e.core.damage.stable_recovery"],
-                "character.stable_recovery",
-            )
-        )
-        target_update = next(
-            item for item in updates if item.character_id == character_id
-        )
-        target_after = replace(
-            current,
-            sheet=target_update.sheet,
-            notes=target_update.notes,
-            revision=current.revision + 1,
-        )
-        stream = active_random_stream()
-        response = {
-            "character": character_view(target_after),
-            "status": "recovered",
-            "recovery_roll": recovery_roll,
-            "recovery_hours": applied["recovery_hours"],
-            "before_hp": applied["before_hp"],
-            "after_hp": applied["after_hp"],
-            "game_time": time_transition["after"],
-            "world_time": next_world_time,
-            "advanced": advanced,
-            "expired": expired,
-            "world_advanced": list(dict.fromkeys(world_advanced)),
-            "world_expired": list(dict.fromkeys(world_expired)),
-            "rule_receipts": receipts,
-            **(
-                {"random_stream_receipt": stream.receipt()}
-                if stream is not None and stream.draw_count > 0
-                else {}
-            ),
-        }
-        StateMutationService(storage.database).replace(
-            current.campaign_id,
-            campaign_state=next_state,
-            character_updates=updates,
-            expected_campaign_revision=campaign.revision,
-            operation="character.stable_recovery",
-            actor=principal_id,
-            branch_id=branch_id,
-            idempotency_key=idempotency_key,
-            idempotency_write=IdempotencyWrite(
-                scope=scope,
-                payload=request_payload,
-                response=response,
-            ),
-            rule_receipts=receipts,
-        )
-        return response
 
     def character_source_state_initialize(
         character_id: str,
@@ -15619,24 +15338,16 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             count=elapsed_hours,
         )
         next_world_time = time_transition["world_time_after"]
-        world_advanced: list[str] = []
-        world_expired: list[str] = []
-        elapsed_minutes = elapsed_hours * 60
-        world_result = advance_elapsed_world_effect_durations(
+        elapsed_ticks = int(time_transition["elapsed_ticks"])
+        elapsed_minutes = elapsed_ticks // TICKS_PER_MINUTE
+        world_duration = advance_world_effect_clocks(
             next_state,
-            elapsed_minutes=elapsed_minutes,
+            elapsed_ticks=elapsed_ticks,
+            period_steps={"round": elapsed_ticks},
         )
-        next_state = world_result["state"]
-        world_advanced.extend(world_result["advanced"])
-        world_expired.extend(world_result["expired"])
-        world_rounds = advance_world_effect_durations(
-            next_state,
-            period="round",
-            amount=int(time_transition["elapsed_ticks"]),
-        )
-        next_state = world_rounds["state"]
-        world_advanced.extend(world_rounds["advanced"])
-        world_expired.extend(world_rounds["expired"])
+        next_state = world_duration["state"]
+        world_advanced = world_duration["advanced"]
+        world_expired = world_duration["expired"]
 
         rules = effective_rule_context(campaign_id)
         receipts: list[dict[str, Any]] = []
@@ -15650,7 +15361,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             character_expired: list[str] = []
             duration_result = advance_elapsed_effect_durations(
                 sheet,
-                elapsed_minutes=elapsed_minutes,
+                elapsed_ticks=elapsed_ticks,
             )
             round_result = advance_effect_durations(
                 duration_result["sheet"],
@@ -15856,20 +15567,23 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             raise PermissionError("level advancement requires the campaign DM")
         campaign = campaigns.get(current.campaign_id)
         advancement_mode = campaign_advancement_mode(campaign)
-        state = dict(campaign.state or {})
-        if state.get("game_phase", PROFILE_LOBBY) != PROFILE_LOBBY:
+        if authoritative_phase(current.campaign_id) != PROFILE_LOBBY:
             raise CombatEngineError("switch to lobby before advancing a character level")
         if expected_revision is None or not idempotency_key:
             raise ValueError(
                 "expected_revision and idempotency_key are required for level advancement"
             )
         normalized_reason = str(reason).strip()
-        normalized_source_ref = str(source_ref).strip()
-        if not normalized_reason or not normalized_source_ref:
+        if not normalized_reason:
             raise ValueError("reason and source_ref are required for audited level advancement")
+        if len(normalized_reason) > 1000:
+            raise ValueError("level advancement reason must not exceed 1000 characters")
+        normalized_source_ref, _, _ = managed_module_source_ref(
+            current.campaign_id,
+            source_ref,
+            allow_legacy_without_manifest=True,
+        )
         audit_source = f"{normalized_source_ref}: {normalized_reason}"
-        if len(audit_source) > 300:
-            raise ValueError("combined source_ref and reason must not exceed 300 characters")
         branch_id = require_current_branch(current.campaign_id, None)
         mutation_payload = {
             "class_name": class_name,
@@ -15982,7 +15696,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if not is_dm(current.campaign_id, principal_id):
             raise PermissionError("level advancement planning requires the campaign DM")
         campaign = campaigns.get(current.campaign_id)
-        if dict(campaign.state or {}).get("game_phase", PROFILE_LOBBY) != PROFILE_LOBBY:
+        if authoritative_phase(current.campaign_id) != PROFILE_LOBBY:
             raise CombatEngineError("switch to lobby before planning a character level")
         branch_id = require_current_branch(current.campaign_id, None)
         old_level = int(current.sheet.get("progression", {}).get("level", 0) or 0)
@@ -16111,24 +15825,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             elapsed_ticks=elapsed_ticks,
         )
         elapsed_minutes = int(time_transition["elapsed_minutes"])
-        world_advanced: list[str] = []
-        world_expired: list[str] = []
-        world_rounds = advance_world_effect_durations(
+        world_duration = advance_world_effect_clocks(
             next_state,
-            period="round",
-            amount=elapsed_ticks,
+            elapsed_ticks=elapsed_ticks,
+            period_steps={"round": elapsed_ticks},
         )
-        next_state = world_rounds["state"]
-        world_advanced.extend(world_rounds["advanced"])
-        world_expired.extend(world_rounds["expired"])
-        if elapsed_minutes:
-            world_elapsed = advance_elapsed_world_effect_durations(
-                next_state,
-                elapsed_minutes=elapsed_minutes,
-            )
-            next_state = world_elapsed["state"]
-            world_advanced.extend(world_elapsed["advanced"])
-            world_expired.extend(world_elapsed["expired"])
+        next_state = world_duration["state"]
+        world_advanced = world_duration["advanced"]
+        world_expired = world_duration["expired"]
         rules = effective_rule_context(
             current.campaign_id,
             facts={
@@ -16152,14 +15856,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             sheet = round_duration["sheet"]
             actor_advanced = list(round_duration["advanced"])
             actor_expired = list(round_duration["expired"])
-            if elapsed_minutes:
-                elapsed_duration = advance_elapsed_effect_durations(
-                    sheet,
-                    elapsed_minutes=elapsed_minutes,
-                )
-                sheet = elapsed_duration["sheet"]
-                actor_advanced.extend(elapsed_duration["advanced"])
-                actor_expired.extend(elapsed_duration["expired"])
+            elapsed_duration = advance_elapsed_effect_durations(
+                sheet,
+                elapsed_ticks=elapsed_ticks,
+            )
+            sheet = elapsed_duration["sheet"]
+            actor_advanced.extend(elapsed_duration["advanced"])
+            actor_expired.extend(elapsed_duration["expired"])
             duration_extension = apply_rule_event(
                 sheet,
                 "duration.advance",
@@ -16168,6 +15871,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     actor_id=character.id,
                     period="round",
                     amount=elapsed_ticks,
+                    elapsed_ticks=elapsed_ticks,
                     elapsed_minutes=elapsed_minutes,
                 ),
             )
@@ -16219,9 +15923,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 sheet=validate_character_sheet(timed_sheets[character.id]),
                 notes=validate_character_notes(character.notes),
                 expected_revision=(
-                    expected_revision
-                    if character.id == current.id
-                    else character.revision
+                    expected_revision if character.id == current.id else character.revision
                 ),
             )
             for character in all_characters
@@ -16233,6 +15935,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             notes=validate_character_notes(current.notes),
             revision=current.revision + 1,
         )
+        current_after_view = character_view(current_after)
 
         def cast_response(revisions: list[Any]) -> dict[str, Any]:
             return {
@@ -16241,7 +15944,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "generic_spell_effect",
                 ),
                 "result": {key: value for key, value in applied.items() if key != "sheet"},
-                "character": character_view(current_after),
+                "character": current_after_view,
                 "game_time": time_transition["after"],
                 "world_time": time_transition["world_time_after"],
                 "elapsed_ticks": elapsed_ticks,
@@ -16340,9 +16043,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             if unknown:
                 raise ValueError(f"members[{index}] has unsupported fields: {unknown}")
             disallowed = (
-                short_rest_fields
-                if normalized_rest_type == "long_rest"
-                else long_rest_fields
+                short_rest_fields if normalized_rest_type == "long_rest" else long_rest_fields
             )
             wrong_rest_fields = sorted(set(raw_member) & disallowed)
             if wrong_rest_fields:
@@ -16375,13 +16076,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             if natural_recovery is not None and not isinstance(natural_recovery, dict):
                 raise ValueError(f"members[{index}].natural_recovery must be an object")
             song_source_id = (
-                str(raw_member.get("song_of_rest_source_actor_id") or "").strip()
-                or None
+                str(raw_member.get("song_of_rest_source_actor_id") or "").strip() or None
             )
             attune_item_id = str(raw_member.get("attune_item_id") or "").strip() or None
-            attunement_confirmed = raw_member.get(
-                "attunement_prerequisite_confirmed"
-            )
+            attunement_confirmed = raw_member.get("attunement_prerequisite_confirmed")
             if attune_item_id and attunement_confirmed is not True:
                 raise NeedsRulingError(
                     "attunement requires explicit DM confirmation that the actor "
@@ -16390,9 +16088,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     ruling_kind="source_or_scene_fact",
                 )
             if not attune_item_id and attunement_confirmed is not None:
-                raise ValueError(
-                    "attunement_prerequisite_confirmed requires attune_item_id"
-                )
+                raise ValueError("attunement_prerequisite_confirmed requires attune_item_id")
             food_and_drink = raw_member.get("food_and_drink", False)
             if not isinstance(food_and_drink, bool):
                 raise ValueError(f"members[{index}].food_and_drink must be a boolean")
@@ -16468,18 +16164,16 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         next_state = validate_party_state(deepcopy(campaign.state or {}))
         if bool(dict(next_state.get("combat") or {}).get("active")):
             raise CombatEngineError("rest is not allowed while combat is active")
-        current_clock = dict(next_state.get("world_time") or {})
-        if not current_clock:
-            raise ValueError("set the campaign clock before resolving a party rest")
-        started_elapsed = int(current_clock.get("elapsed_minutes", 0) or 0)
+        started_elapsed_ticks = int(next_state["game_time"]["elapsed_ticks"])
         next_state, time_transition = advance_state_game_time(
             next_state,
             period="minute",
             count=duration_minutes,
         )
         completed_clock = time_transition["world_time_after"]
-        assert completed_clock is not None
-        completed_elapsed = int(completed_clock["elapsed_minutes"])
+        completed_elapsed_ticks = int(time_transition["after"]["elapsed_ticks"])
+        elapsed_ticks = int(time_transition["elapsed_ticks"])
+        completed_game_day = rules_day_from_ticks(completed_elapsed_ticks)
         all_characters = {item.id: item for item in characters.list(campaign_id=campaign_id)}
         for member in normalized_members:
             current = all_characters.get(member["character_id"])
@@ -16492,8 +16186,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             record_rest_completion(
                 current.sheet,
                 rest_type=normalized_rest_type,
-                started_elapsed_minutes=started_elapsed,
-                completed_elapsed_minutes=completed_elapsed,
+                started_elapsed_ticks=started_elapsed_ticks,
+                completed_elapsed_ticks=completed_elapsed_ticks,
                 rest_schedule=member["rest_schedule"],
             )
             if normalized_rest_type == "long_rest" and member["prepared_spell_ids"] is not None:
@@ -16520,7 +16214,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 validate_arcane_recovery_choice(
                     current.sheet,
                     member["arcane_recovery"],
-                    world_day=completed_clock["day"],
+                    game_day=completed_game_day,
                 )
                 validate_natural_recovery_choice(
                     current.sheet,
@@ -16529,32 +16223,21 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 )
                 song_source_id = member["song_of_rest_source_actor_id"]
                 if song_source_id is not None:
-                    validate_song_of_rest_source(
-                        all_characters[str(song_source_id)].sheet
-                    )
+                    validate_song_of_rest_source(all_characters[str(song_source_id)].sheet)
                 if member["attune_item_id"] is not None:
                     attune_inventory_item(
                         current.sheet,
                         str(member["attune_item_id"]),
                     )
 
-        world_advanced: list[str] = []
-        world_expired: list[str] = []
-        world_result = advance_elapsed_world_effect_durations(
+        world_duration = advance_world_effect_clocks(
             next_state,
-            elapsed_minutes=duration_minutes,
+            elapsed_ticks=elapsed_ticks,
+            period_steps={"round": elapsed_ticks},
         )
-        next_state = world_result["state"]
-        world_advanced.extend(world_result["advanced"])
-        world_expired.extend(world_result["expired"])
-        world_rounds = advance_world_effect_durations(
-            next_state,
-            period="round",
-            amount=int(time_transition["elapsed_ticks"]),
-        )
-        next_state = world_rounds["state"]
-        world_advanced.extend(world_rounds["advanced"])
-        world_expired.extend(world_rounds["expired"])
+        next_state = world_duration["state"]
+        world_advanced = world_duration["advanced"]
+        world_expired = world_duration["expired"]
 
         member_by_id = {item["character_id"]: item for item in normalized_members}
         updates: list[CharacterStateUpdate] = []
@@ -16570,7 +16253,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             actor_expired: list[str] = []
             duration = advance_elapsed_effect_durations(
                 sheet,
-                elapsed_minutes=duration_minutes,
+                elapsed_ticks=elapsed_ticks,
             )
             round_duration = advance_effect_durations(
                 duration["sheet"],
@@ -16610,7 +16293,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "rest_type": normalized_rest_type,
                     "rest_activity_minutes": member["rest_activity_minutes"],
                     "rules": rest_rules,
-                    "world_day": completed_clock["day"],
+                    "game_day": completed_game_day,
                 }
                 if normalized_rest_type == "long_rest":
                     rest_arguments.update(
@@ -16638,10 +16321,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     raise CombatEngineError(
                         f"party rest for {current.id} requires an unresolved rule choice"
                     )
-                if (
-                    normalized_rest_type == "short_rest"
-                    and member["attune_item_id"] is not None
-                ):
+                if normalized_rest_type == "short_rest" and member["attune_item_id"] is not None:
                     applied["sheet"] = attune_inventory_item(
                         applied["sheet"],
                         str(member["attune_item_id"]),
@@ -16650,15 +16330,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 sheet = record_rest_completion(
                     applied["sheet"],
                     rest_type=normalized_rest_type,
-                    started_elapsed_minutes=started_elapsed,
-                    completed_elapsed_minutes=completed_elapsed,
+                    started_elapsed_ticks=started_elapsed_ticks,
+                    completed_elapsed_ticks=completed_elapsed_ticks,
                     rest_schedule=member["rest_schedule"],
                 )
                 preparation_result = None
-                if (
-                    normalized_rest_type == "long_rest"
-                    and member["prepared_spell_ids"] is not None
-                ):
+                if normalized_rest_type == "long_rest" and member["prepared_spell_ids"] is not None:
                     preparation_result = replace_prepared_spells(
                         sheet,
                         spell_ids=member["prepared_spell_ids"],
@@ -16778,6 +16455,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         replay = replay_idempotent(scope, idempotency_key, payload)
         if replay is not None:
             return replay
+        campaign = campaigns.get(current.campaign_id)
         preserve_life = str(activity_id).endswith("life-domain-channel-divinity-preserve-life")
         if preserve_life:
             if not is_dm(current.campaign_id, principal_id):
@@ -16893,38 +16571,51 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "activity.preserve_life",
                 ),
             ]
-            StateMutationService(storage.database).replace(
-                current.campaign_id,
-                character_updates=updates,
+            updates_by_id = {item.character_id: item for item in updates}
+
+            def projected_character(record: Any) -> dict[str, Any]:
+                update = updates_by_id[record.id]
+                return character_view(
+                    replace(
+                        record,
+                        sheet=update.sheet,
+                        notes=update.notes,
+                        revision=record.revision + 1,
+                    )
+                )
+
+            response = commit_campaign_state(
+                campaign,
+                None,
                 operation="character.activity.preserve_life",
-                actor=principal_id,
+                principal_id=principal_id,
                 branch_id=branch_id,
                 idempotency_key=idempotency_key,
-                rule_receipts=receipts,
-            )
-            response = {
-                "status": "committed",
-                "result": {
-                    "activity_id": activity_id,
-                    "payment": applied.get("payment"),
-                    "pool": settled["pool"],
-                    "allocated": settled["allocated"],
-                    "remaining_unallocated": settled["remaining_unallocated"],
-                    "targets": settled["targets"],
-                    "rule_receipts": receipts,
+                scope=scope,
+                payload=payload,
+                response_fields={
+                    "status": "committed",
+                    "result": {
+                        "activity_id": activity_id,
+                        "payment": applied.get("payment"),
+                        "pool": settled["pool"],
+                        "allocated": settled["allocated"],
+                        "remaining_unallocated": settled["remaining_unallocated"],
+                        "targets": settled["targets"],
+                        "rule_receipts": receipts,
+                    },
+                    "character": projected_character(current),
+                    "targets": [
+                        projected_character(target_records[target_id])
+                        for target_id in target_records
+                    ],
                 },
-                "character": character_view(characters.get(character_id)),
-                "targets": [
-                    character_view(characters.get(target_id)) for target_id in target_records
-                ],
-            }
-            return remember_idempotent(
-                scope,
-                idempotency_key,
-                payload,
-                response,
-                campaign_id=current.campaign_id,
+                character_updates=updates,
+                rule_receipts=receipts,
+                include_campaign_revision=False,
+                include_revisions=False,
             )
+            return response
         try:
             applied = consume_activity(
                 current.sheet,
@@ -16967,8 +16658,31 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             current.campaign_id, principal_id
         ):
             raise PermissionError("reaction and special activity triggers require a DM resolution")
-        StateMutationService(storage.database).replace(
-            current.campaign_id,
+        updated_character = replace(
+            current,
+            sheet=validate_character_sheet(applied["sheet"]),
+            notes=validate_character_notes(current.notes),
+            revision=current.revision + 1,
+        )
+        result = {key: value for key, value in applied.items() if key != "sheet"}
+        result["declaration"] = declaration or {}
+        response = commit_campaign_state(
+            campaign,
+            None,
+            operation="character.activity.use",
+            principal_id=principal_id,
+            branch_id=branch_id,
+            idempotency_key=idempotency_key,
+            scope=scope,
+            payload=payload,
+            response_fields={
+                **_ruling_status(
+                    "pending_ruling" if applied["requires_ruling"] else "committed",
+                    "descriptive_activity",
+                ),
+                "result": result,
+                "character": character_view(updated_character),
+            },
             character_updates=[
                 CharacterStateUpdate(
                     character_id=current.id,
@@ -16977,29 +16691,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     expected_revision=expected_revision,
                 )
             ],
-            operation="character.activity.use",
-            actor=principal_id,
-            branch_id=branch_id,
-            idempotency_key=idempotency_key,
             rule_receipts=list(applied.get("rule_receipts") or []),
+            include_campaign_revision=False,
+            include_revisions=False,
         )
-        result = {key: value for key, value in applied.items() if key != "sheet"}
-        result["declaration"] = declaration or {}
-        response = {
-            **_ruling_status(
-                "pending_ruling" if applied["requires_ruling"] else "committed",
-                "descriptive_activity",
-            ),
-            "result": result,
-            "character": character_view(characters.get(character_id)),
-        }
-        return remember_idempotent(
-            scope,
-            idempotency_key,
-            payload,
-            response,
-            campaign_id=current.campaign_id,
-        )
+        return response
 
     @mcp.tool()
     def character_resource_set(
@@ -17070,7 +16766,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             parts,
             source=principal_id,
             critical=critical,
-            ruleset=str(campaign.settings.get("edition") or current.sheet.get("edition") or "2014"),
+            ruleset=campaign_rules_edition(campaign.id),
             death_saves=current.character_type == "pc",
             knock_out=knock_out,
             melee=melee,
@@ -17160,11 +16856,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         require_character_control(current, principal_id)
         if current.campaign_id is not None:
             campaign = campaigns.get(current.campaign_id)
-            state = dict(campaign.state or {})
-            combat = state.get("combat")
-            if isinstance(combat, dict) and combat.get("active", False):
+            phase = authoritative_phase(current.campaign_id)
+            if phase == PROFILE_COMBAT:
                 raise CombatEngineError("prepared spells cannot be changed during combat")
-            if state.get("game_phase", PROFILE_LOBBY) != PROFILE_LOBBY:
+            if phase != PROFILE_LOBBY:
                 raise CombatEngineError(
                     "live prepared-spell changes must be submitted atomically with party_rest"
                 )
@@ -17208,11 +16903,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         normalized_event = str(event).strip().lower().replace("-", "_")
         if current.campaign_id is not None:
             campaign = campaigns.get(current.campaign_id)
-            state = dict(campaign.state or {})
-            combat = state.get("combat")
-            if isinstance(combat, dict) and combat.get("active", False):
+            phase = authoritative_phase(current.campaign_id)
+            if phase == PROFILE_COMBAT:
                 raise CombatEngineError("prepared spells cannot be changed during combat")
-            if state.get("game_phase", PROFILE_LOBBY) != PROFILE_LOBBY:
+            if phase != PROFILE_LOBBY:
                 raise CombatEngineError("switch to lobby for setup or level-up preparation changes")
             if (
                 normalized_event == "setup"
@@ -17339,62 +17033,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
 
     @mcp.tool()
-    def character_memory_add(
-        character_id: str,
-        memory: dict[str, Any],
-        principal_id: str = "system:local",
-        expected_revision: int | None = None,
-        idempotency_key: str | None = None,
-    ) -> dict[str, Any]:
-        """Append a legacy actor-notes memory without altering actor knowledge."""
-        current = characters.get(character_id)
-        require_character_control(current, principal_id)
-        notes, memory_id = add_memory(current.notes, memory)
-        return update_character(
-            current,
-            operation="character.memory.add",
-            notes=validate_character_notes(notes, character_type=current.character_type),
-            principal_id=principal_id,
-            expected_revision=expected_revision,
-            idempotency_key=idempotency_key,
-            payload={"memory": memory},
-            response_extra={"memory_id": memory_id},
-        )
-
-    @mcp.tool()
-    def character_memory_resolve(
-        character_id: str,
-        memory_id: str,
-        status: str = "resolved",
-        principal_id: str = "system:local",
-        expected_revision: int | None = None,
-        idempotency_key: str | None = None,
-    ) -> dict[str, Any]:
-        """Resolve one legacy actor-notes memory without altering actor knowledge."""
-        current = characters.get(character_id)
-        require_character_control(current, principal_id)
-        notes = resolve_memory(current.notes, memory_id, status=status)
-        return update_character(
-            current,
-            operation="character.memory.resolve",
-            notes=validate_character_notes(notes, character_type=current.character_type),
-            principal_id=principal_id,
-            expected_revision=expected_revision,
-            idempotency_key=idempotency_key,
-            payload={"memory_id": memory_id, "status": status},
-        )
-
-    @mcp.tool()
     def party_show(campaign_id: str, principal_id: str = "system:local") -> dict[str, Any]:
         """Read the campaign shared stash, wallet, derived load, and party notes."""
         access.require_campaign(campaign_id, principal_id)
-        state = validate_party_state(campaigns.get(campaign_id).state)
-        sheet = party_sheet(state)
-        return {
-            "inventory": sheet["inventory"],
-            "derived": derive_character_sheet(sheet)["inventory"],
-            "notes": state["party"]["notes"],
-        }
+        return party_view_from_state(campaigns.get(campaign_id).state)
 
     @mcp.tool()
     def party_inventory_add(
@@ -17413,7 +17055,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         before = campaigns.get(campaign_id)
         branch_id = require_current_branch(campaign_id, None)
         payload = {"item": item, "expected_revision": expected_revision, "branch_id": branch_id}
-        scope = f"party-inventory:{campaign_id}:{principal_id}"
+        scope = f"party-inventory:{campaign_id}:{branch_id}:{principal_id}"
         replay = replay_idempotent(scope, idempotency_key, payload)
         if replay is not None:
             return replay
@@ -17426,14 +17068,21 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             actor=principal_id,
             branch_id=branch_id,
             idempotency_key=idempotency_key,
+            idempotency_write=IdempotencyWrite(
+                scope=scope,
+                payload=payload,
+                response=lambda result: {
+                    "inventory": sheet["inventory"],
+                    "item_id": item_id,
+                    "campaign": asdict(result),
+                },
+            ),
         )
-        return remember_idempotent(
-            scope,
-            idempotency_key,
-            payload,
-            {"inventory": sheet["inventory"], "item_id": item_id, "campaign": asdict(after)},
-            campaign_id=campaign_id,
-        )
+        return {
+            "inventory": sheet["inventory"],
+            "item_id": item_id,
+            "campaign": asdict(after),
+        }
 
     @mcp.tool()
     def party_inventory_remove(
@@ -17458,7 +17107,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "expected_revision": expected_revision,
             "branch_id": branch_id,
         }
-        scope = f"party-inventory:{campaign_id}:{principal_id}"
+        scope = f"party-inventory:{campaign_id}:{branch_id}:{principal_id}"
         replay = replay_idempotent(scope, idempotency_key, payload)
         if replay is not None:
             return replay
@@ -17471,14 +17120,21 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             actor=principal_id,
             branch_id=branch_id,
             idempotency_key=idempotency_key,
+            idempotency_write=IdempotencyWrite(
+                scope=scope,
+                payload=payload,
+                response=lambda result: {
+                    "inventory": sheet["inventory"],
+                    "removed": removed,
+                    "campaign": asdict(result),
+                },
+            ),
         )
-        return remember_idempotent(
-            scope,
-            idempotency_key,
-            payload,
-            {"inventory": sheet["inventory"], "removed": removed, "campaign": asdict(after)},
-            campaign_id=campaign_id,
-        )
+        return {
+            "inventory": sheet["inventory"],
+            "removed": removed,
+            "campaign": asdict(after),
+        }
 
     @mcp.tool()
     def party_inventory_transfer(
@@ -17533,13 +17189,25 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             moved = inventory_item_for_receipt(character.sheet, moved)
             character_sheet = receive_inventory_item(character.sheet, moved)
         updated_state = party_state(campaign.state, shared_sheet)
+        normalized_character_sheet = validate_character_sheet(character_sheet)
+        response = {
+            "party": party_view_from_state(updated_state),
+            "character": character_view(
+                replace(
+                    character,
+                    sheet=normalized_character_sheet,
+                    revision=character.revision + 1,
+                )
+            ),
+            "item": moved,
+        }
         StateMutationService(storage.database).replace(
             campaign_id,
             campaign_state=updated_state,
             character_updates=[
                 CharacterStateUpdate(
                     character.id,
-                    character_sheet,
+                    normalized_character_sheet,
                     character.notes,
                     expected_character_revision,
                 )
@@ -17549,20 +17217,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             branch_id=branch_id,
             expected_campaign_revision=expected_campaign_revision,
             idempotency_key=idempotency_key,
+            idempotency_write=IdempotencyWrite(
+                scope=scope,
+                payload=payload,
+                response=response,
+            ),
         )
-        character_after = characters.get(character_id)
-        response = {
-            "party": party_show(campaign_id, principal_id=principal_id),
-            "character": character_view(character_after),
-            "item": moved,
-        }
-        return remember_idempotent(
-            scope,
-            idempotency_key,
-            payload,
-            response,
-            campaign_id=campaign_id,
-        )
+        return response
 
     @mcp.tool()
     def party_wallet_adjust(
@@ -17587,7 +17248,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "expected_revision": expected_revision,
             "branch_id": branch_id,
         }
-        scope = f"party-wallet:{campaign_id}:{principal_id}"
+        scope = f"party-wallet:{campaign_id}:{branch_id}:{principal_id}"
         replay = replay_idempotent(scope, idempotency_key, payload)
         if replay is not None:
             return replay
@@ -17600,14 +17261,19 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             actor=principal_id,
             branch_id=branch_id,
             idempotency_key=idempotency_key,
+            idempotency_write=IdempotencyWrite(
+                scope=scope,
+                payload=payload,
+                response=lambda result: {
+                    "wallet": sheet["inventory"]["wallet"],
+                    "campaign": asdict(result),
+                },
+            ),
         )
-        return remember_idempotent(
-            scope,
-            idempotency_key,
-            payload,
-            {"wallet": sheet["inventory"]["wallet"], "campaign": asdict(after)},
-            campaign_id=campaign_id,
-        )
+        return {
+            "wallet": sheet["inventory"]["wallet"],
+            "campaign": asdict(after),
+        }
 
     @mcp.tool()
     def party_wallet_transfer(
@@ -17660,13 +17326,25 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         delta = amount if direction == "deposit" else -amount
         shared_sheet = adjust_wallet(shared, denomination, delta)
         character_sheet = adjust_wallet(character.sheet, denomination, -delta)
+        updated_state = party_state(campaign.state, shared_sheet)
+        normalized_character_sheet = validate_character_sheet(character_sheet)
+        response = {
+            "party": party_view_from_state(updated_state),
+            "character": character_view(
+                replace(
+                    character,
+                    sheet=normalized_character_sheet,
+                    revision=character.revision + 1,
+                )
+            ),
+        }
         StateMutationService(storage.database).replace(
             campaign_id,
-            campaign_state=party_state(campaign.state, shared_sheet),
+            campaign_state=updated_state,
             character_updates=[
                 CharacterStateUpdate(
                     character.id,
-                    character_sheet,
+                    normalized_character_sheet,
                     character.notes,
                     expected_character_revision
                     if expected_character_revision is not None
@@ -17678,19 +17356,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             branch_id=branch_id,
             expected_campaign_revision=expected_campaign_revision,
             idempotency_key=idempotency_key,
+            idempotency_write=IdempotencyWrite(
+                scope=scope,
+                payload=payload,
+                response=response,
+            ),
         )
-        character_after = characters.get(character_id)
-        response = {
-            "party": party_show(campaign_id, principal_id=principal_id),
-            "character": character_view(character_after),
-        }
-        return remember_idempotent(
-            scope,
-            idempotency_key,
-            payload,
-            response,
-            campaign_id=campaign_id,
-        )
+        return response
 
     def settle_campaign_randomness(
         campaign_id: str,
@@ -17734,6 +17406,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             result = resolver()
             if stream.draw_count == 0:
                 raise ValueError("random resolution must consume at least one random draw")
+            response = {
+                **dict(result),
+                "campaign_revision": campaign.revision + 1,
+                "random_stream_receipt": stream.receipt(),
+            }
             StateMutationService(storage.database).replace(
                 campaign_id,
                 campaign_state=validate_party_state(campaign.state),
@@ -17742,19 +17419,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 actor=principal_id,
                 branch_id=resolved_branch_id,
                 idempotency_key=idempotency_key,
+                idempotency_write=IdempotencyWrite(
+                    scope=scope,
+                    payload=request_payload,
+                    response=response,
+                ),
             )
-        response = {
-            **dict(result),
-            "campaign_revision": campaigns.get(campaign_id).revision,
-            "random_stream_receipt": stream.receipt(),
-        }
-        return remember_idempotent(
-            scope,
-            idempotency_key,
-            request_payload,
-            response,
-            campaign_id=campaign_id,
-        )
+        return response
 
     @mcp.tool()
     def dnd_dice_roll(
@@ -17852,61 +17523,26 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         normalized_sheet = validate_character_sheet(sheet) if sheet is not None else None
         normalized_notes = validate_character_notes(notes) if notes is not None else None
         before = characters.get(character_id)
-        if before.campaign_id is None:
-            updated = characters.update(
-                character_id,
-                name=name,
-                player_name=player_name,
-                summary=summary,
-                sheet=normalized_sheet,
-                notes=normalized_notes,
-                expected_revision=expected_revision,
-            )
-            record_character_revision(before, updated, "character.update")
-            return character_view(updated)
-        access.require_actor(before.campaign_id, before.id, principal_id, control=True)
-        if expected_revision is None or not idempotency_key:
-            raise ValueError(
-                "expected_revision and idempotency_key are required for character updates"
-            )
-        branch_id = require_current_branch(before.campaign_id, None)
-        request_payload = {
-            "character_id": character_id,
-            "name": name,
-            "player_name": player_name,
-            "summary": summary,
-            "sheet": normalized_sheet,
-            "notes": normalized_notes,
-        }
-        scope = f"character-update:{before.campaign_id}:{branch_id}:{principal_id}:{before.id}"
-        replay = replay_idempotent(scope, idempotency_key, request_payload)
-        if replay is not None:
-            return replay
-        StateMutationService(storage.database).replace(
-            before.campaign_id,
-            character_updates=[
-                CharacterStateUpdate(
-                    character_id=before.id,
-                    sheet=normalized_sheet if normalized_sheet is not None else before.sheet,
-                    notes=normalized_notes if normalized_notes is not None else before.notes,
-                    expected_revision=expected_revision,
-                    name=name,
-                    player_name=player_name,
-                    summary=summary,
-                )
-            ],
+        if before.campaign_id is not None:
+            access.require_actor(before.campaign_id, before.id, principal_id, control=True)
+        return update_character(
+            before,
             operation="character.update",
-            actor=principal_id,
-            branch_id=branch_id,
+            sheet=normalized_sheet,
+            notes=normalized_notes,
+            name=name,
+            player_name=player_name,
+            summary=summary,
+            principal_id=principal_id,
+            expected_revision=expected_revision,
             idempotency_key=idempotency_key,
-        )
-        response = character_view(characters.get(character_id))
-        return remember_idempotent(
-            scope,
-            idempotency_key,
-            request_payload,
-            response,
-            campaign_id=before.campaign_id,
+            payload={
+                "name": name,
+                "player_name": player_name,
+                "summary": summary,
+                "sheet": normalized_sheet,
+                "notes": normalized_notes,
+            },
         )
 
     @mcp.tool()
@@ -17936,23 +17572,21 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         replay = replay_idempotent(scope, idempotency_key, request_payload)
         if replay is not None:
             return replay
-        response = asdict(
-            memories.add(
-                campaign_id,
-                content=content,
-                kind=kind,
-                subject=subject,
-                metadata=metadata,
-                branch_id=branch_id,
-            )
+        result = memories.add(
+            campaign_id,
+            content=content,
+            kind=kind,
+            subject=subject,
+            metadata=metadata,
+            branch_id=branch_id,
+            idempotency_key=idempotency_key,
+            idempotency_write=IdempotencyWrite(
+                scope=scope,
+                payload=request_payload,
+                response=lambda value: asdict(value),
+            ),
         )
-        return remember_idempotent(
-            scope,
-            idempotency_key,
-            request_payload,
-            response,
-            campaign_id=campaign_id,
-        )
+        return asdict(result)
 
     @mcp.tool()
     def memory_list(
@@ -18052,6 +17686,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 audience_scope=audience_scope,
                 disclosure_scope=knowledge_disclosure_scope,
                 branch_id=branch_id,
+                idempotency_key=idempotency_key,
+                idempotency_write=IdempotencyWrite(
+                    scope=scope,
+                    payload=request_payload,
+                    response=lambda result: {
+                        **asdict(result[0]),
+                        "actor_knowledge_ids": result[1],
+                    },
+                ),
             )
         else:
             created = events.add(
@@ -18061,16 +17704,19 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 payload=payload,
                 audience_scope=audience_scope,
                 branch_id=branch_id,
+                idempotency_key=idempotency_key,
+                idempotency_write=IdempotencyWrite(
+                    scope=scope,
+                    payload=request_payload,
+                    response=lambda result: {
+                        **asdict(result),
+                        "actor_knowledge_ids": [],
+                    },
+                ),
             )
             knowledge_ids = []
         response = {**asdict(created), "actor_knowledge_ids": knowledge_ids}
-        return remember_idempotent(
-            scope,
-            idempotency_key,
-            request_payload,
-            response,
-            campaign_id=campaign_id,
-        )
+        return response
 
     @mcp.tool()
     def event_list(
@@ -18142,15 +17788,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 cause=cause,
                 disclosure_scope=disclosure_scope,
                 branch_id=branch_id,
+                idempotency_key=idempotency_key,
+                idempotency_write=IdempotencyWrite(
+                    scope=scope,
+                    payload=request_payload,
+                    response=lambda result: asdict(result),
+                ),
             )
         )
-        return remember_idempotent(
-            scope,
-            idempotency_key,
-            request_payload,
-            response,
-            campaign_id=campaign_id,
-        )
+        return response
 
     @mcp.tool()
     def actor_knowledge_revise(
@@ -18208,15 +17854,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 disclosure_scope=disclosure_scope,
                 branch_id=branch_id,
                 expected_revision_id=expected_revision_id,
+                idempotency_key=idempotency_key,
+                idempotency_write=IdempotencyWrite(
+                    scope=scope,
+                    payload=request_payload,
+                    response=lambda result: asdict(result),
+                ),
             )
         )
-        return remember_idempotent(
-            scope,
-            idempotency_key,
-            request_payload,
-            response,
-            campaign_id=current.campaign_id,
-        )
+        return response
 
     @mcp.tool()
     def actor_knowledge_list(
@@ -18338,14 +17984,18 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 f"history cursor conflict: expected {expected_history_sequence}, "
                 f"found {actual_sequence}"
             )
-        response = asdict(revisions.undo(campaign_id))
-        return remember_idempotent(
-            scope,
-            idempotency_key,
-            request_payload,
-            response,
-            campaign_id=campaign_id,
+        response = asdict(
+            revisions.undo(
+                campaign_id,
+                idempotency_key=idempotency_key,
+                idempotency_write=IdempotencyWrite(
+                    scope=scope,
+                    payload=request_payload,
+                    response=lambda result: asdict(result),
+                ),
+            )
         )
+        return response
 
     @mcp.tool()
     def state_redo(
@@ -18377,14 +18027,18 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 f"history cursor conflict: expected {expected_history_sequence}, "
                 f"found {actual_sequence}"
             )
-        response = asdict(revisions.redo(campaign_id))
-        return remember_idempotent(
-            scope,
-            idempotency_key,
-            request_payload,
-            response,
-            campaign_id=campaign_id,
+        response = asdict(
+            revisions.redo(
+                campaign_id,
+                idempotency_key=idempotency_key,
+                idempotency_write=IdempotencyWrite(
+                    scope=scope,
+                    payload=request_payload,
+                    response=lambda result: asdict(result),
+                ),
+            )
         )
+        return response
 
     @mcp.tool()
     def combat_map_patch(
@@ -18481,9 +18135,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 )
             seen_visibility_actors.add(target_id)
             if not str(visibility.get("reason") or "").strip():
-                raise ValueError(
-                    "combatant_visibility requires an Agent-as-DM ruling reason"
-                )
+                raise ValueError("combatant_visibility requires an Agent-as-DM ruling reason")
             if "hidden" not in visibility and "visible_to_actor_ids" not in visibility:
                 raise ValueError("combatant_visibility must change hidden or visible_to_actor_ids")
             if "hidden" in visibility and not isinstance(visibility["hidden"], bool):
@@ -18519,28 +18171,23 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 scene_state[patch["key"]] = patch["value"]
             runtime[scene_id] = scene_state
         state["scene_runtime"] = runtime
-        StateMutationService(storage.database).replace(
-            campaign_id,
-            campaign_state=validate_party_state(state),
-            expected_campaign_revision=campaign.revision,
+        response = commit_campaign_state(
+            campaign,
+            state,
             operation="combat.map.patch",
-            actor=principal_id,
+            principal_id=principal_id,
             branch_id=resolved_branch_id,
             idempotency_key=idempotency_key,
+            scope=scope,
+            payload=payload,
+            response_fields={
+                "battle_map": next_map,
+                "world_patches": normalized,
+                "combat": next_encounter,
+            },
+            include_revisions=False,
         )
-        response = {
-            "battle_map": next_map,
-            "world_patches": normalized,
-            "combat": next_encounter,
-            "campaign_revision": mutation_revision(campaign_id),
-        }
-        return remember_idempotent(
-            scope,
-            idempotency_key,
-            payload,
-            response,
-            campaign_id=campaign_id,
-        )
+        return response
 
     @mcp.tool()
     def combat_end(
@@ -18617,11 +18264,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 ) != actor.id or not source_condition.get("added_by_encounter", False):
                     continue
                 condition = str(source_condition.get("condition") or "").casefold()
-                sheet["conditions"] = [
-                    item
-                    for item in sheet.get("conditions", [])
-                    if str(item).casefold() != condition
-                ]
+                apply_condition_change(sheet, condition_id=condition, add=False)
             holding_ids = {
                 str(item.get("holding_effect_id"))
                 for item in ending_readied
@@ -18640,33 +18283,28 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     expected_revision=actor.revision,
                 )
             )
-        revisions_result = StateMutationService(storage.database).replace(
-            campaign_id,
-            campaign_state=validate_party_state(updated_state),
-            character_updates=character_updates,
-            expected_campaign_revision=campaign.revision,
+        response = commit_campaign_state(
+            campaign,
+            updated_state,
             operation="combat.end",
-            actor=principal_id,
+            principal_id=principal_id,
             branch_id=resolved_branch_id,
             idempotency_key=idempotency_key,
+            scope=scope,
+            payload=payload,
+            response_fields={
+                "ended": True,
+                "combat": combat,
+                "outcome": outcome_value or None,
+                "tool_profile": PROFILE_PLAY,
+                "effects_expired": sorted(expired_effects),
+                "readied_spells_expired": sorted(
+                    str(item.get("id")) for item in ending_readied if item.get("kind") == "spell"
+                ),
+            },
+            character_updates=character_updates,
         )
-        response = {
-            "ended": True,
-            "combat": combat,
-            "outcome": outcome_value or None,
-            "tool_profile": PROFILE_PLAY,
-            "effects_expired": sorted(expired_effects),
-            "readied_spells_expired": sorted(
-                str(item.get("id")) for item in ending_readied if item.get("kind") == "spell"
-            ),
-            "campaign_revision": mutation_revision(campaign_id),
-            "revisions": [asdict(item) for item in revisions_result or []],
-        }
-        return combat_response(
-            campaign_id,
-            principal_id,
-            remember_idempotent(scope, idempotency_key, payload, response, campaign_id),
-        )
+        return combat_response(campaign_id, principal_id, response)
 
     @mcp.tool()
     def continuity_context(
@@ -18847,15 +18485,18 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             actor_knowledge=knowledge_data,
             snapshot=snapshot_data,
             branch_id=branch_id,
+            idempotency_key=idempotency_key,
+            idempotency_write=IdempotencyWrite(
+                scope=scope,
+                payload=request_payload,
+                response=lambda result: {
+                    **result,
+                    "skill_manifest": manifest,
+                },
+            ),
         )
         response["skill_manifest"] = manifest
-        return remember_idempotent(
-            scope,
-            idempotency_key,
-            request_payload,
-            response,
-            campaign_id=campaign_id,
-        )
+        return response
 
     @mcp.tool()
     def module_import_job_create(
@@ -18906,11 +18547,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             artifact=artifact,
             artifact_checksum=str(preview.get("checksum") or ""),
             payload=payload,
+            idempotency_key=idempotency_key,
+            idempotency_write=IdempotencyWrite(
+                scope=scope,
+                payload=payload,
+                response=lambda result: {"job": import_job_view(result)},
+            ),
         )
-        response = {"job": import_job_view(job)}
-        return remember_idempotent(
-            scope, idempotency_key, payload, response, campaign_id=campaign_id
-        )
+        return {"job": import_job_view(job)}
 
     @mcp.tool()
     def module_import_job_inspect(
@@ -18934,11 +18578,21 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             parser=MarkdownModuleParser(profile=DndModuleProfile()),
             **module_document_options(job.artifact_checksum),
         )
-        updated = import_jobs.record_inspection(job_id, preview)
-        response = {"job": import_job_view(updated), "preview": preview}
-        return remember_idempotent(
-            scope, idempotency_key, payload, response, campaign_id=campaign_id
+        updated = import_jobs.record_inspection(
+            job_id,
+            preview,
+            expected_revision=job.revision,
+            idempotency_key=idempotency_key,
+            idempotency_write=IdempotencyWrite(
+                scope=scope,
+                payload=payload,
+                response=lambda result: {
+                    "job": import_job_view(result),
+                    "preview": preview,
+                },
+            ),
         )
+        return {"job": import_job_view(updated), "preview": preview}
 
     @mcp.tool()
     def module_import_job_validate(
@@ -18994,11 +18648,18 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             job_id,
             validation,
             state="validated" if validation["valid"] else "failed",
+            expected_revision=job.revision,
+            idempotency_key=idempotency_key,
+            idempotency_write=IdempotencyWrite(
+                scope=scope,
+                payload=payload,
+                response=lambda result: {
+                    "job": import_job_view(result),
+                    "validation": validation,
+                },
+            ),
         )
-        response = {"job": import_job_view(updated), "validation": validation}
-        return remember_idempotent(
-            scope, idempotency_key, payload, response, campaign_id=campaign_id
-        )
+        return {"job": import_job_view(updated), "validation": validation}
 
     @mcp.tool()
     def module_import_job_import(
@@ -19038,11 +18699,18 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             {**dict(job.result), "module_import": asdict(result)},
             state="imported",
             module_id=result.module_id,
+            expected_revision=job.revision,
+            idempotency_key=idempotency_key,
+            idempotency_write=IdempotencyWrite(
+                scope=scope,
+                payload=payload,
+                response=lambda updated_job: {
+                    "job": import_job_view(updated_job),
+                    **asdict(result),
+                },
+            ),
         )
-        response = {"job": import_job_view(updated), **asdict(result)}
-        return remember_idempotent(
-            scope, idempotency_key, payload, response, campaign_id=campaign_id
-        )
+        return {"job": import_job_view(updated), **asdict(result)}
 
     @mcp.tool()
     def module_import_job_activate(
@@ -19051,59 +18719,155 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         principal_id: str = "system:local",
         expected_revision: int | None = None,
         idempotency_key: str | None = None,
+        progress_remaps: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """Atomically promote an imported module revision after its diff was reviewed."""
         access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
         require_write_contract(expected_revision, idempotency_key)
         job = require_import_job(campaign_id, job_id, "module")
-        payload = {"job_id": job_id, "operation": "activate", "module_id": job.module_id}
+        normalized_remaps: list[dict[str, str]] = []
+        remap_targets: dict[str, str] = {}
+        for index, raw in enumerate(progress_remaps or []):
+            if not isinstance(raw, dict):
+                raise ValueError(f"progress_remaps[{index}] must be an object")
+            unknown = set(raw) - {"from_scene_id", "to_scene_id", "reason"}
+            if unknown:
+                raise ValueError(
+                    f"progress_remaps[{index}] has unsupported fields: {sorted(unknown)}"
+                )
+            source_scene_id = str(raw.get("from_scene_id") or "").strip()
+            target_scene_id = str(raw.get("to_scene_id") or "").strip()
+            reason = str(raw.get("reason") or "").strip()
+            if not source_scene_id or not target_scene_id:
+                raise ValueError(
+                    f"progress_remaps[{index}] requires from_scene_id and to_scene_id"
+                )
+            if not reason or len(reason) > 1000:
+                raise ValueError(
+                    f"progress_remaps[{index}].reason must contain 1 to 1000 characters"
+                )
+            if source_scene_id in remap_targets:
+                raise ValueError("progress_remaps contains duplicate from_scene_id values")
+            remap_targets[source_scene_id] = target_scene_id
+            normalized_remaps.append(
+                {
+                    "from_scene_id": source_scene_id,
+                    "to_scene_id": target_scene_id,
+                    "reason": reason,
+                    "resolver": "agent",
+                }
+            )
+        payload = {
+            "job_id": job_id,
+            "operation": "activate",
+            "module_id": job.module_id,
+            "progress_remaps": normalized_remaps,
+        }
         scope = f"import-job:{campaign_id}:{job_id}:{principal_id}"
         replay = replay_idempotent(scope, idempotency_key, payload)
         if replay is not None:
             return replay
-        if dict(campaigns.get(campaign_id).state or {}).get("combat", {}).get("active", False):
-            raise CombatEngineError("module activation cannot change during active combat")
         if job.state not in {"imported", "activated"} or not job.module_id:
             raise ValueError("module import job must be imported before activation")
-        before = campaigns.get(campaign_id)
-        if before.revision != expected_revision:
-            raise ValueError(f"campaign revision conflict: {campaign_id}")
-        activation = modules.activate_candidate(campaign_id, job.module_id)
-        state = dict(before.state or {})
-        module_imports = dict(state.get("module_imports") or {})
-        active_modules = dict(module_imports.get("active") or {})
-        source_key = str(job.payload.get("source_key") or job.artifact)
-        active_modules[source_key] = {
-            "module_id": job.module_id,
-            "checksum": job.artifact_checksum,
-            "parser_profile": job.parser_profile,
-            "parser_version": job.parser_version,
-        }
-        state["module_imports"] = {**module_imports, "active": active_modules}
-        after = campaigns.update_audited(
-            campaign_id,
-            state=state,
-            expected_revision=expected_revision,
-            operation="module.import.activate",
-            actor=principal_id,
-            branch_id=current_branch_id(campaign_id),
-            idempotency_key=idempotency_key,
-            request_hash=request_hash(payload),
+        campaign_scope = f"{scope}:campaign-state"
+        campaign_key = f"{idempotency_key}:campaign-state"
+        campaign_payload = {**payload, "revision_reason": "module.activation"}
+        campaign_replay = idempotency.lookup(
+            campaign_scope,
+            campaign_key,
+            campaign_payload,
         )
+        before = None
+        if campaign_replay is None:
+            before = campaigns.get(campaign_id)
+            if dict(before.state or {}).get("combat", {}).get("active", False):
+                raise CombatEngineError("module activation cannot change during active combat")
+            if before.revision != expected_revision:
+                raise ValueError(f"campaign revision conflict: {campaign_id}")
+
+        module_scope = f"{scope}:module-source"
+        module_key = f"{idempotency_key}:module-source"
+        module_payload = {
+            "module_id": job.module_id,
+            "operation": "activate",
+            "progress_remaps": normalized_remaps,
+        }
+        module_replay = idempotency.lookup(module_scope, module_key, module_payload)
+        if module_replay is not None:
+            activation = dict(module_replay.response or {}).get("activation")
+        else:
+            activation = modules.activate_candidate(
+                campaign_id,
+                job.module_id,
+                progress_remaps=remap_targets,
+                idempotency_key=module_key,
+                idempotency_write=IdempotencyWrite(
+                    scope=module_scope,
+                    payload=module_payload,
+                    response=lambda result: {"activation": result},
+                ),
+            )
+        if not isinstance(activation, dict):
+            raise RuntimeError("module activation replay is malformed")
+        activation = {
+            **activation,
+            "progress_remap_rulings": normalized_remaps,
+        }
+
+        if campaign_replay is not None:
+            campaign_revision = int(
+                dict(campaign_replay.response or {}).get("campaign_revision", 0) or 0
+            )
+            if campaign_revision < 1:
+                raise RuntimeError("module campaign-state replay is malformed")
+        else:
+            assert before is not None
+            state = validate_party_state(dict(before.state or {}))
+            after = campaigns.update_audited(
+                campaign_id,
+                state=state,
+                expected_revision=expected_revision,
+                operation="module.import.activate",
+                actor=principal_id,
+                branch_id=current_branch_id(campaign_id),
+                idempotency_key=campaign_key,
+                request_hash=request_hash(campaign_payload),
+                idempotency_write=IdempotencyWrite(
+                    scope=campaign_scope,
+                    payload=campaign_payload,
+                    response=lambda result: {
+                        "campaign_revision": result.revision,
+                    },
+                ),
+            )
+            campaign_revision = after.revision
         updated = import_jobs.record_result(
             job_id,
-            {**dict(job.result), "activation": activation, "campaign_revision": after.revision},
+            {
+                **dict(job.result),
+                "activation": activation,
+                "campaign_revision": campaign_revision,
+            },
             state="activated",
             module_id=job.module_id,
+            expected_revision=job.revision,
+            idempotency_key=idempotency_key,
+            idempotency_write=IdempotencyWrite(
+                scope=scope,
+                payload=payload,
+                response=lambda updated_job: {
+                    "job": import_job_view(updated_job),
+                    "activation": activation,
+                    "campaign_revision": campaign_revision,
+                },
+            ),
         )
         response = {
             "job": import_job_view(updated),
             "activation": activation,
-            "campaign_revision": after.revision,
+            "campaign_revision": campaign_revision,
         }
-        return remember_idempotent(
-            scope, idempotency_key, payload, response, campaign_id=campaign_id
-        )
+        return response
 
     @mcp.tool()
     def module_write(name: str, content: str, principal_id: str = "system:local") -> dict[str, str]:
@@ -19151,15 +18915,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             embedder=embedder,
             vector_store=vectors,
             **module_document_options(),
+            idempotency_key=idempotency_key,
+            idempotency_write=IdempotencyWrite(
+                scope=scope,
+                payload=payload,
+                response=lambda value: asdict(value),
+            ),
         )
-        response = asdict(result)
-        return remember_idempotent(
-            scope,
-            idempotency_key,
-            payload,
-            response,
-            campaign_id=campaign_id,
-        )
+        return asdict(result)
 
     @mcp.tool()
     def module_list(campaign_id: str, principal_id: str = "system:local") -> list[dict[str, Any]]:
@@ -19269,6 +19032,19 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             media_type=staged["media_type"],
             checksum=staged["checksum"],
             metadata=asset_metadata,
+            idempotency_key=idempotency_key,
+            idempotency_write=IdempotencyWrite(
+                scope=scope,
+                payload=payload,
+                response=lambda value: {
+                    "campaign_id": campaign_id,
+                    "module_id": module_id,
+                    "asset": value,
+                    "artifact": {
+                        key: item for key, item in staged.items() if key not in {"path", "staged"}
+                    },
+                },
+            ),
         )
         response = {
             "campaign_id": campaign_id,
@@ -19278,13 +19054,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 key: value for key, value in staged.items() if key not in {"path", "staged"}
             },
         }
-        return remember_idempotent(
-            scope,
-            idempotency_key,
-            payload,
-            response,
-            campaign_id=campaign_id,
-        )
+        return response
 
     @mcp.tool()
     def module_page_render(
@@ -19379,9 +19149,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         metadata_value = deepcopy(dict(metadata or {}))
         if "agent_statblock_fill" in metadata_value:
-            raise ValueError(
-                "metadata.agent_statblock_fill is reserved; use payload.agent_fill"
-            )
+            raise ValueError("metadata.agent_statblock_fill is reserved; use payload.agent_fill")
         filled = (
             apply_reviewed_statblock_fill(parsed.sheet, agent_fill)
             if agent_fill is not None
@@ -19431,6 +19199,23 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             reviewer=principal_id,
             observation=observation,
             metadata=metadata_value,
+            idempotency_key=idempotency_key,
+            idempotency_write=IdempotencyWrite(
+                scope=scope,
+                payload=payload,
+                response=lambda value: {
+                    "review": value,
+                    "validation": {
+                        "name": parsed.name,
+                        "challenge_rating": parsed.challenge_rating,
+                        "experience_points": parsed.experience_points,
+                        **statblock_settlement(retained_warnings),
+                        "agent_fill": (filled or {}).get("fill"),
+                        "resolved_warnings": sorted(resolved_warnings),
+                        "agent_fill_requirements": agent_fill_requirements,
+                    },
+                },
+            ),
         )
         response = {
             "review": review,
@@ -19444,13 +19229,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "agent_fill_requirements": agent_fill_requirements,
             },
         }
-        return remember_idempotent(
-            scope,
-            idempotency_key,
-            payload,
-            response,
-            campaign_id=campaign_id,
-        )
+        return response
 
     def module_content_candidates(
         campaign_id: str,
@@ -19487,8 +19266,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     source_key=f"module-candidate:{candidate['id']}",
                     name=None,
                 )
-                candidate["agent_fill_requirements"] = (
-                    statblock_agent_fill_requirements(parsed_candidate.sheet)
+                candidate["agent_fill_requirements"] = statblock_agent_fill_requirements(
+                    parsed_candidate.sheet
                 )
             if candidate.get("review_status") == "manual_review_required":
                 candidate["ruling_requirement"] = _ruling_requirement(
@@ -19793,14 +19572,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 if spatial_review is not None
                 else None
             ),
+            idempotency_key=idempotency_key,
+            idempotency_write=IdempotencyWrite(
+                scope=scope,
+                payload=request_payload,
+                response=lambda result: result,
+            ),
         )
-        return remember_idempotent(
-            scope,
-            idempotency_key,
-            request_payload,
-            response,
-            campaign_id=campaign_id,
-        )
+        return response
 
     @mcp.tool()
     def module_search(
@@ -19940,9 +19719,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if not 2 <= len(target_name) <= 200:
             raise ValueError("name must contain 2 to 200 characters")
         if page_number is not None and (
-            isinstance(page_number, bool)
-            or not isinstance(page_number, int)
-            or page_number < 1
+            isinstance(page_number, bool) or not isinstance(page_number, int) or page_number < 1
         ):
             raise ValueError("page_number must be a positive integer")
         provider = storage.rule_ocr_provider()
@@ -19957,9 +19734,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if page_number is not None:
             candidate_pages.append(page_number)
         else:
-            target_pattern = re.compile(
-                rf"(?i)\b{re.escape(target_name)}\s*,\s*(\d{{1,4}})\b"
-            )
+            target_pattern = re.compile(rf"(?i)\b{re.escape(target_name)}\s*,\s*(\d{{1,4}})\b")
             printed_hints = [
                 int(match.group(1))
                 for chunk in chunks
@@ -20000,8 +19775,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if selected_layout is None:
             raise RuntimeError(
                 "layout OCR did not find one structurally unambiguous target statblock "
-                "on candidate pages "
-                + ", ".join(str(value) for value in attempted_pages)
+                "on candidate pages " + ", ".join(str(value) for value in attempted_pages)
             )
         assert recovered is not None
         evidence = dict(recovered["evidence"])
@@ -20015,9 +19789,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             str(critical_facts["identity"]).casefold(),
         )
         page_lines = [
-            line.strip(" \t#>*_-")
-            for line in page_text.splitlines()
-            if line.strip(" \t#>*_-")
+            line.strip(" \t#>*_-") for line in page_text.splitlines() if line.strip(" \t#>*_-")
         ]
         identity_indexes = [
             index
@@ -20043,9 +19815,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             ],
         ]
         corroboration_mode = "dual_layout_ocr"
-        corroborated = [
-            {"field": label, "value": fact} for label, fact in corroboration_pairs
-        ]
+        corroborated = [{"field": label, "value": fact} for label, fact in corroboration_pairs]
         if len(identity_indexes) == 1:
             segment_start = identity_indexes[0]
             segment_end = len(page_lines)
@@ -20062,10 +19832,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "\n".join(page_lines[segment_start:segment_end]).casefold(),
             )
             for label, fact in corroboration_pairs:
-                if (
-                    re.sub(r"[^a-z0-9]+", "", fact.casefold())
-                    not in normalized_segment
-                ):
+                if re.sub(r"[^a-z0-9]+", "", fact.casefold()) not in normalized_segment:
                     raise RuntimeError(
                         f"OCR-recovered {label} is not corroborated by the target "
                         "embedded-text segment"
@@ -20086,10 +19853,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
 
             def critical_fingerprint(value: Any) -> Any:
                 if isinstance(value, dict):
-                    return {
-                        str(key): critical_fingerprint(item)
-                        for key, item in value.items()
-                    }
+                    return {str(key): critical_fingerprint(item) for key, item in value.items()}
                 return re.sub(r"[^a-z0-9]+", "", str(value).casefold())
 
             if critical_fingerprint(critical_facts) != critical_fingerprint(
@@ -20141,9 +19905,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         """Bind an Agent transcription to one contiguous indexed page segment."""
 
         if not isinstance(evidence_chunk_ids, list):
-            raise ValueError(
-                "evidence_chunk_ids must be a list for an agent_text statblock review"
-            )
+            raise ValueError("evidence_chunk_ids must be a list for an agent_text statblock review")
         chunk_ids = [str(item).strip() for item in evidence_chunk_ids]
         if (
             not chunk_ids
@@ -20151,9 +19913,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             or any(not item for item in chunk_ids)
             or len(chunk_ids) != len(set(chunk_ids))
         ):
-            raise ValueError(
-                "evidence_chunk_ids must contain 1 to 200 unique non-empty ids"
-            )
+            raise ValueError("evidence_chunk_ids must contain 1 to 200 unique non-empty ids")
         available = rules.source_chunks(source_id)
         by_id = {str(item.get("id") or ""): item for item in available}
         missing = [chunk_id for chunk_id in chunk_ids if chunk_id not in by_id]
@@ -20172,22 +19932,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 or not isinstance(page_end, int)
                 or not page_start <= page_number <= page_end
             ):
-                raise ValueError(
-                    "agent_text statblock evidence chunks must all cover page_number"
-                )
+                raise ValueError("agent_text statblock evidence chunks must all cover page_number")
         ordinals = [item.get("ordinal") for item in selected]
         if (
             any(
-                isinstance(value, bool)
-                or not isinstance(value, int)
-                or value < 0
+                isinstance(value, bool) or not isinstance(value, int) or value < 0
                 for value in ordinals
             )
             or ordinals != sorted(ordinals)
-            or any(
-                int(right) != int(left) + 1
-                for left, right in zip(ordinals, ordinals[1:])
-            )
+            or any(int(right) != int(left) + 1 for left, right in zip(ordinals, ordinals[1:]))
         ):
             raise ValueError(
                 "agent_text statblock evidence chunks must be one ordered contiguous segment"
@@ -20199,18 +19952,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         evidence_parts: list[str] = []
         for chunk in selected:
             evidence_parts.extend(
-                str(value)
-                for value in chunk.get("heading_path", [])
-                if str(value).strip()
+                str(value) for value in chunk.get("heading_path", []) if str(value).strip()
             )
             evidence_parts.append(str(chunk.get("content") or ""))
         compact_evidence = compact("\n".join(evidence_parts))
         compact_review_body = compact(
-            "\n".join(
-                line
-                for line in content.splitlines()
-                if not re.match(r"^\s*#{1,6}\s+", line)
-            )
+            "\n".join(line for line in content.splitlines() if not re.match(r"^\s*#{1,6}\s+", line))
         )
         unsupported_lines: list[str] = []
         for raw_line in content.splitlines():
@@ -20269,8 +20016,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         if len(reviewed_ability_cells) != 6:
             raise ValueError(
-                "agent_text normalized_content must preserve six explicit "
-                "ability score modifiers"
+                "agent_text normalized_content must preserve six explicit ability score modifiers"
             )
         for abbreviation, ability in ability_labels.items():
             score = int(dict(ability_scores.get(ability) or {}).get("score", 0))
@@ -20281,26 +20027,18 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         str(chunk.get("content") or ""),
                     )
                     for chunk in selected
-                    if str(list(chunk.get("heading_path") or [""])[-1])
-                    .strip()
-                    .upper()
+                    if str(list(chunk.get("heading_path") or [""])[-1]).strip().upper()
                     == abbreviation
                 ),
                 None,
             )
             if source_ability is None:
-                raise ValueError(
-                    f"agent_text evidence does not support {abbreviation} {score}"
-                )
+                raise ValueError(f"agent_text evidence does not support {abbreviation} {score}")
             ability_index = list(ability_labels).index(abbreviation)
-            if (
-                int(source_ability.group(1)) != score
-                or reviewed_ability_cells[ability_index]
-                != (
-                    source_ability.group(1),
-                    source_ability.group(2),
-                    source_ability.group(3),
-                )
+            if int(source_ability.group(1)) != score or reviewed_ability_cells[ability_index] != (
+                source_ability.group(1),
+                source_ability.group(2),
+                source_ability.group(3),
             ):
                 raise ValueError(
                     f"agent_text normalized_content does not exactly preserve "
@@ -20369,7 +20107,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if not job.source_id:
             raise ValueError("rule import job must be indexed before statblock review")
         source = rules.source(job.source_id)
-        campaign_edition = str(campaigns.get(campaign_id).settings.get("edition") or "2024")
+        campaign_edition = campaign_rules_edition(campaign_id)
         if campaign_edition != "2014" or str(source.get("edition") or "") != "2014":
             raise ValueError("reviewed rule statblocks require a D&D 2014 campaign and source")
         if isinstance(page_number, bool) or not isinstance(page_number, int) or page_number < 1:
@@ -20409,8 +20147,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if rendered.source_checksum != job.artifact_checksum:
             raise RuntimeError("rulebook PDF no longer matches its staged checksum")
         review_identity = (
-            f"{job.id}:{page_number}:"
-            f"{hashlib.sha256(content.encode('utf-8')).hexdigest()}"
+            f"{job.id}:{page_number}:{hashlib.sha256(content.encode('utf-8')).hexdigest()}"
         )
         if review_mode == "agent_text":
             evidence_identity = ",".join(str(item) for item in evidence_chunk_ids or [])
@@ -20424,9 +20161,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             )
             review_identity = f"{review_identity}:agent-fill:{fill_identity}"
         if derived_from_review_id is not None:
-            review_identity = (
-                f"{review_identity}:derived-from:{derived_from_review_id}"
-            )
+            review_identity = f"{review_identity}:derived-from:{derived_from_review_id}"
         review_digest = hashlib.sha256(review_identity.encode()).hexdigest()
         review_id = f"rule-statblock-review:{review_digest[:24]}"
         parsed = parse_2014_statblock(
@@ -20483,12 +20218,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         reviews = list(dict(job.result or {}).get("statblock_reviews") or [])
         reviews = [item for item in reviews if str(item.get("id") or "") != review_id]
         reviews.append(review)
-        updated = import_jobs.record_result(
-            job_id,
-            {**dict(job.result or {}), "statblock_reviews": reviews},
-            state=job.state,
-            source_id=job.source_id,
-        )
         resolved_warnings = set((filled or {}).get("resolved_warnings") or [])
         retained_warnings = [
             warning for warning in parsed.warnings if warning not in resolved_warnings
@@ -20501,21 +20230,36 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 ]
             )
         )
-        response = {
+        validation = {
+            "challenge_rating": parsed.challenge_rating,
+            "experience_points": parsed.experience_points,
+            **statblock_settlement(retained_warnings),
+            "agent_fill": (filled or {}).get("fill"),
+            "resolved_warnings": sorted(resolved_warnings),
+            "agent_fill_requirements": agent_fill_requirements,
+        }
+        updated = import_jobs.record_result(
+            job_id,
+            {**dict(job.result or {}), "statblock_reviews": reviews},
+            state=job.state,
+            source_id=job.source_id,
+            expected_revision=job.revision,
+            idempotency_key=idempotency_key,
+            idempotency_write=IdempotencyWrite(
+                scope=scope,
+                payload=payload,
+                response=lambda result: {
+                    "job": import_job_view(result),
+                    "review": review,
+                    "validation": validation,
+                },
+            ),
+        )
+        return {
             "job": import_job_view(updated),
             "review": review,
-            "validation": {
-                "challenge_rating": parsed.challenge_rating,
-                "experience_points": parsed.experience_points,
-                **statblock_settlement(retained_warnings),
-                "agent_fill": (filled or {}).get("fill"),
-                "resolved_warnings": sorted(resolved_warnings),
-                "agent_fill_requirements": agent_fill_requirements,
-            },
+            "validation": validation,
         }
-        return remember_idempotent(
-            scope, idempotency_key, payload, response, campaign_id=campaign_id
-        )
 
     def rule_statblock_review_from_base(
         campaign_id: str,
@@ -20538,9 +20282,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         base_review = dict(matches[0])
         if str(base_review.get("source_id") or "") != str(job.source_id or ""):
             raise ValueError("base rule statblock review source no longer matches its import job")
-        if str(base_review.get("asset_checksum") or "") != str(
-            job.artifact_checksum or ""
-        ):
+        if str(base_review.get("asset_checksum") or "") != str(job.artifact_checksum or ""):
             raise ValueError("base rule statblock review artifact checksum is stale")
         content = str(base_review.get("normalized_content") or "")
         if hashlib.sha256(content.encode("utf-8")).hexdigest() != str(
@@ -20587,8 +20329,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     ) -> dict[str, Any]:
         """Import a staged rulebook through Core's shared structured parser and index."""
         access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
-        if edition not in {"2014", "2024"}:
-            raise ValueError("imported D&D rulebooks require edition 2014 or 2024")
+        edition = normalize_dnd_edition(edition)
         if not idempotency_key:
             raise ValueError("idempotency_key is required for rulebook import")
         payload = {
@@ -20607,6 +20348,29 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             return replay
         path = storage.artifact_rulebook_path(artifact)
         embedder, vectors = storage.dense_components()
+
+        def rule_document_response(outcome: dict[str, Any]) -> dict[str, Any]:
+            result_value = outcome["result"]
+            source_metadata = dict(outcome.get("source_metadata") or {})
+            return {
+                **asdict(result_value),
+                "artifact": artifact,
+                "source_checksum": source_metadata.get("source_checksum"),
+                "page_count": source_metadata.get("page_count"),
+                "warnings": list(source_metadata.get("warnings") or []),
+                "metadata": {
+                    key: value
+                    for key, value in source_metadata.items()
+                    if key
+                    not in {
+                        "source_path",
+                        "warnings",
+                        "source_checksum",
+                        "page_count",
+                    }
+                },
+            }
+
         result = rules.ingest_path(
             system_id="dnd5e",
             path=path,
@@ -20620,6 +20384,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             embedder=embedder,
             vector_store=vectors,
             **rule_document_options(storage.rulebook_checksum(artifact)),
+            idempotency_campaign_id=campaign_id,
+            idempotency_key=idempotency_key,
+            idempotency_write=IdempotencyWrite(
+                scope=scope,
+                payload=payload,
+                response=rule_document_response,
+            ),
         )
         source = rules.source(result.source_id)
         source_metadata = dict(source.get("metadata") or {})
@@ -20635,9 +20406,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 if key not in {"source_path", "warnings", "source_checksum", "page_count"}
             },
         }
-        return remember_idempotent(
-            scope, idempotency_key, payload, response, campaign_id=campaign_id
-        )
+        return response
 
     @mcp.tool()
     def rule_ingest(
@@ -20797,11 +20566,18 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             job_id,
             {"draft": draft, "accepted_artifact_count": len(artifacts)},
             state=state,
+            expected_revision=job.revision,
+            idempotency_key=idempotency_key,
+            idempotency_write=IdempotencyWrite(
+                scope=scope,
+                payload=payload,
+                response=lambda result: {
+                    "job": import_job_view(result),
+                    "draft": draft,
+                },
+            ),
         )
-        response = {"job": import_job_view(updated), "draft": draft}
-        return remember_idempotent(
-            scope, idempotency_key, payload, response, campaign_id=campaign_id
-        )
+        return {"job": import_job_view(updated), "draft": draft}
 
     @mcp.tool()
     def rule_import_job_install(
@@ -20831,11 +20607,18 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             {**dict(job.result), "installed_pack": installed},
             state="installed",
             source_id=job.source_id,
+            expected_revision=job.revision,
+            idempotency_key=idempotency_key,
+            idempotency_write=IdempotencyWrite(
+                scope=scope,
+                payload=payload,
+                response=lambda result: {
+                    "job": import_job_view(result),
+                    "installed": installed,
+                },
+            ),
         )
-        response = {"job": import_job_view(updated), "installed": installed}
-        return remember_idempotent(
-            scope, idempotency_key, payload, response, campaign_id=campaign_id
-        )
+        return {"job": import_job_view(updated), "installed": installed}
 
     @mcp.tool()
     def rule_import_job_activate(
@@ -20873,18 +20656,26 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             principal_id=principal_id,
             branch_id=branch_id,
             expected_revision=expected_revision,
-            idempotency_key=idempotency_key,
+            idempotency_key=f"{idempotency_key}:rule-activation",
         )
         updated = import_jobs.record_result(
             job_id,
             {**dict(job.result), "activation": activation},
             state="activated",
             source_id=job.source_id,
+            expected_revision=job.revision,
+            idempotency_key=idempotency_key,
+            idempotency_write=IdempotencyWrite(
+                scope=scope,
+                payload=payload,
+                response=lambda result: {
+                    "job": import_job_view(result),
+                    "activation": activation,
+                },
+            ),
         )
         response = {"job": import_job_view(updated), "activation": activation}
-        return remember_idempotent(
-            scope, idempotency_key, payload, response, campaign_id=campaign_id
-        )
+        return response
 
     @mcp.tool()
     def rule_pack_install(pack_id: str, version: str) -> dict[str, Any]:
@@ -20953,6 +20744,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         """Set non-executable edition/publication metadata outside active combat."""
         access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
         require_write_contract(expected_revision, idempotency_key)
+        edition = normalize_dnd_edition(edition)
         payload = {
             "edition": edition,
             "locale": locale,
@@ -20963,24 +20755,27 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         replay = replay_idempotent(scope, idempotency_key, payload)
         if replay is not None:
             return replay
-        if dict(campaigns.get(campaign_id).state or {}).get("combat", {}).get("active", False):
-            raise CombatEngineError("rule profile cannot change during active combat")
         rule_packs.assert_edition_compatible(campaign_id, edition)
-        profile = rule_profiles.set(
+        rule_profiles.set(
             campaign_id,
             edition=edition,
             locale=locale,
             publications=publications,
             options=profile_options_with_core_lock(edition, options),
             expected_campaign_revision=expected_revision,
+            idempotency_key=idempotency_key,
+            idempotency_write=IdempotencyWrite(
+                scope=scope,
+                payload=payload,
+                response=lambda result: {
+                    "profile": asdict(result["profile"]),
+                    "campaign_revision": result["campaign_revision"],
+                },
+            ),
         )
-        response = {
-            "profile": asdict(profile),
-            "campaign_revision": mutation_revision(campaign_id),
-        }
-        return remember_idempotent(
-            scope, idempotency_key, payload, response, campaign_id=campaign_id
-        )
+        committed = idempotency.lookup(scope, str(idempotency_key), payload)
+        assert committed is not None and committed.response is not None
+        return committed.response
 
     @mcp.tool()
     def campaign_core_relock(
@@ -21029,32 +20824,41 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         user_options = {
             key: value for key, value in options.items() if key != "_core_rule_pack_lock"
         }
-        updated = rule_profiles.set(
+
+        def relock_response(result: dict[str, Any]) -> dict[str, Any]:
+            return {
+                "status": "relocked",
+                "reason": normalized_reason,
+                "previous_core_pack": previous,
+                "core_pack": {
+                    "id": latest.id,
+                    "version": latest.version,
+                    "edition": latest.edition,
+                    "fingerprint": latest.fingerprint,
+                },
+                "profile": asdict(result["profile"]),
+                "branch_id": resolved_branch_id,
+                "checkpoint_snapshot_id": expected_head_snapshot_id,
+                "campaign_revision": result["campaign_revision"],
+            }
+
+        rule_profiles.set(
             campaign_id,
             edition=profile.edition,
             locale=profile.locale,
             publications=list(profile.publications),
             options=profile_options_with_core_lock(profile.edition, user_options),
             expected_campaign_revision=expected_revision,
+            idempotency_key=idempotency_key,
+            idempotency_write=IdempotencyWrite(
+                scope=scope,
+                payload=payload,
+                response=relock_response,
+            ),
         )
-        response = {
-            "status": "relocked",
-            "reason": normalized_reason,
-            "previous_core_pack": previous,
-            "core_pack": {
-                "id": latest.id,
-                "version": latest.version,
-                "edition": latest.edition,
-                "fingerprint": latest.fingerprint,
-            },
-            "profile": asdict(updated),
-            "branch_id": resolved_branch_id,
-            "checkpoint_snapshot_id": expected_head_snapshot_id,
-            "campaign_revision": mutation_revision(campaign_id),
-        }
-        return remember_idempotent(
-            scope, idempotency_key, payload, response, campaign_id=campaign_id
-        )
+        committed = idempotency.lookup(scope, str(idempotency_key), payload)
+        assert committed is not None and committed.response is not None
+        return committed.response
 
     @mcp.tool()
     def campaign_rule_pack_set(
@@ -21083,7 +20887,19 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         replay = replay_idempotent(scope, idempotency_key, payload)
         if replay is not None:
             return replay
-        activation = rule_packs.set_activation(
+        profile = rule_profiles.get(campaign_id)
+
+        def activation_response(result: dict[str, Any]) -> dict[str, Any]:
+            return {
+                "activation": asdict(result["activation"]),
+                "effective": effective_ruleset_view_from(
+                    result["effective"],
+                    profile,
+                ),
+                "campaign_revision": int(result["campaign_revision"]),
+            }
+
+        rule_packs.set_activation(
             campaign_id,
             pack_id=pack_id,
             version=version,
@@ -21091,15 +20907,16 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             options=options,
             branch_id=resolved_branch_id,
             expected_campaign_revision=expected_revision,
+            idempotency_key=idempotency_key,
+            idempotency_write=IdempotencyWrite(
+                scope=scope,
+                payload=payload,
+                response=activation_response,
+            ),
         )
-        response = {
-            "activation": asdict(activation),
-            "effective": effective_ruleset_view(campaign_id, branch_id=activation.branch_id),
-            "campaign_revision": mutation_revision(campaign_id),
-        }
-        return remember_idempotent(
-            scope, idempotency_key, payload, response, campaign_id=campaign_id
-        )
+        committed = idempotency.lookup(scope, str(idempotency_key), payload)
+        assert committed is not None and committed.response is not None
+        return committed.response
 
     @mcp.tool()
     def campaign_rule_pack_remove(
@@ -21119,19 +20936,32 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         replay = replay_idempotent(scope, idempotency_key, payload)
         if replay is not None:
             return replay
+        profile = rule_profiles.get(campaign_id)
+
+        def removal_response(result: dict[str, Any]) -> dict[str, Any]:
+            return {
+                "effective": effective_ruleset_view_from(
+                    result["effective"],
+                    profile,
+                ),
+                "campaign_revision": int(result["campaign_revision"]),
+            }
+
         rule_packs.remove_activation(
             campaign_id,
             pack_id,
             branch_id=resolved_branch_id,
             expected_campaign_revision=expected_revision,
+            idempotency_key=idempotency_key,
+            idempotency_write=IdempotencyWrite(
+                scope=scope,
+                payload=payload,
+                response=removal_response,
+            ),
         )
-        response = {
-            "effective": effective_ruleset_view(campaign_id, branch_id=resolved_branch_id),
-            "campaign_revision": mutation_revision(campaign_id),
-        }
-        return remember_idempotent(
-            scope, idempotency_key, payload, response, campaign_id=campaign_id
-        )
+        committed = idempotency.lookup(scope, str(idempotency_key), payload)
+        assert committed is not None and committed.response is not None
+        return committed.response
 
     @mcp.tool()
     def campaign_rules_explain(
@@ -22117,7 +21947,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             raise ValueError("cantrips cannot be copied from a spellbook")
         campaign = campaigns.get(campaign_id)
         next_state = validate_party_state(deepcopy(campaign.state or {}))
-        if next_state.get("game_phase", PROFILE_LOBBY) != PROFILE_PLAY:
+        if authoritative_phase(campaign_id) != PROFILE_PLAY:
             raise CombatEngineError("spellbook copying is available only during play")
         source_owner = str(selection.get("source_owner") or "party").strip().casefold()
         if source_owner not in {"party", "character"}:
@@ -22141,7 +21971,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         mechanics = dict(source_item.get("mechanics") or {})
         if source_item.get("kind") != "spellbook":
             raise ValueError("spellbook copy source item must have kind=spellbook")
-        campaign_edition = str(campaign.settings.get("edition") or "2014")
+        campaign_edition = campaign_rules_edition(campaign.id)
         if str(mechanics.get("edition") or "") != campaign_edition:
             raise ValueError("spellbook copy source edition does not match the campaign")
         if not mechanics.get("copyable", False):
@@ -22204,34 +22034,22 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             payment_wallet, selection.get("payment"), required_cp=cost_cp
         )
 
-        world_time = dict(next_state.get("world_time") or {})
-        if not world_time:
-            raise ValueError("set the campaign clock before copying a spell")
         next_state, time_transition = advance_state_game_time(
             next_state,
             period="minute",
             count=minutes,
         )
         next_world_time = time_transition["world_time_after"]
-        assert next_world_time is not None
+        elapsed_ticks = int(time_transition["elapsed_ticks"])
 
-        world_advanced: list[str] = []
-        world_expired: list[str] = []
-        world_result = advance_elapsed_world_effect_durations(
+        world_duration = advance_world_effect_clocks(
             next_state,
-            elapsed_minutes=minutes,
+            elapsed_ticks=elapsed_ticks,
+            period_steps={"round": elapsed_ticks},
         )
-        next_state = world_result["state"]
-        world_advanced.extend(world_result["advanced"])
-        world_expired.extend(world_result["expired"])
-        world_rounds = advance_world_effect_durations(
-            next_state,
-            period="round",
-            amount=int(time_transition["elapsed_ticks"]),
-        )
-        next_state = world_rounds["state"]
-        world_advanced.extend(world_rounds["advanced"])
-        world_expired.extend(world_rounds["expired"])
+        next_state = world_duration["state"]
+        world_advanced = world_duration["advanced"]
+        world_expired = world_duration["expired"]
 
         branch_id = require_current_branch(campaign_id, None)
         request_payload = {
@@ -22265,7 +22083,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             character_expired: list[str] = []
             duration = advance_elapsed_effect_durations(
                 updated_sheet,
-                elapsed_minutes=minutes,
+                elapsed_ticks=elapsed_ticks,
             )
             round_duration = advance_effect_durations(
                 duration["sheet"],
@@ -22310,9 +22128,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "character.spellbook.copy",
             )
         )
-        current_update = next(
-            item for item in updates if item.character_id == current.id
-        )
+        current_update = next(item for item in updates if item.character_id == current.id)
         response = character_view(
             replace(
                 current,
@@ -22402,7 +22218,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         selection = deepcopy(selection or {})
         sheet = deepcopy(current.sheet)
         campaign = campaigns.get(current.campaign_id)
-        phase = str(dict(campaign.state or {}).get("game_phase") or PROFILE_LOBBY)
+        phase = authoritative_phase(current.campaign_id)
         spellbook_copy: dict[str, Any] | None = None
         subclass_spell_grants: list[dict[str, Any]] = []
         feature_spell_grants: list[dict[str, Any]] = []
@@ -22587,9 +22403,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 raise ValueError("content feat is already present")
             for prerequisite in card.get("prerequisites", []):
                 if prerequisite.get("kind") != "ability_minimum":
-                    ruling_kind = str(
-                        prerequisite.get("ruling_kind") or "source_or_scene_fact"
-                    )
+                    ruling_kind = str(prerequisite.get("ruling_kind") or "source_or_scene_fact")
                     return {
                         **_ruling_status("pending_ruling", ruling_kind),
                         "reason": "feat has a prerequisite that needs Agent-as-DM review",
@@ -23115,6 +22929,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     allowed_selection_fields.update(
                         {
                             "replace_existing",
+                            "study_started_elapsed_ticks",
                             "study_started_elapsed_minutes",
                         }
                     )
@@ -23129,19 +22944,42 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         raise CombatEngineError(
                             "feature selection replacement is available only during play"
                         )
-                    study_started = selection.get("study_started_elapsed_minutes")
-                    if isinstance(study_started, bool) or not isinstance(study_started, int):
+                    study_started_ticks = selection.get("study_started_elapsed_ticks")
+                    legacy_study_minutes = selection.get("study_started_elapsed_minutes")
+                    if legacy_study_minutes is not None and (
+                        isinstance(legacy_study_minutes, bool)
+                        or not isinstance(legacy_study_minutes, int)
+                    ):
                         raise CombatEngineError(
-                            "feature replacement requires study_started_elapsed_minutes"
+                            "feature replacement study start must be an integer"
                         )
-                    current_elapsed = dict(dict(campaign.state or {}).get("world_time") or {}).get(
-                        "elapsed_minutes"
+                    if study_started_ticks is None and legacy_study_minutes is not None:
+                        study_started_ticks = legacy_study_minutes * TICKS_PER_MINUTE
+                    if isinstance(study_started_ticks, bool) or not isinstance(
+                        study_started_ticks, int
+                    ):
+                        raise CombatEngineError(
+                            "feature replacement requires study_started_elapsed_ticks"
+                        )
+                    if (
+                        legacy_study_minutes is not None
+                        and study_started_ticks != legacy_study_minutes * TICKS_PER_MINUTE
+                    ):
+                        raise CombatEngineError(
+                            "legacy study_started_elapsed_minutes must match "
+                            "study_started_elapsed_ticks"
+                        )
+                    current_elapsed = dict(dict(campaign.state or {}).get("game_time") or {}).get(
+                        "elapsed_ticks"
                     )
                     if isinstance(current_elapsed, bool) or not isinstance(current_elapsed, int):
-                        raise CombatEngineError("feature replacement requires the campaign clock")
+                        raise CombatEngineError(
+                            "feature replacement requires the campaign game timeline"
+                        )
                     if (
-                        study_started < 0
-                        or current_elapsed - study_started < replacement_study_minutes
+                        study_started_ticks < 0
+                        or current_elapsed - study_started_ticks
+                        < replacement_study_minutes * TICKS_PER_MINUTE
                     ):
                         raise CombatEngineError(
                             "feature replacement has not completed its required "
@@ -23835,6 +23673,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     not in {
                         "grant_level",
                         "replace_existing",
+                        "study_started_elapsed_ticks",
                         "study_started_elapsed_minutes",
                     }
                 }
@@ -23852,19 +23691,22 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     previous_choices = dict(current_record.get("choices") or {})
                     replacement_history = list(previous_choices.get("_replacement_history") or [])
                     current_elapsed = int(
-                        dict(dict(campaign.state or {}).get("world_time") or {})["elapsed_minutes"]
+                        dict(dict(campaign.state or {}).get("game_time") or {})["elapsed_ticks"]
                     )
+                    study_started_ticks = selection.get("study_started_elapsed_ticks")
+                    if study_started_ticks is None:
+                        study_started_ticks = (
+                            int(selection["study_started_elapsed_minutes"]) * TICKS_PER_MINUTE
+                        )
                     replacement_history.append(
                         {
                             "previous_spell_artifact_ids": list(
                                 previous_choices.get(choice_field) or []
                             ),
-                            "study_started_elapsed_minutes": int(
-                                selection["study_started_elapsed_minutes"]
-                            ),
-                            "study_completed_elapsed_minutes": current_elapsed,
-                            "study_minutes": current_elapsed
-                            - int(selection["study_started_elapsed_minutes"]),
+                            "study_started_elapsed_ticks": int(study_started_ticks),
+                            "study_completed_elapsed_ticks": current_elapsed,
+                            "study_minutes": (current_elapsed - int(study_started_ticks))
+                            // TICKS_PER_MINUTE,
                         }
                     )
                     current_record["choices"] = {
@@ -23901,9 +23743,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         else:
             return {
                 **_ruling_status("pending_ruling", "agent_dm_adjudication"),
-                "reason": (
-                    f"{kind} is catalogued but needs an Agent-as-DM reviewed application"
-                ),
+                "reason": (f"{kind} is catalogued but needs an Agent-as-DM reviewed application"),
             }
         if kind in {"subclass", "background", "species"}:
             if any(
@@ -24485,8 +24325,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         idempotency_key: Annotated[str | None, Field(title="Request Key")] = None,
     ) -> dict[str, Any]:
         """Run reviewed rule imports; direct rule ingestion stays internal."""
-        data = facade_payload(payload)
         if action == "discover":
+            data = strict_facade_payload(
+                payload,
+                action="rule_import(discover)",
+                allowed=set(),
+            )
+            assert not data
             access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
             discovered = storage.discover_rulebooks()
             return facade_result(
@@ -24494,6 +24339,21 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 {"count": len(discovered), "documents": discovered},
             )
         if action == "stage":
+            data = strict_facade_payload(
+                payload,
+                action="rule_import(stage)",
+                allowed={
+                    "source_path",
+                    "source_key",
+                    "title",
+                    "edition",
+                    "locale",
+                    "publication_id",
+                    "version",
+                    "authority",
+                },
+                required_names=("source_path", "source_key", "title", "edition"),
+            )
             staged = rule_document_stage(campaign_id, required(data, "source_path"), principal_id)
             artifact = staged["artifact"]
             result = rule_import_job_create(
@@ -24555,12 +24415,26 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     data.get("agent_fill"),
                 ),
             )
-        job_id = required(data, "job_id")
         if action == "inspect":
+            data = strict_facade_payload(
+                payload,
+                action="rule_import(inspect)",
+                allowed={"job_id"},
+                required_names=("job_id",),
+            )
             return facade_result(
-                action, rule_import_job_inspect(campaign_id, job_id, principal_id, idempotency_key)
+                action,
+                rule_import_job_inspect(
+                    campaign_id, data["job_id"], principal_id, idempotency_key
+                ),
             )
         if action == "ingest":
+            data = strict_facade_payload(
+                payload,
+                action="rule_import(ingest)",
+                allowed={"job_id", "acknowledge_warnings"},
+                required_names=("job_id",),
+            )
             acknowledge_warnings = data.get("acknowledge_warnings", False)
             if not isinstance(acknowledge_warnings, bool):
                 raise ValueError("payload.acknowledge_warnings must be a boolean")
@@ -24568,7 +24442,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 action,
                 rule_import_job_ingest(
                     campaign_id,
-                    job_id,
+                    data["job_id"],
                     acknowledge_warnings,
                     principal_id,
                     idempotency_key,
@@ -24640,24 +24514,48 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 ),
             )
         if action == "extract_candidates":
+            data = strict_facade_payload(
+                payload,
+                action="rule_import(extract_candidates)",
+                allowed={"job_id"},
+                required_names=("job_id",),
+            )
             return facade_result(
                 action,
-                rule_content_candidates_extract(campaign_id, job_id, principal_id, idempotency_key),
+                rule_content_candidates_extract(
+                    campaign_id, data["job_id"], principal_id, idempotency_key
+                ),
             )
         if action == "review":
+            data = strict_facade_payload(
+                payload,
+                action="rule_import(review)",
+                allowed={"job_id", "decisions"},
+                required_names=("job_id", "decisions"),
+            )
             return facade_result(
                 action,
                 import_job_review_candidates(
-                    campaign_id, job_id, required(data, "decisions"), principal_id, idempotency_key
+                    campaign_id,
+                    data["job_id"],
+                    data["decisions"],
+                    principal_id,
+                    idempotency_key,
                 ),
             )
         if action == "compile":
+            data = strict_facade_payload(
+                payload,
+                action="rule_import(compile)",
+                allowed={"job_id", "manifest", "mechanics", "provenance"},
+                required_names=("job_id", "manifest"),
+            )
             return facade_result(
                 action,
                 rule_import_job_compile(
                     campaign_id,
-                    job_id,
-                    required(data, "manifest"),
+                    data["job_id"],
+                    data["manifest"],
                     data.get("mechanics"),
                     data.get("provenance"),
                     principal_id,
@@ -24665,13 +24563,33 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 ),
             )
         if action == "install":
-            return facade_result(
-                action, rule_import_job_install(campaign_id, job_id, principal_id, idempotency_key)
+            data = strict_facade_payload(
+                payload,
+                action="rule_import(install)",
+                allowed={"job_id"},
+                required_names=("job_id",),
             )
+            return facade_result(
+                action,
+                rule_import_job_install(
+                    campaign_id, data["job_id"], principal_id, idempotency_key
+                ),
+            )
+        data = strict_facade_payload(
+            payload,
+            action="rule_import(activate)",
+            allowed={"job_id"},
+            required_names=("job_id",),
+        )
         return facade_result(
             action,
             rule_import_job_activate(
-                campaign_id, job_id, principal_id, branch_id, expected_revision, idempotency_key
+                campaign_id,
+                data["job_id"],
+                principal_id,
+                branch_id,
+                expected_revision,
+                idempotency_key,
             ),
         )
 
@@ -24692,8 +24610,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Run the staged module-import state machine and activate only reviewed revisions."""
-        data = facade_payload(payload)
         if action == "stage":
+            data = strict_facade_payload(
+                payload,
+                action="module_import(stage)",
+                allowed={"source_path", "name", "content", "title", "source_key"},
+            )
             access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
             source_path = data.get("source_path")
             generated_fields = {"name", "content"}.intersection(data)
@@ -24717,6 +24639,20 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             )
             return facade_result(action, {**staged, "artifact": artifact, **result})
         if action == "attach_asset":
+            data = strict_facade_payload(
+                payload,
+                action="module_import(attach_asset)",
+                allowed={
+                    "module_id",
+                    "source_path",
+                    "asset_kind",
+                    "scene_id",
+                    "location_key",
+                    "title",
+                    "metadata",
+                },
+                required_names=("module_id", "source_path", "asset_kind"),
+            )
             return facade_result(
                 action,
                 module_asset_attach(
@@ -24732,25 +24668,61 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     idempotency_key=idempotency_key,
                 ),
             )
-        job_id = required(data, "job_id")
+        if action == "activate":
+            data = strict_facade_payload(
+                payload,
+                action="module_import(activate)",
+                allowed={"job_id", "progress_remaps"},
+                required_names=("job_id",),
+            )
         if action == "inspect":
+            data = strict_facade_payload(
+                payload,
+                action="module_import(inspect)",
+                allowed={"job_id"},
+                required_names=("job_id",),
+            )
             return facade_result(
                 action,
-                module_import_job_inspect(campaign_id, job_id, principal_id, idempotency_key),
+                module_import_job_inspect(
+                    campaign_id, data["job_id"], principal_id, idempotency_key
+                ),
             )
         if action == "validate":
+            data = strict_facade_payload(
+                payload,
+                action="module_import(validate)",
+                allowed={"job_id"},
+                required_names=("job_id",),
+            )
             return facade_result(
                 action,
-                module_import_job_validate(campaign_id, job_id, principal_id, idempotency_key),
+                module_import_job_validate(
+                    campaign_id, data["job_id"], principal_id, idempotency_key
+                ),
             )
         if action == "ingest":
+            data = strict_facade_payload(
+                payload,
+                action="module_import(ingest)",
+                allowed={"job_id"},
+                required_names=("job_id",),
+            )
             return facade_result(
-                action, module_import_job_import(campaign_id, job_id, principal_id, idempotency_key)
+                action,
+                module_import_job_import(
+                    campaign_id, data["job_id"], principal_id, idempotency_key
+                ),
             )
         return facade_result(
             action,
             module_import_job_activate(
-                campaign_id, job_id, principal_id, expected_revision, idempotency_key
+                campaign_id,
+                data["job_id"],
+                principal_id,
+                expected_revision,
+                idempotency_key,
+                data.get("progress_remaps"),
             ),
         )
 
@@ -25191,13 +25163,19 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "a creature at 0 hit points or dead cannot benefit from a rest"
                 )
             hit_dice = validate_rest_hit_dice_requests(current.sheet, data.get("hit_dice_spends"))
-            world_day = int(
-                dict(dict(campaign.state or {}).get("world_time") or {}).get("day", 0) or 0
+            game_day = rules_day_from_ticks(
+                int(
+                    dict(dict(campaign.state or {}).get("game_time") or {}).get(
+                        "elapsed_ticks",
+                        0,
+                    )
+                    or 0
+                )
             )
             arcane_recovery = validate_arcane_recovery_choice(
                 current.sheet,
                 data.get("arcane_recovery"),
-                world_day=world_day,
+                game_day=game_day,
             )
             natural_recovery = validate_natural_recovery_choice(
                 current.sheet,
@@ -25253,7 +25231,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "character_revision": current.revision,
                 "campaign_id": current.campaign_id,
                 "rest_type": rest_type,
-                "world_day": world_day,
+                "game_day": game_day,
                 "hit_dice_spends": [{"key": key, "count": count} for key, count in hit_dice],
                 "arcane_recovery": arcane_recovery,
                 "natural_recovery": natural_recovery,
@@ -25353,9 +25331,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 raise ValueError("narrative NPC instance_key must not exceed 100 characters")
             if identity_agent_ruling_raw is not None:
                 if not isinstance(identity_agent_ruling_raw, dict):
-                    raise ValueError(
-                        "narrative NPC identity_agent_ruling must be an object"
-                    )
+                    raise ValueError("narrative NPC identity_agent_ruling must be an object")
                 allowed_ruling_fields = {
                     "default_resolver",
                     "ruling_kind",
@@ -25386,9 +25362,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         "narrative NPC identity_agent_ruling ruling_kind must be "
                         "agent_dm_adjudication"
                     )
-                decision = str(
-                    identity_agent_ruling_raw.get("decision") or ""
-                ).strip()
+                decision = str(identity_agent_ruling_raw.get("decision") or "").strip()
                 reason = str(identity_agent_ruling_raw.get("reason") or "").strip()
                 if not decision or len(decision) > 1_000:
                     raise ValueError(
@@ -25401,33 +25375,21 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         "1 to 500 characters"
                     )
                 if identity_agent_ruling_raw.get("committed") is not True:
-                    raise ValueError(
-                        "narrative NPC identity_agent_ruling must be committed"
-                    )
+                    raise ValueError("narrative NPC identity_agent_ruling must be committed")
                 if not instance_key:
-                    raise ValueError(
-                        "Agent-named narrative NPCs require a source instance_key"
-                    )
+                    raise ValueError("Agent-named narrative NPCs require a source instance_key")
                 if str(identity_agent_ruling_raw.get("assigned_name") or "") != name:
                     raise ValueError(
-                        "narrative NPC identity_agent_ruling assigned_name must "
-                        "match name"
+                        "narrative NPC identity_agent_ruling assigned_name must match name"
                     )
-                if (
-                    str(identity_agent_ruling_raw.get("source_identity") or "")
-                    != source_identity
-                ):
+                if str(identity_agent_ruling_raw.get("source_identity") or "") != source_identity:
                     raise ValueError(
                         "narrative NPC identity_agent_ruling source_identity must "
                         "match source_identity"
                     )
-                if (
-                    str(identity_agent_ruling_raw.get("instance_key") or "")
-                    != instance_key
-                ):
+                if str(identity_agent_ruling_raw.get("instance_key") or "") != instance_key:
                     raise ValueError(
-                        "narrative NPC identity_agent_ruling instance_key must "
-                        "match instance_key"
+                        "narrative NPC identity_agent_ruling instance_key must match instance_key"
                     )
                 identity_agent_ruling = {
                     "default_resolver": "agent",
@@ -25455,112 +25417,39 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 raise ValueError("narrative NPC role must contain 1 to 500 characters")
             if not summary or len(summary) > 2000:
                 raise ValueError("narrative NPC summary must contain 1 to 2000 characters")
-            if len(source_excerpt) < 8 or len(source_excerpt) > 2000:
-                raise ValueError("narrative NPC source_excerpt must contain 8 to 2000 characters")
-            if not isinstance(source_ref, dict):
-                raise ValueError("narrative NPC source_ref must be an object")
-            required_source_fields = {
-                "module_id",
-                "scene_id",
-                "chunk_id",
-                "page_start",
-                "page_end",
-                "heading_path",
-                "content_sha256",
-            }
-            missing_source_fields = sorted(required_source_fields - set(source_ref))
-            if missing_source_fields:
-                raise ValueError(
-                    "narrative NPC source_ref is missing required fields: "
-                    + ", ".join(missing_source_fields)
-                )
-            if not all(
-                str(source_ref.get(field) or "").strip()
-                for field in ("module_id", "scene_id", "chunk_id", "content_sha256")
-            ):
-                raise ValueError(
-                    "narrative NPC source_ref identifiers and content_sha256 must not be empty"
-                )
-            heading_path = source_ref.get("heading_path")
-            if (
-                not isinstance(heading_path, list)
-                or not heading_path
-                or any(not str(item).strip() for item in heading_path)
-            ):
-                raise ValueError(
-                    "narrative NPC source_ref heading_path must be a non-empty string list"
-                )
-            page_start = source_ref.get("page_start")
-            page_end = source_ref.get("page_end")
-            if (
-                isinstance(page_start, bool)
-                or not isinstance(page_start, int)
-                or page_start < 1
-                or isinstance(page_end, bool)
-                or not isinstance(page_end, int)
-                or page_end < page_start
-            ):
-                raise ValueError("narrative NPC source_ref page range is invalid")
-
             access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
             campaign = campaigns.get(campaign_id)
-            if dict(campaign.state or {}).get("game_phase", PROFILE_LOBBY) != PROFILE_LOBBY:
+            if authoritative_phase(campaign_id) != PROFILE_LOBBY:
                 raise CombatEngineError("narrative NPCs can be created only in lobby")
-            active_modules = dict(
-                dict(dict(campaign.state or {}).get("module_imports") or {}).get("active") or {}
+            _, normalized_source_ref, expanded = managed_module_source_ref(
+                campaign_id,
+                source_ref,
+                require_exact=True,
+                require_active_module=True,
             )
-            active_module_ids = {
-                str(dict(item).get("module_id") or "")
-                for item in active_modules.values()
-                if isinstance(item, dict)
-            }
-            if str(source_ref["module_id"]) not in active_module_ids:
-                raise ValueError("narrative NPC source_ref module is not active")
-
-            expanded = modules.expand(str(source_ref["chunk_id"]))
-            if str(expanded.get("campaign_id")) != campaign_id:
-                raise ValueError("narrative NPC source_ref chunk does not belong to the campaign")
-            if str(dict(expanded.get("module") or {}).get("id")) != str(source_ref["module_id"]):
-                raise ValueError("narrative NPC source_ref module_id does not match its chunk")
-            expanded_scene = dict(expanded.get("scene") or {})
-            if str(expanded_scene.get("id")) != str(source_ref["scene_id"]):
-                raise ValueError("narrative NPC source_ref scene_id does not match its chunk")
+            if normalized_source_ref is None or expanded is None:
+                raise AssertionError(
+                    "exact narrative NPC citations always resolve to a managed chunk"
+                )
             chunk_content = str(expanded.get("content") or "")
-            chunk_content_sha256 = hashlib.sha256(chunk_content.encode("utf-8")).hexdigest()
-            if str(source_ref["content_sha256"]).casefold() != chunk_content_sha256:
-                raise ValueError("narrative NPC source_ref content_sha256 does not match its chunk")
-            expanded_page_start = int(expanded.get("page_start") or 1)
-            expanded_page_end = int(expanded.get("page_end") or expanded_page_start)
-            if expanded_page_start != page_start or expanded_page_end != page_end:
-                raise ValueError("narrative NPC source_ref page range does not match its chunk")
-            if [str(item) for item in list(expanded.get("heading_path") or [])] != [
-                str(item) for item in heading_path
-            ]:
-                raise ValueError("narrative NPC source_ref heading_path does not match its chunk")
-            normalized_content = _normalize_source_evidence_text(chunk_content)
-            if _normalize_source_evidence_text(source_excerpt) not in normalized_content:
-                raise ValueError("narrative NPC source_excerpt is not present in its chunk")
+            normalized_source_excerpt = managed_module_source_excerpt(
+                expanded,
+                source_excerpt,
+                field="narrative NPC source_excerpt",
+                minimum_length=8,
+            )
             if not _source_contains_narrative_name(
                 name=source_identity,
                 content=chunk_content,
             ):
                 raise ValueError("narrative NPC name is not present in its source chunk")
 
-            normalized_source_ref = {
-                "module_id": str(source_ref["module_id"]),
-                "scene_id": str(source_ref["scene_id"]),
-                "chunk_id": str(source_ref["chunk_id"]),
-                "page_start": page_start,
-                "page_end": page_end,
-                "heading_path": [str(item) for item in heading_path],
-                "content_sha256": chunk_content_sha256,
-            }
             evidence = {
                 "kind": "source_bound_narrative_npc",
                 "role": role,
                 "combat_statblock": "not_imported",
                 "source_ref": normalized_source_ref,
-                "source_excerpt": source_excerpt,
+                "source_excerpt": normalized_source_excerpt,
                 **(
                     {
                         "source_identity": source_identity,
@@ -25580,11 +25469,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "narrative_only",
                 "source_bound",
                 *(["anonymous_source_instance"] if instance_key else []),
-                *(
-                    ["agent_named_source_instance"]
-                    if identity_agent_ruling is not None
-                    else []
-                ),
+                *(["agent_named_source_instance"] if identity_agent_ruling is not None else []),
             ]
             notes = default_character_notes()
             notes["profile"]["summary"] = role
@@ -25652,7 +25537,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             campaign = campaigns.get(campaign_id)
             source = rules.source(str(job.source_id))
             if (
-                str(campaign.settings.get("edition") or "2024") != "2014"
+                campaign_rules_edition(campaign.id) != "2014"
                 or str(source.get("edition") or "") != "2014"
             ):
                 raise ValueError("reviewed rule statblocks require a D&D 2014 campaign and source")
@@ -25697,13 +25582,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 [*parsed.warnings, *spell_warnings],
                 variant,
             )
-            resolved_fill_warnings = set(
-                (filled or {}).get("resolved_warnings") or []
-            )
+            resolved_fill_warnings = set((filled or {}).get("resolved_warnings") or [])
             statblock_warnings = [
-                warning
-                for warning in statblock_warnings
-                if warning not in resolved_fill_warnings
+                warning for warning in statblock_warnings if warning not in resolved_fill_warnings
             ]
             statblock_warnings = list(
                 dict.fromkeys(
@@ -25756,8 +25637,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 provenance += (
                     "\nAgent statblock fill: "
                     + ", ".join(
-                        str(item["activity_id"])
-                        for item in filled["fill"]["multiattack_options"]
+                        str(item["activity_id"]) for item in filled["fill"]["multiattack_options"]
                     )
                     + "."
                 )
@@ -25800,7 +25680,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             review_id = str(required(data, "review_id"))
             access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
             campaign = campaigns.get(campaign_id)
-            campaign_edition = str(campaign.settings.get("edition") or "2024")
+            campaign_edition = campaign_rules_edition(campaign.id)
             if campaign_edition != "2014":
                 raise ValueError("reviewed module statblocks currently support D&D 2014 campaigns")
             review = modules.get_content_review(campaign_id, review_id)
@@ -25823,9 +25703,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 source_key=source_key,
                 rule_refs=source_rule_refs,
             )
-            reviewed_fill = dict(review.get("metadata") or {}).get(
-                "agent_statblock_fill"
-            )
+            reviewed_fill = dict(review.get("metadata") or {}).get("agent_statblock_fill")
             require_complete_statblock_agent_fill(
                 hydrated_sheet,
                 reviewed_fill,
@@ -25848,13 +25726,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 [*parsed.warnings, *spell_warnings],
                 variant,
             )
-            resolved_fill_warnings = set(
-                (filled or {}).get("resolved_warnings") or []
-            )
+            resolved_fill_warnings = set((filled or {}).get("resolved_warnings") or [])
             statblock_warnings = [
-                warning
-                for warning in statblock_warnings
-                if warning not in resolved_fill_warnings
+                warning for warning in statblock_warnings if warning not in resolved_fill_warnings
             ]
             statblock_warnings = list(
                 dict.fromkeys(
@@ -25906,8 +25780,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 provenance += (
                     "\nAgent statblock fill: "
                     + ", ".join(
-                        str(item["activity_id"])
-                        for item in filled["fill"]["multiattack_options"]
+                        str(item["activity_id"]) for item in filled["fill"]["multiattack_options"]
                     )
                     + "."
                 )
@@ -25951,7 +25824,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             source = rules.source(source_id)
             if str(source.get("system_id") or "") != "dnd5e":
                 raise ValueError("statblock source must belong to the dnd5e rule corpus")
-            campaign_edition = str(campaign.settings.get("edition") or "2024")
+            campaign_edition = campaign_rules_edition(campaign.id)
             source_edition = str(source.get("edition") or "")
             if source_edition != campaign_edition:
                 raise ValueError(
@@ -26002,9 +25875,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             actor_name = str(data.get("name") or source.get("title") or "").strip()
             source_statblock_name = str(data.get("source_statblock_name") or "").strip()
             if source_statblock_name and not 2 <= len(source_statblock_name) <= 200:
-                raise ValueError(
-                    "payload.source_statblock_name must contain 2 to 200 characters"
-                )
+                raise ValueError("payload.source_statblock_name must contain 2 to 200 characters")
             text_layout_recovery: dict[str, Any] | None = None
             try:
                 parsed = parse_2014_statblock(
@@ -26381,11 +26252,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "heal",
             "level_advance",
             "source_state",
-            "stable_recovery",
             "stand",
             "knock_prone",
-            "memory_add",
-            "memory_resolve",
         ],
         payload: dict[str, Any] | None = None,
         principal_id: str = "system:local",
@@ -26476,13 +26344,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 expected_revision,
                 idempotency_key,
             )
-        elif action == "stable_recovery":
-            result = character_stable_recovery(
-                character_id,
-                principal_id,
-                expected_revision,
-                idempotency_key,
-            )
         elif action == "stand":
             result = character_stand(
                 character_id,
@@ -26497,23 +26358,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 expected_revision,
                 idempotency_key,
             )
-        elif action == "memory_add":
-            result = character_memory_add(
-                character_id,
-                required(data, "memory"),
-                principal_id,
-                expected_revision,
-                idempotency_key,
-            )
         else:
-            result = character_memory_resolve(
-                character_id,
-                required(data, "memory_id"),
-                data.get("status", "resolved"),
-                principal_id,
-                expected_revision,
-                idempotency_key,
-            )
+            raise ValueError(f"unsupported character state action: {action}")
         return facade_result(action, result)
 
     @mcp.tool()
@@ -26637,7 +26483,74 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Update campaign state, advancement, clock, or structured campaign-space effects."""
-        data = facade_payload(payload)
+        action_contracts: dict[str, tuple[set[str], tuple[str, ...]]] = {
+            "update": (
+                {"name", "status", "description", "settings", "state"},
+                (),
+            ),
+            "clock_set": (
+                {"day", "hour", "minute", "label"},
+                ("day",),
+            ),
+            "clock_advance": (
+                {
+                    "period",
+                    "count",
+                    "expected_elapsed_ticks",
+                    "expected_world_time",
+                },
+                ("period",),
+            ),
+            "party_rest": (
+                {"members", "duration_minutes", "rest_type"},
+                ("members",),
+            ),
+            "stable_recovery": ({"members"}, ("members",)),
+            "effect_add": ({"effect"}, ("effect",)),
+            "effect_remove": ({"effect_id", "reason"}, ("effect_id",)),
+            "advancement_configure": ({"mode"}, ("mode",)),
+            "experience_award": (
+                {"awards", "reason", "source_ref"},
+                ("awards", "reason", "source_ref"),
+            ),
+            "loot_acquire": (
+                {"acquisition_id", "coins", "items", "reason", "source_ref"},
+                ("acquisition_id", "reason", "source_ref"),
+            ),
+            "currency_spend": (
+                {"spend_id", "coins", "reason", "source_ref", "rule_ref"},
+                ("spend_id", "coins", "reason", "source_ref", "rule_ref"),
+            ),
+            "item_spend": (
+                {"spend_id", "item_id", "quantity", "reason", "source_ref"},
+                ("spend_id", "item_id", "quantity", "reason", "source_ref"),
+            ),
+            "consumable_use": (
+                {
+                    "use_id",
+                    "item_id",
+                    "target_character_id",
+                    "expected_character_revision",
+                    "reason",
+                },
+                (
+                    "use_id",
+                    "item_id",
+                    "target_character_id",
+                    "expected_character_revision",
+                    "reason",
+                ),
+            ),
+        }
+        if action not in action_contracts:
+            raise ValueError(f"unsupported campaign_change action: {action}")
+        allowed_fields, required_fields = action_contracts[action]
+        data = strict_facade_payload(
+            payload,
+            action=f"campaign_change({action})",
+            allowed=allowed_fields,
+            required_names=required_fields,
+        )
         if action == "clock_set":
             result = campaign_clock_set_legacy(
                 campaign_id,
@@ -26660,6 +26573,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 branch_id,
                 idempotency_key,
                 data.get("expected_world_time"),
+                data.get("expected_elapsed_ticks"),
             )
         elif action == "party_rest":
             result = campaign_party_rest(
@@ -26763,7 +26677,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 branch_id,
                 idempotency_key,
             )
-        else:
+        elif action == "update":
             result = campaign_update(
                 campaign_id,
                 data.get("name"),
@@ -26775,6 +26689,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 expected_revision,
                 idempotency_key,
             )
+        else:  # pragma: no cover - guarded by action_contracts above
+            raise ValueError(f"unsupported campaign_change action: {action}")
         return facade_result(action, result)
 
     def playthrough_runtime_projection(
@@ -26806,9 +26722,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             hp = dict(sheet["combat"]["hp"])
             effective_hp = dict(derive_character_sheet(sheet)["hit_points"])
             conditions = {str(item) for item in sheet.get("conditions") or []}
-            status = "dead" if "dead" in conditions else str(member["status"])
-            if status == "dead" and "dead" not in conditions:
-                status = str(member["status"])
+            narrative_status = str(member["status"])
+            status = (
+                "dead"
+                if "dead" in conditions
+                else "active"
+                if narrative_status == "dead"
+                else narrative_status
+            )
             combat = dict(sheet["combat"])
             spellcasting = dict(sheet["spellcasting"])
             resources = {
@@ -26846,16 +26767,28 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             if actor.campaign_id != campaign_id:
                 raise ValueError(f"playthrough NPC {actor.id!r} does not belong to this campaign")
             conditions = {str(value) for value in actor.sheet.get("conditions") or []}
+            narrative_status = str(item["status"])
             tracked_npcs.append(
                 {
                     **deepcopy(item),
                     "name": actor.name,
-                    "status": "dead" if "dead" in conditions else item["status"],
+                    "status": (
+                        "dead"
+                        if "dead" in conditions
+                        else "active"
+                        if narrative_status == "dead"
+                        else narrative_status
+                    ),
                 }
             )
         return {
             "party_members": members,
             "npcs": tracked_npcs,
+            "current_scene": modules.current_scene(
+                campaign_id,
+                scope_id="party",
+                fallback_to_party=False,
+            ),
             "snapshot_dag": {
                 "active_branch_id": active_branch.id,
                 "head_snapshot_id": active_branch.head_snapshot_id or "",
@@ -26887,6 +26820,16 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         updated["npcs"] = runtime["npcs"]
         updated["snapshot_dag"] = runtime["snapshot_dag"]
         updated["random_stream"] = runtime["random_stream"]
+        current_scene = runtime["current_scene"]
+        if current_scene is not None:
+            updated["current"] = {
+                **deepcopy(updated["current"]),
+                "module_id": str(current_scene["module_id"]),
+                "chapter_id": str(current_scene["chapter_id"]),
+                "chapter_title": str(current_scene["chapter"]),
+                "scene_id": str(current_scene["scene_id"]),
+                "scene_title": str(current_scene["title"]),
+            }
         world_state = deepcopy(updated["world_state"])
         world_state["_canonical"] = runtime["world_state"]
         updated["world_state"] = world_state
@@ -27113,7 +27056,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     next_manifest["status"] = "completed"
                 else:
                     next_manifest["ending"]["status"] = "pending"
+                    next_manifest["ending"]["achieved_condition_id"] = ""
+                    if next_manifest["status"] == "completed":
+                        next_manifest["status"] = "in_progress"
                 next_manifest = validate_playthrough_manifest(next_manifest)
+        # Party resources, NPC life state, Snapshot DAG, random-stream position,
+        # and the canonical world projection are owned by their runtime stores.
+        # Never persist a caller's stale copy through replace/extend_modules.
+        next_manifest = sync_playthrough_manifest(campaign_id, next_manifest)
         persisted_manifest = deepcopy(next_manifest)
         # Snapshot nodes are authoritative in core tables and are projected on
         # every public manifest read. Persisting the full derived DAG inside
@@ -27126,6 +27076,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "playthrough_manifest": validate_playthrough_manifest(persisted_manifest),
             }
         )
+        response = {
+            "manifest": next_manifest,
+            "runtime": playthrough_runtime_projection(campaign_id, next_manifest),
+            "campaign_revision": campaign.revision + 1,
+        }
         StateMutationService(storage.database).replace(
             campaign_id,
             campaign_state=next_state,
@@ -27134,19 +27089,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             actor=principal_id,
             branch_id=resolved_branch_id,
             idempotency_key=idempotency_key,
+            idempotency_write=IdempotencyWrite(
+                scope=scope,
+                payload=request_payload,
+                response=response,
+            ),
         )
-        response = {
-            "manifest": next_manifest,
-            "runtime": playthrough_runtime_projection(campaign_id, next_manifest),
-            "campaign_revision": campaigns.get(campaign_id).revision,
-        }
-        return remember_idempotent(
-            scope,
-            idempotency_key,
-            request_payload,
-            response,
-            campaign_id=campaign_id,
-        )
+        return response
 
     @mcp.tool()
     def access_grant(
@@ -27326,6 +27275,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         by_id = {item.id: item for item in visible}
         by_key = {item.fact_key: item for item in visible}
+        atomic_write = IdempotencyWrite(
+            scope=scope,
+            payload=request_payload,
+            response=lambda item: asdict(item),
+        )
         if action == "add":
             result = memories.add(
                 campaign_id,
@@ -27343,6 +27297,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 source_event_ids=list(data.get("source_event_ids") or []),
                 importance=int(data.get("importance", 3)),
                 disclosure_scope=data.get("disclosure_scope"),
+                idempotency_key=idempotency_key,
+                idempotency_write=atomic_write,
             )
         elif action == "upsert":
             fact_key = str(required(data, "fact_key"))
@@ -27381,6 +27337,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     else 3
                 ),
                 disclosure_scope=data.get("disclosure_scope"),
+                idempotency_key=idempotency_key,
+                idempotency_write=atomic_write,
             )
         else:
             memory_id = str(required(data, "memory_id"))
@@ -27410,16 +27368,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     int(data["importance"]) if data.get("importance") is not None else None
                 ),
                 disclosure_scope=data.get("disclosure_scope"),
+                idempotency_key=idempotency_key,
+                idempotency_write=atomic_write,
             )
-        response = asdict(result)
-        remembered = remember_idempotent(
-            scope,
-            idempotency_key,
-            request_payload,
-            response,
-            campaign_id=campaign_id,
-        )
-        return facade_result(action, remembered)
+        return facade_result(action, asdict(result))
 
     @mcp.tool()
     def actor_knowledge_query(
@@ -28035,6 +27987,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         "continuity_commit": "memory_change(action='commit')",
         "continuity_diagnostics": "memory_query(view='diagnostics')",
         "combat_on_hit_ruling": "combat_choice(action='on_hit_ruling')",
+        "character_rest": "campaign_change(action='party_rest')",
+        "character_memory_add": "actor_knowledge_change(action='add')",
+        "character_memory_resolve": "actor_knowledge_change(action='revise')",
     }
 
     @mcp.tool()
@@ -28269,7 +28224,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         "skill_asset_read",
     }
     for retired_tool_name in retired_tool_names:
-        mcp.remove_tool(retired_tool_name)
+        if mcp._tool_manager.get_tool(retired_tool_name) is not None:
+            mcp.remove_tool(retired_tool_name)
 
     registered_tools = mcp._tool_manager.list_tools()
     validate_profile_coverage(tool.name for tool in registered_tools)

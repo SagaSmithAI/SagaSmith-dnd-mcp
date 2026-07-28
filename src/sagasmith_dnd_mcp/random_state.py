@@ -59,13 +59,19 @@ class RandomStateMutationService(CoreStateMutationService):
         idempotency_key = kwargs.get("idempotency_key")
         branch_id = kwargs.get("branch_id")
         pending = _PENDING_IDEMPOTENCY_REQUEST.get()
-        if (
+        bound_public_request = (
             idempotency_key
             and pending is not None
             and pending.campaign_id == campaign_id
             and pending.key == idempotency_key
             and (branch_id is None or branch_id == pending.branch_id)
-        ):
+        )
+        if bound_public_request:
+            if kwargs.get("idempotency_write") is None:
+                raise RuntimeError(
+                    "public state mutations must persist their exact replay response "
+                    "in the owning transaction"
+                )
             kwargs["idempotency_request_hash"] = pending.request_hash
         stream = active_random_stream()
         should_persist = (

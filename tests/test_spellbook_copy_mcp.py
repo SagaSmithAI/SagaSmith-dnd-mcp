@@ -145,17 +145,6 @@ def test_discovered_spellbook_copy_is_source_bound_paid_timed_and_atomic(
         )
         assert book["item_id"] == "d11-red-spellbook"
         current_campaign = await campaign(server, created["id"])
-        clock = await call(
-            server,
-            "campaign_change",
-            {
-                "campaign_id": created["id"],
-                "action": "clock_set",
-                "payload": {"day": 1, "hour": 10, "label": "Copy test"},
-                "expected_revision": current_campaign["revision"],
-                "idempotency_key": "clock",
-            },
-        )
         await call(
             server,
             "campaign_change",
@@ -170,7 +159,7 @@ def test_discovered_spellbook_copy_is_source_bound_paid_timed_and_atomic(
                         "duration": {"period": "hour", "remaining": 1},
                     }
                 },
-                "expected_revision": clock["campaign_revision"],
+                "expected_revision": current_campaign["revision"],
                 "idempotency_key": "world-effect",
             },
         )
@@ -225,7 +214,8 @@ def test_discovered_spellbook_copy_is_source_bound_paid_timed_and_atomic(
         assert copied["spellbook_copy"]["cost_cp"] == 5000
         assert copied["spellbook_copy"]["deciphered_during_copy"] is True
         assert copied["spellbook_copy"]["hours"] == 2
-        assert copied["spellbook_copy"]["world_time"]["hour"] == 12
+        assert copied["spellbook_copy"]["game_time"]["elapsed_ticks"] == 1200
+        assert copied["spellbook_copy"]["world_time"] is None
         assert copied["spellbook_copy"]["world_expired"] == ["copy-room-light"]
         receipt = await call(
             server,
@@ -241,6 +231,20 @@ def test_discovered_spellbook_copy_is_source_bound_paid_timed_and_atomic(
         assert after["state"]["party"]["inventory"]["items"][0]["id"] == (
             "d11-red-spellbook"
         )
+        assert after["state"]["game_time"]["elapsed_ticks"] == 1200
+        assert "world_time" not in after["state"]
+        clock = await call(
+            server,
+            "campaign_change",
+            {
+                "campaign_id": created["id"],
+                "action": "clock_set",
+                "payload": {"day": 1, "hour": 12, "label": "Copy test"},
+                "expected_revision": after["revision"],
+                "idempotency_key": "clock",
+            },
+        )
+        assert clock["world_time"]["hour"] == 12
         current_savant = await call(
             server,
             "character_query",

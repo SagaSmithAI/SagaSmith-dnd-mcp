@@ -6,7 +6,12 @@ import pytest
 from mcp.types import ImageContent, TextContent
 from pypdf import PdfWriter
 from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
-from sagasmith_core import OcrPageLayout, OcrTextBlock, RapidOcrProvider
+from sagasmith_core import (
+    ImportJobService,
+    OcrPageLayout,
+    OcrTextBlock,
+    RapidOcrProvider,
+)
 from sagasmith_core.rules import RuleService
 
 from sagasmith_dnd_mcp.config import McpConfig
@@ -844,7 +849,10 @@ def test_rule_import_requires_explicit_dm_acknowledgement_for_warnings(tmp_path:
     asyncio.run(exercise())
 
 
-def test_rule_and_module_import_jobs_are_reviewable_and_activation_safe(tmp_path: Path) -> None:
+def test_rule_and_module_import_jobs_are_reviewable_and_activation_safe(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
     import_root = tmp_path / "imports"
     import_root.mkdir()
     rulebook = import_root / "supplement.md"
@@ -1004,11 +1012,33 @@ def test_rule_and_module_import_jobs_are_reviewable_and_activation_safe(tmp_path
             "expected_revision": profile["campaign_revision"],
             "idempotency_key": "rule-job-activate",
         }
+        original_record_result = ImportJobService.record_result
+        crashed_rule_activation = False
+
+        def crash_rule_job_once(self, job_id, result, **kwargs):
+            nonlocal crashed_rule_activation
+            if (
+                job_id == rule_job_id
+                and kwargs.get("state") == "activated"
+                and not crashed_rule_activation
+            ):
+                crashed_rule_activation = True
+                raise RuntimeError("simulated rule activation crash")
+            return original_record_result(self, job_id, result, **kwargs)
+
+        monkeypatch.setattr(ImportJobService, "record_result", crash_rule_job_once)
+        with pytest.raises(Exception, match="simulated rule activation crash"):
+            await call(
+                server,
+                "rule_import_job_activate",
+                activate_arguments,
+            )
         activated = await call(
             server,
             "rule_import_job_activate",
             activate_arguments,
         )
+        monkeypatch.setattr(ImportJobService, "record_result", original_record_result)
         assert activated["job"]["state"] == "activated"
         assert await call(server, "rule_import_job_ingest", ingest_arguments) == indexed
         assert await call(server, "rule_import_job_compile", compile_arguments) == compiled
@@ -1072,19 +1102,59 @@ def test_rule_and_module_import_jobs_are_reviewable_and_activation_safe(tmp_path
         )
         assert await call(server, "module_index", {"campaign_id": campaign["id"]}) == []
         current = await call(server, "campaign_get", {"campaign_id": campaign["id"]})
+        with pytest.raises(Exception, match="campaign revision conflict"):
+            await call(
+                server,
+                "module_import_job_activate",
+                {
+                    "campaign_id": campaign["id"],
+                    "job_id": module_job_id,
+                    "expected_revision": current["revision"] - 1,
+                    "idempotency_key": "module-job-stale-activate",
+                },
+            )
+        assert await call(server, "module_index", {"campaign_id": campaign["id"]}) == []
+        module_activate_arguments = {
+            "campaign_id": campaign["id"],
+            "job_id": module_job_id,
+            "expected_revision": current["revision"],
+            "idempotency_key": "module-job-activate",
+        }
+        crashed_module_activation = False
+
+        def crash_module_job_once(self, job_id, result, **kwargs):
+            nonlocal crashed_module_activation
+            if (
+                job_id == module_job_id
+                and kwargs.get("state") == "activated"
+                and not crashed_module_activation
+            ):
+                crashed_module_activation = True
+                raise RuntimeError("simulated module activation crash")
+            return original_record_result(self, job_id, result, **kwargs)
+
+        monkeypatch.setattr(ImportJobService, "record_result", crash_module_job_once)
+        with pytest.raises(Exception, match="simulated module activation crash"):
+            await call(
+                server,
+                "module_import_job_activate",
+                module_activate_arguments,
+            )
         module_activated = await call(
             server,
             "module_import_job_activate",
-            {
-                "campaign_id": campaign["id"],
-                "job_id": module_job_id,
-                "expected_revision": current["revision"],
-                "idempotency_key": "module-job-activate",
-            },
+            module_activate_arguments,
         )
+        monkeypatch.setattr(ImportJobService, "record_result", original_record_result)
         assert module_activated["activation"]["module_id"] == imported_module["module_id"]
         index = await call(server, "module_index", {"campaign_id": campaign["id"]})
         assert "Arrival" in {item["title"] for item in index}
+        activated_campaign = await call(
+            server,
+            "campaign_get",
+            {"campaign_id": campaign["id"]},
+        )
+        assert "module_imports" not in activated_campaign["state"]
         arrival = next(item for item in index if item["title"] == "Arrival")
         await call(
             server,
@@ -1156,6 +1226,71 @@ def test_rule_and_module_import_jobs_are_reviewable_and_activation_safe(tmp_path
         assert aggregate[0]["scene_id"] == arrival["scene_id"]
         assert aggregate[0]["default_resolver"] == "agent"
         assert aggregate[0]["ruling_kind"] == "source_or_scene_fact"
+        revision_imported = await call(
+            server,
+            "module_import_job_import",
+            {
+                "campaign_id": campaign["id"],
+                "job_id": revision_job["job"]["id"],
+                "idempotency_key": "module-revision-import",
+            },
+        )
+        replacement_index = await call(
+            server,
+            "module_index",
+            {
+                "campaign_id": campaign["id"],
+                "module_id": revision_imported["module_id"],
+            },
+        )
+        finale = next(item for item in replacement_index if item["title"] == "Finale")
+        current = await call(server, "campaign_get", {"campaign_id": campaign["id"]})
+        with pytest.raises(Exception, match="DM-reviewed progress remap"):
+            await call(
+                server,
+                "module_import_job_activate",
+                {
+                    "campaign_id": campaign["id"],
+                    "job_id": revision_job["job"]["id"],
+                    "expected_revision": current["revision"],
+                    "idempotency_key": "module-revision-activate-without-ruling",
+                },
+            )
+        activated_revision = await call(
+            server,
+            "module_import",
+            {
+                "campaign_id": campaign["id"],
+                "action": "activate",
+                "payload": {
+                    "job_id": revision_job["job"]["id"],
+                    "progress_remaps": [
+                        {
+                            "from_scene_id": arrival["scene_id"],
+                            "to_scene_id": finale["scene_id"],
+                            "reason": (
+                                "The Agent acting as DM maps the removed arrival "
+                                "checkpoint to the replacement finale scene."
+                            ),
+                        }
+                    ],
+                },
+                "expected_revision": current["revision"],
+                "idempotency_key": "module-revision-activate-with-agent-ruling",
+            },
+        )
+        assert activated_revision["activation"]["progress_migrations"][0]["mode"] == "dm_ruling"
+        assert activated_revision["activation"]["progress_remap_rulings"][0][
+            "resolver"
+        ] == "agent"
+        current_scene = await call(
+            server,
+            "module_current",
+            {"campaign_id": campaign["id"]},
+        )
+        assert current_scene["module_id"] == revision_imported["module_id"]
+        assert current_scene["scene_id"] == finale["scene_id"]
+        assert current_scene["progress"]["percent"] == 25
 
     asyncio.run(exercise())
 

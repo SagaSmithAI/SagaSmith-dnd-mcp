@@ -356,7 +356,7 @@ def test_clock_advance_rejects_a_duration_that_misses_its_expected_target(
             "minute": 0,
             "elapsed_minutes": 78180,
         }
-        with pytest.raises(Exception, match="require expected_world_time"):
+        with pytest.raises(Exception, match="require expected_elapsed_ticks"):
             await _call(
                 server,
                 "campaign_change",
@@ -518,7 +518,7 @@ def test_minute_clock_advances_accumulate_for_hour_effects(tmp_path: Path) -> No
         assert halfway["sheet"]["effects"][0]["duration"] == {
             "period": "hour",
             "remaining": 1,
-            "elapsed_minutes_remainder": 30,
+            "elapsed_ticks_remainder": 300,
         }
         assert halfway["sheet"]["effects"][1]["active"] is False
         assert set(halfway["sheet"]["conditions"]) == {
@@ -561,7 +561,87 @@ def test_minute_clock_advances_accumulate_for_hour_effects(tmp_path: Path) -> No
     asyncio.run(exercise())
 
 
-def test_campaign_clock_must_be_set_before_time_advance(tmp_path: Path) -> None:
+def test_round_clock_preserves_effect_start_relative_minute_duration(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        server = create_server(_config(tmp_path))
+        campaign = await _call(
+            server,
+            "campaign_create",
+            {"name": "Relative duration", "edition": "2014", "idempotency_key": "campaign"},
+        )
+        sheet = default_character_sheet()
+        sheet["effects"] = [
+            {
+                "id": "one-minute",
+                "name": "One Minute",
+                "active": True,
+                "duration": {"period": "minute", "remaining": 1},
+            }
+        ]
+        actor = await _call(
+            server,
+            "character_create_from",
+            {
+                "mode": "direct",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "name": "Timed Actor",
+                    "sheet": sheet,
+                },
+                "idempotency_key": "actor",
+            },
+        )
+        current = await _call(
+            server,
+            "campaign_query",
+            {"view": "get", "payload": {"campaign_id": campaign["id"]}},
+        )
+        first = await _call(
+            server,
+            "campaign_change",
+            {
+                "campaign_id": campaign["id"],
+                "action": "clock_advance",
+                "payload": {
+                    "period": "round",
+                    "count": 7,
+                    "expected_elapsed_ticks": 7,
+                },
+                "expected_revision": current["revision"],
+                "idempotency_key": "seven-rounds",
+            },
+        )
+        halfway = await _call(
+            server,
+            "character_query",
+            {"view": "get", "payload": {"character_id": actor["id"]}},
+        )
+        assert halfway["sheet"]["effects"][0]["active"] is True
+        assert halfway["sheet"]["effects"][0]["duration"]["elapsed_ticks_remainder"] == 7
+
+        second = await _call(
+            server,
+            "campaign_change",
+            {
+                "campaign_id": campaign["id"],
+                "action": "clock_advance",
+                "payload": {
+                    "period": "round",
+                    "count": 3,
+                    "expected_elapsed_ticks": 10,
+                },
+                "expected_revision": first["campaign_revision"],
+                "idempotency_key": "three-rounds",
+            },
+        )
+        assert second["expired"] == {actor["id"]: ["one-minute"]}
+
+    asyncio.run(exercise())
+
+
+def test_game_time_can_advance_without_an_anchored_calendar(tmp_path: Path) -> None:
     async def exercise() -> None:
         server = create_server(_config(tmp_path))
         campaign = await _call(
@@ -569,7 +649,7 @@ def test_campaign_clock_must_be_set_before_time_advance(tmp_path: Path) -> None:
             "campaign_create",
             {"name": "Unset Clock", "edition": "2014", "idempotency_key": "campaign"},
         )
-        with pytest.raises(Exception, match="set the campaign clock"):
+        with pytest.raises(Exception, match="requires an anchored calendar"):
             await _call(
                 server,
                 "campaign_change",
@@ -589,6 +669,29 @@ def test_campaign_clock_must_be_set_before_time_advance(tmp_path: Path) -> None:
                     "idempotency_key": "advance",
                 },
             )
+        advanced = await _call(
+            server,
+            "campaign_change",
+            {
+                "campaign_id": campaign["id"],
+                "action": "clock_advance",
+                "payload": {
+                    "period": "hour",
+                    "expected_elapsed_ticks": 600,
+                },
+                "expected_revision": campaign["revision"],
+                "idempotency_key": "advance-by-game-time",
+            },
+        )
+        assert advanced["game_time"]["elapsed_ticks"] == 600
+        assert advanced["world_time"] is None
+        persisted = await _call(
+            server,
+            "campaign_query",
+            {"view": "get", "payload": {"campaign_id": campaign["id"]}},
+        )
+        assert persisted["state"]["game_time"]["elapsed_ticks"] == 600
+        assert "world_time" not in persisted["state"]
 
     asyncio.run(exercise())
 
@@ -674,6 +777,53 @@ def test_generic_campaign_update_cannot_bypass_the_clock_owner(tmp_path: Path) -
                 },
             )
 
+        with pytest.raises(Exception, match="system-owned settings fields: edition"):
+            await _call(
+                server,
+                "campaign_change",
+                {
+                    "campaign_id": campaign["id"],
+                    "action": "update",
+                    "payload": {"settings": {"edition": "2024"}},
+                    "expected_revision": clock["campaign_revision"],
+                    "idempotency_key": "bypass-edition",
+                },
+            )
+
+        with pytest.raises(Exception, match="system-owned party fields: inventory"):
+            await _call(
+                server,
+                "campaign_change",
+                {
+                    "campaign_id": campaign["id"],
+                    "action": "update",
+                    "payload": {
+                        "state": {
+                            "party": {
+                                "inventory": {
+                                    "wallet": {"gp": 999},
+                                }
+                            }
+                        }
+                    },
+                    "expected_revision": clock["campaign_revision"],
+                    "idempotency_key": "bypass-party-inventory",
+                },
+            )
+
+        with pytest.raises(Exception, match="system-owned state fields: chase"):
+            await _call(
+                server,
+                "campaign_change",
+                {
+                    "campaign_id": campaign["id"],
+                    "action": "update",
+                    "payload": {"state": {"chase": {"active": True}}},
+                    "expected_revision": clock["campaign_revision"],
+                    "idempotency_key": "bypass-chase",
+                },
+            )
+
         updated = await _call(
             server,
             "campaign_change",
@@ -687,6 +837,20 @@ def test_generic_campaign_update_cannot_bypass_the_clock_owner(tmp_path: Path) -
         )
         assert updated["state"]["party"]["notes"] == "Reviewed party note"
         assert updated["state"]["world_time"] == clock["world_time"]
+        custom = await _call(
+            server,
+            "campaign_change",
+            {
+                "campaign_id": campaign["id"],
+                "action": "update",
+                "payload": {"settings": {"table_name": "Thursday group"}},
+                "expected_revision": updated["revision"],
+                "idempotency_key": "custom-setting",
+            },
+        )
+        assert custom["settings"]["table_name"] == "Thursday group"
+        assert "edition" not in custom["settings"]
+        assert "locale" not in custom["settings"]
 
     asyncio.run(exercise())
 
@@ -766,6 +930,25 @@ def test_two_five_round_combats_share_one_minute_clock_and_elapsed_effects(
                 "idempotency_key": "world-effect",
             },
         )
+        round_effect = await _call(
+            server,
+            "campaign_change",
+            {
+                "campaign_id": campaign["id"],
+                "action": "effect_add",
+                "payload": {
+                    "effect": {
+                        "id": "one-round-light",
+                        "name": "One round light",
+                        "kind": "light",
+                        "target": {"kind": "object", "id": "lantern"},
+                        "duration": {"period": "round", "remaining": 1},
+                    }
+                },
+                "expected_revision": world_effect["campaign_revision"],
+                "idempotency_key": "round-world-effect",
+            },
+        )
         state = await _call(
             server,
             "combat_start",
@@ -776,12 +959,13 @@ def test_two_five_round_combats_share_one_minute_clock_and_elapsed_effects(
                     {"actor_id": actors[0]["id"], "initiative": 20},
                     {"actor_id": actors[1]["id"], "initiative": 10},
                 ],
-                "expected_revision": world_effect["campaign_revision"],
+                "expected_revision": round_effect["campaign_revision"],
                 "idempotency_key": "combat-start",
             },
         )
 
         final_arguments = None
+        first_round_state = None
         for turn in range(10):
             current_combatant = state["combat"]["combatants"][
                 state["combat"]["turn_index"]
@@ -793,7 +977,11 @@ def test_two_five_round_combats_share_one_minute_clock_and_elapsed_effects(
                 "idempotency_key": f"turn-{turn}",
             }
             state = await _call(server, "combat_end_turn", final_arguments)
+            if turn == 1:
+                first_round_state = state
 
+        assert first_round_state is not None
+        assert first_round_state["world_expired"] == ["one-round-light"]
         assert state["game_time"]["elapsed_ticks"] == 5
         assert state["world_time"]["minute"] == 0
         assert state["world_time"]["second"] == 30
@@ -877,7 +1065,13 @@ def test_two_five_round_combats_share_one_minute_clock_and_elapsed_effects(
             {"view": "get", "payload": {"campaign_id": campaign["id"]}},
         )
         assert persisted["state"]["world_time"] == minute_boundary["world_time"]
-        assert persisted["state"]["world_effects"][0]["active"] is False
+        assert {
+            effect["id"]: effect["active"]
+            for effect in persisted["state"]["world_effects"]
+        } == {
+            "one-minute-light": False,
+            "one-round-light": False,
+        }
         for actor in actors:
             updated = await _call(
                 server,

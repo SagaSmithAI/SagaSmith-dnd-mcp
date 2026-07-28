@@ -4,6 +4,7 @@ import asyncio
 from copy import deepcopy
 from pathlib import Path
 
+import pytest
 from sagasmith_dnd.character_schema import default_character_sheet
 from sagasmith_dnd.playthrough import new_playthrough_manifest
 
@@ -17,7 +18,7 @@ SOURCE_REF = {
     "page_start": 1,
     "page_end": 1,
     "heading_path": ["Chapter One"],
-    "chunk_content_sha256": "b" * 64,
+    "content_sha256": "b" * 64,
 }
 
 
@@ -236,6 +237,29 @@ def test_manifest_syncs_canonical_state_and_verifies_source_defined_ending(
             },
         )
         assert initialized["manifest"]["module_ids"] == [module_id, revision_module_id]
+        revision_index = await _call(
+            server,
+            "module_query",
+            {
+                "campaign_id": campaign_id,
+                "view": "index",
+                "payload": {"module_id": revision_module_id},
+            },
+        )
+        current_revision_scene = revision_index[-1]
+        await _call(
+            server,
+            "module_set_progress",
+            {
+                "campaign_id": campaign_id,
+                "scene_id": current_revision_scene["scene_id"],
+                "scope_id": "party",
+                "status": "current",
+                "progress": 10,
+                "expected_state_version": 0,
+                "idempotency_key": "revision-scene-current",
+            },
+        )
 
         actor_sheet = default_character_sheet()
         actor_sheet["resources"]["second_wind"] = {
@@ -272,6 +296,23 @@ def test_manifest_syncs_canonical_state_and_verifies_source_defined_ending(
                 "idempotency_key": "actor",
             },
         )
+        with pytest.raises(Exception, match="source_ref"):
+            await _call(
+                server,
+                "character_state_change",
+                {
+                    "character_id": actor["id"],
+                    "action": "level_advance",
+                    "payload": {
+                        "class_name": "Fighter",
+                        "hp_method": "fixed",
+                        "reason": "A weak citation must not pass a full playthrough.",
+                        "source_ref": "module:chapter-one",
+                    },
+                    "expected_revision": actor["revision"],
+                    "idempotency_key": "weak-level-source",
+                },
+            )
         before_play = await _call(
             server,
             "campaign_query",
@@ -323,7 +364,7 @@ def test_manifest_syncs_canonical_state_and_verifies_source_defined_ending(
             {
                 "actor_id": actor["id"],
                 "name": actor["name"],
-                "status": "active",
+                "status": "dead",
                 "source": "pregen",
                 "source_asset_path": "Pregenerated-Hero.pdf",
                 "level": 1,
@@ -335,6 +376,9 @@ def test_manifest_syncs_canonical_state_and_verifies_source_defined_ending(
             }
         ]
         updated_manifest["world_state"]["victory"] = True
+        updated_manifest["snapshot_dag"]["active_branch_id"] = "stale-branch"
+        updated_manifest["snapshot_dag"]["head_snapshot_id"] = "stale-snapshot"
+        updated_manifest["random_stream"]["position"] = 999
         updated_manifest["status"] = "in_progress"
         updated_manifest["current"] = {
             "module_id": module_id,
@@ -377,6 +421,11 @@ def test_manifest_syncs_canonical_state_and_verifies_source_defined_ending(
                 "idempotency_key": "manifest-party",
             },
         )
+        assert replaced["manifest"]["snapshot_dag"]["active_branch_id"] != "stale-branch"
+        assert replaced["manifest"]["snapshot_dag"]["head_snapshot_id"] == ""
+        assert replaced["manifest"]["random_stream"]["position"] == 0
+        assert replaced["manifest"]["party"]["members"][0]["status"] == "active"
+        assert replaced["manifest"]["current"]["scene_id"] == current_revision_scene["scene_id"]
         synced = await _call(
             server,
             "playthrough_manifest",
@@ -388,6 +437,7 @@ def test_manifest_syncs_canonical_state_and_verifies_source_defined_ending(
             },
         )
         assert synced["manifest"]["status"] == "in_progress"
+        assert synced["runtime"]["current_scene"]["scene_id"] == current_revision_scene["scene_id"]
         synced_member = synced["manifest"]["party"]["members"][0]
         assert synced_member["name"] == "Pregenerated Hero"
         assert synced_member["resources"]["character"]["second_wind"]["value"] == 0
@@ -405,10 +455,13 @@ def test_manifest_syncs_canonical_state_and_verifies_source_defined_ending(
             "campaign_query",
             {"view": "get", "payload": {"campaign_id": campaign_id}},
         )
+        assert persisted["state"]["playthrough_manifest"]["snapshot_dag"]["nodes"] == []
         assert (
-            persisted["state"]["playthrough_manifest"]["snapshot_dag"]["nodes"]
-            == []
+            persisted["state"]["playthrough_manifest"]["snapshot_dag"]["active_branch_id"]
+            == replaced["manifest"]["snapshot_dag"]["active_branch_id"]
         )
+        assert persisted["state"]["playthrough_manifest"]["snapshot_dag"]["head_snapshot_id"] == ""
+        assert persisted["state"]["playthrough_manifest"]["random_stream"]["position"] == 0
 
         branches = await _call(
             server,

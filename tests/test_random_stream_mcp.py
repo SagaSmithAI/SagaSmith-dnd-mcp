@@ -6,11 +6,16 @@ import os
 import sys
 from pathlib import Path
 
+import pytest
 from mcp import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
 from sagasmith_dnd.character_schema import default_character_sheet
 
 from sagasmith_dnd_mcp.config import McpConfig
+from sagasmith_dnd_mcp.random_state import (
+    RandomStateMutationService,
+    bind_idempotency_request,
+)
 from sagasmith_dnd_mcp.server import create_server
 
 
@@ -33,6 +38,27 @@ def _config(tmp_path: Path) -> McpConfig:
         modulegen_skills_dir=workspace / "SagaSmith-module-gen-skills",
         auto_seed_rules=False,
     )
+
+
+def test_public_state_mutation_requires_atomic_replay_receipt() -> None:
+    campaign_id = "00000000-0000-0000-0000-000000000001"
+    branch_id = "00000000-0000-0000-0000-000000000002"
+    bind_idempotency_request(
+        campaign_id,
+        branch_id,
+        "missing-receipt",
+        {"operation": "test"},
+    )
+    service = RandomStateMutationService.__new__(RandomStateMutationService)
+    service.database = object()
+
+    with pytest.raises(RuntimeError, match="exact replay response"):
+        service.replace(
+            campaign_id,
+            campaign_state={},
+            branch_id=branch_id,
+            idempotency_key="missing-receipt",
+        )
 
 
 def test_public_rolls_replay_after_restore_and_do_not_pollute_the_parent_branch(

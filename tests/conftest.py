@@ -209,18 +209,12 @@ def _facade(name: str, arguments: dict[str, Any]) -> tuple[str, dict[str, Any]] 
         "character_effect_add",
         "character_effect_remove",
         "character_resource_set",
-        "character_rest",
-        "character_memory_add",
-        "character_memory_resolve",
     }:
         character_id = args.pop("character_id")
         action = {
             "character_effect_add": "effect_add",
             "character_effect_remove": "effect_remove",
             "character_resource_set": "resource_set",
-            "character_rest": "rest",
-            "character_memory_add": "memory_add",
-            "character_memory_resolve": "memory_resolve",
         }[name]
         return packed(
             "character_state_change",

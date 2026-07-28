@@ -1769,8 +1769,8 @@ def test_spell_mastery_preserves_existing_preparation_state(
         assert mastery["choices"]["_replacement_history"] == [
             {
                 "previous_spell_artifact_ids": spell_ids[:2],
-                "study_started_elapsed_minutes": 0,
-                "study_completed_elapsed_minutes": 480,
+                "study_started_elapsed_ticks": 0,
+                "study_completed_elapsed_ticks": 4800,
                 "study_minutes": 480,
             }
         ]

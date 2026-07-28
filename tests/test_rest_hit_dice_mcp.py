@@ -830,7 +830,7 @@ def test_short_rest_atomically_applies_arcane_recovery_choice(tmp_path: Path) ->
         assert feature["uses"]["value"] == 0
         assert feature["uses"]["max"] == 1
         assert feature["uses"]["recovers_on"] == "manual"
-        assert feature["choices"]["_arcane_recovery_last_used_day"] == 1
+        assert feature["choices"]["_arcane_recovery_last_used_game_day"] == 1
 
     asyncio.run(exercise())
 

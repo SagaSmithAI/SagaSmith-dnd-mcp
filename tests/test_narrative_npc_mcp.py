@@ -108,8 +108,8 @@ async def _campaign_with_narrative_module(tmp_path: Path):
         "module_id": ingested["module_id"],
         "scene_id": expanded["scene"]["id"],
         "chunk_id": expanded["chunk_id"],
-        "page_start": expanded["page_start"] or 1,
-        "page_end": expanded["page_end"] or expanded["page_start"] or 1,
+        "page_start": expanded["page_start"],
+        "page_end": expanded["page_end"],
         "heading_path": expanded["heading_path"],
         "content_sha256": hashlib.sha256(expanded["content"].encode("utf-8")).hexdigest(),
     }

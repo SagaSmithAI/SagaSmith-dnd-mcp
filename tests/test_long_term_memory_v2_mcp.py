@@ -30,6 +30,71 @@ def _config(tmp_path: Path) -> McpConfig:
     )
 
 
+def test_character_state_facade_has_no_second_actor_memory_authority(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        server = create_server(_config(tmp_path))
+        tool = next(
+            item for item in await server.list_tools() if item.name == "character_state_change"
+        )
+        actions = tool.inputSchema["properties"]["action"]["enum"]
+        assert "memory_add" not in actions
+        assert "memory_resolve" not in actions
+        assert {"actor_knowledge_query", "actor_knowledge_change"}.issubset(
+            {item.name for item in await server.list_tools()}
+        )
+        campaign = await _call(
+            server,
+            "campaign_create",
+            {"name": "One knowledge authority", "idempotency_key": "campaign"},
+        )
+        actor = await _call(
+            server,
+            "character_create_from",
+            {
+                "mode": "direct",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "name": "Legacy witness",
+                    "notes": {
+                        "memories": [
+                            {
+                                "id": "legacy-memory",
+                                "summary": "Imported only.",
+                            }
+                        ]
+                    },
+                },
+                "idempotency_key": "actor",
+            },
+        )
+        with pytest.raises(Exception, match="import-only"):
+            await _call(
+                server,
+                "character_metadata_update",
+                {
+                    "character_id": actor["id"],
+                    "payload": {
+                        "notes": {
+                            **actor["notes"],
+                            "memories": [
+                                *actor["notes"]["memories"],
+                                {
+                                    "id": "bypass",
+                                    "summary": "Must use ActorKnowledge.",
+                                },
+                            ],
+                        }
+                    },
+                    "expected_revision": actor["revision"],
+                    "idempotency_key": "legacy-bypass",
+                },
+            )
+
+    asyncio.run(exercise())
+
+
 def test_memory_facade_supports_stable_upsert_revision_and_supersede(tmp_path: Path) -> None:
     async def exercise() -> None:
         server = create_server(_config(tmp_path))

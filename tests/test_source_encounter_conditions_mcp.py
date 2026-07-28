@@ -188,6 +188,16 @@ def test_source_condition_is_validated_persisted_and_cleared_with_encounter(
             "expected_revision": play["campaign_revision"],
             "idempotency_key": "start",
         }
+        with pytest.raises(Exception, match="authoritative campaign rule profile"):
+            await _call(
+                server,
+                "combat_start",
+                {
+                    **start_arguments,
+                    "ruleset": "2024",
+                    "idempotency_key": "wrong-ruleset",
+                },
+            )
         with pytest.raises(Exception, match="content_sha256 does not match"):
             await _call(
                 server,

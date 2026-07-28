@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, Callable
 from uuid import uuid4
 
 from .tool_profiles import CORE_TOOLS, GROUP_BY_ID, TOOL_GROUPS
@@ -20,6 +20,12 @@ class ExposureError(ValueError):
     """Raised when a session attempts to use an unexposed capability."""
 
 
+def operational_utcnow() -> datetime:
+    """Return the wall clock used only for exposure leases and audit timestamps."""
+
+    return datetime.now(UTC)
+
+
 @dataclass
 class Exposure:
     id: str
@@ -27,23 +33,35 @@ class Exposure:
     principal_id: str
     campaign_id: str | None
     phase: str
+    created_at: datetime
+    updated_at: datetime
+    expires_at: datetime
     loaded_groups: set[str] = field(default_factory=set)
     remaining_calls: dict[str, int | None] = field(default_factory=dict)
-    created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
-    updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
-    expires_at: datetime = field(default_factory=lambda: datetime.now(UTC) + timedelta(hours=12))
 
 
 class ExposureRegistry:
     """Own session exposure state; storage and agent prompts never own it."""
 
-    def __init__(self, *, ttl: timedelta = timedelta(hours=12)) -> None:
+    def __init__(
+        self,
+        *,
+        ttl: timedelta = timedelta(hours=12),
+        clock: Callable[[], datetime] = operational_utcnow,
+    ) -> None:
         self._by_id: dict[str, Exposure] = {}
         self._active_by_session: dict[str, str] = {}
         self._ttl = ttl
+        self._clock = clock
+
+    def _now(self) -> datetime:
+        value = self._clock()
+        if value.tzinfo is None:
+            raise ValueError("exposure clock must return a timezone-aware datetime")
+        return value.astimezone(UTC)
 
     def _prune(self) -> None:
-        now = datetime.now(UTC)
+        now = self._now()
         expired = [
             exposure_id for exposure_id, item in self._by_id.items() if item.expires_at <= now
         ]
@@ -53,7 +71,7 @@ class ExposureRegistry:
                 self._active_by_session.pop(exposure.session_key, None)
 
     def touch(self, exposure: Exposure) -> Exposure:
-        now = datetime.now(UTC)
+        now = self._now()
         exposure.updated_at = now
         exposure.expires_at = now + self._ttl
         return exposure
@@ -70,13 +88,16 @@ class ExposureRegistry:
         prior_id = self._active_by_session.get(session_key)
         if prior_id:
             self._by_id.pop(prior_id, None)
+        now = self._now()
         exposure = Exposure(
             id=f"exp_{uuid4().hex}",
             session_key=session_key,
             principal_id=principal_id,
             campaign_id=campaign_id,
             phase=phase,
-            expires_at=datetime.now(UTC) + self._ttl,
+            created_at=now,
+            updated_at=now,
+            expires_at=now + self._ttl,
         )
         self._by_id[exposure.id] = exposure
         self._active_by_session[session_key] = exposure.id

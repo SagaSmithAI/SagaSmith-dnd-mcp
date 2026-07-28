@@ -61,9 +61,7 @@ def _line_entries(line: dict[str, Any]) -> list[dict[str, Any]]:
 
 def _manifest_entries(manifest: dict[str, Any]) -> list[dict[str, Any]]:
     entries = [
-        entry
-        for line in manifest.get("campaign_lines") or []
-        for entry in _line_entries(line)
+        entry for line in manifest.get("campaign_lines") or [] for entry in _line_entries(line)
     ]
     return [*entries, *list(manifest.get("unassigned_assets") or [])]
 
@@ -143,14 +141,9 @@ async def _create_campaign(
     advancement = dict(line["play_requirements"].get("advancement") or {})
     selected_advancement = str(advancement.get("selected") or "")
     if selected_advancement not in {"xp", "milestone"}:
-        raise ValueError(
-            f"campaign line {line_id} must select xp or milestone advancement"
-        )
+        raise ValueError(f"campaign line {line_id} must select xp or milestone advancement")
     current_advancement = str(
-        dict(dict(campaign.get("settings") or {}).get("advancement") or {}).get(
-            "mode"
-        )
-        or ""
+        dict(dict(campaign.get("settings") or {}).get("advancement") or {}).get("mode") or ""
     )
     if current_advancement == selected_advancement:
         return campaign
@@ -284,12 +277,15 @@ def _line_review_blocks(
     for document in player_documents:
         inspection = dict(document.get("character_document") or {})
         declared = dict(document.get("declared_player_material") or {})
-        if inspection.get("document_kind") == "character_sheet" and not inspection.get(
-            "ready_to_create"
-        ) and declared.get("review_status") not in {
-            "reviewed_excluded_from_party",
-            "reviewed_not_module_pregen",
-        }:
+        if (
+            inspection.get("document_kind") == "character_sheet"
+            and not inspection.get("ready_to_create")
+            and declared.get("review_status")
+            not in {
+                "reviewed_excluded_from_party",
+                "reviewed_not_module_pregen",
+            }
+        ):
             blocks.append(
                 {
                     "kind": "incomplete_character_template",
@@ -318,11 +314,7 @@ def _build_playthrough_manifest(
         "module_ids": list(module_ids),
         "status": "lobby",
         "source_refs": deepcopy(
-            list(
-                source_refs
-                if source_refs is not None
-                else requirements.get("source_refs") or []
-            )
+            list(source_refs if source_refs is not None else requirements.get("source_refs") or [])
         ),
         "current": {
             "module_id": module_ids[0],
@@ -395,14 +387,10 @@ async def _resolve_playthrough_source_refs(
             raise RuntimeError("imported module metadata is missing checksum or module_id")
         previous = modules_by_checksum.get(checksum)
         if previous is not None and str(previous["module_id"]) != module_id:
-            raise RuntimeError(
-                f"imported module checksum identifies multiple modules: {checksum}"
-            )
+            raise RuntimeError(f"imported module checksum identifies multiple modules: {checksum}")
         modules_by_checksum[checksum] = document
     resolved: list[dict[str, Any]] = []
-    for index, raw in enumerate(
-        list(dict(line["play_requirements"]).get("source_refs") or [])
-    ):
+    for index, raw in enumerate(list(dict(line["play_requirements"]).get("source_refs") or [])):
         source = deepcopy(dict(raw))
         asset_sha256 = str(source.get("asset_sha256") or "").casefold()
         module_document = modules_by_checksum.get(asset_sha256)
@@ -429,12 +417,8 @@ async def _resolve_playthrough_source_refs(
         )
         if isinstance(hits, dict) and isinstance(hits.get("result"), list):
             hits = hits["result"]
-        if not isinstance(hits, list) or any(
-            not isinstance(hit, dict) for hit in hits
-        ):
-            raise RuntimeError(
-                f"source_refs[{index}] module_search returned an invalid collection"
-            )
+        if not isinstance(hits, list) or any(not isinstance(hit, dict) for hit in hits):
+            raise RuntimeError(f"source_refs[{index}] module_search returned an invalid collection")
         matches: dict[str, dict[str, Any]] = {}
         for hit in hits or []:
             chunk_id = str(hit.get("chunk_id") or hit.get("id") or "")
@@ -445,30 +429,23 @@ async def _resolve_playthrough_source_refs(
             content = str(expanded.get("content") or "")
             content_sha256 = str(expanded.get("content_sha256") or "").casefold()
             if hashlib.sha256(content.encode("utf-8")).hexdigest() != content_sha256:
-                raise RuntimeError(
-                    f"source_refs[{index}] expanded content hash is inconsistent"
-                )
+                raise RuntimeError(f"source_refs[{index}] expanded content hash is inconsistent")
             if (
                 str(managed_ref.get("module_id") or "") != module_id
-                or content_sha256
-                != str(source.get("chunk_content_sha256") or "").casefold()
-                or int(managed_ref.get("page_start") or 0)
-                != int(source.get("page_start") or 0)
-                or int(managed_ref.get("page_end") or 0)
-                != int(source.get("page_end") or 0)
+                or content_sha256 != str(source.get("content_sha256") or "").casefold()
+                or int(managed_ref.get("page_start") or 0) != int(source.get("page_start") or 0)
+                or int(managed_ref.get("page_end") or 0) != int(source.get("page_end") or 0)
             ):
                 continue
             scene_id = str(managed_ref.get("scene_id") or "")
             if not scene_id:
-                raise RuntimeError(
-                    f"source_refs[{index}] exact chunk has no managed scene_id"
-                )
+                raise RuntimeError(f"source_refs[{index}] exact chunk has no managed scene_id")
             matches[chunk_id] = {
                 **source,
                 "page_start": int(managed_ref["page_start"]),
                 "page_end": int(managed_ref["page_end"]),
                 "heading_path": list(managed_ref.get("heading_path") or []),
-                "chunk_content_sha256": content_sha256,
+                "content_sha256": content_sha256,
                 "module_id": module_id,
                 "scene_id": scene_id,
                 "chunk_id": chunk_id,
@@ -476,8 +453,7 @@ async def _resolve_playthrough_source_refs(
             }
         if len(matches) != 1:
             raise RuntimeError(
-                f"source_refs[{index}] must resolve exactly once: "
-                f"{query!r} -> {len(matches)}"
+                f"source_refs[{index}] must resolve exactly once: {query!r} -> {len(matches)}"
             )
         resolved.append(next(iter(matches.values())))
     return resolved
@@ -660,13 +636,9 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                                 scene=scene,
                             )
                         )
-                    line_report["review_blocks"] = _line_review_blocks(
-                        line, player_documents
-                    )
+                    line_report["review_blocks"] = _line_review_blocks(line, player_documents)
                     report["review_blocks"].extend(line_report["review_blocks"])
-                    line_report[
-                        "playthrough_manifest"
-                    ] = await _initialize_playthrough_manifest(
+                    line_report["playthrough_manifest"] = await _initialize_playthrough_manifest(
                         client,
                         line=line,
                         module_documents=[

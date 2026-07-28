@@ -4,7 +4,7 @@ import asyncio
 import json
 import os
 import sys
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -594,6 +594,29 @@ def test_exposure_ttl_is_deterministic_and_expired_sessions_are_pruned() -> None
         registry.require_tool(exposure, "combat_check")
 
 
+def test_exposure_lease_uses_one_injected_operational_clock() -> None:
+    moments = iter(
+        [
+            datetime(2026, 7, 28, 1, 0, tzinfo=UTC),
+            datetime(2026, 7, 28, 1, 1, tzinfo=UTC),
+            datetime(2026, 7, 28, 1, 2, tzinfo=UTC),
+        ]
+    )
+    registry = ExposureRegistry(ttl=timedelta(hours=2), clock=lambda: next(moments))
+    exposure = registry.open(
+        session_key="session:clock",
+        principal_id="system:local",
+        campaign_id=None,
+        phase="lobby",
+    )
+
+    assert exposure.created_at == datetime(2026, 7, 28, 1, 1, tzinfo=UTC)
+    assert exposure.updated_at == exposure.created_at
+    assert exposure.expires_at == exposure.created_at + timedelta(hours=2)
+    registry.touch(exposure)
+    assert exposure.updated_at == datetime(2026, 7, 28, 1, 2, tzinfo=UTC)
+
+
 @pytest.mark.parametrize(
     ("retired_name", "replacement"),
     [
@@ -609,6 +632,9 @@ def test_exposure_ttl_is_deterministic_and_expired_sessions_are_pruned() -> None
         ("continuity_commit", "memory_change(action='commit')"),
         ("continuity_diagnostics", "memory_query(view='diagnostics')"),
         ("combat_on_hit_ruling", "combat_choice(action='on_hit_ruling')"),
+        ("character_rest", "campaign_change(action='party_rest')"),
+        ("character_memory_add", "actor_knowledge_change(action='add')"),
+        ("character_memory_resolve", "actor_knowledge_change(action='revise')"),
     ],
 )
 def test_exposure_call_explains_retired_tool_replacements(

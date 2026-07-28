@@ -216,9 +216,9 @@ def test_party_long_rest_advances_once_and_settles_members_atomically(tmp_path: 
             assert current_actor["sheet"]["combat"]["hit_dice"]["fighter:d10"]["value"] == 1
             assert current_actor["sheet"]["combat"]["rest_history"] == {
                 "last_rest_type": "long_rest",
-                "last_rest_started_elapsed_minutes": 1260,
-                "last_rest_completed_elapsed_minutes": 1740,
-                "last_long_rest_elapsed_minutes": 1740,
+                "last_rest_started_elapsed_ticks": 0,
+                "last_rest_completed_elapsed_ticks": 4800,
+                "last_long_rest_elapsed_ticks": 4800,
             }
             assert current_actor["sheet"]["effects"][0]["active"] is False
             assert current_actor["sheet"]["resources"]["ki"]["value"] == (2 if index == 0 else 0)
@@ -372,9 +372,9 @@ def test_party_short_rest_advances_and_settles_every_member_atomically(
             updated.append(current_actor)
             assert current_actor["sheet"]["combat"]["rest_history"] == {
                 "last_rest_type": "short_rest",
-                "last_rest_started_elapsed_minutes": 3480,
-                "last_rest_completed_elapsed_minutes": 3540,
-                "last_long_rest_elapsed_minutes": None,
+                "last_rest_started_elapsed_ticks": 0,
+                "last_rest_completed_elapsed_ticks": 600,
+                "last_long_rest_elapsed_ticks": None,
             }
         assert updated[0]["sheet"]["resources"]["ki"]["value"] == 2
         assert updated[1]["sheet"]["resources"]["ki"]["value"] == 0
@@ -432,6 +432,74 @@ def test_party_short_rest_advances_and_settles_every_member_atomically(
         )
         assert after_failure["revision"] == before_failure["revision"]
         assert after_failure["state"]["world_time"]["elapsed_minutes"] == 3540
+
+    asyncio.run(exercise())
+
+
+def test_party_rest_uses_game_time_without_requiring_a_calendar(tmp_path: Path) -> None:
+    async def exercise() -> None:
+        server = create_server(_config(tmp_path))
+        campaign = await _call(
+            server,
+            "campaign_create",
+            {
+                "name": "Unanchored rest",
+                "edition": "2014",
+                "idempotency_key": "campaign",
+            },
+        )
+        actor = await _call(
+            server,
+            "character_create_from",
+            {
+                "mode": "direct",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "name": "Traveler",
+                    "sheet": _spent_sheet(),
+                },
+                "idempotency_key": "actor",
+            },
+        )
+        current = await _call(
+            server,
+            "campaign_query",
+            {"view": "get", "payload": {"campaign_id": campaign["id"]}},
+        )
+        rested = await _call(
+            server,
+            "campaign_change",
+            {
+                "campaign_id": campaign["id"],
+                "action": "party_rest",
+                "payload": {
+                    "rest_type": "short_rest",
+                    "duration_minutes": 60,
+                    "members": [
+                        {
+                            "character_id": actor["id"],
+                            "expected_revision": actor["revision"],
+                            "rest_schedule": SHORT_REST_SCHEDULE,
+                        }
+                    ],
+                },
+                "expected_revision": current["revision"],
+                "idempotency_key": "rest",
+            },
+        )
+        assert rested["world_time"] is None
+        assert rested["game_time"]["elapsed_ticks"] == 600
+        updated = await _call(
+            server,
+            "character_query",
+            {"view": "get", "payload": {"character_id": actor["id"]}},
+        )
+        assert updated["sheet"]["combat"]["rest_history"] == {
+            "last_rest_type": "short_rest",
+            "last_rest_started_elapsed_ticks": 0,
+            "last_rest_completed_elapsed_ticks": 600,
+            "last_long_rest_elapsed_ticks": None,
+        }
 
     asyncio.run(exercise())
 
@@ -551,7 +619,7 @@ def test_party_long_rest_honors_source_granted_elf_trance(tmp_path: Path) -> Non
             {"view": "get", "payload": {"character_id": elf["id"]}},
         )
         assert updated["sheet"]["combat"]["hp"]["value"] == 12
-        assert updated["sheet"]["combat"]["rest_history"]["last_long_rest_elapsed_minutes"] == 240
+        assert updated["sheet"]["combat"]["rest_history"]["last_long_rest_elapsed_ticks"] == 2400
 
     asyncio.run(exercise())
 

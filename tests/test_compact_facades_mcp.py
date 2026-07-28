@@ -50,6 +50,30 @@ def test_compact_facades_reject_unknown_fields_and_wrong_phases(
             },
         )
 
+        with pytest.raises(Exception, match="unsupported rule_import"):
+            await _call(
+                server,
+                "rule_import",
+                {
+                    "campaign_id": campaign["id"],
+                    "action": "discover",
+                    "payload": {"job_id": "payload-bypass"},
+                },
+            )
+        with pytest.raises(Exception, match="unsupported module_import"):
+            await _call(
+                server,
+                "module_import",
+                {
+                    "campaign_id": campaign["id"],
+                    "action": "inspect",
+                    "payload": {
+                        "job_id": "job",
+                        "expected_revision": campaign["revision"],
+                    },
+                },
+            )
+
         with pytest.raises(Exception, match="only available during play"):
             await _call(
                 server,
@@ -139,6 +163,22 @@ def test_compact_facades_reject_unknown_fields_and_wrong_phases(
                     },
                     "expected_revision": before["revision"],
                     "idempotency_key": "unknown-commit-field",
+                },
+            )
+        with pytest.raises(Exception, match="unsupported campaign_change"):
+            await _call(
+                server,
+                "campaign_change",
+                {
+                    "campaign_id": campaign["id"],
+                    "action": "clock_advance",
+                    "payload": {
+                        "period": "minute",
+                        "expected_elapsed_ticks": 10,
+                        "state": {"game_time": {"elapsed_ticks": 10}},
+                    },
+                    "expected_revision": before["revision"],
+                    "idempotency_key": "clock-payload-bypass",
                 },
             )
         with pytest.raises(Exception, match="only available during lobby"):

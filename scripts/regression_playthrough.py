@@ -20,6 +20,13 @@ from typing import Any
 
 from mcp import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
+from sagasmith_dnd.game_time import (
+    TICKS_PER_MINUTE,
+    anchor_world_time,
+    game_time_from_ticks,
+    game_time_ticks,
+    project_world_time,
+)
 from sagasmith_dnd.lifecycle import allows_trance_rest
 from sagasmith_dnd.module_profile import DndModuleProfile
 from sagasmith_dnd.playthrough import validate_playthrough_manifest
@@ -282,8 +289,16 @@ def _arguments() -> argparse.Namespace:
         "--time-expected-after-json",
         type=json.loads,
         help=(
-            "Required machine-verifiable day/hour/minute/elapsed_minutes target "
-            "for advance-time; rejected before clock mutation when count cannot reach it"
+            "Optional anchored-calendar day/hour/minute/elapsed_minutes target "
+            "for advance-time; legacy calls may use this instead of the tick target"
+        ),
+    )
+    parser.add_argument(
+        "--time-expected-after-ticks",
+        type=int,
+        help=(
+            "Canonical state.game_time.elapsed_ticks target for advance-time; "
+            "required when no calendar target is supplied"
         ),
     )
     parser.add_argument(
@@ -793,7 +808,7 @@ async def _remap_ending_sources_for_module_revision(
         ):
             continue
         excerpt = str(source_ref.get("excerpt") or "").strip()
-        content_sha256 = str(source_ref.get("chunk_content_sha256") or "").casefold()
+        content_sha256 = str(source_ref.get("content_sha256") or "").casefold()
         if not excerpt or not content_sha256:
             raise ValueError(
                 "module refresh cannot remap an ending citation without its excerpt "
@@ -844,7 +859,7 @@ async def _remap_ending_sources_for_module_revision(
             "page_start": int(exact_ref["page_start"]),
             "page_end": int(exact_ref["page_end"]),
             "heading_path": list(exact_ref["heading_path"]),
-            "chunk_content_sha256": str(exact_ref["content_sha256"]).casefold(),
+            "content_sha256": str(exact_ref["content_sha256"]).casefold(),
             "module_id": new_module_id,
             "scene_id": replacement_scene_id,
             "chunk_id": str(exact_ref["chunk_id"]),
@@ -920,8 +935,11 @@ def _validate_source_ref(
 
 
 def _campaign_phase(campaign: dict[str, Any]) -> str:
-    phase = str(dict(campaign.get("state") or {}).get("game_phase") or "lobby")
-    if phase not in {"lobby", "play", "combat"}:
+    state = dict(campaign.get("state") or {})
+    if bool(dict(state.get("combat") or {}).get("active", False)):
+        return "combat"
+    phase = str(state.get("game_phase") or "lobby")
+    if phase not in {"lobby", "play"}:
         raise RuntimeError(f"unsupported campaign phase: {phase}")
     return phase
 
@@ -961,9 +979,7 @@ async def _validate_narrative_preconditions(
     normalized_outcome_id = outcome_id.strip()
     normalized_actor_ids = [str(actor_id).strip() for actor_id in (actor_ids or [])]
     if bool(normalized_scene_id) != bool(normalized_outcome_id):
-        raise ValueError(
-            "narrative outcome precondition requires both scene id and outcome id"
-        )
+        raise ValueError("narrative outcome precondition requires both scene id and outcome id")
     if any(not actor_id for actor_id in normalized_actor_ids):
         raise ValueError("narrative actor precondition ids must not be empty")
     if len(normalized_actor_ids) != len(set(normalized_actor_ids)):
@@ -988,8 +1004,7 @@ async def _validate_narrative_preconditions(
             None,
         )
         outcomes = dict(
-            dict((progress or {}).get("state") or {}).get("full_playthrough_outcomes")
-            or {}
+            dict((progress or {}).get("state") or {}).get("full_playthrough_outcomes") or {}
         )
         outcome = outcomes.get(normalized_outcome_id)
         if not isinstance(outcome, dict):
@@ -1013,8 +1028,7 @@ async def _validate_narrative_preconditions(
         )
         if actor.get("campaign_id") != campaign_id:
             raise ValueError(
-                "narrative actor precondition does not belong to the campaign: "
-                f"{actor_id}"
+                f"narrative actor precondition does not belong to the campaign: {actor_id}"
             )
         actor_evidence.append(
             {
@@ -1037,10 +1051,7 @@ def _validate_world_time_precondition(
     if normalized_expected is None:
         return None
     world_time = dict(dict(campaign.get("state") or {}).get("world_time") or {})
-    actual = {
-        key: world_time.get(key)
-        for key in ("day", "hour", "minute", "elapsed_minutes")
-    }
+    actual = {key: world_time.get(key) for key in ("day", "hour", "minute", "elapsed_minutes")}
     if actual != normalized_expected:
         raise ValueError(
             "campaign world time does not match the required precondition: "
@@ -1078,8 +1089,7 @@ def _validate_recovered_continuity(
     receipt_branch_id = str(receipt.get("branch_id") or "")
     if receipt_branch_id and receipt_branch_id != branch_id:
         raise RuntimeError(
-            "continuity recovery receipt is from another branch: "
-            f"{receipt_branch_id}"
+            f"continuity recovery receipt is from another branch: {receipt_branch_id}"
         )
     if payload.get("facts"):
         raise RuntimeError("continuity recovery with fact writes requires explicit review")
@@ -1119,10 +1129,9 @@ def _validate_recovered_continuity(
     if expected_snapshot is None:
         if recovered_snapshot is not None:
             raise RuntimeError("continuity recovery receipt has an unexpected snapshot")
-    elif (
-        not isinstance(recovered_snapshot, dict)
-        or recovered_snapshot.get("label") != dict(expected_snapshot).get("label")
-    ):
+    elif not isinstance(recovered_snapshot, dict) or recovered_snapshot.get("label") != dict(
+        expected_snapshot
+    ).get("label"):
         raise RuntimeError("continuity recovery receipt snapshot does not match")
     return deepcopy(response)
 
@@ -1172,8 +1181,7 @@ async def _commit_roll_continuity(
                 },
             )
             response_event_id = str(
-                dict(dict(receipt.get("response") or {}).get("event") or {}).get("id")
-                or ""
+                dict(dict(receipt.get("response") or {}).get("event") or {}).get("id") or ""
             )
             if not response_event_id or response_event_id not in {
                 str(item.get("id") or "") for item in list(visible_events or [])
@@ -1245,6 +1253,7 @@ def _validate_recovered_long_rest(
         raise RuntimeError("long-rest recovery receipt request does not match")
     actor_ids = [str(item["actor_id"]) for item in members]
     current_clock = dict(dict(campaign.get("state") or {}).get("world_time") or {})
+    current_game_time = dict(dict(campaign.get("state") or {}).get("game_time") or {})
     if (
         response.get("idempotency_replayed") is True
         and response.get("response_recovery") == "read_current_state"
@@ -1270,6 +1279,7 @@ def _validate_recovered_long_rest(
             "duration_minutes": duration_minutes,
             "member_ids": actor_ids,
             "campaign_revision": campaign.get("revision"),
+            "game_time": current_game_time,
             "world_time": current_clock,
             "preparations": preparations,
         }
@@ -1283,13 +1293,14 @@ def _validate_recovered_long_rest(
     campaign_revision = campaign.get("revision")
     if response.get("campaign_revision") != campaign_revision:
         raise RuntimeError("long-rest recovery receipt is not the current campaign mutation")
-    receipt_clock = response.get("world_time")
-    if not current_clock or receipt_clock != current_clock:
-        raise RuntimeError("long-rest recovery receipt does not match the current world clock")
-    completed_elapsed = current_clock.get("elapsed_minutes")
+    if dict(response.get("world_time") or {}) != current_clock:
+        raise RuntimeError("long-rest recovery receipt does not match the calendar projection")
+    if response.get("game_time") != current_game_time:
+        raise RuntimeError("long-rest recovery receipt does not match the campaign timeline")
+    completed_elapsed = current_game_time.get("elapsed_ticks")
     if isinstance(completed_elapsed, bool) or not isinstance(completed_elapsed, int):
-        raise RuntimeError("long-rest recovery requires an elapsed campaign clock")
-    started_elapsed = completed_elapsed - duration_minutes
+        raise RuntimeError("long-rest recovery requires the campaign game timeline")
+    started_elapsed = completed_elapsed - duration_minutes * 10
     actor_by_id = {str(actor.get("id")): actor for actor in actors}
     receipt_preparations = dict(response.get("preparations") or {})
     for member in members:
@@ -1301,9 +1312,9 @@ def _validate_recovered_long_rest(
         history = dict(combat.get("rest_history") or {})
         if history != {
             "last_rest_type": "long_rest",
-            "last_rest_started_elapsed_minutes": started_elapsed,
-            "last_rest_completed_elapsed_minutes": completed_elapsed,
-            "last_long_rest_elapsed_minutes": completed_elapsed,
+            "last_rest_started_elapsed_ticks": started_elapsed,
+            "last_rest_completed_elapsed_ticks": completed_elapsed,
+            "last_long_rest_elapsed_ticks": completed_elapsed,
         }:
             raise RuntimeError(f"long-rest recovery history does not match for actor {actor_id}")
         prepared_ids = member.get("prepared_spell_ids")
@@ -1335,9 +1346,7 @@ def _validate_recovered_short_rest(
     if receipt.get("request_hash") != expected_request_hash:
         raise RuntimeError("short-rest recovery receipt request does not match")
     if response.get("response_recovery") == "read_current_state":
-        raise RuntimeError(
-            "random-capable short-rest recovery requires its atomic exact response"
-        )
+        raise RuntimeError("random-capable short-rest recovery requires its atomic exact response")
     actor_ids = [str(item["actor_id"]) for item in members]
     if (
         response.get("status") != "committed"
@@ -1349,12 +1358,15 @@ def _validate_recovered_short_rest(
     if response.get("campaign_revision") != campaign.get("revision"):
         raise RuntimeError("short-rest recovery receipt is not the current campaign mutation")
     current_clock = dict(dict(campaign.get("state") or {}).get("world_time") or {})
-    if not current_clock or response.get("world_time") != current_clock:
-        raise RuntimeError("short-rest recovery receipt does not match the current world clock")
-    completed_elapsed = current_clock.get("elapsed_minutes")
+    current_game_time = dict(dict(campaign.get("state") or {}).get("game_time") or {})
+    if dict(response.get("world_time") or {}) != current_clock:
+        raise RuntimeError("short-rest recovery receipt does not match the calendar projection")
+    if response.get("game_time") != current_game_time:
+        raise RuntimeError("short-rest recovery receipt does not match the campaign timeline")
+    completed_elapsed = current_game_time.get("elapsed_ticks")
     if isinstance(completed_elapsed, bool) or not isinstance(completed_elapsed, int):
-        raise RuntimeError("short-rest recovery requires an elapsed campaign clock")
-    started_elapsed = completed_elapsed - duration_minutes
+        raise RuntimeError("short-rest recovery requires the campaign game timeline")
+    started_elapsed = completed_elapsed - duration_minutes * 10
     actor_by_id = {str(actor.get("id")): actor for actor in actors}
     recovered_by_id = dict(response.get("recovered") or {})
     requested_draws = 0
@@ -1364,19 +1376,14 @@ def _validate_recovered_short_rest(
         if actor is None:
             raise RuntimeError("short-rest recovery is missing a requested actor")
         history = dict(
-            dict(dict(actor.get("sheet") or {}).get("combat") or {}).get(
-                "rest_history"
-            )
-            or {}
+            dict(dict(actor.get("sheet") or {}).get("combat") or {}).get("rest_history") or {}
         )
         if (
             history.get("last_rest_type") != "short_rest"
-            or history.get("last_rest_started_elapsed_minutes") != started_elapsed
-            or history.get("last_rest_completed_elapsed_minutes") != completed_elapsed
+            or history.get("last_rest_started_elapsed_ticks") != started_elapsed
+            or history.get("last_rest_completed_elapsed_ticks") != completed_elapsed
         ):
-            raise RuntimeError(
-                f"short-rest recovery history does not match for actor {actor_id}"
-            )
+            raise RuntimeError(f"short-rest recovery history does not match for actor {actor_id}")
         recovered = recovered_by_id.get(actor_id)
         if not isinstance(recovered, dict):
             raise RuntimeError(
@@ -1393,10 +1400,7 @@ def _validate_recovered_short_rest(
         attune_item_id = str(member.get("attune_item_id") or "")
         if attune_item_id:
             inventory = list(
-                dict(dict(actor.get("sheet") or {}).get("inventory") or {}).get(
-                    "items"
-                )
-                or []
+                dict(dict(actor.get("sheet") or {}).get("inventory") or {}).get("items") or []
             )
             item = next(
                 (
@@ -1445,9 +1449,7 @@ def _committed_check_result(settled: dict[str, Any]) -> dict[str, Any]:
     raise_for_pending_ruling(
         {
             **settled,
-            "reason": str(
-                settled.get("reason") or "source-cited character check did not commit"
-            ),
+            "reason": str(settled.get("reason") or "source-cited character check did not commit"),
         },
         operation="character_check",
     )
@@ -1541,9 +1543,7 @@ def _committed_contest_result(settled: dict[str, Any]) -> dict[str, Any]:
     raise_for_pending_ruling(
         {
             **settled,
-            "reason": str(
-                settled.get("reason") or "source-cited ability contest did not commit"
-            ),
+            "reason": str(settled.get("reason") or "source-cited ability contest did not commit"),
         },
         operation="character_check.contest",
     )
@@ -1825,9 +1825,7 @@ async def _register_party(
             {
                 "status": "pending_ruling",
                 "default_resolver": str(review.get("default_resolver") or "agent"),
-                "ruling_kind": str(
-                    review.get("ruling_kind") or "source_or_scene_fact"
-                ),
+                "ruling_kind": str(review.get("ruling_kind") or "source_or_scene_fact"),
                 "reason": "party size still requires explicit Agent-as-DM review",
                 "committed": False,
             },
@@ -1897,17 +1895,13 @@ def _settled_agent_ruling(
     }
     unknown = sorted(set(value) - allowed)
     if unknown:
-        raise ValueError(
-            f"{label} Agent ruling contains unsupported fields: " + ", ".join(unknown)
-        )
+        raise ValueError(f"{label} Agent ruling contains unsupported fields: " + ", ".join(unknown))
     if value.get("default_resolver") != "agent":
         raise ValueError(f"{label} Agent ruling default_resolver must be agent")
     ruling_kind = str(value.get("ruling_kind") or "")
     if ruling_kind not in ruling_kinds:
         expected = (
-            next(iter(ruling_kinds))
-            if len(ruling_kinds) == 1
-            else ", ".join(sorted(ruling_kinds))
+            next(iter(ruling_kinds)) if len(ruling_kinds) == 1 else ", ".join(sorted(ruling_kinds))
         )
         raise ValueError(f"{label} Agent ruling ruling_kind must be {expected}")
     decision = str(value.get("decision") or "").strip()
@@ -1963,36 +1957,31 @@ def _normalize_expected_world_time(value: Any) -> dict[str, int] | None:
     unknown = set(value) - {"day", "hour", "minute", "elapsed_minutes"}
     if unknown:
         raise ValueError(
-            "expected world time contains unsupported fields: "
-            + ", ".join(sorted(unknown))
+            "expected world time contains unsupported fields: " + ", ".join(sorted(unknown))
         )
     day = value.get("day")
     hour = value.get("hour")
     minute = value.get("minute")
     elapsed = value.get("elapsed_minutes")
-    if (
-        isinstance(day, bool)
-        or not isinstance(day, int)
-        or day < 1
-        or isinstance(hour, bool)
-        or not isinstance(hour, int)
-        or not 0 <= hour <= 23
-        or isinstance(minute, bool)
-        or not isinstance(minute, int)
-        or not 0 <= minute <= 59
-        or isinstance(elapsed, bool)
-        or not isinstance(elapsed, int)
-        or elapsed < 0
-    ):
+    if isinstance(elapsed, bool) or not isinstance(elapsed, int) or elapsed < 0:
         raise ValueError(
             "expected world time requires positive day, hour 0..23, "
             "minute 0..59, and nonnegative elapsed_minutes"
         )
-    derived = (day - 1) * 1440 + hour * 60 + minute
-    if elapsed != derived:
-        raise ValueError(
-            "expected world time elapsed_minutes does not match day/hour/minute"
+    try:
+        canonical = anchor_world_time(
+            game_time_from_ticks(),
+            day=day,
+            hour=hour,
+            minute=minute,
         )
+    except ValueError as exc:
+        raise ValueError(
+            "expected world time requires positive day, hour 0..23, "
+            "minute 0..59, and nonnegative elapsed_minutes"
+        ) from exc
+    if elapsed != canonical["elapsed_minutes"]:
+        raise ValueError("expected world time elapsed_minutes does not match day/hour/minute")
     return {
         "day": day,
         "hour": hour,
@@ -2007,13 +1996,22 @@ def _project_world_time(clock: dict[str, Any], elapsed_minutes: int) -> dict[str
         raise ValueError("campaign clock must contain integer elapsed_minutes")
     if elapsed_minutes < 1:
         raise ValueError("elapsed_minutes must be positive")
-    projected = current_elapsed + elapsed_minutes
-    return {
-        "day": projected // 1440 + 1,
-        "hour": (projected % 1440) // 60,
-        "minute": projected % 60,
-        "elapsed_minutes": projected,
-    }
+    round_remainder = clock.get("round_remainder", 0)
+    if (
+        isinstance(round_remainder, bool)
+        or not isinstance(round_remainder, int)
+        or not 0 <= round_remainder < TICKS_PER_MINUTE
+    ):
+        raise ValueError("campaign clock round_remainder is invalid")
+    projected = project_world_time(
+        game_time_from_ticks(
+            current_elapsed * TICKS_PER_MINUTE
+            + round_remainder
+            + game_time_ticks("minute", elapsed_minutes)
+        ),
+        calendar_offset_ticks=0,
+    )
+    return {key: int(projected[key]) for key in ("day", "hour", "minute", "elapsed_minutes")}
 
 
 def _settled_event_agent_ruling(value: Any) -> dict[str, Any] | None:
@@ -2062,18 +2060,14 @@ async def _register_replacement(
         )
     ):
         raise ValueError(
-            "register-replacement requires predecessor, replacement, scene, "
-            "location, and summary"
+            "register-replacement requires predecessor, replacement, scene, location, and summary"
         )
     has_source_evidence = source_ref is not None or bool(source_excerpt.strip())
     if normalized_agent_ruling is not None and has_source_evidence:
         raise ValueError(
-            "replacement arrival must use either exact source evidence or an Agent "
-            "ruling, not both"
+            "replacement arrival must use either exact source evidence or an Agent ruling, not both"
         )
-    if normalized_agent_ruling is None and (
-        source_ref is None or not source_excerpt.strip()
-    ):
+    if normalized_agent_ruling is None and (source_ref is None or not source_excerpt.strip()):
         raise ValueError(
             "replacement arrival requires exact source evidence or a settled Agent ruling"
         )
@@ -2260,9 +2254,7 @@ async def _register_replacement(
                         "replacement_actor_id": replacement_id,
                         "handoff_knowledge": handoff,
                         "source_excerpt": (
-                            source_excerpt.strip()
-                            if normalized_agent_ruling is None
-                            else ""
+                            source_excerpt.strip() if normalized_agent_ruling is None else ""
                         ),
                         "source_ref": exact_ref,
                         "agent_ruling": normalized_agent_ruling,
@@ -2720,9 +2712,7 @@ async def _resolve_check(
         source_ref,
         excerpt=source_excerpt,
     )
-    location_keys = {
-        str(item.get("key") or "") for item in _scene_locations(occurrence_scene)
-    }
+    location_keys = {str(item.get("key") or "") for item in _scene_locations(occurrence_scene)}
     if location_key not in location_keys:
         raise ValueError("resolve-check location is not present in the scene atlas")
     actor = await client.domain(
@@ -2986,9 +2976,7 @@ async def _resolve_contest(
         source_ref,
         excerpt=source_excerpt,
     )
-    location_keys = {
-        str(item.get("key") or "") for item in _scene_locations(occurrence_scene)
-    }
+    location_keys = {str(item.get("key") or "") for item in _scene_locations(occurrence_scene)}
     if location_key not in location_keys:
         raise ValueError("resolve-contest location is not present in the scene atlas")
     source_actor = await client.domain(
@@ -3238,13 +3226,9 @@ async def _record_event(
     has_source_ref = source_ref is not None
     has_source_excerpt = bool(source_excerpt.strip())
     if has_source_ref != has_source_excerpt:
-        raise ValueError(
-            "record-event source evidence requires both exact source ref and excerpt"
-        )
+        raise ValueError("record-event source evidence requires both exact source ref and excerpt")
     if not has_source_ref and normalized_agent_ruling is None:
-        raise ValueError(
-            "record-event requires exact source evidence or a settled Agent ruling"
-        )
+        raise ValueError("record-event requires exact source evidence or a settled Agent ruling")
     if not has_source_ref and source_scene_id.strip():
         raise ValueError("record-event source scene requires exact source evidence")
     if bool(knowledge.strip()) != bool(knowledge_actor_ids):
@@ -3301,9 +3285,7 @@ async def _record_event(
         "summary": summary.strip(),
         "source_ref": exact_ref,
         **(
-            {"agent_ruling": normalized_agent_ruling}
-            if normalized_agent_ruling is not None
-            else {}
+            {"agent_ruling": normalized_agent_ruling} if normalized_agent_ruling is not None else {}
         ),
     }
     state["full_playthrough_events"] = events
@@ -3448,9 +3430,7 @@ async def _prepare_narrative_npc(
         identity_agent_ruling,
         label="narrative NPC identity",
         ruling_kinds=frozenset({"agent_dm_adjudication"}),
-        extra_fields=frozenset(
-            {"assigned_name", "source_identity", "instance_key"}
-        ),
+        extra_fields=frozenset({"assigned_name", "source_identity", "instance_key"}),
     )
     if initial_phase != "play":
         raise RuntimeError("prepare-narrative-npc requires the play phase")
@@ -3469,9 +3449,7 @@ async def _prepare_narrative_npc(
         )
     if normalized_identity_agent_ruling is not None:
         if not normalized_instance_key:
-            raise ValueError(
-                "Agent-named narrative NPCs require a source instance key"
-            )
+            raise ValueError("Agent-named narrative NPCs require a source instance key")
         expected_identity_fields = {
             "assigned_name": normalized_name,
             "source_identity": normalized_source_identity,
@@ -3484,8 +3462,7 @@ async def _prepare_narrative_npc(
         )
         if mismatched:
             raise ValueError(
-                "narrative NPC identity Agent ruling must match: "
-                + ", ".join(mismatched)
+                "narrative NPC identity Agent ruling must match: " + ", ".join(mismatched)
             )
     elif normalized_instance_key and normalized_name != (
         f"{normalized_source_identity} [{normalized_instance_key}]"
@@ -3560,11 +3537,7 @@ async def _prepare_narrative_npc(
                         else {}
                     ),
                     **(
-                        {
-                            "identity_agent_ruling": (
-                                normalized_identity_agent_ruling
-                            )
-                        }
+                        {"identity_agent_ruling": (normalized_identity_agent_ruling)}
                         if normalized_identity_agent_ruling is not None
                         else {}
                     ),
@@ -3651,12 +3624,11 @@ async def _prepare_narrative_npc(
         ),
         None,
     )
-    if existing_manifest_npc is not None and str(
-        existing_manifest_npc.get("name") or ""
-    ) != normalized_name:
-        raise RuntimeError(
-            "registered narrative NPC manifest name does not match its actor"
-        )
+    if (
+        existing_manifest_npc is not None
+        and str(existing_manifest_npc.get("name") or "") != normalized_name
+    ):
+        raise RuntimeError("registered narrative NPC manifest name does not match its actor")
     source_note = (
         "Narrative-only source-bound actor; combat_statblock=not_imported; "
         f"module={exact_ref['module_id']}; scene={exact_ref['scene_id']}; "
@@ -3763,9 +3735,7 @@ async def _record_outcome(
             "record-outcome source evidence requires both exact source ref and excerpt"
         )
     if not has_source_ref and normalized_agent_ruling is None:
-        raise ValueError(
-            "record-outcome requires exact source evidence or a settled Agent ruling"
-        )
+        raise ValueError("record-outcome requires exact source evidence or a settled Agent ruling")
     if not has_source_ref and source_scene_id.strip():
         raise ValueError("record-outcome source scene requires exact source evidence")
     if bool(knowledge.strip()) != bool(knowledge_actor_ids):
@@ -3913,9 +3883,7 @@ async def _record_outcome(
         "summary": summary.strip(),
         "source_ref": exact_ref,
         **(
-            {"agent_ruling": normalized_agent_ruling}
-            if normalized_agent_ruling is not None
-            else {}
+            {"agent_ruling": normalized_agent_ruling} if normalized_agent_ruling is not None else {}
         ),
         "fact_keys": [str(item["fact_key"]) for item in normalized_facts],
     }
@@ -3967,9 +3935,7 @@ async def _record_outcome(
                         "scene_id": scene_id,
                         "source_scene_id": cited_scene_id,
                         "location_key": location_key,
-                        "source_excerpt": (
-                            source_excerpt.strip() if has_source_ref else ""
-                        ),
+                        "source_excerpt": (source_excerpt.strip() if has_source_ref else ""),
                         "source_ref": exact_ref,
                         "agent_ruling": normalized_agent_ruling,
                     },
@@ -4167,9 +4133,7 @@ async def _roll_source_table(
                 "progress": _scene_progress_percent(progress_before),
                 "state": state,
                 "current_location_key": location_key,
-                "expected_state_version": int(
-                    (progress_before or {}).get("state_version", 0) or 0
-                ),
+                "expected_state_version": int((progress_before or {}).get("state_version", 0) or 0),
                 "idempotency_key": _mutation_key(
                     run_id,
                     "source-roll-progress",
@@ -4999,9 +4963,7 @@ async def _short_rest(
         if member["natural_recovery"]:
             party_member["natural_recovery"] = member["natural_recovery"]
         if member["song_of_rest_source_actor_id"] is not None:
-            party_member["song_of_rest_source_actor_id"] = member[
-                "song_of_rest_source_actor_id"
-            ]
+            party_member["song_of_rest_source_actor_id"] = member["song_of_rest_source_actor_id"]
         if member.get("attune_item_id"):
             party_member["attune_item_id"] = member["attune_item_id"]
             party_member["attunement_prerequisite_confirmed"] = True
@@ -5062,8 +5024,7 @@ async def _short_rest(
         campaign_revision_row = revision_by_entity[("campaign", campaign_id)]
         if (
             campaign_revision_row.get("after_revision") != campaign.get("revision")
-            or campaign_revision_row.get("before_revision")
-            != campaign.get("revision") - 1
+            or campaign_revision_row.get("before_revision") != campaign.get("revision") - 1
         ):
             raise RuntimeError("short-rest recovery campaign revisions do not match")
         for (entity_type, entity_id), revision_row in revision_by_entity.items():
@@ -5096,9 +5057,7 @@ async def _short_rest(
                     "hit_dice_spends": member["hit_dice_spends"],
                     "arcane_recovery": member["arcane_recovery"],
                     "natural_recovery": member["natural_recovery"],
-                    "song_of_rest_source_actor_id": member[
-                        "song_of_rest_source_actor_id"
-                    ],
+                    "song_of_rest_source_actor_id": member["song_of_rest_source_actor_id"],
                     "attune_item_id": member.get("attune_item_id"),
                     "attunement_prerequisite_confirmed": (
                         True if member.get("attune_item_id") else None
@@ -5185,8 +5144,7 @@ async def _short_rest(
         "rest_recovered": rest_recovered,
         "clock_advanced": rested,
         "rests": [
-            dict(dict(rested.get("recovered") or {}).get(actor_id) or {})
-            for actor_id in actor_ids
+            dict(dict(rested.get("recovered") or {}).get(actor_id) or {}) for actor_id in actor_ids
         ],
         "party_rest": rested,
         "continuity": committed,
@@ -5458,8 +5416,7 @@ async def _cast_source_spell(
                 "source_item_id": normalized_item_id,
             },
             retry_hint=(
-                "Resolve the typed pre-commit ruling and retry at the current "
-                "character revision."
+                "Resolve the typed pre-commit ruling and retry at the current character revision."
             ),
         )
     if acted.get("status") not in {"committed", "pending_ruling"}:
@@ -5691,10 +5648,7 @@ async def _cast_healing_spell(
             ),
         },
     )
-    if (
-        cast.get("status") == "pending_ruling"
-        and not dict(cast.get("result") or {}).get("payment")
-    ):
+    if cast.get("status") == "pending_ruling" and not dict(cast.get("result") or {}).get("payment"):
         raise_for_pending_ruling(
             cast,
             operation="character_action.cast_healing_spell",
@@ -5704,8 +5658,7 @@ async def _cast_healing_spell(
                 "spell_id": normalized_spell_id,
             },
             retry_hint=(
-                "Resolve the typed pre-commit ruling and retry before rolling "
-                "or applying healing."
+                "Resolve the typed pre-commit ruling and retry before rolling or applying healing."
             ),
         )
     if cast.get("status") not in {"committed", "pending_ruling"}:
@@ -6061,9 +6014,7 @@ async def _long_rest(
                 or revision_row.get("after_revision") != current_revision
                 or revision_row.get("before_revision") != current_revision - 1
             ):
-                raise RuntimeError(
-                    "long-rest recovery incidental actor revisions do not match"
-                )
+                raise RuntimeError("long-rest recovery incidental actor revisions do not match")
         recovery_members = []
         for member in normalized:
             actor = actor_by_id[member["actor_id"]]
@@ -6187,6 +6138,7 @@ async def _advance_time(
     knowledge_actor_ids: list[str],
     defer_checkpoint: bool = False,
     expected_after: dict[str, Any] | None = None,
+    expected_after_ticks: int | None = None,
     prerequisite_scene_id: str = "",
     prerequisite_outcome_id: str = "",
     prerequisite_actor_ids: list[str] | None = None,
@@ -6200,14 +6152,19 @@ async def _advance_time(
         or count <= 0
         or not normalized_reason
     ):
-        raise ValueError(
-            "advance-time requires scene, positive count, period, and reason"
-        )
+        raise ValueError("advance-time requires scene, positive count, period, and reason")
     normalized_expected_after = _normalize_expected_world_time(expected_after)
-    if normalized_expected_after is None:
+    if expected_after_ticks is not None and (
+        isinstance(expected_after_ticks, bool)
+        or not isinstance(expected_after_ticks, int)
+        or expected_after_ticks < 0
+    ):
+        raise ValueError("advance-time expected tick target must be nonnegative")
+    if normalized_expected_after is None and expected_after_ticks is None:
         raise ValueError(
-            "advance-time requires --time-expected-after-json so every elapsed "
-            "interval is bound to one machine-verifiable destination"
+            "advance-time requires --time-expected-after-ticks or legacy "
+            "--time-expected-after-json so every elapsed interval is bound to "
+            "one machine-verifiable destination"
         )
     normalized_agent_ruling = _settled_time_agent_ruling(
         agent_ruling,
@@ -6217,9 +6174,7 @@ async def _advance_time(
     has_source_ref = source_ref is not None
     has_source_excerpt = bool(source_excerpt.strip())
     if has_source_ref != has_source_excerpt:
-        raise ValueError(
-            "advance-time source evidence requires both exact source ref and excerpt"
-        )
+        raise ValueError("advance-time source evidence requires both exact source ref and excerpt")
     if not has_source_ref and normalized_agent_ruling is None:
         raise ValueError(
             "advance-time requires exact source evidence or a settled Agent duration ruling"
@@ -6242,9 +6197,7 @@ async def _advance_time(
         },
     )
     exact_ref = (
-        _validate_source_ref(scene, source_ref, excerpt=source_excerpt)
-        if has_source_ref
-        else None
+        _validate_source_ref(scene, source_ref, excerpt=source_excerpt) if has_source_ref else None
     )
     actors = []
     for actor_id in knowledge_actor_ids:
@@ -6272,14 +6225,13 @@ async def _advance_time(
         legacy_elapsed = before.get("elapsed_minutes")
         if isinstance(legacy_elapsed, bool) or not isinstance(legacy_elapsed, int):
             raise RuntimeError("legacy campaign clock has no canonical elapsed position")
-        before_game_time = {
-            "schema_version": 1,
-            "tick_seconds": 6,
-            "elapsed_ticks": legacy_elapsed * 10,
-        }
-    expected_minutes = count * {"minute": 1, "hour": 60, "day": 1440}[period]
+        before_game_time = game_time_from_ticks(legacy_elapsed * TICKS_PER_MINUTE)
+    expected_tick_delta = game_time_ticks(period, count)
+    expected_minutes = expected_tick_delta // TICKS_PER_MINUTE
+    current_ticks = before_game_time.get("elapsed_ticks")
+    if isinstance(current_ticks, bool) or not isinstance(current_ticks, int):
+        raise RuntimeError("campaign has no canonical game-time position")
     projected_before = before
-    clock_recovery = False
     if not projected_before and isinstance(start_clock, dict):
         start_day = start_clock.get("day")
         start_hour = start_clock.get("hour", 0)
@@ -6297,41 +6249,53 @@ async def _advance_time(
         ):
             raise ValueError("advance-time start clock is invalid")
         projected_before = {
-            "elapsed_minutes": (
-                (start_day - 1) * 1440 + start_hour * 60 + start_minute
-            )
+            "elapsed_minutes": ((start_day - 1) * 1440 + start_hour * 60 + start_minute)
         }
-    if not projected_before:
+    if normalized_expected_after is not None and not projected_before:
         raise ValueError(
-            "advance-time expected target requires an existing or supplied start clock"
+            "advance-time calendar target requires an existing or supplied start clock"
         )
-    current_projection = {
-        key: projected_before.get(key)
-        for key in ("day", "hour", "minute", "elapsed_minutes")
-    }
-    clock_recovery = current_projection == normalized_expected_after
+    current_projection = (
+        {key: projected_before.get(key) for key in ("day", "hour", "minute", "elapsed_minutes")}
+        if projected_before
+        else None
+    )
+    legacy_calendar_recovery = (
+        normalized_expected_after is not None and current_projection == normalized_expected_after
+    )
+    if expected_after_ticks is None:
+        expected_target_ticks = (
+            current_ticks if legacy_calendar_recovery else current_ticks + expected_tick_delta
+        )
+    else:
+        expected_target_ticks = expected_after_ticks
+    clock_recovery = current_ticks == expected_target_ticks
+    if not clock_recovery and current_ticks + expected_tick_delta != expected_target_ticks:
+        raise ValueError(
+            "advance-time duration does not reach expected tick target: "
+            f"computed {current_ticks + expected_tick_delta}, "
+            f"expected {expected_target_ticks}"
+        )
     if clock_recovery:
-        original_elapsed = normalized_expected_after["elapsed_minutes"] - expected_minutes
-        if original_elapsed < 0:
-            raise ValueError("advance-time recovery target predates the requested duration")
-        before = {
-            "schema_version": int(projected_before.get("schema_version", 1) or 1),
-            "day": original_elapsed // 1440 + 1,
-            "hour": (original_elapsed % 1440) // 60,
-            "minute": original_elapsed % 60,
-            "elapsed_minutes": original_elapsed,
-            "label": str(projected_before.get("label") or ""),
-        }
-        current_ticks = before_game_time.get("elapsed_ticks")
-        if isinstance(current_ticks, bool) or not isinstance(current_ticks, int):
-            raise RuntimeError("advance-time recovery has no canonical game-time position")
         before_game_time = {
             **before_game_time,
-            "elapsed_ticks": current_ticks - expected_minutes * 10,
+            "elapsed_ticks": current_ticks - expected_tick_delta,
         }
         if before_game_time["elapsed_ticks"] < 0:
             raise RuntimeError("advance-time recovery predates canonical game-time zero")
-    else:
+        if normalized_expected_after is not None:
+            original_elapsed = normalized_expected_after["elapsed_minutes"] - expected_minutes
+            if original_elapsed < 0:
+                raise ValueError("advance-time recovery target predates the requested duration")
+            before = {
+                "schema_version": int(projected_before.get("schema_version", 1) or 1),
+                "day": original_elapsed // 1440 + 1,
+                "hour": (original_elapsed % 1440) // 60,
+                "minute": original_elapsed % 60,
+                "elapsed_minutes": original_elapsed,
+                "label": str(projected_before.get("label") or ""),
+            }
+    elif normalized_expected_after is not None:
         projected_after = _project_world_time(projected_before, expected_minutes)
         if projected_after != normalized_expected_after:
             raise ValueError(
@@ -6341,11 +6305,7 @@ async def _advance_time(
                 f"elapsed {projected_after['elapsed_minutes']}"
             )
     clock_set = None
-    if not before:
-        if not isinstance(start_clock, dict):
-            raise ValueError(
-                "advance-time requires --time-start-clock-json when the clock is unset"
-            )
+    if not before and isinstance(start_clock, dict):
         clock_set = await client.domain(
             "campaign_change",
             {
@@ -6363,14 +6323,17 @@ async def _advance_time(
             },
         )
         before = deepcopy(dict(clock_set.get("world_time") or {}))
-    elif start_clock is not None:
+    elif before and start_clock is not None:
         raise ValueError("advance-time start clock must be omitted after the clock is set")
     campaign = await _campaign(client, campaign_id)
     advance_payload: dict[str, Any] = {
         "period": period,
         "count": count,
-        "expected_world_time": normalized_expected_after,
     }
+    if expected_after_ticks is not None:
+        advance_payload["expected_elapsed_ticks"] = expected_target_ticks
+    if normalized_expected_after is not None:
+        advance_payload["expected_world_time"] = normalized_expected_after
     advanced = await client.domain(
         "campaign_change",
         {
@@ -6402,12 +6365,7 @@ async def _advance_time(
         if str(receipt.get("branch_id") or "") != branch_id:
             raise RuntimeError("clock recovery receipt is from another branch")
         expected_request_hash = _idempotency_request_hash(
-            {
-                "period": period,
-                "count": count,
-                "branch_id": branch_id,
-                "expected_world_time": normalized_expected_after,
-            }
+            {**advance_payload, "branch_id": branch_id}
         )
         if receipt.get("request_hash") != expected_request_hash:
             raise RuntimeError("clock recovery receipt request does not match")
@@ -6431,20 +6389,26 @@ async def _advance_time(
             or after_revision != before_revision + 1
         ):
             raise RuntimeError("clock recovery receipt campaign revisions are invalid")
-        current_clock = deepcopy(
-            dict(dict(campaign.get("state") or {}).get("world_time") or {})
-        )
-        if {
-            key: current_clock.get(key)
-            for key in ("day", "hour", "minute", "elapsed_minutes")
-        } != normalized_expected_after:
-            raise RuntimeError("clock recovery current state does not match the exact target")
+        current_clock = deepcopy(dict(dict(campaign.get("state") or {}).get("world_time") or {}))
+        current_game_time = deepcopy(dict(dict(campaign.get("state") or {}).get("game_time") or {}))
+        if not current_game_time and current_clock:
+            current_game_time = game_time_from_ticks(
+                int(current_clock["elapsed_minutes"]) * TICKS_PER_MINUTE
+            )
+        if current_game_time.get("elapsed_ticks") != expected_target_ticks:
+            raise RuntimeError("clock recovery current game time does not match the exact target")
+        if (
+            normalized_expected_after is not None
+            and {
+                key: current_clock.get(key) for key in ("day", "hour", "minute", "elapsed_minutes")
+            }
+            != normalized_expected_after
+        ):
+            raise RuntimeError("clock recovery current calendar does not match the exact target")
         advanced = {
             **advanced,
-            "game_time": deepcopy(
-                dict(dict(campaign.get("state") or {}).get("game_time") or {})
-            ),
-            "world_time": current_clock,
+            "game_time": current_game_time,
+            "world_time": current_clock or None,
             "campaign_revision": after_revision,
             "recovery_receipt": receipt,
         }
@@ -6455,18 +6419,16 @@ async def _advance_time(
     after = deepcopy(dict(advanced.get("world_time") or {}))
     after_game_time = deepcopy(dict(advanced.get("game_time") or {}))
     if not after_game_time and migrated_legacy_game_time:
-        after_game_time = {
-            **before_game_time,
-            "elapsed_ticks": int(before_game_time["elapsed_ticks"])
-            + expected_minutes * 10,
-        }
-    if (
-        not before
-        or not after
-        or int(after.get("elapsed_minutes", 0) or 0) - int(before.get("elapsed_minutes", 0) or 0)
+        after_game_time = game_time_from_ticks(
+            int(before_game_time["elapsed_ticks"]) + expected_tick_delta
+        )
+    if bool(before) != bool(after):
+        raise RuntimeError("campaign calendar anchor changed during time advancement")
+    if before and (
+        int(after.get("elapsed_minutes", 0) or 0) - int(before.get("elapsed_minutes", 0) or 0)
         != expected_minutes
     ):
-        raise RuntimeError("campaign clock did not advance by the requested duration")
+        raise RuntimeError("campaign calendar did not advance by the requested duration")
     before_ticks = before_game_time.get("elapsed_ticks")
     after_ticks = after_game_time.get("elapsed_ticks")
     if (
@@ -6474,14 +6436,16 @@ async def _advance_time(
         or not isinstance(before_ticks, int)
         or isinstance(after_ticks, bool)
         or not isinstance(after_ticks, int)
-        or after_ticks - before_ticks != expected_minutes * 10
+        or after_ticks - before_ticks != expected_tick_delta
+        or after_ticks != expected_target_ticks
     ):
         raise RuntimeError("canonical game time did not advance by the requested duration")
-    if {
-        key: int(after.get(key, -1))
-        for key in ("day", "hour", "minute", "elapsed_minutes")
-    } != normalized_expected_after:
-        raise RuntimeError("campaign clock response does not match expected target")
+    if (
+        normalized_expected_after is not None
+        and {key: int(after.get(key, -1)) for key in ("day", "hour", "minute", "elapsed_minutes")}
+        != normalized_expected_after
+    ):
+        raise RuntimeError("campaign calendar response does not match expected target")
     continuity_payload = {
         "event": {
             "summary": normalized_reason,
@@ -6493,7 +6457,8 @@ async def _advance_time(
                 "period": period,
                 "count": count,
                 "elapsed_minutes": expected_minutes,
-                "elapsed_ticks": expected_minutes * 10,
+                "elapsed_ticks": expected_tick_delta,
+                "expected_elapsed_ticks": expected_target_ticks,
                 "expected_world_time": normalized_expected_after,
                 "game_time_before": before_game_time,
                 "game_time_after": after_game_time,
@@ -6555,6 +6520,7 @@ async def _advance_time(
         "before": before,
         "advance": advanced,
         "after": after,
+        "expected_after_ticks": expected_target_ticks,
         "expected_after": normalized_expected_after,
         "knowledge_actor_ids": [str(actor["id"]) for actor in actors],
         "continuity": committed,
@@ -7402,9 +7368,7 @@ async def _pool_character_currency(
     if location_key not in {
         str(item.get("key") or "") for item in _scene_locations(occurrence_scene)
     }:
-        raise ValueError(
-            f"{action_name} location is not present in the occurrence scene atlas"
-        )
+        raise ValueError(f"{action_name} location is not present in the occurrence scene atlas")
 
     progress_rows = await client.domain(
         "module_query",
@@ -7435,9 +7399,7 @@ async def _pool_character_currency(
         if not isinstance(existing_pool, dict) or any(
             existing_pool.get(key) != value for key, value in pool_details.items()
         ):
-            raise ValueError(
-                f"{action_name} occurrence id already exists with different details"
-            )
+            raise ValueError(f"{action_name} occurrence id already exists with different details")
         if str(existing_pool.get("status") or "") == "completed":
             return {
                 "scene": {
@@ -7462,9 +7424,7 @@ async def _pool_character_currency(
             or not isinstance(existing_pool.get("expected_campaign_revision"), int)
             or not isinstance(existing_pool.get("expected_character_revision"), int)
         ):
-            raise RuntimeError(
-                f"{action_name} progress contains an invalid planned transfer"
-            )
+            raise RuntimeError(f"{action_name} progress contains an invalid planned transfer")
 
     actor = dict(
         _facade_value(
@@ -7508,12 +7468,9 @@ async def _pool_character_currency(
     else:
         planned_pool = deepcopy(existing_pool)
         progress_planned = progress_before
-        if (
-            int(planned_pool["expected_campaign_revision"])
-            == int(campaign["revision"]) + 1
-            and int(planned_pool["expected_character_revision"])
-            == int(actor["revision"])
-        ):
+        if int(planned_pool["expected_campaign_revision"]) == int(campaign["revision"]) + 1 and int(
+            planned_pool["expected_character_revision"]
+        ) == int(actor["revision"]):
             # Scene progress has its own state_version and does not mutate the
             # campaign revision. Recover plans written by the former +1
             # assumption before retrying the public atomic wallet transfer.
@@ -7537,10 +7494,7 @@ async def _pool_character_currency(
                     "idempotency_key": _mutation_key(
                         run_id,
                         f"{identity_label}-progress-rebase",
-                        (
-                            f"{pool_identity}:"
-                            f"c{campaign['revision']}:a{actor['revision']}"
-                        ),
+                        (f"{pool_identity}:c{campaign['revision']}:a{actor['revision']}"),
                     ),
                 },
             )
@@ -7636,9 +7590,7 @@ async def _pool_character_currency(
             "action": "commit",
             "payload": continuity_payload,
             "expected_revision": campaign["revision"],
-            "idempotency_key": _mutation_key(
-                run_id, f"{identity_label}-continuity", pool_identity
-            ),
+            "idempotency_key": _mutation_key(run_id, f"{identity_label}-continuity", pool_identity),
         },
     )
     synced = await _manifest_mutation(
@@ -8211,9 +8163,7 @@ async def _acquire_source_loot(
         item_kind = str(item.get("kind") or "").strip()
         if item_kind == "weapon":
             mechanics = item.get("mechanics")
-            if not isinstance(mechanics, dict) or not isinstance(
-                mechanics.get("proficient"), bool
-            ):
+            if not isinstance(mechanics, dict) or not isinstance(mechanics.get("proficient"), bool):
                 raise ValueError(
                     f"acquire-loot weapon item {index} requires explicit boolean "
                     "mechanics.proficient"
@@ -9243,10 +9193,11 @@ async def _configure_advancement(
 
 
 def _level_audit_source(source_ref: dict[str, Any]) -> str:
-    return (
-        f"module:{source_ref['module_id']}:scene:{source_ref['scene_id']}:"
-        f"chunk:{source_ref['chunk_id']}:pages:{source_ref['page_start']}-"
-        f"{source_ref['page_end']}:sha256:{source_ref['content_sha256']}"
+    return json.dumps(
+        source_ref,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
     )
 
 
@@ -9603,8 +9554,6 @@ async def _advance_level(
     )
     exact_ref = _validate_source_ref(scene, source_ref)
     audit_source = _level_audit_source(exact_ref)
-    if len(audit_source) + len(normalized_reason) + 2 > 300:
-        raise ValueError("level source reference and reason exceed the audited 300-character limit")
     actor = await client.domain(
         "character_query",
         {"view": "get", "payload": {"character_id": actor_id}},
@@ -9878,7 +9827,7 @@ async def _advance_level(
             "level spell selections do not satisfy the reported cantrip and leveled-spell "
             f"choices: expected {required_cantrips}/{required_leveled}, got "
             f"{selected_cantrips}/{selected_leveled}"
-    )
+        )
     applied_spells: list[str] = []
     reused_spells: list[str] = []
     for selection in spell_selections:
@@ -10160,17 +10109,26 @@ async def _refresh_module(
             "payload": {"module_id": old_module_id},
         },
     )
-    campaign = await _campaign(client, campaign_id)
-    active_modules = dict(
-        dict(dict(campaign.get("state") or {}).get("module_imports") or {}).get("active") or {}
+    imported_modules = await client.domain(
+        "module_query",
+        {
+            "campaign_id": campaign_id,
+            "view": "list",
+            "payload": {},
+        },
     )
-    current_source_key = next(
+    current_module = next(
         (
-            key
-            for key, item in active_modules.items()
-            if str(dict(item or {}).get("module_id") or "") == old_module_id
+            dict(item)
+            for item in imported_modules
+            if str(dict(item).get("id") or "") == old_module_id
         ),
-        "",
+        None,
+    )
+    if current_module is None:
+        raise ValueError("refresh-module current manifest module is not an active imported module")
+    current_source_key = str(
+        current_module.get("logical_source_key") or current_module.get("source_key") or ""
     )
     if source_key and current_source_key and source_key != current_source_key:
         raise ValueError(
@@ -10181,6 +10139,7 @@ async def _refresh_module(
         source_key = current_source_key
     if not source_key:
         raise ValueError("refresh-module could not identify the logical module source key")
+    campaign = await _campaign(client, campaign_id)
     resolved_source_path = source_path.expanduser().resolve()
     resolved_title = title.strip() or resolved_source_path.stem
     source_asset_sha256 = _file_sha256(resolved_source_path)
@@ -10520,9 +10479,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                         relationship=args.narrative_npc_relationship,
                         source_identity=args.narrative_npc_source_identity,
                         instance_key=args.narrative_npc_instance_key,
-                        identity_agent_ruling=(
-                            args.narrative_npc_identity_agent_ruling_json
-                        ),
+                        identity_agent_ruling=(args.narrative_npc_identity_agent_ruling_json),
                         defer_checkpoint=args.defer_checkpoint,
                     )
                 except Exception:
@@ -10661,6 +10618,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     knowledge_actor_ids=args.knowledge_actor_id,
                     defer_checkpoint=args.defer_checkpoint,
                     expected_after=args.time_expected_after_json,
+                    expected_after_ticks=args.time_expected_after_ticks,
                     prerequisite_scene_id=args.prerequisite_scene_id,
                     prerequisite_outcome_id=args.prerequisite_outcome_id,
                     prerequisite_actor_ids=args.prerequisite_actor_id,

@@ -5481,7 +5481,11 @@ async def _auto_run(
         "combat.map",
     )
     campaign = await _campaign(client, args.campaign_id)
-    if str(dict(campaign.get("state") or {}).get("game_phase") or "") != "combat":
+    if not bool(
+        dict(dict(campaign.get("state") or {}).get("combat") or {}).get(
+            "active", False
+        )
+    ):
         raise RuntimeError("auto-run requires an active combat")
     branch = await _current_branch(client, args.campaign_id)
     _validate_source_flee_configuration(

@@ -21,7 +21,10 @@ Use `memory_change` only for administrative fact maintenance:
 - `supersede` keeps history while removing the fact from default retrieval.
 
 Character-sheet `notes.memories` is a deprecated import source, not an
-authoritative campaign-memory store.
+authoritative campaign-memory store. Public
+`character_state_change` deliberately has no `memory_add` or `memory_resolve`
+action; use stable-keyed `actor_knowledge_change(add/revise)` for subjective
+knowledge and `memory_change` for objective facts or an atomic continuity event.
 
 ## Provenance and reads
 

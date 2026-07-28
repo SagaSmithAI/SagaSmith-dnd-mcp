@@ -88,13 +88,10 @@ def test_module_stage_identity_changes_with_source_or_normalizer() -> None:
     assert v13 != v14
     assert v14 != parser_v12
     assert parser_v12 != changed_source
-    assert (
-        parser_v12
-        == _module_import_identity(
-            **common,
-            normalizer="sagasmith-core/pdf-layout-v14",
-            parser="dnd5e-v12",
-        )
+    assert parser_v12 == _module_import_identity(
+        **common,
+        normalizer="sagasmith-core/pdf-layout-v14",
+        parser="dnd5e-v12",
     )
 
 
@@ -394,7 +391,7 @@ def test_playthrough_manifest_builder_preserves_unknown_party_size_review() -> N
                     "page_start": 1,
                     "page_end": 1,
                     "heading_path": ["Introduction"],
-                    "chunk_content_sha256": "b" * 64,
+                    "content_sha256": "b" * 64,
                 }
             ],
         },
@@ -415,9 +412,7 @@ def test_playthrough_manifest_builder_preserves_unknown_party_size_review() -> N
 
 
 def test_corpus_source_refs_resolve_to_one_exact_managed_chunk() -> None:
-    content = (
-        "Characters begin at 1st level. The ideal party size is four characters."
-    )
+    content = "Characters begin at 1st level. The ideal party size is four characters."
     content_sha256 = hashlib.sha256(content.encode("utf-8")).hexdigest()
     line = {
         "id": "tyranny-of-dragons",
@@ -430,7 +425,7 @@ def test_corpus_source_refs_resolve_to_one_exact_managed_chunk() -> None:
                     "page_start": 6,
                     "page_end": 6,
                     "heading_path": ["Front Matter", "Introduction"],
-                    "chunk_content_sha256": content_sha256,
+                    "content_sha256": content_sha256,
                 }
             ]
         },
@@ -517,7 +512,7 @@ def test_corpus_source_ref_resolution_fails_closed(
                     "page_start": 6,
                     "page_end": 6,
                     "heading_path": ["Introduction"],
-                    "chunk_content_sha256": content_sha256,
+                    "content_sha256": content_sha256,
                 }
             ]
         },

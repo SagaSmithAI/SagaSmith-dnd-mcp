@@ -83,7 +83,7 @@
               "Front Matter",
               "RUNNING THE ADVENTURE"
             ],
-            "chunk_content_sha256": "2252e193cfddc4c0141da1964f3c14e744309b31824b7ecdf0622cc8b3abb325"
+            "content_sha256": "2252e193cfddc4c0141da1964f3c14e744309b31824b7ecdf0622cc8b3abb325"
           },
           {
             "purpose": "included_character_applicability",
@@ -96,7 +96,7 @@
               "THE FORGOTTEN REALMS",
               "ROLEPLAYING AND INSPIRATION"
             ],
-            "chunk_content_sha256": "d660f9a6a25e98b854950a9210b03f7a356ae23ddf245d0a7a71f5dfb9ab1585"
+            "content_sha256": "d660f9a6a25e98b854950a9210b03f7a356ae23ddf245d0a7a71f5dfb9ab1585"
           }
         ]
       }
@@ -188,7 +188,7 @@
               "INTRODUCTION",
               "ELCOME TO WATERDEEP, THE CROWN OF"
             ],
-            "chunk_content_sha256": "b6bcf6ceabd4002bb4a6755437c702b8fd168013defc038e9ad7722bf08c3b9d"
+            "content_sha256": "b6bcf6ceabd4002bb4a6755437c702b8fd168013defc038e9ad7722bf08c3b9d"
           },
           {
             "purpose": "advancement",
@@ -200,7 +200,7 @@
               "Front Matter",
               "CHARACTER ADVANCEMENT"
             ],
-            "chunk_content_sha256": "433aec7137cb9a1c9799fb31b72e6a7fa358a06f8a8847d7d65d7895cb06678c"
+            "content_sha256": "433aec7137cb9a1c9799fb31b72e6a7fa358a06f8a8847d7d65d7895cb06678c"
           }
         ],
         "review_queries": [
@@ -293,7 +293,7 @@
               "Front Matter",
               "Introduction"
             ],
-            "chunk_content_sha256": "dfc01f523a4b310b0e9934a6c35a7fa794f7c041839a48e0a243e5701738f88e"
+            "content_sha256": "dfc01f523a4b310b0e9934a6c35a7fa794f7c041839a48e0a243e5701738f88e"
           },
           {
             "purpose": "rise_party_size_and_level_span",
@@ -305,7 +305,7 @@
               "Front Matter",
               "Tyanny of Dragons"
             ],
-            "chunk_content_sha256": "1315f5f0c44a3fd88567566be8d572479e4ae1adbf20a9ff724a40836d9171ce"
+            "content_sha256": "1315f5f0c44a3fd88567566be8d572479e4ae1adbf20a9ff724a40836d9171ce"
           },
           {
             "purpose": "rise_advancement",
@@ -318,7 +318,7 @@
               "Outline of Episodes",
               "advancement"
             ],
-            "chunk_content_sha256": "9318d3c251a126a7c7b1a79cf9d12d5947a70a22d8d2e881894a97010450f5ef"
+            "content_sha256": "9318d3c251a126a7c7b1a79cf9d12d5947a70a22d8d2e881894a97010450f5ef"
           }
         ]
       }
@@ -459,7 +459,7 @@
               "INTRODUCTION",
               "OU ARE ABOUT TO EMBARK ON A GREAT"
             ],
-            "chunk_content_sha256": "b20ba08f05b6c5cf6493cfcc7beebd791b2a92782d367a3099750fb51a082630"
+            "content_sha256": "b20ba08f05b6c5cf6493cfcc7beebd791b2a92782d367a3099750fb51a082630"
           },
           {
             "purpose": "advancement",
@@ -474,7 +474,7 @@
               "ADVENTURE SYNOPSIS",
               "CHARACTER ADVANCEMENT"
             ],
-            "chunk_content_sha256": "ee3d103104d5711de398ed9cb58f99ccfe9e6fe77aaf027105cda7b9270ec19c"
+            "content_sha256": "ee3d103104d5711de398ed9cb58f99ccfe9e6fe77aaf027105cda7b9270ec19c"
           }
         ]
       }
@@ -536,7 +536,7 @@
               "INTRODUCTION",
               "jungles of Xen'drik on Eberron, or a comparable setting"
             ],
-            "chunk_content_sha256": "a23209c0f818edadc59be38300079d0fe925adb8132715e8b9a10bcde526b331"
+            "content_sha256": "a23209c0f818edadc59be38300079d0fe925adb8132715e8b9a10bcde526b331"
           },
           {
             "purpose": "advancement",
@@ -550,7 +550,7 @@
               "RUNNING THE ADVENTURE",
               "CHARACTER ADVANCEMENT"
             ],
-            "chunk_content_sha256": "7e4a7453646a42ad306c97418c21167ce48a91834e4e8a5fd6cfd44e544a7f29"
+            "content_sha256": "7e4a7453646a42ad306c97418c21167ce48a91834e4e8a5fd6cfd44e544a7f29"
           }
         ]
       }

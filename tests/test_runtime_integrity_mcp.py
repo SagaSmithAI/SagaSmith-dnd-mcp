@@ -14,7 +14,7 @@ from sagasmith_dnd_mcp.config import McpConfig
 from sagasmith_dnd_mcp.server import create_server
 
 
-def test_committed_write_recovers_after_response_receipt_crash(
+def test_response_receipt_failure_rolls_back_the_state_write(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -45,27 +45,56 @@ def test_committed_write_recovers_after_response_receipt_crash(
             "expected_revision": campaign["revision"],
             "idempotency_key": "phase-after-commit",
         }
-        original_remember = IdempotencyService.remember
+        original_remember = IdempotencyService.remember_write_in_session
         failed = False
 
-        def fail_after_commit(self, scope, key, payload, response, **kwargs):
+        def fail_in_transaction(
+            self,
+            session,
+            *,
+            campaign_id,
+            key,
+            write,
+            result,
+            mutation_group_id=None,
+        ):
             nonlocal failed
             if key == "phase-after-commit" and not failed:
                 failed = True
-                raise RuntimeError("simulated response receipt crash")
-            return original_remember(self, scope, key, payload, response, **kwargs)
+                raise RuntimeError("simulated atomic receipt failure")
+            return original_remember(
+                self,
+                session,
+                campaign_id=campaign_id,
+                key=key,
+                write=write,
+                result=result,
+                mutation_group_id=mutation_group_id,
+            )
 
-        monkeypatch.setattr(IdempotencyService, "remember", fail_after_commit)
-        with pytest.raises(ToolError, match="simulated response receipt crash"):
+        monkeypatch.setattr(
+            IdempotencyService,
+            "remember_write_in_session",
+            fail_in_transaction,
+        )
+        with pytest.raises(ToolError, match="simulated atomic receipt failure"):
             await call(server, "game_phase_set", arguments)
-        monkeypatch.setattr(IdempotencyService, "remember", original_remember)
+        unchanged = await call(
+            server,
+            "campaign_get",
+            {"campaign_id": campaign["id"]},
+        )
+        assert unchanged["revision"] == campaign["revision"]
+        assert unchanged["state"]["game_phase"] == "lobby"
+        monkeypatch.setattr(
+            IdempotencyService,
+            "remember_write_in_session",
+            original_remember,
+        )
 
+        committed = await call(server, "game_phase_set", arguments)
         replay = await call(server, "game_phase_set", arguments)
-        assert replay == {
-            "status": "committed",
-            "idempotency_replayed": True,
-            "response_recovery": "read_current_state",
-        }
+        assert replay == committed
         with pytest.raises(ToolError, match="different request"):
             await call(
                 server,

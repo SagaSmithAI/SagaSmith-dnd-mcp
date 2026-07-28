@@ -97,7 +97,7 @@ def _manifest_source_ref() -> dict:
         "page_start": 10,
         "page_end": 11,
         "heading_path": ["Goblin Den"],
-        "chunk_content_sha256": "b" * 64,
+        "content_sha256": "b" * 64,
         "module_id": "module-1",
         "scene_id": "scene-1",
         "chunk_id": "chunk-1",
@@ -2373,9 +2373,7 @@ def test_healing_spell_driver_returns_precommit_ruling_before_rolling() -> None:
                     "campaign_id": "campaign-1",
                     "revision": 7,
                     "sheet": deepcopy(
-                        caster_sheet
-                        if actor_id == "cleric"
-                        else default_character_sheet()
+                        caster_sheet if actor_id == "cleric" else default_character_sheet()
                     ),
                 }
             if tool_id == "character_action":
@@ -3212,11 +3210,7 @@ def test_source_table_roll_is_public_replayable_and_deferred() -> None:
     dice_call = next(args for tool, args in client.calls if tool == "dnd_dice_roll")
     assert dice_call["idempotency_key"].startswith("full-playthrough-source-roll-")
     stored_progress = deepcopy(
-        next(
-            args["state"]
-            for tool, args in client.calls
-            if tool == "module_set_progress"
-        )
+        next(args["state"] for tool, args in client.calls if tool == "module_set_progress")
     )
 
     class ResumeClient(Client):
@@ -3253,8 +3247,7 @@ def test_source_table_roll_is_public_replayable_and_deferred() -> None:
                 scene_id="scene-1",
                 location_key="triboar-trail",
                 source_excerpt=(
-                    "Check for encounters once during the day and once at night "
-                    "by rolling a d20."
+                    "Check for encounters once during the day and once at night by rolling a d20."
                 ),
                 source_ref=source_ref,
                 roll_id="travel-day-1-daylight",
@@ -3285,20 +3278,12 @@ def test_source_table_roll_is_public_replayable_and_deferred() -> None:
             defer_checkpoint=True,
         )
     )
-    second_dice_call = next(
-        args for tool, args in second_client.calls if tool == "dnd_dice_roll"
-    )
+    second_dice_call = next(args for tool, args in second_client.calls if tool == "dnd_dice_roll")
     assert dice_call["idempotency_key"] == second_dice_call["idempotency_key"]
     for tool_id in ("module_set_progress", "memory_change", "playthrough_manifest"):
-        first_key = next(
-            args["idempotency_key"]
-            for tool, args in client.calls
-            if tool == tool_id
-        )
+        first_key = next(args["idempotency_key"] for tool, args in client.calls if tool == tool_id)
         second_key = next(
-            args["idempotency_key"]
-            for tool, args in second_client.calls
-            if tool == tool_id
+            args["idempotency_key"] for tool, args in second_client.calls if tool == tool_id
         )
         assert first_key != second_key
 
@@ -3320,11 +3305,7 @@ def test_source_roll_sequence_keeps_independent_ids_and_one_final_checkpoint(
             "progress": {"state_version": index},
             "continuity": {
                 "event": {"id": f"event-{index}"},
-                **(
-                    {}
-                    if arguments["defer_checkpoint"]
-                    else {"snapshot": {"slot": 10}}
-                ),
+                **({} if arguments["defer_checkpoint"] else {"snapshot": {"slot": 10}}),
             },
             "sync": {"campaign_revision": 20 + index},
         }
@@ -3613,7 +3594,7 @@ def test_module_revision_remaps_exact_ending_source_and_scene_check() -> None:
             "module_id": "module-v1",
             "scene_id": "ending-v1",
             "chunk_id": "chunk-v1",
-            "chunk_content_sha256": "e" * 64,
+            "content_sha256": "e" * 64,
             "excerpt": "The characters should be 5th level.",
         }
     )
@@ -3744,6 +3725,15 @@ def test_module_refresh_validates_ingested_scene_mapping_before_activation(
 
         async def domain(self, tool_id: str, arguments: dict):
             if tool_id == "module_query":
+                if arguments["view"] == "list":
+                    return [
+                        {
+                            "id": "module-v1",
+                            "source_key": "module-key",
+                            "logical_source_key": "module-key",
+                            "active": True,
+                        }
+                    ]
                 module_id = arguments["payload"]["module_id"]
                 events.append(f"index:{module_id}")
                 return indexes[module_id]
@@ -3781,7 +3771,6 @@ def test_module_refresh_validates_ingested_scene_mapping_before_activation(
             "revision": 4,
             "state": {
                 "game_phase": "lobby",
-                "module_imports": {"active": {"module-key": {"module_id": "module-v1"}}},
             },
         }
 
@@ -3822,6 +3811,15 @@ def test_module_refresh_rejects_changing_the_logical_source_key(
 
         async def domain(self, tool_id: str, arguments: dict):
             assert tool_id == "module_query"
+            if arguments["view"] == "list":
+                return [
+                    {
+                        "id": "module-v1",
+                        "source_key": "stable-module-key",
+                        "logical_source_key": "stable-module-key",
+                        "active": True,
+                    }
+                ]
             return [{"scene_id": "scene-v1", "stable_key": "chapter-cave"}]
 
     async def manifest_get(client, campaign_id: str):
@@ -3831,16 +3829,7 @@ def test_module_refresh_rejects_changing_the_logical_source_key(
             }
         }
 
-    async def campaign_get(client, campaign_id: str):
-        return {
-            "revision": 4,
-            "state": {
-                "module_imports": {"active": {"stable-module-key": {"module_id": "module-v1"}}}
-            },
-        }
-
     monkeypatch.setattr(regression_playthrough, "_manifest_get", manifest_get)
-    monkeypatch.setattr(regression_playthrough, "_campaign", campaign_get)
 
     with pytest.raises(ValueError, match="source key must remain stable"):
         asyncio.run(
@@ -4200,9 +4189,7 @@ def test_replacement_join_preserves_predecessor_and_only_hands_off_explicit_know
                 event_payload = arguments["payload"]["event"]["payload"]
                 if evidence_kind == "source":
                     assert event_payload["source_ref"] == source_ref
-                    assert event_payload["source_excerpt"] == (
-                        "The local inn has rooms for rent."
-                    )
+                    assert event_payload["source_excerpt"] == ("The local inn has rooms for rent.")
                     assert event_payload["agent_ruling"] is None
                 else:
                     assert event_payload["source_ref"] is None
@@ -4273,9 +4260,7 @@ def test_replacement_join_preserves_predecessor_and_only_hands_off_explicit_know
                     "default_resolver": "agent",
                     "ruling_kind": "module_specific_procedure",
                     "decision": "The replacement can join at the inn.",
-                    "reason": (
-                        "The living party members can introduce the new adventurer."
-                    ),
+                    "reason": ("The living party members can introduce the new adventurer."),
                 }
                 if evidence_kind == "agent"
                 else None
@@ -4316,7 +4301,12 @@ def test_replacement_join_preserves_predecessor_and_only_hands_off_explicit_know
 
 def test_phase_and_idempotency_namespaces_are_stable() -> None:
     assert _campaign_phase({"state": {}}) == "lobby"
-    assert _campaign_phase({"state": {"game_phase": "combat"}}) == "combat"
+    assert (
+        _campaign_phase(
+            {"state": {"game_phase": "play", "combat": {"active": True}}}
+        )
+        == "combat"
+    )
     assert _phase_groups("lobby") == ("lobby.campaign",)
     assert _phase_groups("play") == ("play.scene_control", "play.scene")
     assert _phase_groups("combat") == ("combat.save", "combat.observe")
@@ -4483,7 +4473,7 @@ def test_level_advancement_exhausts_public_follow_up_and_restores_play(
             if tool_id == "character_state_change":
                 assert self.phase == "lobby"
                 assert arguments["action"] == "level_advance"
-                assert arguments["payload"]["source_ref"].endswith("sha256:abc123")
+                assert json.loads(arguments["payload"]["source_ref"]) == source_ref
                 self.actor["sheet"]["progression"]["level"] = 2
                 self.actor["sheet"]["progression"]["classes"][0]["level"] = 2
                 self.actor["revision"] += 1
@@ -6013,9 +6003,7 @@ def test_short_rest_advances_clock_and_applies_only_explicit_resource_choices() 
     assert result["rest_recovered"] is False
     identity = "hideout-short-rest-1"
     assert client.keys["clock_set"] == [_mutation_key("run-1", "short-rest-clock-set", identity)]
-    assert client.keys["party_rest"] == [
-        _mutation_key("run-1", "short-rest-party", identity)
-    ]
+    assert client.keys["party_rest"] == [_mutation_key("run-1", "short-rest-party", identity)]
     assert client.keys["continuity"] == [_mutation_key("run-1", "short-rest-continuity", identity)]
     assert client.keys["sync"] == [_mutation_key("run-1", "sync", f"short-rest-sync:{identity}")]
 
@@ -6032,6 +6020,11 @@ def test_short_rest_recovers_the_atomic_random_receipt_without_rerolling() -> No
         "rest_type": "short_rest",
         "duration_minutes": 60,
         "member_ids": ["fighter"],
+        "game_time": {
+            "schema_version": 1,
+            "tick_seconds": 6,
+            "elapsed_ticks": 600,
+        },
         "world_time": {
             "schema_version": 1,
             "day": 1,
@@ -6075,6 +6068,7 @@ def test_short_rest_recovers_the_atomic_random_receipt_without_rerolling() -> No
                     "revision": self.revision,
                     "state": {
                         "game_phase": "play",
+                        "game_time": response["game_time"],
                         "world_time": response["world_time"],
                     },
                 }
@@ -6087,9 +6081,9 @@ def test_short_rest_recovers_the_atomic_random_receipt_without_rerolling() -> No
                 sheet = default_character_sheet()
                 sheet["combat"]["rest_history"] = {
                     "last_rest_type": "short_rest",
-                    "last_rest_started_elapsed_minutes": 0,
-                    "last_rest_completed_elapsed_minutes": 60,
-                    "last_long_rest_elapsed_minutes": None,
+                    "last_rest_started_elapsed_ticks": 0,
+                    "last_rest_completed_elapsed_ticks": 600,
+                    "last_long_rest_elapsed_ticks": None,
                 }
                 return {
                     "id": "fighter",
@@ -6101,9 +6095,7 @@ def test_short_rest_recovers_the_atomic_random_receipt_without_rerolling() -> No
                 return [{"id": "branch-1", "is_current": True}]
             if tool_id == "campaign_change":
                 self.party_rest_calls += 1
-                raise RuntimeError(
-                    f"idempotency key reused with a different request: {rest_key}"
-                )
+                raise RuntimeError(f"idempotency key reused with a different request: {rest_key}")
             if tool_id == "state_revision":
                 normalized_request = {
                     "members": [
@@ -6314,9 +6306,7 @@ def test_time_advance_commits_evidence_clock_knowledge_and_snapshot(
             occurrence_id="travel-to-phandalin-1",
             scene_id="scene-1",
             source_excerpt=(
-                ""
-                if evidence_mode == "agent"
-                else "The characters arrive late in the day."
+                "" if evidence_mode == "agent" else "The characters arrive late in the day."
             ),
             source_ref=None if evidence_mode == "agent" else source_ref,
             period="hour",
@@ -6812,7 +6802,7 @@ def test_time_advance_requires_an_exact_target_before_public_calls() -> None:
         async def domain(self, tool_id: str, arguments: dict):
             raise AssertionError((tool_id, arguments))
 
-    with pytest.raises(ValueError, match="requires --time-expected-after-json"):
+    with pytest.raises(ValueError, match="requires --time-expected-after-ticks"):
         asyncio.run(
             _advance_time(
                 Client(),
@@ -6830,6 +6820,98 @@ def test_time_advance_requires_an_exact_target_before_public_calls() -> None:
                 knowledge_actor_ids=[],
             )
         )
+
+
+def test_time_advance_uses_canonical_ticks_without_a_calendar() -> None:
+    class Client:
+        revision = 1
+
+        async def core(self, tool_id: str, arguments: dict):
+            assert tool_id == "campaign_query"
+            return {
+                "result": {
+                    "id": "campaign-1",
+                    "revision": self.revision,
+                    "state": {
+                        "game_phase": "play",
+                        "game_time": {
+                            "schema_version": 1,
+                            "tick_seconds": 6,
+                            "elapsed_ticks": 0,
+                        },
+                    },
+                }
+            }
+
+        async def domain(self, tool_id: str, arguments: dict):
+            if tool_id == "module_query":
+                return {"module_id": "module-1", "scene_id": "scene-1"}
+            if tool_id == "branch_query":
+                return [{"id": "branch-1", "is_current": True}]
+            if tool_id == "campaign_change":
+                assert arguments["action"] == "clock_advance"
+                assert arguments["payload"] == {
+                    "period": "hour",
+                    "count": 1,
+                    "expected_elapsed_ticks": 600,
+                }
+                self.revision = 2
+                return {
+                    "status": "committed",
+                    "game_time": {
+                        "schema_version": 1,
+                        "tick_seconds": 6,
+                        "elapsed_ticks": 600,
+                    },
+                    "world_time": None,
+                    "campaign_revision": 2,
+                }
+            if tool_id == "memory_change":
+                assert arguments["expected_revision"] == 2
+                event_payload = arguments["payload"]["event"]["payload"]
+                assert event_payload["expected_elapsed_ticks"] == 600
+                assert event_payload["world_time_before"] == {}
+                assert event_payload["world_time_after"] == {}
+                self.revision = 3
+                return {"event": {"id": "event-1"}}
+            if tool_id == "playthrough_manifest":
+                self.revision = 4
+                return {
+                    "manifest": {"status": "in_progress"},
+                    "campaign_revision": 4,
+                }
+            raise AssertionError((tool_id, arguments))
+
+    result = asyncio.run(
+        _advance_time(
+            Client(),
+            campaign_id="campaign-1",
+            run_id="run-1",
+            occurrence_id="wait-one-hour",
+            scene_id="scene-1",
+            source_excerpt="",
+            source_ref=None,
+            period="hour",
+            count=1,
+            reason="The party waits for one hour.",
+            start_clock=None,
+            agent_ruling={
+                "default_resolver": "agent",
+                "ruling_kind": "agent_dm_adjudication",
+                "decision": "Advance the campaign clock by one hour.",
+                "reason": "The declared wait lasts exactly one hour.",
+                "period": "hour",
+                "count": 1,
+            },
+            knowledge_actor_ids=[],
+            expected_after_ticks=600,
+        )
+    )
+
+    assert result["before"] == {}
+    assert result["after"] == {}
+    assert result["expected_after_ticks"] == 600
+    assert result["advance"]["game_time"]["elapsed_ticks"] == 600
 
 
 def test_narrative_preconditions_require_a_complete_outcome_reference_before_calls() -> None:
@@ -7051,10 +7133,7 @@ def test_rest_world_time_precondition_ignores_labels_but_rejects_wrong_time() ->
         "minute": 0,
         "elapsed_minutes": 3900,
     }
-    assert (
-        regression_playthrough._validate_world_time_precondition(campaign, expected)
-        == expected
-    )
+    assert regression_playthrough._validate_world_time_precondition(campaign, expected) == expected
     with pytest.raises(ValueError, match="does not match the required precondition"):
         regression_playthrough._validate_world_time_precondition(
             campaign,
@@ -7422,11 +7501,7 @@ def test_source_spell_driver_returns_precommit_ruling_without_charge_assumption(
                             "charges to cast the legend lore spell."
                         )
                     ),
-                    "locations": (
-                        [{"key": "safe-room"}]
-                        if scene_id == "occurrence-scene"
-                        else []
-                    ),
+                    "locations": ([{"key": "safe-room"}] if scene_id == "occurrence-scene" else []),
                 }
             if tool_id == "character_query":
                 sheet = default_character_sheet()
@@ -7478,12 +7553,8 @@ def test_source_spell_driver_returns_precommit_ruling_without_charge_assumption(
             )
         )
 
-    assert raised.value.requirement["operation"] == (
-        "character_action.cast_source_spell"
-    )
-    assert raised.value.requirement["ruling"]["ruling_kind"] == (
-        "module_specific_procedure"
-    )
+    assert raised.value.requirement["operation"] == ("character_action.cast_source_spell")
+    assert raised.value.requirement["ruling"]["ruling_kind"] == ("module_specific_procedure")
 
 
 @pytest.mark.parametrize("evidence_mode", ["source", "agent", "source_and_agent"])
@@ -7563,9 +7634,7 @@ def test_dm_event_preserves_evidence_and_keeps_enemy_knowledge_private(
             occurrence_id="enemy-alerted-1",
             scene_id="scene-1",
             location_key="8-cave",
-            source_excerpt=(
-                "" if evidence_mode == "agent" else "A messenger warned the leader."
-            ),
+            source_excerpt=("" if evidence_mode == "agent" else "A messenger warned the leader."),
             source_ref=None if evidence_mode == "agent" else source_ref,
             event_type="enemy_alerted",
             summary="The leader received the warning.",
@@ -7599,6 +7668,11 @@ def test_long_rest_uses_atomic_party_rest_and_unique_occurrence_knowledge() -> N
                 "elapsed_minutes": 960,
                 "label": "Cragmaw Hideout",
             }
+            self.game_time = {
+                "schema_version": 1,
+                "tick_seconds": 6,
+                "elapsed_ticks": 14400,
+            }
 
         async def core(self, tool_id: str, arguments: dict):
             assert tool_id == "campaign_query"
@@ -7606,7 +7680,11 @@ def test_long_rest_uses_atomic_party_rest_and_unique_occurrence_knowledge() -> N
                 "result": {
                     "id": "campaign-1",
                     "revision": self.revision,
-                    "state": {"game_phase": "play", "world_time": self.world_time},
+                    "state": {
+                        "game_phase": "play",
+                        "game_time": self.game_time,
+                        "world_time": self.world_time,
+                    },
                 }
             }
 
@@ -7751,6 +7829,11 @@ def test_long_rest_recovers_committed_receipt_without_advancing_time_twice(
                 "elapsed_minutes": 1440,
                 "label": "Cragmaw Hideout",
             }
+            self.game_time = {
+                "schema_version": 1,
+                "tick_seconds": 6,
+                "elapsed_ticks": 14400,
+            }
 
         async def core(self, tool_id: str, arguments: dict):
             assert tool_id == "campaign_query"
@@ -7758,7 +7841,11 @@ def test_long_rest_recovers_committed_receipt_without_advancing_time_twice(
                 "result": {
                     "id": "campaign-1",
                     "revision": self.revision,
-                    "state": {"game_phase": "play", "world_time": self.world_time},
+                    "state": {
+                        "game_phase": "play",
+                        "game_time": self.game_time,
+                        "world_time": self.world_time,
+                    },
                 }
             }
 
@@ -7768,9 +7855,9 @@ def test_long_rest_recovers_committed_receipt_without_advancing_time_twice(
                 sheet = default_character_sheet()
                 sheet["combat"]["rest_history"] = {
                     "last_rest_type": "long_rest",
-                    "last_rest_started_elapsed_minutes": 960,
-                    "last_rest_completed_elapsed_minutes": 1440,
-                    "last_long_rest_elapsed_minutes": 1440,
+                    "last_rest_started_elapsed_ticks": 9600,
+                    "last_rest_completed_elapsed_ticks": 14400,
+                    "last_long_rest_elapsed_ticks": 14400,
                 }
                 if actor_id == "cleric":
                     sheet["spellcasting"]["preparation"] = {"selected_spell_ids": ["cure-wounds"]}
@@ -7860,6 +7947,7 @@ def test_long_rest_recovers_committed_receipt_without_advancing_time_twice(
                         "rest_type": "long_rest",
                         "duration_minutes": 480,
                         "member_ids": ["fighter", "cleric"],
+                        "game_time": self.game_time,
                         "world_time": self.world_time,
                         "campaign_revision": 6,
                         "preparations": {"cleric": {"selected_spell_ids": ["cure-wounds"]}},
