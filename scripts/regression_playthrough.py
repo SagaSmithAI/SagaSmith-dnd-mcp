@@ -7406,15 +7406,57 @@ async def _recover_stable_party(
     run_id: str,
     occurrence_id: str,
     actor_ids: list[str],
+    resting_members: list[dict[str, Any]] | None,
     knowledge_actor_ids: list[str],
     reason: str,
+    expected_start_clock: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     recovery_identity = _occurrence_identity(occurrence_id, "recover-stable")
     member_ids = list(dict.fromkeys(actor_ids))
     if not member_ids or len(member_ids) != len(actor_ids) or not reason.strip():
         raise ValueError("recover-stable requires unique actor ids and a non-empty --rest-reason")
+    resting_members = list(resting_members or [])
+    allowed_resting_fields = {
+        "actor_id",
+        "arcane_recovery",
+        "natural_recovery",
+        "song_of_rest_source_actor_id",
+        "attune_item_id",
+        "attunement_prerequisite_confirmed",
+        "hit_dice_spends",
+        "rest_activity_minutes",
+        "rest_schedule",
+    }
+    normalized_resting: list[dict[str, Any]] = []
+    for index, member in enumerate(resting_members):
+        if not isinstance(member, dict):
+            raise ValueError(f"rest-member-json[{index}] must be an object")
+        unexpected = sorted(set(member) - allowed_resting_fields)
+        actor_id = str(member.get("actor_id") or "").strip()
+        if unexpected or not actor_id:
+            raise ValueError(
+                "recover-stable rest members accept actor_id and short-rest "
+                f"choice fields only; invalid entry {index}"
+            )
+        normalized_resting.append(
+            {
+                "actor_id": actor_id,
+                **{
+                    key: deepcopy(value)
+                    for key, value in member.items()
+                    if key != "actor_id" and value not in (None, {}, [])
+                },
+            }
+        )
+    resting_ids = [item["actor_id"] for item in normalized_resting]
+    if len(resting_ids) != len(set(resting_ids)):
+        raise ValueError("recover-stable concurrent rest actor ids must be unique")
+    if set(member_ids) & set(resting_ids):
+        raise ValueError(
+            "recover-stable actors cannot also be concurrent short-rest members"
+        )
     actors = []
-    for actor_id in member_ids:
+    for actor_id in [*member_ids, *resting_ids]:
         actor = await client.domain(
             "character_query",
             {"view": "get", "payload": {"character_id": actor_id}},
@@ -7430,6 +7472,25 @@ async def _recover_stable_party(
     if branch is None:
         raise RuntimeError("campaign has no current branch")
     campaign = await _campaign(client, campaign_id)
+    required_start_clock = _validate_world_time_precondition(
+        campaign,
+        expected_start_clock,
+    )
+    actor_by_id = {str(actor["id"]): actor for actor in actors}
+    concurrent_rest_payload = []
+    for member in normalized_resting:
+        actor_id = member["actor_id"]
+        concurrent_rest_payload.append(
+            {
+                "character_id": actor_id,
+                "expected_revision": actor_by_id[actor_id]["revision"],
+                **{
+                    key: deepcopy(value)
+                    for key, value in member.items()
+                    if key != "actor_id"
+                },
+            }
+        )
     recovered = await client.domain(
         "campaign_change",
         {
@@ -7442,7 +7503,9 @@ async def _recover_stable_party(
                         "expected_revision": actor["revision"],
                     }
                     for actor in actors
-                ]
+                    if str(actor["id"]) in set(member_ids)
+                ],
+                "resting_members": concurrent_rest_payload,
             },
             "expected_revision": campaign["revision"],
             "branch_id": branch["id"],
@@ -7451,7 +7514,11 @@ async def _recover_stable_party(
     )
     if recovered.get("status") != "recovered":
         raise RuntimeError("party stable recovery did not commit")
-    recipients = list(dict.fromkeys([*member_ids, *knowledge_actor_ids]))
+    if list(recovered.get("resting_member_ids") or []) != resting_ids:
+        raise RuntimeError("party stable recovery omitted concurrent short-rest members")
+    recipients = list(
+        dict.fromkeys([*member_ids, *resting_ids, *knowledge_actor_ids])
+    )
     campaign = await _campaign(client, campaign_id)
     committed = await client.domain(
         "memory_change",
@@ -7465,9 +7532,12 @@ async def _recover_stable_party(
                     "audience_scope": "party",
                     "payload": {
                         "member_ids": member_ids,
+                        "resting_member_ids": resting_ids,
                         "occurrence_id": recovery_identity,
                         "elapsed_hours": recovered["elapsed_hours"],
                         "recoveries": deepcopy(recovered["recoveries"]),
+                        "rested": deepcopy(recovered.get("rested") or {}),
+                        "expected_start_clock": required_start_clock,
                         "random_stream_receipt": deepcopy(recovered.get("random_stream_receipt")),
                     },
                 },
@@ -7502,6 +7572,7 @@ async def _recover_stable_party(
     return {
         "occurrence_id": recovery_identity,
         "member_ids": member_ids,
+        "resting_member_ids": resting_ids,
         "knowledge_actor_ids": recipients,
         "recovery": recovered,
         "continuity": committed,
@@ -11788,8 +11859,10 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     run_id=args.run_id,
                     occurrence_id=args.occurrence_id,
                     actor_ids=args.recovery_actor_id,
+                    resting_members=args.rest_member_json,
                     knowledge_actor_ids=args.knowledge_actor_id,
                     reason=args.rest_reason,
+                    expected_start_clock=args.rest_expected_start_clock_json,
                 )
             elif args.action == "provision-source-item":
                 if phase != "play":

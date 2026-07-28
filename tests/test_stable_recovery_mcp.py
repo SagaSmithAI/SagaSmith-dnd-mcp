@@ -270,6 +270,153 @@ def test_party_stable_recovery_uses_longest_concurrent_wait(
     asyncio.run(exercise())
 
 
+def test_stable_recovery_and_companion_short_rest_share_one_clock(
+    tmp_path: Path, monkeypatch
+) -> None:
+    original_roll = server_module.roll
+
+    class FixedRandom:
+        def randint(self, minimum: int, maximum: int) -> int:
+            assert minimum == 1
+            return min(2, maximum)
+
+    def deterministic_recovery_roll(expression: str):
+        assert expression == "1d4"
+        return original_roll(expression, rng=FixedRandom())
+
+    monkeypatch.setattr(server_module, "roll", deterministic_recovery_roll)
+    config = McpConfig(
+        home=tmp_path / "home",
+        database_url=None,
+        chroma_url=None,
+        chroma_path_override=None,
+        dnd_skills_dir=tmp_path / "dnd",
+        modulegen_skills_dir=tmp_path / "modulegen",
+        auto_seed_rules=False,
+    )
+
+    async def exercise() -> None:
+        server = create_server(config)
+        campaign = await _call(
+            server,
+            "campaign_create",
+            {
+                "name": "Concurrent Recovery and Rest",
+                "edition": "2014",
+                "idempotency_key": "campaign",
+            },
+        )
+        stable_sheet = default_character_sheet()
+        stable_sheet["combat"]["hp"] = {"value": 0, "max": 12, "temp": 0}
+        stable_sheet["conditions"] = ["prone", "stable", "unconscious"]
+        stable = await _call(
+            server,
+            "character_create_from",
+            {
+                "mode": "direct",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "name": "Stable companion",
+                    "sheet": stable_sheet,
+                },
+                "idempotency_key": "stable",
+            },
+        )
+        resting_sheet = default_character_sheet()
+        resting_sheet["combat"]["hp"] = {"value": 1, "max": 12, "temp": 0}
+        resting_sheet["combat"]["hit_dice"] = {
+            "fighter:d10": {
+                "label": "Fighter d10",
+                "value": 1,
+                "max": 1,
+                "recovers_on": "long_rest",
+                "source_key": "Fighter",
+                "slot_level": 0,
+            }
+        }
+        resting = await _call(
+            server,
+            "character_create_from",
+            {
+                "mode": "direct",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "name": "Resting companion",
+                    "sheet": resting_sheet,
+                },
+                "idempotency_key": "resting",
+            },
+        )
+        current = await _call(
+            server,
+            "campaign_query",
+            {"view": "get", "payload": {"campaign_id": campaign["id"]}},
+        )
+        clock = await _call(
+            server,
+            "campaign_change",
+            {
+                "campaign_id": campaign["id"],
+                "action": "clock_set",
+                "payload": {"day": 2, "hour": 10},
+                "expected_revision": current["revision"],
+                "idempotency_key": "clock",
+            },
+        )
+        arguments = {
+            "campaign_id": campaign["id"],
+            "action": "stable_recovery",
+            "payload": {
+                "members": [
+                    {
+                        "character_id": stable["id"],
+                        "expected_revision": stable["revision"],
+                    }
+                ],
+                "resting_members": [
+                    {
+                        "character_id": resting["id"],
+                        "expected_revision": resting["revision"],
+                        "hit_dice_spends": [{"key": "fighter:d10", "count": 1}],
+                    }
+                ],
+            },
+            "expected_revision": clock["campaign_revision"],
+            "idempotency_key": "recover-and-rest",
+        }
+
+        recovered = await _call(server, "campaign_change", arguments)
+        assert await _call(server, "campaign_change", arguments) == recovered
+        assert recovered["elapsed_hours"] == 2
+        assert recovered["world_time"]["hour"] == 12
+        assert recovered["member_ids"] == [stable["id"]]
+        assert recovered["resting_member_ids"] == [resting["id"]]
+        assert recovered["recoveries"][stable["id"]]["after_hp"] == 1
+        assert len(recovered["rested"][resting["id"]]["hit_dice_rolls"]) == 1
+
+        stable_after = await _call(
+            server,
+            "character_query",
+            {"view": "get", "payload": {"character_id": stable["id"]}},
+        )
+        resting_after = await _call(
+            server,
+            "character_query",
+            {"view": "get", "payload": {"character_id": resting["id"]}},
+        )
+        assert stable_after["sheet"]["combat"]["hp"]["value"] == 1
+        assert resting_after["sheet"]["combat"]["hp"]["value"] > 1
+        assert (
+            resting_after["sheet"]["combat"]["hit_dice"]["fighter:d10"]["value"]
+            == 0
+        )
+        assert resting_after["sheet"]["combat"]["rest_history"][
+            "last_rest_completed_elapsed_ticks"
+        ] == 1200
+
+    asyncio.run(exercise())
+
+
 def test_stable_recovery_rejects_a_healthy_actor(tmp_path: Path) -> None:
     config = McpConfig(
         home=tmp_path / "home",

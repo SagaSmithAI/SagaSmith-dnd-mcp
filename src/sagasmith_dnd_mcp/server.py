@@ -15582,12 +15582,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     def campaign_stable_recovery(
         campaign_id: str,
         members: list[dict[str, Any]],
+        resting_members: list[dict[str, Any]] | None = None,
         principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         branch_id: str | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
-        """Recover simultaneously Stable creatures without summing their wait times."""
+        """Recover Stable creatures while conscious companions rest on the same clock."""
         access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         require_write_contract(expected_revision, idempotency_key)
         resolved_branch_id = require_current_branch(campaign_id, branch_id)
@@ -15615,9 +15616,112 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         member_ids = [item["character_id"] for item in normalized_members]
         if len(member_ids) != len(set(member_ids)):
             raise ValueError("stable recovery member ids must be unique")
+        if resting_members is None:
+            resting_members = []
+        if not isinstance(resting_members, list):
+            raise ValueError("resting_members must be an array")
+        allowed_resting_fields = {
+            "character_id",
+            "expected_revision",
+            "rest_activity_minutes",
+            "rest_schedule",
+            "hit_dice_spends",
+            "arcane_recovery",
+            "natural_recovery",
+            "song_of_rest_source_actor_id",
+            "attune_item_id",
+            "attunement_prerequisite_confirmed",
+        }
+        normalized_resting: list[dict[str, Any]] = []
+        for index, raw_member in enumerate(resting_members):
+            if not isinstance(raw_member, dict):
+                raise ValueError(f"resting_members[{index}] must be an object")
+            unknown = sorted(set(raw_member) - allowed_resting_fields)
+            if unknown:
+                raise ValueError(
+                    f"resting_members[{index}] has unsupported fields: {unknown}"
+                )
+            character_id = str(raw_member.get("character_id") or "").strip()
+            character_revision = raw_member.get("expected_revision")
+            if not character_id:
+                raise ValueError(f"resting_members[{index}].character_id is required")
+            if isinstance(character_revision, bool) or not isinstance(
+                character_revision, int
+            ):
+                raise ValueError(
+                    f"resting_members[{index}].expected_revision is required"
+                )
+            hit_dice_spends = raw_member.get("hit_dice_spends")
+            arcane_recovery = raw_member.get("arcane_recovery")
+            natural_recovery = raw_member.get("natural_recovery")
+            if hit_dice_spends is not None and not isinstance(hit_dice_spends, list):
+                raise ValueError(
+                    f"resting_members[{index}].hit_dice_spends must be an array"
+                )
+            if arcane_recovery is not None and not isinstance(arcane_recovery, dict):
+                raise ValueError(
+                    f"resting_members[{index}].arcane_recovery must be an object"
+                )
+            if natural_recovery is not None and not isinstance(natural_recovery, dict):
+                raise ValueError(
+                    f"resting_members[{index}].natural_recovery must be an object"
+                )
+            attune_item_id = (
+                str(raw_member.get("attune_item_id") or "").strip() or None
+            )
+            attunement_confirmed = raw_member.get(
+                "attunement_prerequisite_confirmed"
+            )
+            if attune_item_id and attunement_confirmed is not True:
+                raise NeedsRulingError(
+                    "attunement requires explicit DM confirmation that the actor "
+                    "satisfies every source-defined prerequisite",
+                    missing=("attunement_prerequisite",),
+                    ruling_kind="source_or_scene_fact",
+                )
+            if not attune_item_id and attunement_confirmed is not None:
+                raise ValueError(
+                    "attunement_prerequisite_confirmed requires attune_item_id"
+                )
+            normalized_resting.append(
+                {
+                    "character_id": character_id,
+                    "expected_revision": character_revision,
+                    "rest_activity_minutes": validate_rest_activity_minutes(
+                        raw_member.get("rest_activity_minutes")
+                    ),
+                    "rest_schedule": deepcopy(raw_member.get("rest_schedule")),
+                    "hit_dice_spends": list(hit_dice_spends or []),
+                    "arcane_recovery": deepcopy(arcane_recovery or {}),
+                    "natural_recovery": deepcopy(natural_recovery or {}),
+                    "song_of_rest_source_actor_id": (
+                        str(raw_member.get("song_of_rest_source_actor_id") or "").strip()
+                        or None
+                    ),
+                    "attune_item_id": attune_item_id,
+                    "attunement_prerequisite_confirmed": attunement_confirmed,
+                }
+            )
+        resting_member_ids = [item["character_id"] for item in normalized_resting]
+        if len(resting_member_ids) != len(set(resting_member_ids)):
+            raise ValueError("resting member ids must be unique")
+        if set(member_ids) & set(resting_member_ids):
+            raise ValueError(
+                "a stable recovery member cannot also complete a concurrent short rest"
+            )
+        song_source_ids = {
+            str(item["song_of_rest_source_actor_id"])
+            for item in normalized_resting
+            if item["song_of_rest_source_actor_id"] is not None
+        }
+        if song_source_ids - set(resting_member_ids):
+            raise CombatEngineError(
+                "every Song of Rest source must participate in the concurrent short rest"
+            )
         request_payload = {
             "operation": "campaign.party.stable_recovery",
-            "members": normalized_members,
+            "members": deepcopy(normalized_members),
+            "resting_members": deepcopy(normalized_resting),
             "branch_id": resolved_branch_id,
         }
         scope = f"campaign-stable-recovery:{campaign_id}:{resolved_branch_id}:{principal_id}"
@@ -15635,6 +15739,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             raise CombatEngineError("stable recovery is not allowed while combat is active")
         all_characters = {item.id: item for item in characters.list(campaign_id=campaign_id)}
         member_by_id = {item["character_id"]: item for item in normalized_members}
+        resting_by_id = {
+            item["character_id"]: item for item in normalized_resting
+        }
         for member in normalized_members:
             current = all_characters.get(member["character_id"])
             if current is None:
@@ -15645,12 +15752,61 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             if current.revision != member["expected_revision"]:
                 raise ValueError(f"character revision conflict: {current.id}")
             recover_stable_creature(current.sheet, recovery_hours=1)
+        for member in normalized_resting:
+            current = all_characters.get(member["character_id"])
+            if current is None:
+                raise ValueError(
+                    f"concurrent rest actor is not in this campaign: {member['character_id']}"
+                )
+            require_character_control(current, principal_id)
+            if current.revision != member["expected_revision"]:
+                raise ValueError(f"character revision conflict: {current.id}")
+            validate_rest_hit_dice_requests(
+                current.sheet,
+                member["hit_dice_spends"],
+            )
+            validate_natural_recovery_choice(
+                current.sheet,
+                member["natural_recovery"],
+                rest_activity_minutes=member["rest_activity_minutes"],
+            )
+            if member["song_of_rest_source_actor_id"] is not None:
+                validate_song_of_rest_source(
+                    all_characters[str(member["song_of_rest_source_actor_id"])].sheet
+                )
+            if member["attune_item_id"] is not None:
+                attune_inventory_item(current.sheet, str(member["attune_item_id"]))
 
         recovery_rolls = {character_id: asdict(roll("1d4")) for character_id in member_ids}
         recovery_hours = {
             character_id: int(recovery_rolls[character_id]["total"]) for character_id in member_ids
         }
         elapsed_hours = max(recovery_hours.values())
+        duration_minutes = elapsed_hours * 60
+        started_elapsed_ticks = int(next_state["game_time"]["elapsed_ticks"])
+        for member in normalized_resting:
+            requested_schedule = member["rest_schedule"]
+            if requested_schedule is None:
+                requested_schedule = {
+                    "sleep_minutes": 0,
+                    "light_activity_minutes": duration_minutes,
+                    "strenuous_activity_minutes": 0,
+                }
+            member["rest_schedule"] = validate_rest_schedule(
+                rest_type="short_rest",
+                duration_minutes=duration_minutes,
+                rest_schedule=requested_schedule,
+                allows_trance=False,
+            )
+            record_rest_completion(
+                all_characters[member["character_id"]].sheet,
+                rest_type="short_rest",
+                started_elapsed_ticks=started_elapsed_ticks,
+                completed_elapsed_ticks=(
+                    started_elapsed_ticks + elapsed_hours * 60 * TICKS_PER_MINUTE
+                ),
+                rest_schedule=member["rest_schedule"],
+            )
         next_state, time_transition = advance_state_game_time(
             next_state,
             period="hour",
@@ -15659,6 +15815,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         next_world_time = time_transition["world_time_after"]
         elapsed_ticks = int(time_transition["elapsed_ticks"])
         elapsed_minutes = elapsed_ticks // TICKS_PER_MINUTE
+        completed_game_day = rules_day_from_ticks(
+            int(time_transition["after"]["elapsed_ticks"])
+        )
         world_duration = advance_world_effect_clocks(
             next_state,
             elapsed_ticks=elapsed_ticks,
@@ -15674,6 +15833,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         advanced: dict[str, list[str]] = {}
         expired: dict[str, list[str]] = {}
         recoveries: dict[str, dict[str, Any]] = {}
+        rested: dict[str, dict[str, Any]] = {}
         for current in all_characters.values():
             sheet = current.sheet
             character_advanced: list[str] = []
@@ -15727,6 +15887,60 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         "character.stable_recovery",
                     )
                 )
+            resting_member = resting_by_id.get(current.id)
+            if resting_member is not None:
+                rest_rules = effective_rule_context(
+                    campaign_id,
+                    facts={
+                        "actor_id": current.id,
+                        "rest_type": "short_rest",
+                    },
+                )
+                song_source_id = resting_member["song_of_rest_source_actor_id"]
+                applied_rest = apply_rest(
+                    sheet,
+                    rest_type="short_rest",
+                    rest_activity_minutes=resting_member["rest_activity_minutes"],
+                    rules=rest_rules,
+                    game_day=completed_game_day,
+                    hit_dice_spends=resting_member["hit_dice_spends"],
+                    arcane_recovery=resting_member["arcane_recovery"],
+                    natural_recovery=resting_member["natural_recovery"],
+                    song_of_rest_source_sheet=(
+                        all_characters[str(song_source_id)].sheet
+                        if song_source_id is not None
+                        else None
+                    ),
+                )
+                if applied_rest.get("status") != "committed":
+                    raise CombatEngineError(
+                        f"concurrent short rest for {current.id} requires "
+                        "an unresolved rule choice"
+                    )
+                sheet = applied_rest["sheet"]
+                if resting_member["attune_item_id"] is not None:
+                    sheet = attune_inventory_item(
+                        sheet,
+                        str(resting_member["attune_item_id"]),
+                    )
+                    applied_rest["attuned_item_id"] = str(
+                        resting_member["attune_item_id"]
+                    )
+                sheet = record_rest_completion(
+                    sheet,
+                    rest_type="short_rest",
+                    started_elapsed_ticks=started_elapsed_ticks,
+                    completed_elapsed_ticks=int(
+                        time_transition["after"]["elapsed_ticks"]
+                    ),
+                    rest_schedule=resting_member["rest_schedule"],
+                )
+                rested[current.id] = {
+                    key: value
+                    for key, value in applied_rest.items()
+                    if key not in {"sheet", "rule_receipts"}
+                }
+                receipts.extend(applied_rest.get("rule_receipts") or [])
             if sheet != current.sheet:
                 updates.append(
                     CharacterStateUpdate(
@@ -15747,8 +15961,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         response = {
             "status": "recovered",
             "member_ids": member_ids,
+            "resting_member_ids": resting_member_ids,
             "elapsed_hours": elapsed_hours,
             "recoveries": recoveries,
+            "rested": rested,
             "characters": {
                 character_id: character_view(
                     replace(
@@ -26957,7 +27173,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 {"members", "duration_minutes", "rest_type"},
                 ("members",),
             ),
-            "stable_recovery": ({"members"}, ("members",)),
+            "stable_recovery": (
+                {"members", "resting_members"},
+                ("members",),
+            ),
             "effect_add": ({"effect"}, ("effect",)),
             "effect_remove": ({"effect_id", "reason"}, ("effect_id",)),
             "advancement_configure": ({"mode"}, ("mode",)),
@@ -27040,12 +27259,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             )
         elif action == "stable_recovery":
             result = campaign_stable_recovery(
-                campaign_id,
-                required(data, "members"),
-                principal_id,
-                expected_revision,
-                branch_id,
-                idempotency_key,
+                campaign_id=campaign_id,
+                members=required(data, "members"),
+                resting_members=data.get("resting_members"),
+                principal_id=principal_id,
+                expected_revision=expected_revision,
+                branch_id=branch_id,
+                idempotency_key=idempotency_key,
             )
         elif action in {"effect_add", "effect_remove"}:
             result = campaign_world_effect_change(

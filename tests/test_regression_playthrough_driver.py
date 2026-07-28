@@ -3830,15 +3830,24 @@ def test_stable_party_recovery_uses_one_public_campaign_transition() -> None:
             if tool_id == "campaign_change":
                 assert arguments["action"] == "stable_recovery"
                 assert len(arguments["payload"]["members"]) == 2
+                assert arguments["payload"]["resting_members"] == [
+                    {
+                        "character_id": "actor-3",
+                        "expected_revision": 3,
+                        "hit_dice_spends": [{"key": "fighter:d10", "count": 1}],
+                    }
+                ]
                 self.keys["recovery"] = arguments["idempotency_key"]
                 return {
                     "status": "recovered",
                     "elapsed_hours": 4,
                     "recoveries": {"actor-1": {}, "actor-2": {}},
+                    "resting_member_ids": ["actor-3"],
+                    "rested": {"actor-3": {"hit_dice_rolls": [{"total": 7}]}},
                     "random_stream_receipt": {"start_position": 10, "end_position": 12},
                 }
             if tool_id == "memory_change":
-                assert len(arguments["payload"]["actor_knowledge"]) == 3
+                assert len(arguments["payload"]["actor_knowledge"]) == 4
                 self.keys["continuity"] = arguments["idempotency_key"]
                 return {"event": {"id": "event-1"}, "snapshot": {"slot": 7}}
             if tool_id == "playthrough_manifest":
@@ -3854,12 +3863,19 @@ def test_stable_party_recovery_uses_one_public_campaign_transition() -> None:
             run_id="run-1",
             occurrence_id="stable-recovery-after-hideout",
             actor_ids=["actor-1", "actor-2"],
+            resting_members=[
+                {
+                    "actor_id": "actor-3",
+                    "hit_dice_spends": [{"key": "fighter:d10", "count": 1}],
+                }
+            ],
             knowledge_actor_ids=["witness"],
             reason="Both stable adventurers recovered while the party waited.",
         )
     )
 
     assert result["recovery"]["elapsed_hours"] == 4
+    assert result["resting_member_ids"] == ["actor-3"]
     assert client.tools.count("campaign_change") == 1
     identity = _occurrence_identity(
         "stable-recovery-after-hideout",
