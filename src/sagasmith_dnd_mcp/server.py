@@ -16162,6 +16162,54 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             rule_receipts=receipts,
         )
 
+    def character_class_resources_synchronize(
+        character_id: str,
+        reason: str,
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
+        expected_revision: int | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Reconcile deterministic class-card resources during lobby maintenance."""
+
+        current = characters.get(character_id)
+        require_character_control(current, principal_id)
+        require_outside_active_combat(current, "class resource synchronization")
+        if current.campaign_id is None:
+            raise ValueError("class resource synchronization requires a campaign-bound character")
+        if not is_dm(current.campaign_id, principal_id):
+            raise PermissionError("class resource synchronization requires the campaign DM")
+        if authoritative_phase(current.campaign_id) != PROFILE_LOBBY:
+            raise CombatEngineError(
+                "switch to lobby before synchronizing class feature resources"
+            )
+        if expected_revision is None or not idempotency_key:
+            raise ValueError(
+                "expected_revision and idempotency_key are required for "
+                "class resource synchronization"
+            )
+        normalized_reason = str(reason).strip()
+        if not normalized_reason:
+            raise ValueError("class resource synchronization requires a reason")
+        if len(normalized_reason) > 1000:
+            raise ValueError(
+                "class resource synchronization reason must not exceed 1000 characters"
+            )
+        synchronized = synchronize_class_feature_resources(current.sheet)
+        return update_sheet(
+            character_id,
+            synchronized["sheet"],
+            operation="character.resources.synchronize",
+            principal_id=principal_id,
+            expected_revision=expected_revision,
+            idempotency_key=idempotency_key,
+            payload={"reason": normalized_reason},
+            response_extra={
+                "status": "committed",
+                "reason": normalized_reason,
+                "changes": synchronized["changes"],
+            },
+        )
+
     def character_level_advancement_plan(
         character_id: str,
         class_name: str,
@@ -26957,6 +27005,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "damage",
             "heal",
             "level_advance",
+            "resource_sync",
             "source_state",
             "stand",
             "knock_prone",
@@ -27036,6 +27085,20 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 required(data, "hp_method"),
                 required(data, "reason"),
                 required(data, "source_ref"),
+                principal_id,
+                expected_revision,
+                idempotency_key,
+            )
+        elif action == "resource_sync":
+            unexpected = set(data) - {"reason"}
+            if unexpected:
+                raise ValueError(
+                    "resource_sync payload accepts only reason; "
+                    f"unexpected fields: {sorted(unexpected)}"
+                )
+            result = character_class_resources_synchronize(
+                character_id,
+                required(data, "reason"),
                 principal_id,
                 expected_revision,
                 idempotency_key,

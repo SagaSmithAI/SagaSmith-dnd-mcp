@@ -335,6 +335,7 @@ def test_waterdeep_party_uses_explicit_dm_review_not_a_fake_module_range() -> No
 def test_tyranny_party_uses_source_four_and_preserves_continuous_party() -> None:
     profiles = tyranny_party_profiles()
     audit = audit_profiles(profiles, campaign_line_id="tyranny-of-dragons")
+    seraphine = next(item for item in profiles if item["name"] == "Seraphine Vale")
 
     assert audit["selected_size"] == audit["source_maximum"] == 4
     assert audit["party_size_basis"] == {
@@ -358,6 +359,7 @@ def test_tyranny_party_uses_source_four_and_preserves_continuous_party() -> None
             "preserve them across both volumes"
         ),
     }
+    assert "bardic_inspiration" not in seraphine["resources"]
 
 
 def test_catalog_source_normalizes_srd_table_markers_but_never_invents_items() -> None:

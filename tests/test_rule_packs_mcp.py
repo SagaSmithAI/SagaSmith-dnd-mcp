@@ -576,10 +576,21 @@ def test_core_srd_content_catalog_is_structured_and_selectable(tmp_path: Path) -
                 "level": 1,
                 "method": "manual",
                 "value": 3,
-                "source": (
-                    "level 1; Hill Dwarf: Constitution ability score increase; "
-                    "Hill Dwarf: Dwarven Toughness"
-                ),
+                "source": "level 1",
+                "adjustments": [
+                    {
+                        "kind": "constitution_modifier_change",
+                        "amount": 1,
+                        "source": "Hill Dwarf: Constitution ability score increase",
+                        "previous_score": 10,
+                        "new_score": 12,
+                    },
+                    {
+                        "kind": "per_level_bonus",
+                        "amount": 1,
+                        "source": "Hill Dwarf: Dwarven Toughness",
+                    },
+                ],
             }
         ]
         assert any(

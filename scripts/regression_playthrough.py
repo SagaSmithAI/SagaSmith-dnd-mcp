@@ -115,6 +115,7 @@ DEFERRED_CHECKPOINT_ACTIONS = frozenset(
         "spend-item",
         "use-consumable",
         "advance-level",
+        "sync-character-resources",
     }
 )
 
@@ -189,6 +190,7 @@ def _arguments() -> argparse.Namespace:
             "use-consumable",
             "award-xp",
             "advance-level",
+            "sync-character-resources",
             "configure-advancement",
             "relock-core",
             "refresh-module",
@@ -569,6 +571,13 @@ def _arguments() -> argparse.Namespace:
         help="JSON object with artifact_id, source_class, and method",
     )
     parser.add_argument("--level-prepared-spell-id", action="append", default=[])
+    parser.add_argument("--resource-sync-actor-id", default="")
+    parser.add_argument("--resource-sync-reason", default="")
+    parser.add_argument(
+        "--resource-sync-return-phase",
+        choices=tuple(sorted(CAMPAIGN_GAME_PHASES)),
+        help="Explicit phase to restore after lobby-only class resource synchronization",
+    )
     parser.add_argument("--objective", default="")
     parser.add_argument("--mark-visited", action="store_true")
     parser.add_argument("--reachable-scene-id", action="append", default=[])
@@ -10856,6 +10865,150 @@ async def _advance_level(
     }
 
 
+async def _sync_character_resources(
+    client: ExposureClient,
+    *,
+    campaign_id: str,
+    run_id: str,
+    initial_phase: str,
+    return_phase: str,
+    actor_id: str,
+    reason: str,
+    checkpoint_label: str,
+    defer_checkpoint: bool = False,
+) -> dict[str, Any]:
+    normalized_reason = reason.strip()
+    if (
+        not actor_id
+        or not normalized_reason
+        or return_phase not in CAMPAIGN_GAME_PHASES
+    ):
+        raise ValueError(
+            "sync-character-resources requires actor, reason, and return phase"
+        )
+    if initial_phase == "combat":
+        raise RuntimeError("sync-character-resources cannot run during active combat")
+
+    await client.load(_character_group(initial_phase))
+    actor = await client.domain(
+        "character_query",
+        {"view": "get", "payload": {"character_id": actor_id}},
+    )
+    if actor.get("campaign_id") != campaign_id:
+        raise ValueError("sync-character-resources actor does not belong to the campaign")
+    branches = await client.domain(
+        "branch_query",
+        {"campaign_id": campaign_id, "view": "list"},
+    )
+    branch = next((item for item in branches if item.get("is_current")), None)
+    if branch is None:
+        raise RuntimeError("campaign has no current branch")
+    branch_id = str(branch["id"])
+    phase_changes: list[dict[str, Any]] = []
+    if initial_phase == "play":
+        campaign = await _campaign(client, campaign_id)
+        phase_changes.append(
+            _facade_value(
+                await client.core(
+                    "game_phase",
+                    {
+                        "campaign_id": campaign_id,
+                        "action": "set",
+                        "tool_profile": "lobby",
+                        "expected_revision": campaign["revision"],
+                        "branch_id": branch_id,
+                        "idempotency_key": _mutation_key(
+                            run_id,
+                            "phase",
+                            (
+                                f"resource-sync-{actor_id}-enter-lobby-"
+                                f"r{campaign['revision']}"
+                            ),
+                        ),
+                    },
+                )
+            )
+        )
+    await client.open(campaign_id)
+    await client.load("lobby.campaign", "lobby.characters")
+    actor = await client.domain(
+        "character_query",
+        {"view": "get", "payload": {"character_id": actor_id}},
+    )
+    synchronized = _facade_value(
+        await client.domain(
+            "character_state_change",
+            {
+                "character_id": actor_id,
+                "action": "resource_sync",
+                "payload": {"reason": normalized_reason},
+                "expected_revision": actor["revision"],
+                "idempotency_key": _mutation_key(
+                    run_id, "resource-sync", actor_id
+                ),
+            },
+        )
+    )
+    verified_actor = await client.domain(
+        "character_query",
+        {"view": "get", "payload": {"character_id": actor_id}},
+    )
+    if dict(synchronized.get("character") or {}).get("revision") != verified_actor.get(
+        "revision"
+    ):
+        raise RuntimeError(
+            "sync-character-resources verification found a different actor revision"
+        )
+
+    if return_phase == "play":
+        campaign = await _campaign(client, campaign_id)
+        if _campaign_phase(campaign) != "play":
+            phase_changes.append(
+                _facade_value(
+                    await client.core(
+                        "game_phase",
+                        {
+                            "campaign_id": campaign_id,
+                            "action": "set",
+                            "tool_profile": "play",
+                            "expected_revision": campaign["revision"],
+                            "branch_id": branch_id,
+                            "idempotency_key": _mutation_key(
+                                run_id,
+                                "phase",
+                                (
+                                    f"resource-sync-{actor_id}-return-play-"
+                                    f"r{campaign['revision']}"
+                                ),
+                            ),
+                        },
+                    )
+                )
+            )
+            await client.open(campaign_id)
+            await client.load("play.scene", "play.scene_control")
+    checkpoint = None
+    if not defer_checkpoint:
+        checkpoint = await _checkpoint(
+            client,
+            campaign_id=campaign_id,
+            run_id=run_id,
+            label=(
+                checkpoint_label.strip()
+                or f"Class resource synchronization: {verified_actor['name']}"
+            ),
+            checkpoint_id=f"resource-sync:{actor_id}",
+        )
+    return {
+        "actor": verified_actor,
+        "changes": list(synchronized.get("changes") or []),
+        "reason": normalized_reason,
+        "phase_changes": phase_changes,
+        "return_phase": return_phase,
+        "checkpoint": checkpoint,
+    }
+
+
 async def _relock_core(
     client: ExposureClient,
     *,
@@ -12139,6 +12292,28 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                         run_id=args.run_id,
                         original_phase=phase,
                         identity=f"level:{args.level_actor_id}:{args.level_target}",
+                    )
+                    raise
+            elif args.action == "sync-character-resources":
+                try:
+                    report["result"] = await _sync_character_resources(
+                        client,
+                        campaign_id=args.campaign_id,
+                        run_id=args.run_id,
+                        initial_phase=phase,
+                        return_phase=str(args.resource_sync_return_phase or ""),
+                        actor_id=args.resource_sync_actor_id,
+                        reason=args.resource_sync_reason,
+                        checkpoint_label=args.checkpoint_label,
+                        defer_checkpoint=args.defer_checkpoint,
+                    )
+                except Exception:
+                    await _restore_phase_after_failed_lobby_action(
+                        client,
+                        campaign_id=args.campaign_id,
+                        run_id=args.run_id,
+                        original_phase=phase,
+                        identity=f"resource-sync:{args.resource_sync_actor_id}",
                     )
                     raise
             elif args.action == "checkpoint":

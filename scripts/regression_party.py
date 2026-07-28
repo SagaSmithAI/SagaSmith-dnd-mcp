@@ -910,15 +910,10 @@ def lost_mine_party_profiles() -> list[dict[str, Any]]:
                 "ritual_casting": True,
             },
             "feature_choices": {},
-            "resources": {
-                "bardic_inspiration": {
-                    "label": "Bardic Inspiration",
-                    "value": 3,
-                    "max": 3,
-                    "recovers_on": "long_rest",
-                    "source_key": "Bard",
-                }
-            },
+            # Bardic Inspiration is a card-local ``uses`` counter.  Seeding a
+            # second top-level counter creates two independently recoverable
+            # representations of the same class feature.
+            "resources": {},
             "items": [
                 _armor(
                     "seraphine-leather",

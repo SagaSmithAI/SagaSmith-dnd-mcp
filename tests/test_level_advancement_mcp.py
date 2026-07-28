@@ -190,6 +190,72 @@ def _fighter_sheet() -> dict:
     return sheet
 
 
+def _bard_sheet_with_shadow_resource() -> dict:
+    sheet = default_character_sheet()
+    sheet["progression"]["level"] = 10
+    sheet["progression"]["classes"] = [
+        {"name": "Bard", "level": 10, "subclass": "College of Lore", "hit_die": 8}
+    ]
+    sheet["abilities"]["charisma"]["score"] = 20
+    sheet["abilities"]["constitution"]["score"] = 14
+    sheet["combat"]["hp"] = {"value": 70, "max": 70, "temp": 0}
+    sheet["combat"]["hit_dice"] = {
+        "d8": {
+            "label": "d8",
+            "value": 10,
+            "max": 10,
+            "recovers_on": "long_rest",
+            "source_key": "Bard",
+        }
+    }
+    sheet["resources"] = {
+        "bardic_inspiration": {
+            "label": "Bardic Inspiration",
+            "value": 3,
+            "max": 3,
+            "recovers_on": "long_rest",
+            "source_key": "Bard",
+        }
+    }
+    sheet["content"]["features"] = [
+        {
+            "id": "dnd5e.content.srd2014.feature.bard-bardic-inspiration",
+            "name": "Bardic Inspiration",
+            "source_key": "Bard",
+            "uses": {
+                "label": "Bardic Inspiration",
+                "value": 3,
+                "max": 3,
+                "recovers_on": "long_rest",
+                "source_key": "Bard",
+            },
+            "resource_key": "",
+            "activation": {"type": "bonus_action", "cost": 1},
+            "resource_scaling": {
+                "target": "uses",
+                "label": "Bardic Inspiration",
+                "class_name": "Bard",
+                "maximum_by_level": {},
+                "maximum_formula": {
+                    "kind": "ability_modifier",
+                    "ability": "charisma",
+                    "minimum": 1,
+                    "multiplier": 1,
+                    "offset": 0,
+                },
+                "recovers_on": "long_rest",
+                "recovery_by_level": {"5": "short_rest"},
+                "unlimited_at_level": 0,
+            },
+            "pack_id": "dnd5e.content.srd2014",
+            "pack_version": CORE_CONTENT_PACK_VERSION,
+            "rule_refs": ["bundled:srd2014/02_Classes/Bard.md"],
+            "mechanic_refs": [],
+        }
+    ]
+    return sheet
+
+
 def _land_druid_sheet() -> dict:
     sheet = default_character_sheet()
     sheet["progression"]["level"] = 2
@@ -256,6 +322,83 @@ def _land_druid_sheet() -> dict:
         }
     ]
     return sheet
+
+
+def test_lobby_resource_sync_removes_legacy_shadow_counter_via_public_facade(
+    tmp_path: Path,
+) -> None:
+    workspace = Path(__file__).resolve().parents[2]
+    config = McpConfig(
+        home=tmp_path / "home",
+        database_url=None,
+        chroma_url=None,
+        chroma_path_override=None,
+        dnd_skills_dir=workspace / "SagaSmith-dnd-skills",
+        modulegen_skills_dir=workspace / "SagaSmith-module-gen-skills",
+        auto_seed_rules=True,
+    )
+
+    async def exercise() -> None:
+        server = create_server(config)
+        campaign = await _call(
+            server,
+            "campaign_create",
+            {
+                "name": "Resource synchronization",
+                "edition": "2014",
+                "idempotency_key": "campaign",
+            },
+        )
+        actor = await _call(
+            server,
+            "character_create_from",
+            {
+                "mode": "direct",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "name": "Legacy Bard",
+                    "sheet": _bard_sheet_with_shadow_resource(),
+                },
+                "idempotency_key": "actor",
+            },
+        )
+        arguments = {
+            "character_id": actor["id"],
+            "action": "resource_sync",
+            "payload": {
+                "reason": (
+                    "Remove a legacy top-level counter shadowed by the "
+                    "authoritative Bardic Inspiration card uses."
+                )
+            },
+            "expected_revision": actor["revision"],
+            "idempotency_key": "resource-sync",
+        }
+
+        synchronized = await _call(server, "character_state_change", arguments)
+        replay = await _call(server, "character_state_change", arguments)
+
+        assert replay == synchronized
+        assert synchronized["status"] == "committed"
+        assert synchronized["changes"][-1]["operation"] == "remove_shadow"
+        sheet = synchronized["character"]["sheet"]
+        assert "bardic_inspiration" not in sheet["resources"]
+        bardic = next(
+            item
+            for item in sheet["content"]["features"]
+            if item["id"] == "dnd5e.content.srd2014.feature.bard-bardic-inspiration"
+        )
+        assert bardic["uses"] == {
+            "label": "Bardic Inspiration",
+            "value": 5,
+            "max": 5,
+            "recovers_on": "short_rest",
+            "source_key": "Bard",
+            "slot_level": 0,
+            "unlimited": False,
+        }
+
+    asyncio.run(exercise())
 
 
 def test_source_choice_repeats_and_off_list_oath_spells_are_enforced(
