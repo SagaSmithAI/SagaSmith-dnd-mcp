@@ -20,6 +20,8 @@ from typing import Any
 
 from mcp import ClientSession
 from mcp.client.stdio import stdio_client
+from sagasmith_dnd.editions import SUPPORTED_DND_EDITIONS
+from sagasmith_dnd.vocabulary import ADVANCEMENT_MODES
 
 from scripts.regression_modules import (
     PRINCIPAL_ID,
@@ -43,7 +45,7 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--home", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--run-id", default="full-campaign-playthrough-v1")
-    parser.add_argument("--edition", choices=("2014", "2024"), default="2014")
+    parser.add_argument("--edition", choices=SUPPORTED_DND_EDITIONS, default="2014")
     parser.add_argument("--locale", default="en")
     parser.add_argument("--campaign", action="append", default=[])
     parser.add_argument("--include-scene-index", action="store_true")
@@ -140,7 +142,7 @@ async def _create_campaign(
     await client.load("lobby.campaign")
     advancement = dict(line["play_requirements"].get("advancement") or {})
     selected_advancement = str(advancement.get("selected") or "")
-    if selected_advancement not in {"xp", "milestone"}:
+    if selected_advancement not in ADVANCEMENT_MODES:
         raise ValueError(f"campaign line {line_id} must select xp or milestone advancement")
     current_advancement = str(
         dict(dict(campaign.get("settings") or {}).get("advancement") or {}).get("mode") or ""

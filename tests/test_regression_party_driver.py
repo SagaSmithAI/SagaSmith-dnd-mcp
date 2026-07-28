@@ -6,6 +6,7 @@ from copy import deepcopy
 
 import pytest
 from sagasmith_dnd.character_schema import default_character_sheet
+from sagasmith_dnd.engine import ability_modifier
 
 from scripts.regression_party import (
     OIL_RULE,
@@ -124,6 +125,13 @@ def test_base_casters_record_their_spell_class_list(
     sheet = _configure_base_sheet(actor, profile, catalog)
 
     assert sheet["spellcasting"]["class_lists"] == [expected_class_list]
+    constitution = int(sheet["abilities"]["constitution"]["score"])
+    expected_hp = int(profile["hit_die"]) + ability_modifier(constitution)
+    assert sheet["combat"]["hp"] == {
+        "value": expected_hp,
+        "max": expected_hp,
+        "temp": 0,
+    }
 
 
 def test_starting_equipment_packs_expand_to_rule_accurate_consumable_items() -> None:

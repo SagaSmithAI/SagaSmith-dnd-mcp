@@ -6,20 +6,40 @@ import argparse
 import asyncio
 import heapq
 import json
-import os
 import re
-import sys
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
 from mcp import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
+from sagasmith_core.modules import (
+    normalize_source_evidence_text as _normalized_source_text,
+)
+from sagasmith_dnd.conditions import (
+    DEATH_SAVE_SETTLED_CONDITIONS,
+    INCAPACITATING_STATE_IDS,
+    LIVING_INCAPACITATING_STATE_IDS,
+)
+from sagasmith_dnd.vocabulary import (
+    ATTACK_MODES,
+    COMBAT_OUTCOME_STATUSES,
+    WEAPON_HAND_SLOTS,
+)
 
 from scripts.regression_lock import campaign_operation_lock
-from scripts.regression_modules import PRINCIPAL_ID, ExposureClient, _token
+from scripts.regression_modules import (
+    ExposureClient,
+    _facade_value,
+    _token,
+    campaign_view,
+)
 from scripts.regression_playthrough import _checkpoint, _manifest_get, _manifest_mutation
 from scripts.regression_rulings import normalize_pending_ruling
+from scripts.regression_runtime import (
+    exception_leaf_messages,
+    regression_server_parameters,
+)
 
 GUIDING_BOLT_ID = "dnd5e.content.srd2014.spell.guiding-bolt"
 GUIDING_BOLT_ON_HIT = (
@@ -660,23 +680,9 @@ def _arguments() -> argparse.Namespace:
 
 
 def _server_parameters(args: argparse.Namespace) -> StdioServerParameters:
-    repo = Path(__file__).resolve().parents[1]
-    env = dict(os.environ)
-    env.update(
-        {
-            "PYTHONIOENCODING": "utf-8",
-            "SAGASMITH_DND_MCP_HOME": str(args.home.expanduser().resolve()),
-            "SAGASMITH_DND_MCP_AUTO_SEED": "1",
-        }
-    )
-    server_args = ["-m", "sagasmith_dnd_mcp.server"]
-    if profile_output := str(env.get("SAGASMITH_SERVER_PROFILE_OUTPUT") or "").strip():
-        server_args = ["-m", "cProfile", "-o", profile_output, *server_args]
-    return StdioServerParameters(
-        command=sys.executable,
-        args=server_args,
-        cwd=repo,
-        env=env,
+    return regression_server_parameters(
+        home=args.home,
+        auto_seed=True,
     )
 
 
@@ -1363,12 +1369,6 @@ def _reinforcement_config(
     }
 
 
-def _facade_value(value: Any) -> Any:
-    if isinstance(value, dict) and "result" in value:
-        return value["result"]
-    return value
-
-
 def _roll_total(value: dict[str, Any]) -> int:
     if "total" in value:
         return int(value["total"])
@@ -1709,10 +1709,6 @@ def _source_zero_hp_stabilization(
         "actor_ids": actor_ids,
         "source_excerpt": source_excerpt,
     }
-
-
-def _normalized_source_text(value: Any) -> str:
-    return " ".join(str(value or "").split()).casefold()
 
 
 def _source_target_priorities(
@@ -2217,7 +2213,7 @@ def _agent_attack_contexts(
         identity = (actor_id, attack_mode)
         if (
             actor_id not in participant_ids
-            or attack_mode not in {"melee", "ranged"}
+            or attack_mode not in ATTACK_MODES
             or identity in normalized
             or not isinstance(advantage, bool)
             or not isinstance(disadvantage, bool)
@@ -3242,16 +3238,7 @@ def _source_contest_activities(
 
 
 async def _campaign(client: ExposureClient, campaign_id: str) -> dict[str, Any]:
-    return _facade_value(
-        await client.core(
-            "campaign_query",
-            {
-                "view": "get",
-                "payload": {"campaign_id": campaign_id},
-                "principal_id": PRINCIPAL_ID,
-            },
-        )
-    )
+    return await campaign_view(client, campaign_id)
 
 
 async def _roll_hostile_stealth(
@@ -3492,7 +3479,7 @@ def _party_loadouts(
             raise ValueError(
                 f"party loadout {index} item {item_id!r} is not owned by {actor_id!r}"
             )
-        if slot in {"main_hand", "off_hand"} and str(item.get("kind") or "") != "weapon":
+        if slot in WEAPON_HAND_SLOTS and str(item.get("kind") or "") != "weapon":
             raise ValueError(
                 f"party loadout {index} cannot equip non-weapon {item_id!r} in {slot}"
             )
@@ -4409,14 +4396,7 @@ def _body_thief_target_ids(
         if target_id in actors
         and target_id in combatants
         and "dead" not in _conditions(actors[target_id])
-        and _conditions(actors[target_id])
-        & {
-            "incapacitated",
-            "paralyzed",
-            "petrified",
-            "stunned",
-            "unconscious",
-        }
+        and _conditions(actors[target_id]) & LIVING_INCAPACITATING_STATE_IDS
         and _distance(
             source_position,
             dict(combatants[target_id].get("position") or {"x": 0, "y": 0}),
@@ -4728,8 +4708,7 @@ def _postcombat_stabilization_target(
     if (
         actor_id not in party_ids
         or _hit_points(actor) <= 0
-        or _conditions(actor)
-        & {"dead", "unconscious", "stunned", "incapacitated", "paralyzed", "petrified"}
+        or _conditions(actor) & INCAPACITATING_STATE_IDS
         or hostile_count <= 0
         or defeated_hostiles + fled_hostiles < hostile_count
     ):
@@ -4740,7 +4719,7 @@ def _postcombat_stabilization_target(
             for ally_id in party_ids
             if ally_id != actor_id
             and _hit_points(actors[ally_id]) == 0
-            and not _conditions(actors[ally_id]) & {"dead", "stable"}
+            and not _conditions(actors[ally_id]) & DEATH_SAVE_SETTLED_CONDITIONS
         ),
         None,
     )
@@ -6285,7 +6264,7 @@ async def _auto_run(
             actor_id
             for actor_id in effective_party_ids
             if _hit_points(actors[actor_id]) == 0
-            and not _conditions(actors[actor_id]) & {"dead", "stable"}
+            and not _conditions(actors[actor_id]) & DEATH_SAVE_SETTLED_CONDITIONS
         ]
         party_down = all(_hit_points(actors[actor_id]) <= 0 for actor_id in effective_party_ids)
         outcome = (
@@ -6351,7 +6330,8 @@ async def _auto_run(
                     actor_id
                     for actor_id in source_zero_hp_stabilization["actor_ids"]
                     if _hit_points(actors[actor_id]) == 0
-                    and not _conditions(actors[actor_id]) & {"dead", "stable"}
+                    and not _conditions(actors[actor_id])
+                    & DEATH_SAVE_SETTLED_CONDITIONS
                 ),
                 None,
             )
@@ -6460,8 +6440,7 @@ async def _auto_run(
         if (
             source_casualty_pool is not None
             and _hit_points(actor) > 0
-            and not actor_conditions
-            & {"dead", "unconscious", "stunned", "incapacitated", "paralyzed", "petrified"}
+            and not actor_conditions & INCAPACITATING_STATE_IDS
         ):
             settled_pool = await _settle_source_casualty_pool_turn(
                 client,
@@ -6537,11 +6516,7 @@ async def _auto_run(
         if (
             _hit_points(actor) == 0
             and actor_id in effective_party_ids
-            and not actor_conditions
-            & {
-                "dead",
-                "stable",
-            }
+            and not actor_conditions & DEATH_SAVE_SETTLED_CONDITIONS
         ):
             campaign = await _campaign(client, args.campaign_id)
             saved = await client.domain(
@@ -7931,14 +7906,7 @@ async def _finalize_ended_encounter(
         not combat
         or combat.get("active", True)
         or outcome.get("status")
-        not in {
-            "victory",
-            "defeat",
-            "surrender",
-            "truce",
-            "withdrawal",
-            "interrupted",
-        }
+        not in COMBAT_OUTCOME_STATUSES
     ):
         raise RuntimeError("campaign does not retain a completed encounter with a source outcome")
     if args.scene_id and str(combat.get("scene_id") or "") != str(args.scene_id):
@@ -8214,13 +8182,6 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
     return report
 
 
-def _leaf_messages(error: BaseException) -> list[str]:
-    nested = getattr(error, "exceptions", ())
-    if nested:
-        return [message for child in nested for message in _leaf_messages(child)]
-    return [f"{type(error).__name__}: {error}"]
-
-
 def _leaf_ruling_requirements(error: BaseException) -> list[dict[str, Any]]:
     nested = getattr(error, "exceptions", ())
     if nested:
@@ -8246,7 +8207,7 @@ def main() -> int:
             "campaign_id": args.campaign_id,
             "run_id": args.run_id,
             "passed": False,
-            "error": "; ".join(_leaf_messages(error)),
+            "error": "; ".join(exception_leaf_messages(error)),
             **(
                 {
                     "status": "pending_ruling",

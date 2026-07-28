@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from sagasmith_core import (
+    DOCUMENT_SOURCE_SUFFIXES,
     Database,
     RapidOcrProvider,
     VectorStore,
@@ -85,7 +86,7 @@ class SagaSmithStorage:
         source = Path(source_path).expanduser().resolve()
         if not source.is_file():
             raise LookupError(str(source))
-        if source.suffix.casefold() not in {".pdf", ".md", ".markdown", ".txt"}:
+        if source.suffix.casefold() not in DOCUMENT_SOURCE_SUFFIXES:
             raise ValueError("rulebook must be PDF, Markdown, or text")
         if not self.config.rule_import_roots:
             raise PermissionError("no rulebook import roots are configured")
@@ -115,7 +116,6 @@ class SagaSmithStorage:
 
     def discover_rulebooks(self) -> list[dict[str, Any]]:
         """List importable documents under configured roots without staging them."""
-        allowed = {".pdf", ".md", ".markdown", ".txt"}
         seen: set[Path] = set()
         result: list[dict[str, Any]] = []
         for root in self.config.rule_import_roots:
@@ -126,7 +126,7 @@ class SagaSmithStorage:
                 resolved = source.resolve()
                 if (
                     not resolved.is_file()
-                    or resolved.suffix.casefold() not in allowed
+                    or resolved.suffix.casefold() not in DOCUMENT_SOURCE_SUFFIXES
                     or resolved in seen
                 ):
                     continue
@@ -166,12 +166,10 @@ class SagaSmithStorage:
 
     def artifact_rulebook_path(self, name: str) -> Path:
         target = (self.config.rulebooks_dir / name).resolve()
-        if target.parent != self.config.rulebooks_dir.resolve() or target.suffix.casefold() not in {
-            ".pdf",
-            ".md",
-            ".markdown",
-            ".txt",
-        }:
+        if (
+            target.parent != self.config.rulebooks_dir.resolve()
+            or target.suffix.casefold() not in DOCUMENT_SOURCE_SUFFIXES
+        ):
             raise ValueError("invalid managed rulebook artifact")
         if not target.is_file():
             raise LookupError(name)
@@ -194,7 +192,7 @@ class SagaSmithStorage:
         source = Path(source_path).expanduser().resolve()
         if not source.is_file():
             raise LookupError(str(source))
-        if source.suffix.casefold() not in {".pdf", ".md", ".markdown", ".txt"}:
+        if source.suffix.casefold() not in DOCUMENT_SOURCE_SUFFIXES:
             raise ValueError("module must be PDF, Markdown, or text")
         if not self.config.module_import_roots:
             raise PermissionError("no module import roots are configured")
@@ -229,12 +227,10 @@ class SagaSmithStorage:
 
     def artifact_module_path(self, name: str) -> Path:
         target = (self.config.modules_dir / name).resolve()
-        if target.parent != self.config.modules_dir.resolve() or target.suffix.casefold() not in {
-            ".pdf",
-            ".md",
-            ".markdown",
-            ".txt",
-        }:
+        if (
+            target.parent != self.config.modules_dir.resolve()
+            or target.suffix.casefold() not in DOCUMENT_SOURCE_SUFFIXES
+        ):
             raise ValueError(
                 "module artifact must be PDF, Markdown, or text directly under artifacts/modules"
             )

@@ -26,6 +26,8 @@ from scripts.regression_modules import (
 
 def test_exposure_facade_unwrap_preserves_structured_domain_status() -> None:
     facade = {"status": "ok", "action": "get", "result": {"id": "campaign"}}
+    query_facade = {"view": "get", "result": {"id": "campaign"}}
+    mock_facade = {"result": {"id": "campaign"}}
     structured = {
         "status": "committed",
         "result": {"kind": "healing", "amount": 9},
@@ -33,6 +35,8 @@ def test_exposure_facade_unwrap_preserves_structured_domain_status() -> None:
     }
 
     assert _facade_value(facade) == {"id": "campaign"}
+    assert _facade_value(query_facade) == {"id": "campaign"}
+    assert _facade_value(mock_facade) == {"id": "campaign"}
     assert _facade_value(structured) == structured
 
 

@@ -7,6 +7,7 @@ import scripts.regression_party as regression_party
 import scripts.regression_playthrough as regression_playthrough
 from scripts.regression_rulings import (
     RegressionRulingRequiredError,
+    pending_ruling_kind,
     raise_for_pending_ruling,
     ruling_failure_fields,
 )
@@ -151,6 +152,21 @@ def test_unknown_ruling_kind_defaults_to_agent_adjudication() -> None:
     ruling = fields["ruling_requirements"][0]["ruling"]
     assert ruling["default_resolver"] == "agent"
     assert ruling["ruling_kind"] == "agent_dm_adjudication"
+
+
+def test_nested_rulings_use_runtime_priority_instead_of_list_order() -> None:
+    assert (
+        pending_ruling_kind(
+            {
+                "status": "pending_ruling",
+                "pending_rulings": [
+                    {"ruling_kind": "owner_approval"},
+                    {"ruling_kind": "player_owned_choice"},
+                ],
+            }
+        )
+        == "player_owned_choice"
+    )
 
 
 def test_inconsistent_agent_kind_is_normalized_back_to_agent() -> None:

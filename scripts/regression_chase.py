@@ -5,8 +5,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-import os
-import sys
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
@@ -14,8 +12,14 @@ from typing import Any
 from mcp import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
 
-from scripts.regression_modules import PRINCIPAL_ID, ExposureClient, _facade_value, _token
+from scripts.regression_modules import (
+    ExposureClient,
+    _facade_value,
+    _token,
+    campaign_view,
+)
 from scripts.regression_playthrough import _checkpoint
+from scripts.regression_runtime import regression_server_parameters
 
 
 def _arguments() -> argparse.Namespace:
@@ -46,20 +50,9 @@ def _arguments() -> argparse.Namespace:
 
 
 def _server_parameters(args: argparse.Namespace) -> StdioServerParameters:
-    repo = Path(__file__).resolve().parents[1]
-    env = dict(os.environ)
-    env.update(
-        {
-            "PYTHONIOENCODING": "utf-8",
-            "SAGASMITH_DND_MCP_HOME": str(args.home.expanduser().resolve()),
-            "SAGASMITH_DND_MCP_AUTO_SEED": "1",
-        }
-    )
-    return StdioServerParameters(
-        command=sys.executable,
-        args=["-m", "sagasmith_dnd_mcp.server"],
-        cwd=repo,
-        env=env,
+    return regression_server_parameters(
+        home=args.home,
+        auto_seed=True,
     )
 
 
@@ -106,16 +99,7 @@ async def _finalize_chase_checkpoint(
 
 
 async def _campaign(client: ExposureClient, campaign_id: str) -> dict[str, Any]:
-    return _facade_value(
-        await client.core(
-            "campaign_query",
-            {
-                "view": "get",
-                "payload": {"campaign_id": campaign_id},
-                "principal_id": PRINCIPAL_ID,
-            },
-        )
-    )
+    return await campaign_view(client, campaign_id)
 
 
 async def _actors(

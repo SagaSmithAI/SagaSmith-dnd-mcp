@@ -5,77 +5,15 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any
 
-EXTERNAL_RULING_KINDS = frozenset(
-    {
-        "player_owned_choice",
-        "owner_approval",
-        "permission_escalation",
-        "missing_or_conflicting_source_review",
-    }
+from sagasmith_dnd.rule_engine import (
+    EXTERNAL_RULING_KINDS,
+    nested_ruling_kind,
 )
-AGENT_RULING_KINDS = (
-    "agent_dm_adjudication",
-    "source_or_scene_fact",
-    "descriptive_activity",
-    "generic_spell_effect",
-    "ready_release_effect",
-    "environmental_consequence",
-    "module_specific_procedure",
-)
-RULING_KINDS = frozenset((*AGENT_RULING_KINDS, *EXTERNAL_RULING_KINDS))
 
 
 def pending_ruling_kind(ruling: dict[str, Any]) -> str:
     """Classify every nested requirement, with true external boundaries taking priority."""
-
-    kinds: list[str] = []
-    visited: set[int] = set()
-
-    def collect(value: Any) -> None:
-        if not isinstance(value, dict) or id(value) in visited:
-            return
-        visited.add(id(value))
-        direct_kind = str(value.get("ruling_kind") or "")
-        if direct_kind:
-            kinds.append(direct_kind)
-        for field in (
-            "pending",
-            "pending_rulings",
-            "ruling_requirements",
-            "review_requirements",
-        ):
-            nested = value.get(field)
-            if isinstance(nested, dict):
-                collect(nested)
-            elif isinstance(nested, (list, tuple)):
-                for item in nested:
-                    collect(item)
-        for field in ("ruling_requirement", "ruling", "review_resolution"):
-            collect(value.get(field))
-        nested_result = value.get("result")
-        if isinstance(nested_result, dict) and (
-            nested_result.get("status") in {"pending_choice", "pending_ruling"}
-            or any(
-                field in nested_result
-                for field in (
-                    "pending",
-                    "pending_rulings",
-                    "ruling_requirement",
-                    "ruling_requirements",
-                    "review_requirements",
-                )
-            )
-        ):
-            collect(nested_result)
-
-    collect(ruling)
-    external = next((kind for kind in kinds if kind in EXTERNAL_RULING_KINDS), "")
-    if external:
-        return external
-    return next(
-        (kind for kind in kinds if kind in AGENT_RULING_KINDS),
-        "agent_dm_adjudication",
-    )
+    return nested_ruling_kind(ruling)
 
 
 def normalize_pending_ruling(ruling: dict[str, Any]) -> dict[str, Any]:

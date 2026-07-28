@@ -12,7 +12,6 @@ import asyncio
 import hashlib
 import json
 import os
-import re
 import sys
 from copy import deepcopy
 from pathlib import Path
@@ -21,10 +20,15 @@ from typing import Any
 
 from mcp import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
+from sagasmith_core import DOCUMENT_SOURCE_SUFFIXES
 from sagasmith_core.access import LOCAL_SYSTEM_PRINCIPAL_ID
+from sagasmith_core.text import ascii_slug
+from sagasmith_dnd.editions import SUPPORTED_DND_EDITIONS
+
+from scripts.regression_runtime import decode_mcp_result, regression_server_parameters
 
 PRINCIPAL_ID = LOCAL_SYSTEM_PRINCIPAL_ID
-SUPPORTED_SUFFIXES = {".md", ".markdown", ".pdf", ".txt"}
+SUPPORTED_SUFFIXES = DOCUMENT_SOURCE_SUFFIXES
 
 
 def _arguments() -> argparse.Namespace:
@@ -32,7 +36,7 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("root", type=Path, help="Allowlisted root containing module documents")
     parser.add_argument("--home", type=Path, required=True, help="MCP home for the regression")
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--edition", choices=("2014", "2024"), default="2014")
+    parser.add_argument("--edition", choices=SUPPORTED_DND_EDITIONS, default="2014")
     parser.add_argument("--locale", default="en")
     parser.add_argument(
         "--document",
@@ -68,36 +72,23 @@ def _arguments() -> argparse.Namespace:
 
 
 def _server_parameters(args: argparse.Namespace, root: Path, home: Path) -> StdioServerParameters:
-    repo = Path(__file__).resolve().parents[1]
-    env = dict(os.environ)
-    env.update(
-        {
-            "PYTHONIOENCODING": "utf-8",
-            "SAGASMITH_DND_MCP_HOME": str(home),
-            "SAGASMITH_DND_MCP_AUTO_SEED": "1",
-            "SAGASMITH_DND_MCP_MODULE_IMPORT_ROOTS": str(root),
-        }
+    return regression_server_parameters(
+        home=home,
+        auto_seed=True,
+        module_root=root,
     )
-    return StdioServerParameters(
-        command=sys.executable,
-        args=["-m", "sagasmith_dnd_mcp.server"],
-        cwd=repo,
-        env=env,
-    )
-
-
-def _decode(result: Any) -> Any:
-    texts = [item.text for item in result.content if getattr(item, "text", None)]
-    message = "\n".join(texts)
-    if result.isError:
-        raise RuntimeError(message or "MCP tool call failed")
-    if not message:
-        return result.structuredContent
-    return json.loads(message)
 
 
 def _facade_value(payload: Any) -> Any:
-    if isinstance(payload, dict) and "action" in payload and "result" in payload:
+    if (
+        isinstance(payload, dict)
+        and "result" in payload
+        and (
+            "action" in payload
+            or "view" in payload
+            or set(payload) == {"result"}
+        )
+    ):
         return payload["result"]
     return payload
 
@@ -115,7 +106,7 @@ def _token(value: str, *, length: int = 16) -> str:
 
 
 def _slug(value: str) -> str:
-    rendered = re.sub(r"[^a-z0-9]+", "-", value.casefold()).strip("-")
+    rendered = ascii_slug(value)
     return rendered[:80] or "module"
 
 
@@ -154,7 +145,7 @@ class ExposureClient:
     async def core(self, tool_id: str, arguments: dict[str, Any]) -> Any:
         started = perf_counter()
         try:
-            return _decode(await self.session.call_tool(tool_id, arguments))
+            return decode_mcp_result(await self.session.call_tool(tool_id, arguments))
         finally:
             if os.environ.get("SAGASMITH_REGRESSION_TIMINGS") == "1":
                 label = (
@@ -198,6 +189,29 @@ class ExposureClient:
             },
         )
         return _domain_value(wrapped)
+
+
+async def campaign_view(
+    client: ExposureClient,
+    campaign_id: str,
+    *,
+    principal_id: str = PRINCIPAL_ID,
+) -> dict[str, Any]:
+    """Read one campaign through the canonical public regression contract."""
+
+    value = _facade_value(
+        await client.core(
+            "campaign_query",
+            {
+                "view": "get",
+                "payload": {"campaign_id": campaign_id},
+                "principal_id": principal_id,
+            },
+        )
+    )
+    if not isinstance(value, dict):
+        raise TypeError("campaign_query(view='get') must return an object")
+    return value
 
 
 def _preview_audit(preview: dict[str, Any]) -> dict[str, Any]:

@@ -6,11 +6,13 @@ import argparse
 import asyncio
 import hashlib
 import json
-import re
 import sys
 from pathlib import Path
 from time import perf_counter
 from typing import Any
+
+from sagasmith_core.text import ascii_slug
+from sagasmith_dnd.editions import SUPPORTED_DND_EDITIONS
 
 from sagasmith_dnd_mcp.config import McpConfig
 from sagasmith_dnd_mcp.server import create_server
@@ -25,7 +27,7 @@ def _arguments() -> argparse.Namespace:
         required=True,
         help="Disposable or persistent MCP home used for the regression index/cache",
     )
-    parser.add_argument("--edition", choices=("2014", "2024"), default="2014")
+    parser.add_argument("--edition", choices=SUPPORTED_DND_EDITIONS, default="2014")
     parser.add_argument("--locale", default="en")
     parser.add_argument("--no-ocr", action="store_true")
     parser.add_argument("--ocr-scale", type=float, default=2.0)
@@ -40,7 +42,7 @@ def _arguments() -> argparse.Namespace:
 
 
 def _key(relative_path: str, *, run_id: str = "default") -> str:
-    slug = re.sub(r"[^a-z0-9]+", "-", Path(relative_path).stem.casefold()).strip("-")
+    slug = ascii_slug(Path(relative_path).stem)
     digest_input = relative_path if run_id == "default" else f"{relative_path}\0{run_id}"
     digest = hashlib.sha256(digest_input.encode("utf-8")).hexdigest()[:10]
     return f"regression.{slug[:120] or 'rulebook'}.{digest}"

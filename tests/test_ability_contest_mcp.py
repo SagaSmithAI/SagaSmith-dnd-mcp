@@ -27,6 +27,57 @@ def _config(tmp_path: Path) -> McpConfig:
     )
 
 
+def test_character_check_facade_rejects_attack_kind_before_actor_lookup(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        server = create_server(_config(tmp_path))
+        campaign = await _call(
+            server,
+            "campaign_create",
+            {
+                "name": "Reject generic attack check",
+                "edition": "2014",
+                "idempotency_key": "campaign",
+            },
+        )
+        current = await _call(
+            server,
+            "campaign_get",
+            {"campaign_id": campaign["id"]},
+        )
+        await _call(
+            server,
+            "game_phase",
+            {
+                "campaign_id": campaign["id"],
+                "action": "set",
+                "tool_profile": "play",
+                "expected_revision": current["revision"],
+                "idempotency_key": "enter-play",
+            },
+        )
+        with pytest.raises(
+            Exception,
+            match=r"payload.kind must be ability, check, save, or death_save",
+        ):
+            await _call(
+                server,
+                "character_check",
+                {
+                    "campaign_id": campaign["id"],
+                    "action": "check",
+                    "payload": {
+                        "actor_id": "missing-actor",
+                        "kind": "attack",
+                        "ability": "strength",
+                    },
+                },
+            )
+
+    asyncio.run(exercise())
+
+
 def test_character_check_contest_is_atomic_branch_scoped_and_replayable(
     tmp_path: Path,
 ) -> None:

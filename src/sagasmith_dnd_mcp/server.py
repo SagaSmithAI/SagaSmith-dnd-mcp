@@ -51,9 +51,20 @@ from sagasmith_core import (
 from sagasmith_core.access import CAMPAIGN_DM_ROLES, LOCAL_SYSTEM_PRINCIPAL_ID
 from sagasmith_core.idempotency import request_hash
 from sagasmith_core.integrity import canonical_json
-from sagasmith_core.modules import MarkdownModuleParser, canonical_heading_path
+from sagasmith_core.modules import (
+    EXACT_MODULE_SOURCE_FIELD_ORDER,
+    EXACT_MODULE_SOURCE_FIELDS,
+    MANAGED_MODULE_SOURCE_FIELDS,
+    MarkdownModuleParser,
+    canonical_heading_path,
+    clean_source_evidence_text,
+)
+from sagasmith_core.modules import (
+    normalize_source_evidence_text as _normalize_source_evidence_text,
+)
 from sagasmith_core.rule_packs import RulePackError, RulesetUnavailableError, content_checksum
 from sagasmith_core.systems import SystemRegistry
+from sagasmith_core.text import ascii_slug, compact_ascii_key
 from sagasmith_core.visibility import (
     PLAYER_MODULE_VISIBILITY_SCOPES,
     PLAYER_OWNED_ACTOR_DISCLOSURE_SCOPES,
@@ -105,6 +116,8 @@ from sagasmith_dnd.chase_engine import (
     start_chase,
 )
 from sagasmith_dnd.combat_engine import (
+    ABILITY_CHECK_KINDS,
+    ACTOR_CHECK_KINDS,
     CombatEngineError,
     NeedsRulingError,
     add_choice_window,
@@ -119,6 +132,7 @@ from sagasmith_dnd.combat_engine import (
     available_attack_defenses,
     available_reactions,
     current_combatant,
+    damage_amount_after_reduction,
     detach_attachment,
     end_concentration_for_incapacitating_conditions,
     end_turn,
@@ -156,6 +170,7 @@ from sagasmith_dnd.combat_engine import (
     trigger_readied_spell,
 )
 from sagasmith_dnd.conditions import (
+    DEATH_SAVE_SETTLED_CONDITIONS,
     INCAPACITATING_STATE_IDS,
     STANDARD_BINARY_CONDITION_IDS,
     apply_condition_change,
@@ -174,15 +189,21 @@ from sagasmith_dnd.core_content import PACK_VERSION as CORE_CONTENT_PACK_VERSION
 from sagasmith_dnd.core_content import build_srd2014_content
 from sagasmith_dnd.core_rule_pack import get_core_rule_pack
 from sagasmith_dnd.editions import DEFAULT_CAMPAIGN_EDITION, normalize_dnd_edition
-from sagasmith_dnd.engine import resolve_attack, resolve_check, roll
+from sagasmith_dnd.engine import resolve_check, roll
 from sagasmith_dnd.game_time import (
+    CALENDAR_MINUTE_FIELDS,
+    FIXED_GAME_TIME_PERIODS,
+    NARRATIVE_GAME_TIME_PERIODS,
     TICKS_PER_MINUTE,
     advance_game_time,
     anchor_world_time,
+    calendar_minute_point,
     game_time_ticks,
     rules_day_from_ticks,
+    validate_calendar_minute_point,
 )
 from sagasmith_dnd.lifecycle import (
+    LONG_REST_MINIMUM_MINUTES,
     advance_effect_durations,
     advance_elapsed_effect_durations,
     advance_elapsed_world_effect_durations,
@@ -193,6 +214,7 @@ from sagasmith_dnd.lifecycle import (
     expire_combat_bound_effects,
     initialize_source_state,
     knock_prone_outside_combat,
+    minimum_rest_minutes,
     record_rest_completion,
     recover_stable_creature,
     stand_outside_combat,
@@ -226,6 +248,7 @@ from sagasmith_dnd.rule_engine import (
     AGENT_RULING_KIND_ORDER,
     EXTERNAL_RULING_KIND_ORDER,
     EXTERNAL_RULING_KINDS,
+    PENDING_RULE_RESULT_STATUSES,
     RULING_KINDS,
     ResolutionContext,
     RuleCompilationError,
@@ -234,8 +257,8 @@ from sagasmith_dnd.rule_engine import (
     compile_mechanics,
     context_with_facts,
     core_receipts,
+    nested_ruling_kind,
     resolution_context,
-    rule_event_ruling_kind,
     run_mechanic_tests,
     validate_source_bound_mechanics,
 )
@@ -285,10 +308,13 @@ from sagasmith_dnd.statblocks import (
 )
 from sagasmith_dnd.system import DND5E
 from sagasmith_dnd.vocabulary import (
+    ADVANCEMENT_MODES,
+    COMBAT_OUTCOME_STATUSES,
     DENOMINATION_CP_VALUES,
     DENOMINATIONS,
     INVENTORY_OWNER_SCOPES,
     PLAYER_GAMEPLAY_VISIBILITY_SCOPES,
+    REST_TYPES,
 )
 from sqlalchemy.exc import NoResultFound
 
@@ -324,31 +350,6 @@ from sagasmith_dnd_mcp.tool_profiles import (
     profiles_for_tool,
     validate_profile_coverage,
 )
-
-_SOURCE_EVIDENCE_TRANSLATION = str.maketrans(
-    {
-        "\u2018": "'",
-        "\u2019": "'",
-        "\u201c": '"',
-        "\u201d": '"',
-        "\u2013": "-",
-        "\u2014": "-",
-    }
-)
-MANAGED_MODULE_SOURCE_FIELDS = frozenset(
-    {"module_id", "scene_id", "chunk_id", "content_sha256"}
-)
-EXACT_MODULE_SOURCE_FIELD_ORDER = (
-    "module_id",
-    "scene_id",
-    "chunk_id",
-    "page_start",
-    "page_end",
-    "heading_path",
-    "content_sha256",
-)
-EXACT_MODULE_SOURCE_FIELDS = frozenset(EXACT_MODULE_SOURCE_FIELD_ORDER)
-PENDING_RULE_RESULT_STATUSES = frozenset({"pending_choice", "pending_ruling"})
 
 AGENT_RULING_TRANSACTION_RULES = (
     "inspect_existing_payment_before_settlement",
@@ -423,56 +424,7 @@ def _pending_result_ruling_kind(
     fallback: str = "agent_dm_adjudication",
 ) -> str:
     """Preserve a nested rule pause's owner while defaulting unclassified DM work."""
-
-    if result.get("status") == "pending_choice":
-        return "player_owned_choice"
-    kinds: set[str] = set()
-    visited: set[int] = set()
-
-    def collect(value: Any) -> None:
-        if not isinstance(value, dict) or id(value) in visited:
-            return
-        visited.add(id(value))
-        direct_kind = str(value.get("ruling_kind") or "")
-        if direct_kind:
-            kinds.add(direct_kind)
-        for field in (
-            "pending",
-            "pending_rulings",
-            "ruling_requirements",
-            "review_requirements",
-        ):
-            nested = value.get(field)
-            if isinstance(nested, dict):
-                collect(nested)
-            elif isinstance(nested, (list, tuple)):
-                for item in nested:
-                    collect(item)
-        for field in ("ruling_requirement", "ruling", "review_resolution"):
-            collect(value.get(field))
-        nested_result = value.get("result")
-        if isinstance(nested_result, dict) and (
-            nested_result.get("status") in PENDING_RULE_RESULT_STATUSES
-            or any(
-                field in nested_result
-                for field in (
-                    "pending",
-                    "pending_rulings",
-                    "ruling_requirement",
-                    "ruling_requirements",
-                    "review_requirements",
-                )
-            )
-        ):
-            collect(nested_result)
-
-    collect(result)
-    if kinds:
-        return rule_event_ruling_kind(
-            "pending_ruling",
-            ({"ruling_kind": kind} for kind in kinds),
-        )
-    return fallback if fallback in RULING_KINDS else "agent_dm_adjudication"
+    return nested_ruling_kind(result, fallback=fallback)
 
 
 def _facade_result(action: str, result: Any) -> dict[str, Any]:
@@ -597,15 +549,8 @@ SUPPORTED_FEATURE_MECHANICAL_GRANTS = frozenset(
 )
 
 
-def _normalize_source_evidence_text(value: Any) -> str:
-    """Normalize PDF artifacts without weakening exact source containment."""
-
-    text = str(value or "").replace("\x02", "").replace("\u00ad", "")
-    return " ".join(text.translate(_SOURCE_EVIDENCE_TRANSLATION).split()).casefold()
-
-
 def _compact_agent_evidence(value: Any) -> str:
-    return re.sub(r"[^a-z0-9]+", "", str(value or "").casefold())
+    return compact_ascii_key(value)
 
 
 def _bounded_edit_distance(left: str, right: str, *, limit: int) -> int:
@@ -1198,8 +1143,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         allow_ordered_omissions: bool = False,
     ) -> str:
         """Normalize and verify cited text against the already-resolved chunk."""
-        display = str(value or "").replace("\x02", "").replace("\u00ad", "")
-        display = " ".join(display.translate(_SOURCE_EVIDENCE_TRANSLATION).split())
+        display = clean_source_evidence_text(value)
         normalized = display.casefold()
         if not minimum_length <= len(display) <= maximum_length:
             raise ValueError(
@@ -1683,7 +1627,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
 
     def normalized_advancement_mode(mode: Any) -> str:
         value = str(mode or "").strip().casefold()
-        if value not in {"milestone", "xp"}:
+        if value not in ADVANCEMENT_MODES:
             raise ValueError("advancement mode must be milestone or xp")
         return value
 
@@ -7221,7 +7165,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         ):
             actions = (
                 ["death_save"]
-                if not conditions & {"dead", "stable"} and not death_save_used
+                if not conditions & DEATH_SAVE_SETTLED_CONDITIONS
+                and not death_save_used
                 else []
             )
         return {
@@ -8532,9 +8477,16 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             )
             rule_receipts.extend(saved.get("rule_receipts") or [])
             damage_roll = asdict(roll(damage_formula))
-            damage_amount = int(damage_roll["total"])
-            if saved["success"]:
-                damage_amount = damage_amount // 2 if half_on_success else 0
+            damage_amount = damage_amount_after_reduction(
+                int(damage_roll["total"]),
+                (
+                    "half"
+                    if saved["success"] and half_on_success
+                    else "none"
+                    if saved["success"]
+                    else "full"
+                ),
+            )
             damaged_result: dict[str, Any] | None = None
             applied_zero_hp_effect: dict[str, Any] | None = None
             if damage_amount > 0:
@@ -9342,12 +9294,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         require_write_contract(expected_revision, idempotency_key)
         resolved_branch_id = require_current_branch(campaign_id, branch_id)
-        if isinstance(day, bool) or not isinstance(day, int) or day < 1:
-            raise ValueError("day must be a positive integer")
-        if isinstance(hour, bool) or not isinstance(hour, int) or not 0 <= hour <= 23:
-            raise ValueError("hour must be an integer from 0 to 23")
-        if isinstance(minute, bool) or not isinstance(minute, int) or not 0 <= minute <= 59:
-            raise ValueError("minute must be an integer from 0 to 59")
+        calendar_point = calendar_minute_point(day=day, hour=hour, minute=minute)
+        day = calendar_point["day"]
+        hour = calendar_point["hour"]
+        minute = calendar_point["minute"]
         payload = {
             "day": day,
             "hour": hour,
@@ -9427,7 +9377,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         require_write_contract(expected_revision, idempotency_key)
         resolved_branch_id = require_current_branch(campaign_id, branch_id)
         normalized_period = str(period).strip().lower().replace("-", "_")
-        if normalized_period not in {"minute", "hour", "day", "round", "encounter"}:
+        if normalized_period not in FIXED_GAME_TIME_PERIODS | {"encounter"}:
             raise ValueError("period must be minute, hour, day, round, or encounter")
         if isinstance(count, bool) or not isinstance(count, int) or count < 1:
             raise ValueError("count must be a positive integer")
@@ -9439,55 +9389,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         ):
             raise ValueError("expected_elapsed_ticks must be a nonnegative integer")
         if expected_world_time is not None:
-            if not isinstance(expected_world_time, dict):
-                raise ValueError("expected_world_time must be an object")
-            unknown_expected_fields = set(expected_world_time) - {
-                "day",
-                "hour",
-                "minute",
-                "elapsed_minutes",
-            }
-            if unknown_expected_fields:
-                raise ValueError(
-                    "expected_world_time contains unsupported fields: "
-                    + ", ".join(sorted(unknown_expected_fields))
-                )
-            day = expected_world_time.get("day")
-            hour = expected_world_time.get("hour")
-            minute = expected_world_time.get("minute")
-            expected_elapsed = expected_world_time.get("elapsed_minutes")
-            if (
-                isinstance(day, bool)
-                or not isinstance(day, int)
-                or day < 1
-                or isinstance(hour, bool)
-                or not isinstance(hour, int)
-                or not 0 <= hour <= 23
-                or isinstance(minute, bool)
-                or not isinstance(minute, int)
-                or not 0 <= minute <= 59
-                or isinstance(expected_elapsed, bool)
-                or not isinstance(expected_elapsed, int)
-                or expected_elapsed < 0
-            ):
-                raise ValueError(
-                    "expected_world_time requires positive day, hour 0..23, "
-                    "minute 0..59, and nonnegative elapsed_minutes"
-                )
-            derived_elapsed = (day - 1) * 1440 + hour * 60 + minute
-            if expected_elapsed != derived_elapsed:
-                raise ValueError(
-                    "expected_world_time elapsed_minutes does not match day/hour/minute"
-                )
-            normalized_expected_world_time = {
-                "day": day,
-                "hour": hour,
-                "minute": minute,
-                "elapsed_minutes": expected_elapsed,
-            }
-        narrative_time_periods = {"minute", "hour", "day"}
+            normalized_expected_world_time = validate_calendar_minute_point(
+                expected_world_time,
+                field="expected_world_time",
+            )
         if (
-            normalized_period in narrative_time_periods
+            normalized_period in NARRATIVE_GAME_TIME_PERIODS
             and normalized_expected_world_time is None
             and expected_elapsed_ticks is None
         ):
@@ -9496,7 +9403,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "or legacy expected_world_time"
             )
         if (
-            normalized_period not in narrative_time_periods
+            normalized_period not in NARRATIVE_GAME_TIME_PERIODS
             and normalized_expected_world_time is not None
         ):
             raise ValueError("expected_world_time is valid only for minute, hour, and day advances")
@@ -9532,10 +9439,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "expected_world_time requires an anchored calendar; "
                 "use expected_elapsed_ticks for an unanchored campaign"
             )
-        time_minutes = {"minute": 1, "hour": 60, "day": 1440}
         world_time: dict[str, Any] | None = None
         time_transition: dict[str, Any] | None = None
-        if normalized_period in {*time_minutes, "round"}:
+        if normalized_period in FIXED_GAME_TIME_PERIODS:
             next_state, time_transition = advance_state_game_time(
                 next_state,
                 period=normalized_period,
@@ -9555,7 +9461,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 and world_time is not None
                 and {
                     key: int(world_time[key])
-                    for key in ("day", "hour", "minute", "elapsed_minutes")
+                    for key in CALENDAR_MINUTE_FIELDS
                 }
                 != normalized_expected_world_time
             ):
@@ -11200,12 +11106,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     else deepcopy(target_record.sheet)
                 )
                 healing = dict(structured_resolution.get("healing") or {})
-                expression = scaled_roll_expression(
-                    healing,
-                    cast_level=resolved_cast_level,
-                    actor_level=int(applied["sheet"].get("progression", {}).get("level", 1) or 1),
-                )
-                dice = asdict(roll(expression))
                 ability_modifier = 0
                 if healing.get("add_spellcasting_modifier"):
                     derived_caster = derive_character_sheet(applied["sheet"])
@@ -11215,7 +11115,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     ability_modifier = int(
                         dict(derived_caster.get("ability_modifiers") or {}).get(ability, 0) or 0
                     )
-                rolled_amount = max(0, int(dice["total"]) + ability_modifier)
+                expression = scaled_roll_expression(
+                    healing,
+                    cast_level=resolved_cast_level,
+                    actor_level=int(applied["sheet"].get("progression", {}).get("level", 1) or 1),
+                    flat_modifier=ability_modifier,
+                )
+                dice = asdict(roll(expression))
+                rolled_amount = max(0, int(dice["total"]))
                 healed = apply_healing_to_sheet(
                     target_sheet,
                     amount=rolled_amount,
@@ -11325,12 +11232,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     ),
                 )
                 resolution_receipts.extend(saved.get("rule_receipts") or [])
-                if saved["success"]:
-                    damage_amount = (
-                        int(damage_roll["total"]) // 2 if save_spec.get("success") == "half" else 0
-                    )
-                else:
-                    damage_amount = int(damage_roll["total"])
+                damage_amount = damage_amount_after_reduction(
+                    int(damage_roll["total"]),
+                    str(save_spec["success"]) if saved["success"] else "full",
+                )
                 damage_result: dict[str, Any] | None = None
                 if damage_amount > 0:
                     combatant = require_encounter_combatant(
@@ -12936,7 +12841,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         derived_skill = normalized_ability in dict(
             actor_snapshot["derived"].get("skills") or {}
         )
-        if kind in {"ability", "check"} and derived_skill and (proficient or bonus):
+        if kind in ABILITY_CHECK_KINDS and derived_skill and (proficient or bonus):
             raise CombatEngineError(
                 "skill checks derive proficiency, expertise, and bonuses from the actor card"
             )
@@ -13293,27 +13198,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             )
 
         attacker = combat_actor_snapshot(character_id)
-        conditions = {
-            str(item).strip().casefold()
-            for item in dict(attacker.get("sheet") or {}).get("conditions", [])
-        }
-        if conditions & {"dead", "incapacitated", "paralyzed", "stunned", "unconscious"}:
-            raise CombatEngineError("an incapacitated or dead character cannot attack an object")
-        attack = next(
-            (
-                item
-                for item in dict(attacker.get("derived") or {})
-                .get("inventory", {})
-                .get("weapon_attacks", [])
-                if str(item.get("item_id") or "") == str(weapon_id)
-            ),
-            None,
-        )
-        if attack is None:
-            raise LookupError("weapon_id is not an equipped source object attack")
-        if not str(attack.get("damage_expression") or ""):
-            raise CombatEngineError("selected weapon has no damage expression")
-
         scene_objects = deepcopy(dict(campaign.state.get("scene_objects") or {}))
         scene_state = deepcopy(dict(scene_objects.get(scene_id) or {}))
         existing = deepcopy(dict(scene_state.get(object_id) or {}))
@@ -13338,19 +13222,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             hit_points_before = hit_point_maximum
 
         campaign_edition = campaign_rules_edition(campaign_id)
-        exhaustion = int(dict(attacker["sheet"].get("combat") or {}).get("exhaustion", 0) or 0)
-        attack_bonus = int(attack["attack_bonus"])
-        attack_disadvantage = bool(disadvantage)
-        if campaign_edition == "2014":
-            attack_disadvantage = attack_disadvantage or exhaustion >= 3
-        else:
-            attack_bonus -= 2 * exhaustion
-        attack_roll = resolve_attack(
-            armor_class=armor_class,
-            attack_bonus=attack_bonus,
-            advantage=bool(advantage),
-            disadvantage=attack_disadvantage,
-        )
         object_sheet = default_character_sheet()
         object_sheet["edition"] = campaign_edition
         object_sheet["combat"]["hp"] = {
@@ -13365,35 +13236,42 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "name": object_name,
             "sheet": validate_character_sheet(object_sheet),
             "derived": derive_character_sheet(object_sheet),
+            "death_saves": False,
         }
-        plan = {
-            "damage_expression": str(attack["damage_expression"]),
-            "damage_type": str(attack.get("damage_type") or ""),
-            "additional_damage": [],
-            "ruleset": object_sheet["edition"],
-            "target_uses_death_saves": False,
-            "knock_out": False,
-            "melee": str(attack.get("attack_type") or "") == "melee",
-        }
+        rules = effective_rule_context(
+            campaign_id,
+            facts={
+                "actor_id": character_id,
+                "target_kind": "source_object",
+                "target_id": object_id,
+                "scene_id": scene_id,
+            },
+            branch_id=resolved_branch_id,
+        )
+        plan = preflight_attack(
+            attacker,
+            target,
+            action={
+                "weapon_id": weapon_id,
+                "context": {
+                    "advantage": bool(advantage),
+                    "disadvantage": bool(disadvantage),
+                },
+            },
+            require_attack_action=False,
+            rules=rules,
+        )
+        attack_roll = roll_attack_action(plan=plan)
         updated_attacker, updated_target, settled = resolve_attack_damage(
             attacker,
             target,
             plan=plan,
             attack=attack_roll,
-            rules=effective_rule_context(
-                campaign_id,
-                facts={
-                    "actor_id": character_id,
-                    "target_kind": "source_object",
-                    "target_id": object_id,
-                    "scene_id": scene_id,
-                },
-                branch_id=resolved_branch_id,
-            ),
+            rules=rules,
         )
         next_attacker_sheet = deepcopy(updated_attacker["sheet"])
         ammunition = None
-        if attack.get("ammunition_item_id"):
+        if plan.get("ammunition_item_id"):
             next_attacker_sheet, ammunition = consume_weapon_ammunition(
                 next_attacker_sheet,
                 str(weapon_id),
@@ -13637,7 +13515,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         actor = combat_actor_snapshot(actor_id)
         normalized_ability = str(ability).strip().casefold().replace(" ", "_")
         derived_skill = normalized_ability in dict(actor["derived"].get("skills") or {})
-        if kind in {"ability", "check"} and derived_skill and (proficient or bonus):
+        if kind in ABILITY_CHECK_KINDS and derived_skill and (proficient or bonus):
             raise CombatEngineError(
                 "skill checks derive proficiency and bonuses from the actor card"
             )
@@ -13645,16 +13523,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         encounter = dict(next_state.get("combat") or {})
         updates: list[CharacterStateUpdate] = []
         if kind == "death_save":
-            exhaustion = int(actor["sheet"].get("combat", {}).get("exhaustion", 0) or 0)
             ruleset = encounter_rules_edition(campaign_id, encounter)
-            death_save_bonus = -2 * exhaustion if ruleset == "2024" else 0
-            if ruleset == "2014" and exhaustion >= 3:
-                disadvantage = True
             updated = resolve_death_save_to_sheet(
                 actor["sheet"],
                 advantage=advantage,
                 disadvantage=disadvantage,
-                bonus=death_save_bonus,
+                ruleset=ruleset,
             )
             result = {key: value for key, value in updated.items() if key != "sheet"}
             current = characters.get(actor_id)
@@ -15802,9 +15676,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 all_characters[member["character_id"]].sheet,
                 rest_type="short_rest",
                 started_elapsed_ticks=started_elapsed_ticks,
-                completed_elapsed_ticks=(
-                    started_elapsed_ticks + elapsed_hours * 60 * TICKS_PER_MINUTE
-                ),
+                completed_elapsed_ticks=started_elapsed_ticks
+                + game_time_ticks("hour", elapsed_hours),
                 rest_schedule=member["rest_schedule"],
             )
         next_state, time_transition = advance_state_game_time(
@@ -16517,7 +16390,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     def campaign_party_rest(
         campaign_id: str,
         members: list[dict[str, Any]],
-        duration_minutes: int = 480,
+        duration_minutes: int = LONG_REST_MINIMUM_MINUTES,
         rest_type: str = "long_rest",
         principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
@@ -16529,16 +16402,18 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         require_write_contract(expected_revision, idempotency_key)
         resolved_branch_id = require_current_branch(campaign_id, branch_id)
         normalized_rest_type = str(rest_type).strip().lower().replace("-", "_")
-        if normalized_rest_type not in {"short_rest", "long_rest"}:
+        if normalized_rest_type not in REST_TYPES:
             raise CombatEngineError("rest_type must be short_rest or long_rest")
         if isinstance(duration_minutes, bool) or not isinstance(duration_minutes, int):
             raise ValueError("duration_minutes must be an integer")
-        if normalized_rest_type == "short_rest" and duration_minutes < 60:
-            raise CombatEngineError("a short rest requires at least 60 minutes")
-        if normalized_rest_type == "long_rest" and duration_minutes < 240:
+        minimum_possible_minutes = minimum_rest_minutes(
+            normalized_rest_type,
+            allows_trance=True,
+        )
+        if duration_minutes < minimum_possible_minutes:
             raise CombatEngineError(
-                "a long rest requires at least 480 minutes, or 240 minutes "
-                "for a creature with the source-granted Trance feature"
+                f"{normalized_rest_type} requires at least "
+                f"{minimum_possible_minutes} minutes"
             )
         if not isinstance(members, list) or not members:
             raise ValueError("party rest requires at least one member")
@@ -18769,14 +18644,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             if unknown:
                 raise ValueError(f"unsupported combat outcome fields: {sorted(unknown)}")
             status = str(outcome_value.get("status") or "").strip().lower()
-            if status not in {
-                "defeat",
-                "interrupted",
-                "surrender",
-                "truce",
-                "victory",
-                "withdrawal",
-            }:
+            if status not in COMBAT_OUTCOME_STATUSES:
                 raise ValueError("combat outcome status is invalid")
             summary = str(outcome_value.get("summary") or "").strip()
             if not summary or len(summary) > 2000:
@@ -18800,7 +18668,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             actor = characters.get(str(combatant["actor_id"]))
             hp = int(actor.sheet.get("combat", {}).get("hp", {}).get("value", 0) or 0)
             conditions = {str(item).casefold() for item in actor.sheet.get("conditions", [])}
-            if hp == 0 and not conditions & {"dead", "stable"}:
+            if hp == 0 and not conditions & DEATH_SAVE_SETTLED_CONDITIONS:
                 raise CombatEngineError(
                     f"cannot end combat while {actor.id} is still making death saves"
                 )
@@ -20354,7 +20222,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     if 1 <= candidate <= page_count and candidate not in candidate_pages:
                         candidate_pages.append(candidate)
 
-        target_key = re.sub(r"[^a-z0-9]+", "", target_name.casefold())
+        target_key = compact_ascii_key(target_name)
         selected_layout = None
         recovered = None
         attempted_pages: list[int] = []
@@ -20362,7 +20230,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             attempted_pages.append(candidate)
             layout = provider.extract_layout(source_path, page_numbers=[candidate])[0]
             if not any(
-                re.sub(r"[^a-z0-9]+", "", block.text.casefold()) == target_key
+                compact_ascii_key(block.text) == target_key
                 for block in layout.blocks
             ):
                 continue
@@ -20387,18 +20255,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         page_text = extract_pdf_page_text(source_path, recovered_page)
         content = str(recovered["normalized_content"])
         critical_facts = dict(recovered["critical_facts"])
-        identity_key = re.sub(
-            r"[^a-z0-9]+",
-            "",
-            str(critical_facts["identity"]).casefold(),
-        )
+        identity_key = compact_ascii_key(critical_facts["identity"])
         page_lines = [
             line.strip(" \t#>*_-") for line in page_text.splitlines() if line.strip(" \t#>*_-")
         ]
         identity_indexes = [
             index
             for index, line in enumerate(page_lines)
-            if re.sub(r"[^a-z0-9]+", "", line.casefold()) == identity_key
+            if compact_ascii_key(line) == identity_key
         ]
         corroboration_pairs = [
             ("Identity", str(critical_facts["identity"])),
@@ -20430,13 +20294,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 if identity_pattern.fullmatch(page_lines[index]):
                     segment_end = index
                     break
-            normalized_segment = re.sub(
-                r"[^a-z0-9]+",
-                "",
-                "\n".join(page_lines[segment_start:segment_end]).casefold(),
+            normalized_segment = compact_ascii_key(
+                "\n".join(page_lines[segment_start:segment_end])
             )
             for label, fact in corroboration_pairs:
-                if re.sub(r"[^a-z0-9]+", "", fact.casefold()) not in normalized_segment:
+                if compact_ascii_key(fact) not in normalized_segment:
                     raise RuntimeError(
                         f"OCR-recovered {label} is not corroborated by the target "
                         "embedded-text segment"
@@ -20458,7 +20320,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             def critical_fingerprint(value: Any) -> Any:
                 if isinstance(value, dict):
                     return {str(key): critical_fingerprint(item) for key, item in value.items()}
-                return re.sub(r"[^a-z0-9]+", "", str(value).casefold())
+                return compact_ascii_key(value)
 
             if critical_fingerprint(critical_facts) != critical_fingerprint(
                 dict(secondary["critical_facts"])
@@ -21787,7 +21649,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "",
                     str(specification.get("action_name") or name),
                 ).strip()
-                slug = re.sub(r"[^a-z0-9]+", "-", name.casefold()).strip("-")
+                slug = ascii_slug(name)
                 range_match = re.search(
                     r"(?i)range\s+(\d+)(?:\s*/\s*(\d+))?\s*ft",
                     action_description,
@@ -24813,6 +24675,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             },
             required_names=("actor_id", "kind", "ability"),
         )
+        if data["kind"] not in ACTOR_CHECK_KINDS:
+            raise ValueError(
+                "character_check(check).payload.kind must be ability, check, "
+                "save, or death_save"
+            )
         result = character_check_legacy(
             campaign_id,
             data["actor_id"],
@@ -27250,7 +27117,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             result = campaign_party_rest(
                 campaign_id=campaign_id,
                 members=required(data, "members"),
-                duration_minutes=data.get("duration_minutes", 480),
+                duration_minutes=data.get(
+                    "duration_minutes",
+                    LONG_REST_MINIMUM_MINUTES,
+                ),
                 rest_type=data.get("rest_type", "long_rest"),
                 principal_id=principal_id,
                 expected_revision=expected_revision,

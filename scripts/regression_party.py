@@ -11,26 +11,28 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-import os
 import re
-import sys
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
 from mcp import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
+from sagasmith_core.text import ascii_slug
+from sagasmith_dnd.abilities import ABILITY_NAMES
+from sagasmith_dnd.engine import ability_modifier
+from sagasmith_dnd.vocabulary import (
+    CAMPAIGN_GAME_PHASES,
+    EFFECTIVE_GAME_PHASES,
+    PREPARED_SELECTION_MODES,
+    SPELLCASTING_RESOURCE_MODELS,
+)
 
-from scripts.regression_modules import ExposureClient, _token
+from scripts.regression_modules import ExposureClient, _facade_value, _token, campaign_view
 from scripts.regression_rulings import raise_for_pending_ruling, ruling_failure_fields
-
-ABILITY_NAMES = (
-    "strength",
-    "dexterity",
-    "constitution",
-    "intelligence",
-    "wisdom",
-    "charisma",
+from scripts.regression_runtime import (
+    exception_leaf_messages,
+    regression_server_parameters,
 )
 
 _ITEM_WEIGHT_OZ: dict[str, int | float] = {
@@ -108,7 +110,7 @@ def _arguments() -> argparse.Namespace:
     )
     parser.add_argument(
         "--return-phase",
-        choices=("lobby", "play"),
+        choices=tuple(sorted(CAMPAIGN_GAME_PHASES)),
         default="",
         help="Phase to expose after construction; defaults to the entry phase",
     )
@@ -125,27 +127,10 @@ def _arguments() -> argparse.Namespace:
 
 
 def _server_parameters(args: argparse.Namespace) -> StdioServerParameters:
-    repo = Path(__file__).resolve().parents[1]
-    env = dict(os.environ)
-    env.update(
-        {
-            "PYTHONIOENCODING": "utf-8",
-            "SAGASMITH_DND_MCP_HOME": str(args.home.expanduser().resolve()),
-            "SAGASMITH_DND_MCP_AUTO_SEED": "1",
-        }
+    return regression_server_parameters(
+        home=args.home,
+        auto_seed=True,
     )
-    return StdioServerParameters(
-        command=sys.executable,
-        args=["-m", "sagasmith_dnd_mcp.server"],
-        cwd=repo,
-        env=env,
-    )
-
-
-def _facade_value(value: Any) -> Any:
-    if isinstance(value, dict) and "result" in value:
-        return value["result"]
-    return value
 
 
 def _weapon(
@@ -257,7 +242,7 @@ def _equipment(
 
 
 def _profile_item_prefix(profile: dict[str, Any]) -> str:
-    return re.sub(r"[^a-z0-9]+", "-", str(profile["name"]).casefold()).strip("-")
+    return ascii_slug(profile["name"])
 
 
 OIL_RULE = (
@@ -352,11 +337,11 @@ def _pack_contents(
     if contents is None:
         raise ValueError(f"unsupported audited equipment pack: {pack_name}")
     prefix = _profile_item_prefix(profile)
-    pack_slug = re.sub(r"[^a-z0-9]+", "-", pack_name.casefold()).strip("-")
+    pack_slug = ascii_slug(pack_name)
     source_key = str(profile["class"])
     items: list[dict[str, Any]] = []
     for name, quantity in contents:
-        item_slug = re.sub(r"[^a-z0-9]+", "-", name.casefold()).strip("-")
+        item_slug = ascii_slug(name)
         description = (
             OIL_RULE
             if name == "Oil (flask)"
@@ -1082,7 +1067,7 @@ def audit_profiles(
         str(dict(item.get("spellcasting") or {}).get("mode") or "")
         for item in profiles
     }
-    if not {"known", "prepared", "spellbook"}.issubset(spell_modes):
+    if not SPELLCASTING_RESOURCE_MODELS.issubset(spell_modes):
         raise ValueError("party must cover known, prepared, and spellbook casting")
     backgrounds = sorted({str(item["background"]) for item in profiles})
     if len(backgrounds) != len(profiles):
@@ -1257,7 +1242,7 @@ def _configure_base_sheet(
     for skill in profile["skills"]:
         sheet["skills"][skill]["proficiency"] = "proficient"
     constitution = int(sheet["abilities"]["constitution"]["score"])
-    hp = hit_die + (constitution - 10) // 2
+    hp = hit_die + ability_modifier(constitution)
     sheet["combat"]["hp"] = {"value": hp, "max": hp, "temp": 0}
     sheet["combat"]["hit_dice"] = {
         f"d{hit_die}": {
@@ -1302,7 +1287,7 @@ def _configure_base_sheet(
     if spellcasting:
         mode = str(spellcasting["mode"])
         ability = str(spellcasting["ability"])
-        modifier = (int(sheet["abilities"][ability]["score"]) - 10) // 2
+        modifier = ability_modifier(int(sheet["abilities"][ability]["score"]))
         sheet["spellcasting"]["ability"] = ability
         sheet["spellcasting"]["class_lists"] = [class_name.casefold()]
         sheet["spellcasting"]["spell_slots"] = {
@@ -1316,7 +1301,7 @@ def _configure_base_sheet(
             }
         }
         max_prepared = (
-            max(1, modifier + 1) if mode in {"prepared", "spellbook"} else 0
+            max(1, modifier + 1) if mode in PREPARED_SELECTION_MODES else 0
         )
         sheet["spellcasting"]["preparation"] = {
             "mode": mode,
@@ -1411,11 +1396,7 @@ async def _repair_existing_party_equipment(
         pack_items = _pack_contents(profile, pack_name)
         pack_item_ids = {str(item["id"]) for item in pack_items}
         prefix = _profile_item_prefix(profile)
-        legacy_pack_slug = re.sub(
-            r"[^a-z0-9]+",
-            "-",
-            pack_name.casefold().replace("'", ""),
-        ).strip("-")
+        legacy_pack_slug = ascii_slug(pack_name.replace("'", ""))
         legacy_pack_id = f"{prefix}-{legacy_pack_slug}"
         inventory = list(actor["sheet"]["inventory"]["items"])
         legacy_pack = next(
@@ -1884,17 +1865,7 @@ async def _build_character(
 
 
 async def _campaign(client: ExposureClient, campaign_id: str) -> dict[str, Any]:
-    return dict(
-        _facade_value(
-            await client.core(
-                "campaign_query",
-                {
-                    "view": "get",
-                    "payload": {"campaign_id": campaign_id},
-                },
-            )
-        )
-    )
+    return await campaign_view(client, campaign_id)
 
 
 async def _switch_phase(
@@ -1908,7 +1879,7 @@ async def _switch_phase(
 ) -> dict[str, Any] | None:
     if current_phase == target_phase:
         return None
-    if current_phase not in {"lobby", "play"} or target_phase not in {"lobby", "play"}:
+    if current_phase not in CAMPAIGN_GAME_PHASES or target_phase not in CAMPAIGN_GAME_PHASES:
         raise RuntimeError("party construction cannot transition through combat")
     branches = await client.domain(
         "branch_query",
@@ -1961,7 +1932,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             await client.open(args.campaign_id)
             campaign = await _campaign(client, args.campaign_id)
             entry_phase = str(campaign.get("effective_game_phase") or "")
-            if entry_phase not in {"lobby", "play", "combat"}:
+            if entry_phase not in EFFECTIVE_GAME_PHASES:
                 raise RuntimeError(
                     "campaign view has no valid effective_game_phase: "
                     f"{entry_phase!r}"
@@ -1975,7 +1946,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             ):
                 raise RuntimeError("full party construction requires the public Lobby profile")
             return_phase = args.return_phase or entry_phase
-            if return_phase not in {"lobby", "play"}:
+            if return_phase not in CAMPAIGN_GAME_PHASES:
                 raise ValueError("--return-phase must be lobby or play")
             if entry_phase == "lobby":
                 await client.load("lobby.campaign", "lobby.rules", "lobby.characters")
@@ -2088,12 +2059,6 @@ def main() -> int:
         report = asyncio.run(_run(args))
     except Exception as error:
 
-        def leaf_messages(item: BaseException) -> list[str]:
-            nested = getattr(item, "exceptions", ())
-            if nested:
-                return [message for child in nested for message in leaf_messages(child)]
-            return [f"{type(item).__name__}: {item}"]
-
         report = {
             "action": (
                 "repair-campaign-party-equipment"
@@ -2104,7 +2069,7 @@ def main() -> int:
             "run_id": args.run_id,
             "campaign_line_id": args.party,
             "passed": False,
-            "error": "; ".join(leaf_messages(error)),
+            "error": "; ".join(exception_leaf_messages(error)),
             **ruling_failure_fields(error),
         }
     output = args.output.expanduser().resolve()

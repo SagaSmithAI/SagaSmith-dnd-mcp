@@ -12,7 +12,6 @@ import argparse
 import asyncio
 import hashlib
 import json
-import os
 import re
 import sys
 from copy import deepcopy
@@ -21,23 +20,68 @@ from typing import Any
 
 from mcp import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
+from sagasmith_core.continuity_commit import FACT_KEY_WRITE_ACTIONS
+from sagasmith_core.documents import file_sha256
+from sagasmith_core.idempotency import request_hash
+from sagasmith_core.modules import (
+    EXACT_MODULE_SOURCE_FIELD_ORDER,
+    EXACT_MODULE_SOURCE_FIELDS,
+)
+from sagasmith_core.modules import (
+    normalize_source_evidence_text as _normalized_source_text,
+)
+from sagasmith_dnd.character_schema import effective_ability_modifier
+from sagasmith_dnd.combat_engine import (
+    ACTOR_CHECK_KINDS,
+    damage_amount_after_reduction,
+)
 from sagasmith_dnd.game_time import (
+    CALENDAR_MINUTE_FIELDS,
+    NARRATIVE_GAME_TIME_PERIODS,
     TICKS_PER_MINUTE,
-    anchor_world_time,
+    advance_calendar_minutes_from_elapsed,
+    calendar_minute_point,
+    calendar_minute_point_from_elapsed,
     game_time_from_ticks,
     game_time_ticks,
-    project_world_time,
+    validate_calendar_minute_point,
 )
-from sagasmith_dnd.lifecycle import allows_trance_rest
+from sagasmith_dnd.lifecycle import (
+    LONG_REST_LIGHT_ACTIVITY_MAX_MINUTES,
+    LONG_REST_SLEEP_MINUTES,
+    allows_trance_rest,
+    minimum_rest_minutes,
+)
 from sagasmith_dnd.module_profile import DndModuleProfile
-from sagasmith_dnd.playthrough import validate_playthrough_manifest
+from sagasmith_dnd.playthrough import (
+    PARTY_MEMBER_SOURCES,
+    PLAYTHROUGH_SOURCE_FIELDS,
+    validate_playthrough_manifest,
+)
+from sagasmith_dnd.spell_resolution import scaled_roll_expression
+from sagasmith_dnd.vocabulary import (
+    ADVANCEMENT_MODES,
+    CAMPAIGN_GAME_PHASES,
+    DENOMINATIONS,
+    EFFECTIVE_GAME_PHASES,
+)
 
 from scripts.regression_lock import campaign_operation_lock
-from scripts.regression_modules import PRINCIPAL_ID, ExposureClient, _token
+from scripts.regression_modules import (
+    PRINCIPAL_ID,
+    ExposureClient,
+    _facade_value,
+    _token,
+    campaign_view,
+)
 from scripts.regression_rulings import (
     RegressionRulingRequiredError,
     raise_for_pending_ruling,
     ruling_failure_fields,
+)
+from scripts.regression_runtime import (
+    exception_leaf_messages,
+    regression_server_parameters,
 )
 
 DEFERRED_CHECKPOINT_ACTIONS = frozenset(
@@ -161,7 +205,7 @@ def _arguments() -> argparse.Namespace:
         default="status",
     )
     parser.add_argument("--run-id", default="full-playthrough-v1")
-    parser.add_argument("--advancement-mode", choices=("xp", "milestone"))
+    parser.add_argument("--advancement-mode", choices=tuple(sorted(ADVANCEMENT_MODES)))
     parser.add_argument("--core-relock-reason", default="")
     parser.add_argument("--module-root", type=Path)
     parser.add_argument("--module-source-path", type=Path)
@@ -180,7 +224,7 @@ def _arguments() -> argparse.Namespace:
     )
     parser.add_argument(
         "--refresh-return-phase",
-        choices=("lobby", "play"),
+        choices=tuple(sorted(CAMPAIGN_GAME_PHASES)),
         default="",
         help="Phase to expose after a successful module refresh; defaults to the entry phase",
     )
@@ -235,7 +279,7 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--check-actor-id", default="")
     parser.add_argument(
         "--check-kind",
-        choices=("ability", "check", "save", "death_save"),
+        choices=tuple(sorted(ACTOR_CHECK_KINDS)),
         default="",
         help="Public character_check kind; use ability with a skill name as --check-ability",
     )
@@ -505,7 +549,7 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--level-reason", default="")
     parser.add_argument(
         "--level-return-phase",
-        choices=("lobby", "play"),
+        choices=tuple(sorted(CAMPAIGN_GAME_PHASES)),
         help="Explicit phase to restore after the lobby-only level transaction",
     )
     parser.add_argument("--level-subclass-artifact-id", default="")
@@ -701,29 +745,11 @@ async def _index_source(
 
 
 def _server_parameters(args: argparse.Namespace) -> StdioServerParameters:
-    repo = Path(__file__).resolve().parents[1]
-    env = dict(os.environ)
-    env.update(
-        {
-            "PYTHONIOENCODING": "utf-8",
-            "SAGASMITH_DND_MCP_HOME": str(args.home.expanduser().resolve()),
-            "SAGASMITH_DND_MCP_AUTO_SEED": "1",
-        }
+    return regression_server_parameters(
+        home=args.home,
+        auto_seed=True,
+        module_root=args.module_root,
     )
-    if args.module_root:
-        env["SAGASMITH_DND_MCP_MODULE_IMPORT_ROOTS"] = str(args.module_root.expanduser().resolve())
-    return StdioServerParameters(
-        command=sys.executable,
-        args=["-m", "sagasmith_dnd_mcp.server"],
-        cwd=repo,
-        env=env,
-    )
-
-
-def _facade_value(value: Any) -> Any:
-    if isinstance(value, dict) and "result" in value:
-        return value["result"]
-    return value
 
 
 def _phase_groups(phase: str) -> tuple[str, ...]:
@@ -1091,10 +1117,6 @@ def _module_refresh_manifest_identity(
     )
 
 
-def _normalized_source_text(value: Any) -> str:
-    return " ".join(str(value or "").split())
-
-
 async def _validate_source_ref(
     client: ExposureClient,
     scene: dict[str, Any],
@@ -1104,15 +1126,10 @@ async def _validate_source_ref(
 ) -> dict[str, Any]:
     if not isinstance(source_ref, dict):
         raise ValueError("playthrough action requires --source-ref-json")
-    required = {
-        "module_id",
-        "scene_id",
-        "chunk_id",
-        "page_start",
-        "page_end",
-        "heading_path",
-        "content_sha256",
-    }
+    required = EXACT_MODULE_SOURCE_FIELDS
+    unknown = sorted(set(source_ref) - (required | PLAYTHROUGH_SOURCE_FIELDS))
+    if unknown:
+        raise ValueError(f"source_ref has unsupported fields: {', '.join(unknown)}")
     missing = sorted(required - set(source_ref))
     if missing:
         raise ValueError(f"source_ref is missing required fields: {', '.join(missing)}")
@@ -1129,8 +1146,13 @@ async def _validate_source_ref(
     expanded_ref = expanded.get("source_ref")
     if not isinstance(expanded_ref, dict):
         raise RuntimeError("module_expand returned no exact source_ref")
-    cited = {key: deepcopy(source_ref[key]) for key in required}
-    resolved = {key: deepcopy(expanded_ref.get(key)) for key in required}
+    cited = {
+        key: deepcopy(source_ref[key]) for key in EXACT_MODULE_SOURCE_FIELD_ORDER
+    }
+    resolved = {
+        key: deepcopy(expanded_ref.get(key))
+        for key in EXACT_MODULE_SOURCE_FIELD_ORDER
+    }
     if resolved != cited:
         raise ValueError("source_ref does not match the cited chunk's exact source metadata")
     if str(expanded.get("chunk_id") or "") != str(source_ref["chunk_id"]):
@@ -1146,22 +1168,13 @@ async def _validate_source_ref(
 
 def _campaign_phase(campaign: dict[str, Any]) -> str:
     phase = str(campaign.get("effective_game_phase") or "")
-    if phase not in {"lobby", "play", "combat"}:
+    if phase not in EFFECTIVE_GAME_PHASES:
         raise RuntimeError(f"campaign view has no valid effective_game_phase: {phase!r}")
     return phase
 
 
 async def _campaign(client: ExposureClient, campaign_id: str) -> dict[str, Any]:
-    return _facade_value(
-        await client.core(
-            "campaign_query",
-            {
-                "view": "get",
-                "payload": {"campaign_id": campaign_id},
-                "principal_id": PRINCIPAL_ID,
-            },
-        )
-    )
+    return await campaign_view(client, campaign_id)
 
 
 def _knowledge_preflight_actor_ids(args: argparse.Namespace) -> list[str]:
@@ -1288,7 +1301,7 @@ def _validate_world_time_precondition(
     if normalized_expected is None:
         return None
     world_time = dict(dict(campaign.get("state") or {}).get("world_time") or {})
-    actual = {key: world_time.get(key) for key in ("day", "hour", "minute", "elapsed_minutes")}
+    actual = {key: world_time.get(key) for key in CALENDAR_MINUTE_FIELDS}
     if actual != normalized_expected:
         raise ValueError(
             "campaign world time does not match the required precondition: "
@@ -1305,13 +1318,7 @@ def _mutation_key(run_id: str, action: str, identity: str) -> str:
 
 
 def _idempotency_request_hash(payload: dict[str, Any]) -> str:
-    encoded = json.dumps(
-        payload,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+    return request_hash(payload)
 
 
 def _validate_recovered_continuity(
@@ -1433,14 +1440,6 @@ async def _commit_roll_continuity(
         )
 
 
-def _file_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as source:
-        for chunk in iter(lambda: source.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 def _module_refresh_identity(
     *,
     old_module_id: str,
@@ -1454,7 +1453,7 @@ def _module_refresh_identity(
         {
             "old_module_id": old_module_id,
             "source_key": source_key,
-            "source_sha256": source_sha256 or _file_sha256(source_path),
+            "source_sha256": source_sha256 or file_sha256(source_path),
             "title": title,
             "parser_revision": parser_revision,
         },
@@ -2057,7 +2056,7 @@ async def _register_party(
     if any(not item for item in selected_ids) or len(selected_ids) != len(set(selected_ids)):
         raise ValueError("party actor_ids must be non-empty and unique")
     for item in selections:
-        if item.get("source") not in {"pregen", "generated", "replacement"}:
+        if item.get("source") not in PARTY_MEMBER_SOURCES:
             raise ValueError("party member source must be pregen, generated, or replacement")
     current = await _manifest_get(client, campaign_id)
     manifest = deepcopy(current["manifest"])
@@ -2195,66 +2194,14 @@ def _settled_time_agent_ruling(
 def _normalize_expected_world_time(value: Any) -> dict[str, int] | None:
     if value is None:
         return None
-    if not isinstance(value, dict):
-        raise ValueError("expected world time must be a JSON object")
-    unknown = set(value) - {"day", "hour", "minute", "elapsed_minutes"}
-    if unknown:
-        raise ValueError(
-            "expected world time contains unsupported fields: " + ", ".join(sorted(unknown))
-        )
-    day = value.get("day")
-    hour = value.get("hour")
-    minute = value.get("minute")
-    elapsed = value.get("elapsed_minutes")
-    if isinstance(elapsed, bool) or not isinstance(elapsed, int) or elapsed < 0:
-        raise ValueError(
-            "expected world time requires positive day, hour 0..23, "
-            "minute 0..59, and nonnegative elapsed_minutes"
-        )
-    try:
-        canonical = anchor_world_time(
-            game_time_from_ticks(),
-            day=day,
-            hour=hour,
-            minute=minute,
-        )
-    except ValueError as exc:
-        raise ValueError(
-            "expected world time requires positive day, hour 0..23, "
-            "minute 0..59, and nonnegative elapsed_minutes"
-        ) from exc
-    if elapsed != canonical["elapsed_minutes"]:
-        raise ValueError("expected world time elapsed_minutes does not match day/hour/minute")
-    return {
-        "day": day,
-        "hour": hour,
-        "minute": minute,
-        "elapsed_minutes": elapsed,
-    }
+    return validate_calendar_minute_point(value, field="expected world time")
 
 
 def _project_world_time(clock: dict[str, Any], elapsed_minutes: int) -> dict[str, int]:
-    current_elapsed = clock.get("elapsed_minutes")
-    if isinstance(current_elapsed, bool) or not isinstance(current_elapsed, int):
-        raise ValueError("campaign clock must contain integer elapsed_minutes")
-    if elapsed_minutes < 1:
-        raise ValueError("elapsed_minutes must be positive")
-    round_remainder = clock.get("round_remainder", 0)
-    if (
-        isinstance(round_remainder, bool)
-        or not isinstance(round_remainder, int)
-        or not 0 <= round_remainder < TICKS_PER_MINUTE
-    ):
-        raise ValueError("campaign clock round_remainder is invalid")
-    projected = project_world_time(
-        game_time_from_ticks(
-            current_elapsed * TICKS_PER_MINUTE
-            + round_remainder
-            + game_time_ticks("minute", elapsed_minutes)
-        ),
-        calendar_offset_ticks=0,
+    return advance_calendar_minutes_from_elapsed(
+        clock.get("elapsed_minutes"),
+        elapsed_minutes,
     )
-    return {key: int(projected[key]) for key in ("day", "hour", "minute", "elapsed_minutes")}
 
 
 def _settled_event_agent_ruling(value: Any) -> dict[str, Any] | None:
@@ -3242,7 +3189,7 @@ async def _resolve_check(
         )
     if dc is None or dc < 0:
         raise ValueError("resolve-check requires a non-negative --check-dc")
-    if kind not in {"ability", "check", "save", "death_save"}:
+    if kind not in ACTOR_CHECK_KINDS:
         raise ValueError("resolve-check kind is not supported by character_check")
     if advantage and disadvantage:
         raise ValueError("resolve-check cannot apply advantage and disadvantage together")
@@ -4183,15 +4130,7 @@ async def _prepare_narrative_npc(
     provenance = dict(created.get("narrative_npc") or {})
     canonical_source_ref = {
         key: deepcopy(exact_ref[key])
-        for key in (
-            "module_id",
-            "scene_id",
-            "chunk_id",
-            "page_start",
-            "page_end",
-            "heading_path",
-            "content_sha256",
-        )
+        for key in EXACT_MODULE_SOURCE_FIELD_ORDER
     }
     if (
         actor.get("campaign_id") != campaign_id
@@ -4392,7 +4331,7 @@ async def _record_outcome(
         ):
             raise ValueError(f"fact-json[{index}] requires fact_key and content")
         action = str(fact.get("action", "upsert"))
-        if action not in {"add", "upsert"}:
+        if action not in FACT_KEY_WRITE_ACTIONS:
             raise ValueError(
                 f"fact-json[{index}].action must be add or upsert; "
                 "the public continuity commit does not support deletion or retraction"
@@ -5132,7 +5071,10 @@ async def _apply_source_damage(
     )
     roll_result = _dice_result(rolled)
     rolled_amount = int(roll_result["total"])
-    amount = rolled_amount // 2 if half_damage else rolled_amount
+    amount = damage_amount_after_reduction(
+        rolled_amount,
+        "half" if half_damage else "full",
+    )
     damaged = await client.domain(
         "character_state_change",
         {
@@ -5553,8 +5495,9 @@ async def _short_rest(
     expected_start_clock: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     rest_identity = _occurrence_identity(occurrence_id, "short-rest")
-    if duration_minutes < 60:
-        raise ValueError("short-rest requires at least 60 minutes")
+    minimum_duration = minimum_rest_minutes("short_rest")
+    if duration_minutes < minimum_duration:
+        raise ValueError(f"short-rest requires at least {minimum_duration} minutes")
     if not members or not reason.strip():
         raise ValueError("short-rest requires members and --rest-reason")
     allowed_fields = {
@@ -6409,22 +6352,26 @@ async def _cast_healing_spell(
     paid_level = spell_level if cast_level is None else cast_level
     if paid_level < max(1, spell_level):
         raise ValueError("cast-healing-spell cast level is below the spell level")
-    slot_base_level = int(healing.get("slot_base_level", spell_level) or spell_level)
-    base_dice = str(healing.get("base_dice") or "").strip()
-    per_slot_dice = str(healing.get("per_slot_dice") or "").strip()
-    if not base_dice:
-        raise ValueError("cast-healing-spell healing card has no base dice")
-    expression_parts = [base_dice]
-    expression_parts.extend(
-        per_slot_dice for _ in range(max(0, paid_level - slot_base_level)) if per_slot_dice
-    )
+    modifier = 0
     if healing.get("add_spellcasting_modifier"):
-        ability = str(dict(actor["sheet"].get("spellcasting") or {}).get("ability") or "")
-        score = int(dict(actor["sheet"].get("abilities") or {}).get(ability, {}).get("score", 10))
-        modifier = (score - 10) // 2
-        if modifier:
-            expression_parts.append(str(modifier))
-    healing_expression = " + ".join(expression_parts)
+        derived = dict(actor.get("derived") or {})
+        ability = str(
+            dict(derived.get("spellcasting") or {}).get("ability")
+            or dict(actor["sheet"].get("spellcasting") or {}).get("ability")
+            or ""
+        )
+        derived_modifiers = dict(derived.get("ability_modifiers") or {})
+        modifier = (
+            int(derived_modifiers[ability])
+            if ability in derived_modifiers
+            else effective_ability_modifier(actor["sheet"], ability)
+        )
+    healing_expression = scaled_roll_expression(
+        healing,
+        cast_level=paid_level,
+        actor_level=int(actor["sheet"].get("progression", {}).get("level", 1) or 1),
+        flat_modifier=modifier,
+    )
 
     cast_payload: dict[str, Any] = {
         "spell_id": normalized_spell_id,
@@ -6603,9 +6550,12 @@ async def _long_rest(
     expected_start_clock: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     rest_identity = _occurrence_identity(occurrence_id, "long-rest")
-    if duration_minutes < 240:
+    trance_minimum = minimum_rest_minutes("long_rest", allows_trance=True)
+    standard_minimum = minimum_rest_minutes("long_rest")
+    if duration_minutes < trance_minimum:
         raise ValueError(
-            "long-rest requires at least 480 minutes, or 240 minutes for "
+            f"long-rest requires at least {standard_minimum} minutes, or "
+            f"{trance_minimum} minutes for "
             "members with the source-granted Trance feature"
         )
     if not members or not reason.strip():
@@ -6651,20 +6601,25 @@ async def _long_rest(
         if actor.get("campaign_id") != campaign_id:
             raise ValueError("every long-rest actor must belong to the campaign")
         actors.append(actor)
-        uses_trance = duration_minutes < 480 and allows_trance_rest(actor["sheet"])
-        if duration_minutes < 480 and not uses_trance:
-            raise ValueError(f"long-rest member {actor_id} requires at least 480 minutes")
+        uses_trance = duration_minutes < standard_minimum and allows_trance_rest(actor["sheet"])
+        if duration_minutes < standard_minimum and not uses_trance:
+            raise ValueError(
+                f"long-rest member {actor_id} requires at least {standard_minimum} minutes"
+            )
         default_schedule = (
             {
-                "sleep_minutes": max(duration_minutes - 360, 0),
-                "trance_minutes": 240,
-                "light_activity_minutes": min(max(duration_minutes - 240, 0), 120),
+                "sleep_minutes": max(duration_minutes - LONG_REST_SLEEP_MINUTES, 0),
+                "trance_minutes": trance_minimum,
+                "light_activity_minutes": min(
+                    max(duration_minutes - trance_minimum, 0),
+                    LONG_REST_LIGHT_ACTIVITY_MAX_MINUTES,
+                ),
                 "strenuous_activity_minutes": 0,
             }
             if uses_trance
             else {
-                "sleep_minutes": duration_minutes - 120,
-                "light_activity_minutes": 120,
+                "sleep_minutes": duration_minutes - LONG_REST_LIGHT_ACTIVITY_MAX_MINUTES,
+                "light_activity_minutes": LONG_REST_LIGHT_ACTIVITY_MAX_MINUTES,
                 "strenuous_activity_minutes": 0,
             }
         )
@@ -6945,7 +6900,7 @@ async def _advance_time(
     normalized_reason = reason.strip()
     if (
         not scene_id
-        or period not in {"minute", "hour", "day"}
+        or period not in NARRATIVE_GAME_TIME_PERIODS
         or count is None
         or count <= 0
         or not normalized_reason
@@ -7033,30 +6988,17 @@ async def _advance_time(
         raise RuntimeError("campaign has no canonical game-time position")
     projected_before = before
     if not projected_before and isinstance(start_clock, dict):
-        start_day = start_clock.get("day")
-        start_hour = start_clock.get("hour", 0)
-        start_minute = start_clock.get("minute", 0)
-        if (
-            isinstance(start_day, bool)
-            or not isinstance(start_day, int)
-            or start_day < 1
-            or isinstance(start_hour, bool)
-            or not isinstance(start_hour, int)
-            or not 0 <= start_hour <= 23
-            or isinstance(start_minute, bool)
-            or not isinstance(start_minute, int)
-            or not 0 <= start_minute <= 59
-        ):
-            raise ValueError("advance-time start clock is invalid")
-        projected_before = {
-            "elapsed_minutes": ((start_day - 1) * 1440 + start_hour * 60 + start_minute)
-        }
+        projected_before = calendar_minute_point(
+            day=start_clock.get("day"),
+            hour=start_clock.get("hour", 0),
+            minute=start_clock.get("minute", 0),
+        )
     if normalized_expected_after is not None and not projected_before:
         raise ValueError(
             "advance-time calendar target requires an existing or supplied start clock"
         )
     current_projection = (
-        {key: projected_before.get(key) for key in ("day", "hour", "minute", "elapsed_minutes")}
+        {key: projected_before.get(key) for key in CALENDAR_MINUTE_FIELDS}
         if projected_before
         else None
     )
@@ -7087,12 +7029,10 @@ async def _advance_time(
             original_elapsed = normalized_expected_after["elapsed_minutes"] - expected_minutes
             if original_elapsed < 0:
                 raise ValueError("advance-time recovery target predates the requested duration")
+            recovered_point = calendar_minute_point_from_elapsed(original_elapsed)
             before = {
                 "schema_version": int(projected_before.get("schema_version", 1) or 1),
-                "day": original_elapsed // 1440 + 1,
-                "hour": (original_elapsed % 1440) // 60,
-                "minute": original_elapsed % 60,
-                "elapsed_minutes": original_elapsed,
+                **recovered_point,
                 "label": str(projected_before.get("label") or ""),
             }
     elif normalized_expected_after is not None:
@@ -7200,7 +7140,7 @@ async def _advance_time(
         if (
             normalized_expected_after is not None
             and {
-                key: current_clock.get(key) for key in ("day", "hour", "minute", "elapsed_minutes")
+                key: current_clock.get(key) for key in CALENDAR_MINUTE_FIELDS
             }
             != normalized_expected_after
         ):
@@ -7242,7 +7182,7 @@ async def _advance_time(
         raise RuntimeError("canonical game time did not advance by the requested duration")
     if (
         normalized_expected_after is not None
-        and {key: int(after.get(key, -1)) for key in ("day", "hour", "minute", "elapsed_minutes")}
+        and {key: int(after.get(key, -1)) for key in CALENDAR_MINUTE_FIELDS}
         != normalized_expected_after
     ):
         raise RuntimeError("campaign calendar response does not match expected target")
@@ -7361,10 +7301,11 @@ async def _initialize_clock(
         )
     campaign = await _campaign(client, campaign_id)
     existing = dict(dict(campaign.get("state") or {}).get("world_time") or {})
-    requested_elapsed = (day - 1) * 1440 + hour * 60 + minute
+    requested_point = calendar_minute_point(day=day, hour=hour, minute=minute)
     if existing:
         if (
-            int(existing.get("elapsed_minutes", -1)) != requested_elapsed
+            int(existing.get("elapsed_minutes", -1))
+            != requested_point["elapsed_minutes"]
             or str(existing.get("label") or "") != label
         ):
             raise ValueError("campaign clock is already initialized to a different DM anchor")
@@ -8211,7 +8152,7 @@ async def _pool_character_currency(
         raise ValueError(
             f"{action_name} requires scene, location, excerpt, actor, denomination, and reason"
         )
-    if normalized_denomination not in {"cp", "sp", "ep", "gp", "pp"}:
+    if normalized_denomination not in DENOMINATIONS:
         raise ValueError(f"{action_name} denomination must be cp, sp, ep, gp, or pp")
     if isinstance(amount, bool) or not isinstance(amount, int) or amount <= 0:
         raise ValueError(f"{action_name} amount must be a positive integer")
@@ -9989,7 +9930,7 @@ async def _configure_advancement(
     mode: str,
     initial_phase: str,
 ) -> dict[str, Any]:
-    if mode not in {"xp", "milestone"}:
+    if mode not in ADVANCEMENT_MODES:
         raise ValueError("configure-advancement requires --advancement-mode")
     phase_changes: list[dict[str, Any]] = []
     branch_id = ""
@@ -10395,7 +10336,7 @@ async def _advance_level(
         or not normalized_class
         or hp_method not in {"fixed", "rolled"}
         or not normalized_reason
-        or return_phase not in {"lobby", "play"}
+        or return_phase not in CAMPAIGN_GAME_PHASES
         or not scene_id
     ):
         raise ValueError(
@@ -10960,10 +10901,10 @@ async def _refresh_module(
     return_phase: str = "",
     progress_remaps: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    if initial_phase not in {"lobby", "play"}:
+    if initial_phase not in CAMPAIGN_GAME_PHASES:
         raise RuntimeError("refresh-module cannot run during active combat")
     target_phase = return_phase.strip() or initial_phase
-    if target_phase not in {"lobby", "play"}:
+    if target_phase not in CAMPAIGN_GAME_PHASES:
         raise ValueError("refresh-module return phase must be lobby or play")
     if source_path is None:
         raise ValueError("refresh-module requires --module-source-path")
@@ -11015,7 +10956,7 @@ async def _refresh_module(
     campaign = await _campaign(client, campaign_id)
     resolved_source_path = source_path.expanduser().resolve()
     resolved_title = title.strip() or resolved_source_path.stem
-    source_asset_sha256 = _file_sha256(resolved_source_path)
+    source_asset_sha256 = file_sha256(resolved_source_path)
     refresh_identity = _module_refresh_identity(
         old_module_id=old_module_id,
         source_key=source_key,
@@ -11248,13 +11189,13 @@ async def _restore_phase_after_failed_lobby_action(
     identity: str,
 ) -> dict[str, Any] | None:
     """Restore the entry exposure after a resumable Lobby-only action fails."""
-    if original_phase not in {"lobby", "play"}:
+    if original_phase not in CAMPAIGN_GAME_PHASES:
         return None
     campaign = await _campaign(client, campaign_id)
     current_phase = _campaign_phase(campaign)
     if current_phase == original_phase:
         return None
-    if current_phase not in {"lobby", "play"}:
+    if current_phase not in CAMPAIGN_GAME_PHASES:
         raise RuntimeError("failed module refresh left the campaign in combat")
     await client.open(campaign_id)
     await client.load(*_phase_groups(current_phase))
@@ -12238,18 +12179,12 @@ def main() -> int:
             report = asyncio.run(_run(args))
     except Exception as error:
 
-        def leaf_messages(item: BaseException) -> list[str]:
-            nested = getattr(item, "exceptions", ())
-            if nested:
-                return [message for child in nested for message in leaf_messages(child)]
-            return [f"{type(item).__name__}: {item}"]
-
         report = {
             "action": args.action,
             "campaign_id": args.campaign_id,
             "run_id": args.run_id,
             "passed": False,
-            "error": "; ".join(leaf_messages(error)),
+            "error": "; ".join(exception_leaf_messages(error)),
             **ruling_failure_fields(error),
         }
     rendered = json.dumps(report, ensure_ascii=False, indent=2)

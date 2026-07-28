@@ -11,7 +11,6 @@ import argparse
 import asyncio
 import hashlib
 import json
-import os
 import sys
 from copy import deepcopy
 from pathlib import Path
@@ -20,8 +19,16 @@ from typing import Any
 from mcp import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
 from sagasmith_core.access import LOCAL_SYSTEM_PRINCIPAL_ID
+from sagasmith_core.documents import file_sha256
+from sagasmith_core.modules import (
+    normalize_source_evidence_text as _normalized_source_text,
+)
+from sagasmith_dnd.actor_types import NON_PLAYER_CHARACTER_TYPES
+from sagasmith_dnd.engine import ability_modifier
 
 from scripts.regression_lock import campaign_operation_lock
+from scripts.regression_modules import _facade_value
+from scripts.regression_runtime import decode_mcp_result, regression_server_parameters
 
 PRINCIPAL_ID = LOCAL_SYSTEM_PRINCIPAL_ID
 RULE_STATBLOCK_OCR_PROFILE = "layout-ocr-v1"
@@ -228,7 +235,7 @@ def _arguments() -> argparse.Namespace:
     )
     parser.add_argument(
         "--actor-type",
-        choices=("npc", "monster"),
+        choices=tuple(sorted(NON_PLAYER_CHARACTER_TYPES)),
         default="monster",
         help="Actor type for statblock preparation actions (default: monster)",
     )
@@ -378,21 +385,10 @@ def _arguments() -> argparse.Namespace:
 
 
 def _server_parameters(args: argparse.Namespace) -> StdioServerParameters:
-    repo = Path(__file__).resolve().parents[1]
-    env = dict(os.environ)
-    env.update(
-        {
-            "SAGASMITH_DND_MCP_HOME": str(args.home.expanduser().resolve()),
-            "SAGASMITH_DND_MCP_AUTO_SEED": "0",
-        }
-    )
-    if args.module_root:
-        env["SAGASMITH_DND_MCP_MODULE_IMPORT_ROOTS"] = str(args.module_root.expanduser().resolve())
-    return StdioServerParameters(
-        command=sys.executable,
-        args=["-m", "sagasmith_dnd_mcp.server"],
-        cwd=repo,
-        env=env,
+    return regression_server_parameters(
+        home=args.home,
+        auto_seed=False,
+        module_root=args.module_root,
     )
 
 
@@ -422,14 +418,6 @@ def _statblock_creation_key(
     )
     identity_token = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
     return f"{_idempotency_token(run_id)}-create-statblock-{identity_token}"
-
-
-def _file_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as source:
-        for block in iter(lambda: source.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
 
 
 def _rule_statblock_operation_token(
@@ -517,22 +505,6 @@ def _phase_transition_key(token: str, action: str, campaign: dict[str, Any]) -> 
     return f"{token}-{action}-r{campaign['revision']}"
 
 
-def _decode(result: Any) -> Any:
-    texts = [item.text for item in result.content if getattr(item, "text", None)]
-    message = "\n".join(texts)
-    if result.isError:
-        raise RuntimeError(message or "MCP tool call failed")
-    if not message:
-        return result.structuredContent
-    return json.loads(message)
-
-
-def _facade_value(payload: Any) -> Any:
-    if isinstance(payload, dict) and "result" in payload:
-        return payload["result"]
-    return payload
-
-
 class CampaignMcp:
     def __init__(self, session: ClientSession, campaign_id: str) -> None:
         self.session = session
@@ -540,7 +512,7 @@ class CampaignMcp:
         self.exposure_id = ""
 
     async def core(self, tool_id: str, arguments: dict[str, Any]) -> Any:
-        return _decode(await self.session.call_tool(tool_id, arguments))
+        return decode_mcp_result(await self.session.call_tool(tool_id, arguments))
 
     async def open(self) -> dict[str, Any]:
         opened = await self.core(
@@ -773,25 +745,6 @@ def _current_scene_summary(current: Any) -> Any:
         )
         if key in current
     } | {"content_characters": len(content)}
-
-
-def _normalized_source_text(value: Any) -> str:
-    """Normalize PDF control characters and whitespace for source containment checks."""
-
-    text = str(value or "").replace("\x02", "").replace("\u00ad", "")
-    text = text.translate(
-        str.maketrans(
-            {
-                "\u2018": "'",
-                "\u2019": "'",
-                "\u201c": '"',
-                "\u201d": '"',
-                "\u2013": "-",
-                "\u2014": "-",
-            }
-        )
-    )
-    return " ".join(text.split()).casefold()
 
 
 def _expanded_source_ref(expanded: dict[str, Any]) -> dict[str, Any]:
@@ -2913,7 +2866,7 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
     source_identity = (
         {
             "source_path": str(resolved_source_path),
-            "source_sha256": _file_sha256(resolved_source_path),
+            "source_sha256": file_sha256(resolved_source_path),
         }
         if resolved_source_path is not None
         else {"source_id": str(args.source_id)}
@@ -3834,8 +3787,8 @@ async def _prepare_core_wizard(args: argparse.Namespace) -> dict[str, Any]:
             sheet["skills"]["investigation"]["proficiency"] = "proficient"
             constitution = int(sheet["abilities"]["constitution"]["score"])
             intelligence = int(sheet["abilities"]["intelligence"]["score"])
-            constitution_modifier = (constitution - 10) // 2
-            intelligence_modifier = (intelligence - 10) // 2
+            constitution_modifier = ability_modifier(constitution)
+            intelligence_modifier = ability_modifier(intelligence)
             level_one_hp = 6 + constitution_modifier
             sheet["combat"]["hp"] = {
                 "value": level_one_hp,

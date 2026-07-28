@@ -103,6 +103,55 @@ def test_source_ref_validation_rejects_an_excerpt_from_an_adjacent_chunk() -> No
         )
 
 
+def test_source_ref_validation_uses_canonical_typographic_normalization() -> None:
+    source_ref = _source_ref()
+
+    class Client:
+        async def domain(self, tool_id: str, arguments: dict):
+            assert tool_id == "module_expand"
+            assert arguments == {"chunk_id": "chunk-trigger"}
+            return {
+                "chunk_id": "chunk-trigger",
+                "content": "\x02The dragon’s \u00adhoard—HERE.",
+                "content_sha256": "a" * 64,
+                "source_ref": deepcopy(source_ref),
+            }
+
+    result = asyncio.run(
+        _validate_source_ref(
+            Client(),
+            {
+                "module_id": "module-1",
+                "scene_id": "scene-1",
+            },
+            source_ref,
+            excerpt="The dragon's hoard-here.",
+        )
+    )
+
+    assert result == source_ref
+
+
+def test_source_ref_validation_rejects_extra_fields_before_expansion() -> None:
+    source_ref = {**_source_ref(), "unmanaged_field": "not a source contract field"}
+
+    class Client:
+        async def domain(self, tool_id: str, arguments: dict):
+            raise AssertionError((tool_id, arguments))
+
+    with pytest.raises(ValueError, match="unsupported fields: unmanaged_field"):
+        asyncio.run(
+            _validate_source_ref(
+                Client(),
+                {
+                    "module_id": "module-1",
+                    "scene_id": "scene-1",
+                },
+                source_ref,
+            )
+        )
+
+
 def test_record_outcome_rejects_an_adjacent_chunk_before_any_mutation() -> None:
     source_ref = _source_ref()
 
