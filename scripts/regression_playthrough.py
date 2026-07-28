@@ -73,6 +73,32 @@ DEFERRED_CHECKPOINT_ACTIONS = frozenset(
     }
 )
 
+KNOWLEDGE_ACTOR_PREFLIGHT_ACTIONS = frozenset(
+    {
+        "register-replacement",
+        "resolve-check",
+        "resolve-contest",
+        "apply-damage",
+        "initialize-source-state",
+        "stand-up",
+        "use-activity",
+        "cast-source-spell",
+        "cast-healing-spell",
+        "advance-time",
+        "recover-stable",
+        "acquire-loot",
+        "spend-coins",
+        "spend-item",
+        "use-consumable",
+    }
+)
+EVENT_KNOWLEDGE_ACTOR_PREFLIGHT_ACTIONS = frozenset(
+    {
+        "record-event",
+        "record-outcome",
+    }
+)
+
 
 def _arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -1136,6 +1162,36 @@ async def _campaign(client: ExposureClient, campaign_id: str) -> dict[str, Any]:
             },
         )
     )
+
+
+def _knowledge_preflight_actor_ids(args: argparse.Namespace) -> list[str]:
+    if args.action in KNOWLEDGE_ACTOR_PREFLIGHT_ACTIONS:
+        return list(args.knowledge_actor_id)
+    if args.action in EVENT_KNOWLEDGE_ACTOR_PREFLIGHT_ACTIONS:
+        return list(args.event_knowledge_actor_id)
+    return []
+
+
+async def _validate_campaign_actor_ids(
+    client: ExposureClient,
+    *,
+    campaign_id: str,
+    actor_ids: list[str],
+    operation: str,
+) -> list[dict[str, Any]]:
+    normalized_ids = list(dict.fromkeys(str(actor_id).strip() for actor_id in actor_ids))
+    if any(not actor_id for actor_id in normalized_ids):
+        raise ValueError(f"{operation} actor ids must not be empty")
+    actors = []
+    for actor_id in normalized_ids:
+        actor = await client.domain(
+            "character_query",
+            {"view": "get", "payload": {"character_id": actor_id}},
+        )
+        if actor.get("campaign_id") != campaign_id:
+            raise ValueError(f"{operation} actor does not belong to the campaign: {actor_id}")
+        actors.append(actor)
+    return actors
 
 
 async def _manifest_get(
@@ -11190,6 +11246,15 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             phase = _campaign_phase(campaign)
             report["phase"] = phase
             await client.load(*_phase_groups(phase))
+            knowledge_actor_ids = _knowledge_preflight_actor_ids(args)
+            if knowledge_actor_ids:
+                await client.load(_character_group(phase))
+                await _validate_campaign_actor_ids(
+                    client,
+                    campaign_id=args.campaign_id,
+                    actor_ids=knowledge_actor_ids,
+                    operation=f"{args.action} knowledge recipient",
+                )
             if args.action == "register-party":
                 await client.load(_character_group(phase))
                 report["result"] = await _register_party(

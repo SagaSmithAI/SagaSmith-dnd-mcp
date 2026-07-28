@@ -6329,6 +6329,75 @@ def test_source_damage_rolls_then_damages_and_knocks_prone_through_public_tools(
     assert _mutation_key("run-1", "source-damage-continuity", "chimney-fall-1") in client.keys
 
 
+def test_knowledge_recipient_preflight_covers_every_mutating_driver_action() -> None:
+    standard = argparse.Namespace(
+        action="apply-damage",
+        knowledge_actor_id=["actor-1"],
+        event_knowledge_actor_id=["event-actor"],
+    )
+    event = argparse.Namespace(
+        action="record-outcome",
+        knowledge_actor_id=["actor-1"],
+        event_knowledge_actor_id=["event-actor"],
+    )
+    unrelated = argparse.Namespace(
+        action="status",
+        knowledge_actor_id=["actor-1"],
+        event_knowledge_actor_id=["event-actor"],
+    )
+
+    assert regression_playthrough._knowledge_preflight_actor_ids(standard) == ["actor-1"]
+    assert regression_playthrough._knowledge_preflight_actor_ids(event) == ["event-actor"]
+    assert regression_playthrough._knowledge_preflight_actor_ids(unrelated) == []
+    assert {
+        "register-replacement",
+        "resolve-check",
+        "resolve-contest",
+        "apply-damage",
+        "initialize-source-state",
+        "stand-up",
+        "use-activity",
+        "cast-source-spell",
+        "cast-healing-spell",
+        "advance-time",
+        "recover-stable",
+        "acquire-loot",
+        "spend-coins",
+        "spend-item",
+        "use-consumable",
+    } == regression_playthrough.KNOWLEDGE_ACTOR_PREFLIGHT_ACTIONS
+    assert {
+        "record-event",
+        "record-outcome",
+    } == regression_playthrough.EVENT_KNOWLEDGE_ACTOR_PREFLIGHT_ACTIONS
+
+
+def test_knowledge_recipient_preflight_rejects_cross_campaign_actor_before_mutation() -> None:
+    class Client:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        async def domain(self, tool_id: str, arguments: dict):
+            self.calls.append(tool_id)
+            assert tool_id == "character_query"
+            return {
+                "id": arguments["payload"]["character_id"],
+                "campaign_id": "different-campaign",
+            }
+
+    client = Client()
+    with pytest.raises(ValueError, match="does not belong to the campaign"):
+        asyncio.run(
+            regression_playthrough._validate_campaign_actor_ids(
+                client,
+                campaign_id="campaign-1",
+                actor_ids=["actor-1"],
+                operation="apply-damage knowledge recipient",
+            )
+        )
+    assert client.calls == ["character_query"]
+
+
 @pytest.mark.parametrize("defer_checkpoint", [False, True])
 def test_source_event_stand_uses_validated_public_character_action(
     defer_checkpoint: bool,
