@@ -1317,6 +1317,8 @@ def _reinforcement_config(
     *,
     join_round: int = 0,
     tie_breaker: int | None = None,
+    source_conditions: list[dict[str, Any]] | None = None,
+    source_traits: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Place a queued source reinforcement without granting an immediate turn."""
 
@@ -1350,6 +1352,12 @@ def _reinforcement_config(
         "hidden": False,
         "surprised": False,
         "death_saves": False,
+        **(
+            {"source_conditions": deepcopy(source_conditions)}
+            if source_conditions
+            else {}
+        ),
+        **({"source_traits": deepcopy(source_traits)} if source_traits else {}),
         **({"tie_breaker": tie_breaker} if tie_breaker is not None else {}),
         **({"join_round": join_round} if join_round else {}),
     }
@@ -3725,11 +3733,11 @@ async def _start(
         )
     source_conditions_by_actor = _source_declared_conditions(
         args.source_condition_json,
-        participant_ids=[*party_ids, *initial_hostile_ids],
+        participant_ids=[*party_ids, *all_hostile_ids],
     )
     source_traits_by_actor = _source_traits(
         args.source_trait_json,
-        participant_ids=[*party_ids, *initial_hostile_ids],
+        participant_ids=[*party_ids, *all_hostile_ids],
     )
     source_zero_hp_finisher = _source_zero_hp_finisher(
         args.source_zero_hp_finisher_json,
@@ -4117,6 +4125,8 @@ async def _start(
                         index,
                         join_round=int(args.reinforcement_round or 0),
                         tie_breaker=tie_breaker,
+                        source_conditions=source_conditions_by_actor.get(actor_id),
+                        source_traits=source_traits_by_actor.get(actor_id),
                     ),
                     "branch_id": branch["id"],
                     "expected_revision": campaign["revision"],
