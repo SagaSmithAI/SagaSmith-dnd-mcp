@@ -138,6 +138,16 @@ def test_source_condition_is_validated_persisted_and_cleared_with_encounter(
                 "idempotency_key": "hero",
             },
         )
+        late_ruffian = await _call(
+            server,
+            "character_create",
+            {
+                "campaign_id": campaign["id"],
+                "name": "Late Ruffian",
+                "character_type": "monster",
+                "idempotency_key": "late-ruffian",
+            },
+        )
         current = await _call(
             server,
             "campaign_query",
@@ -231,6 +241,31 @@ def test_source_condition_is_validated_persisted_and_cleared_with_encounter(
             {"character_id": ruffian["id"]},
         )
         assert during["sheet"]["conditions"] == ["poisoned"]
+        joined = await _call(
+            server,
+            "combat_join",
+            {
+                "campaign_id": campaign["id"],
+                "actor_id": late_ruffian["id"],
+                "participant_config": {
+                    "initiative": 5,
+                    "disposition": "hostile",
+                    "source_conditions": [source_condition],
+                },
+                "expected_revision": started["campaign_revision"],
+                "idempotency_key": "join-late-ruffian",
+            },
+        )
+        assert joined["queued"]["conditions"] == ["poisoned"]
+        assert {
+            item["actor_id"] for item in joined["combat"]["source_conditions"]
+        } == {ruffian["id"], late_ruffian["id"]}
+        late_during = await _call(
+            server,
+            "character_get",
+            {"character_id": late_ruffian["id"]},
+        )
+        assert late_during["sheet"]["conditions"] == ["poisoned"]
         preflight = await _call(
             server,
             "combat_preflight_attack",
@@ -255,7 +290,7 @@ def test_source_condition_is_validated_persisted_and_cleared_with_encounter(
                     "status": "interrupted",
                     "summary": "The encounter-scoped condition cleanup was verified.",
                 },
-                "expected_revision": started["campaign_revision"],
+                "expected_revision": joined["campaign_revision"],
                 "idempotency_key": "end",
             },
         )
@@ -266,5 +301,11 @@ def test_source_condition_is_validated_persisted_and_cleared_with_encounter(
         )
         assert ended["ended"] is True
         assert after["sheet"]["conditions"] == []
+        late_after = await _call(
+            server,
+            "character_get",
+            {"character_id": late_ruffian["id"]},
+        )
+        assert late_after["sheet"]["conditions"] == []
 
     asyncio.run(exercise())

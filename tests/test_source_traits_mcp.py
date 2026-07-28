@@ -194,6 +194,149 @@ def test_public_regeneration_recovers_then_fire_suppression_kills_at_turn_start(
     asyncio.run(exercise())
 
 
+def test_queued_source_regeneration_is_preserved_until_reinforcement_turn(
+    tmp_path: Path,
+) -> None:
+    regeneration = (
+        "The troll regains 10 hit points at the start of its turn. If the troll "
+        "takes acid or fire damage, this trait doesn't function at the start of "
+        "the troll's next turn. The troll dies only if it starts its turn with "
+        "0 hit points and doesn't regenerate."
+    )
+
+    async def exercise() -> None:
+        server = create_server(_config(tmp_path))
+        campaign = await _call(
+            server,
+            "campaign_create",
+            {
+                "name": "Queued source regeneration",
+                "edition": "2014",
+                "idempotency_key": "campaign",
+            },
+        )
+        hero = await _call(
+            server,
+            "character_create",
+            {
+                "campaign_id": campaign["id"],
+                "name": "Hero",
+                "character_type": "pc",
+                "idempotency_key": "hero",
+            },
+        )
+        troll = await _call(
+            server,
+            "character_create",
+            {
+                "campaign_id": campaign["id"],
+                "name": "Late Troll",
+                "character_type": "monster",
+                "idempotency_key": "troll",
+            },
+        )
+        troll_sheet = default_character_sheet()
+        troll_sheet["combat"]["hp"] = {"value": 44, "max": 84, "temp": 0}
+        troll_sheet["content"]["features"] = [
+            {
+                "id": "regeneration-passive",
+                "name": "Regeneration",
+                "description": regeneration,
+                "activation": {"type": "passive", "cost": 0},
+            }
+        ]
+        await _call(
+            server,
+            "character_sheet_replace",
+            {
+                "character_id": troll["id"],
+                "sheet": troll_sheet,
+                "expected_revision": troll["revision"],
+                "idempotency_key": "troll-sheet",
+            },
+        )
+        current = await _call(
+            server,
+            "campaign_get",
+            {"campaign_id": campaign["id"]},
+        )
+        started = await _raw(
+            server,
+            "combat_start",
+            {
+                "campaign_id": campaign["id"],
+                "participant_ids": [hero["id"]],
+                "participant_config": [
+                    {
+                        "actor_id": hero["id"],
+                        "initiative": 20,
+                        "disposition": "friendly",
+                        "death_saves": True,
+                    }
+                ],
+                "expected_revision": current["revision"],
+                "idempotency_key": "start",
+            },
+        )
+        joined = await _raw(
+            server,
+            "combat_join",
+            {
+                "campaign_id": campaign["id"],
+                "actor_id": troll["id"],
+                "participant_config": {
+                    "initiative": 10,
+                    "disposition": "hostile",
+                    "death_saves": False,
+                    "join_round": 2,
+                    "source_traits": [
+                        {
+                            "kind": "regeneration",
+                            "feature_id": "regeneration-passive",
+                            "source_excerpt": regeneration,
+                        }
+                    ],
+                },
+                "expected_revision": started["campaign_revision"],
+                "idempotency_key": "join",
+            },
+        )
+        assert joined["queued"]["zero_hp_recovery"] is True
+        assert joined["combat"]["source_traits"][0]["actor_id"] == troll["id"]
+        assert joined["combat"]["source_traits"][0]["amount"] == 10
+
+        round_two = await _raw(
+            server,
+            "combat_end_turn",
+            {
+                "campaign_id": campaign["id"],
+                "actor_id": hero["id"],
+                "expected_revision": joined["campaign_revision"],
+                "idempotency_key": "round-one-end",
+            },
+        )
+        troll_turn = await _raw(
+            server,
+            "combat_end_turn",
+            {
+                "campaign_id": campaign["id"],
+                "actor_id": hero["id"],
+                "expected_revision": round_two["campaign_revision"],
+                "idempotency_key": "round-two-hero-end",
+            },
+        )
+        assert troll_turn["source_turn_start"][0]["actor_id"] == troll["id"]
+        assert troll_turn["source_turn_start"][0]["result"]["amount"] == 10
+        troll_after = await _call(
+            server,
+            "character_get",
+            {"character_id": troll["id"]},
+        )
+        assert troll_after["sheet"]["combat"]["hp"]["value"] == 54
+
+    asyncio.run(exercise())
+
+
 def test_public_source_stabilization_requires_scene_evidence_and_no_helper_actor(
     tmp_path: Path,
 ) -> None:
