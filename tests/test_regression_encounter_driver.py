@@ -57,6 +57,7 @@ from scripts.regression_encounter import (
     _selected_prepared_actor_ids,
     _settle_source_casualty_pool_turn,
     _should_stand,
+    _source_ammunition_selections,
     _source_attack_environments,
     _source_avoidances,
     _source_casualty_pools,
@@ -337,6 +338,57 @@ def test_preflight_capture_uses_only_melee_and_declares_knockout() -> None:
     }
     assert plan["knock_out"] is True
     assert [call["action"] for call in client.calls] == [action]
+
+
+def test_preflight_selects_source_ammunition_while_stack_remains() -> None:
+    class Client:
+        async def domain(self, tool_id: str, arguments: dict) -> dict:
+            assert tool_id == "combat_preflight_attack"
+            return {"status": "ready", **arguments["action"]}
+
+    actor = {
+        "id": "pc-1",
+        "derived": {
+            "inventory": {
+                "weapon_attacks": [
+                    {
+                        "item_id": "shortbow",
+                        "attack_type": "ranged",
+                        "properties": ["ammunition", "two-handed"],
+                    }
+                ]
+            }
+        },
+        "sheet": {
+            "inventory": {
+                "items": [
+                    {
+                        "id": "dragon-slaying-arrow",
+                        "kind": "ammunition",
+                        "quantity": 2,
+                    }
+                ]
+            }
+        },
+    }
+
+    _, action, _ = asyncio.run(
+        _preflight_attack(
+            Client(),
+            SimpleNamespace(campaign_id="campaign-1"),
+            actor,
+            ["dragon-1"],
+            source_ammunition_selections={
+                ("pc-1", "shortbow"): {
+                    "actor_id": "pc-1",
+                    "weapon_id": "shortbow",
+                    "ammunition_item_id": "dragon-slaying-arrow",
+                }
+            },
+        )
+    )
+
+    assert action["ammunition_item_id"] == "dragon-slaying-arrow"
 
 
 def test_knockout_objective_supports_agent_selected_minimum_without_naming_targets() -> None:
@@ -3305,6 +3357,50 @@ def test_source_authored_precombat_and_attack_tactics_are_structured() -> None:
         ),
     }
     assert delayed["nezznar"]["until_round"] == 2
+
+
+def test_source_ammunition_selection_requires_owned_source_stack() -> None:
+    selections = _source_ammunition_selections(
+        [
+            {
+                "actor_id": "archer",
+                "weapon_id": "shortbow",
+                "ammunition_item_id": "dragon-slaying-arrow",
+            }
+        ],
+        participant_ids=["archer", "dragon"],
+        actors={
+            "archer": {
+                "derived": {
+                    "inventory": {
+                        "weapon_attacks": [
+                            {
+                                "item_id": "shortbow",
+                                "attack_type": "ranged",
+                                "properties": ["ammunition", "two-handed"],
+                            }
+                        ]
+                    }
+                },
+                "sheet": {
+                    "inventory": {
+                        "items": [
+                            {
+                                "id": "dragon-slaying-arrow",
+                                "kind": "ammunition",
+                                "quantity": 2,
+                                "source_key": "module:chunk-1",
+                            }
+                        ]
+                    }
+                },
+            }
+        },
+    )
+
+    assert selections[("archer", "shortbow")]["ammunition_item_id"] == (
+        "dragon-slaying-arrow"
+    )
 
 
 @pytest.mark.parametrize(

@@ -973,6 +973,177 @@ def test_public_on_hit_ruling_resolves_spider_bite_poison(
     asyncio.run(exercise())
 
 
+def test_attack_can_select_and_consume_slaying_ammunition(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    original_attack_roll = server_module.roll_attack_action
+
+    def forced_hit(*, plan, rng=None):
+        result = original_attack_roll(plan=plan, rng=rng)
+        result.update(
+            natural=10,
+            total=max(int(plan["target_ac"]), int(result.get("total", 0) or 0)),
+            armor_class=int(plan["target_ac"]),
+            hit=True,
+            critical=False,
+            fumble=False,
+        )
+        return result
+
+    monkeypatch.setattr(server_module, "roll_attack_action", forced_hit)
+
+    async def exercise() -> None:
+        server = create_server(_config(tmp_path))
+
+        async def raw(name: str, arguments: dict):
+            _, result = await server.call_tool(name, arguments)
+            return result
+
+        async def call(name: str, arguments: dict):
+            result = await raw(name, arguments)
+            return result.get("result", result)
+
+        campaign = await call(
+            "campaign_create",
+            {
+                "name": "Selected slaying ammunition",
+                "edition": "2014",
+                "idempotency_key": "campaign",
+            },
+        )
+        archer = await call(
+            "character_create",
+            {
+                "campaign_id": campaign["id"],
+                "name": "Archer",
+                "character_type": "pc",
+                "idempotency_key": "archer",
+            },
+        )
+        dragon = await call(
+            "character_create",
+            {
+                "campaign_id": campaign["id"],
+                "name": "Dragon",
+                "character_type": "monster",
+                "idempotency_key": "dragon",
+            },
+        )
+        source_excerpt = (
+            "If a creature belonging to the type, race, or group associated with "
+            "an arrow of slaying takes damage from the arrow, the creature must "
+            "make a DC 17 Constitution saving throw, taking an extra 6d10 piercing "
+            "damage on a failed save, or half as much extra damage on a successful one."
+        )
+        archer_sheet = default_character_sheet()
+        archer_sheet["inventory"]["items"] = [
+            {"id": "arrows", "name": "Arrows", "kind": "ammunition", "quantity": 20},
+            {
+                "id": "dragon-slaying-arrows",
+                "name": "Arrows of dragon slaying",
+                "kind": "ammunition",
+                "quantity": 2,
+                "mechanics": {
+                    "magic": True,
+                    "rarity": "very_rare",
+                    "slaying": {
+                        "target_groups": ["dragon"],
+                        "save_ability": "constitution",
+                        "save_dc": 17,
+                        "damage_formula": "6d10",
+                        "damage_type": "piercing",
+                        "half_on_success": True,
+                        "source_excerpt": source_excerpt,
+                        "rule_refs": ["srd2014.magic-items.arrow-of-slaying"],
+                    },
+                },
+            },
+            {
+                "id": "shortbow",
+                "name": "Shortbow",
+                "kind": "weapon",
+                "equipped": True,
+                "equipped_slot": "main_hand",
+                "mechanics": {
+                    "attack_type": "ranged",
+                    "attack_ability": "dexterity",
+                    "damage_formula": "1d6",
+                    "damage_type": "piercing",
+                    "properties": ["ammunition", "two_handed"],
+                    "normal_range_ft": 80,
+                    "long_range_ft": 320,
+                    "ammunition_item_id": "arrows",
+                },
+            },
+        ]
+        archer_sheet["inventory"]["equipment_slots"]["main_hand"] = "shortbow"
+        dragon_sheet = default_character_sheet()
+        dragon_sheet["progression"]["species"] = "Huge dragon"
+        dragon_sheet["combat"]["hp"] = {"value": 100, "max": 100, "temp": 0}
+        for actor, sheet, key in (
+            (archer, archer_sheet, "archer-sheet"),
+            (dragon, dragon_sheet, "dragon-sheet"),
+        ):
+            await call(
+                "character_sheet_replace",
+                {
+                    "character_id": actor["id"],
+                    "sheet": sheet,
+                    "expected_revision": actor["revision"],
+                    "idempotency_key": key,
+                },
+            )
+        campaign = await call("campaign_get", {"campaign_id": campaign["id"]})
+        started = await raw(
+            "combat_start",
+            {
+                "campaign_id": campaign["id"],
+                "participant_ids": [archer["id"], dragon["id"]],
+                "participant_config": [
+                    {
+                        "actor_id": archer["id"],
+                        "initiative": 20,
+                        "position": {"x": 0, "y": 0},
+                    },
+                    {
+                        "actor_id": dragon["id"],
+                        "initiative": 10,
+                        "position": {"x": 4, "y": 0},
+                    },
+                ],
+                "expected_revision": campaign["revision"],
+                "idempotency_key": "start",
+            },
+        )
+        attacked = await raw(
+            "combat_resolve_attack",
+            {
+                "campaign_id": campaign["id"],
+                "actor_id": archer["id"],
+                "target_id": dragon["id"],
+                "action": {
+                    "weapon_id": "shortbow",
+                    "attack_mode": "ranged",
+                    "ammunition_item_id": "dragon-slaying-arrows",
+                },
+                "expected_revision": started["campaign_revision"],
+                "idempotency_key": "shot",
+            },
+        )
+
+        assert attacked["status"] == "pending_ruling"
+        assert attacked["result"]["ammunition"]["item_id"] == "dragon-slaying-arrows"
+        archer_after = await call("character_get", {"character_id": archer["id"]})
+        inventory = {
+            item["id"]: item for item in archer_after["sheet"]["inventory"]["items"]
+        }
+        assert inventory["dragon-slaying-arrows"]["quantity"] == 1
+        assert inventory["arrows"]["quantity"] == 20
+
+    asyncio.run(exercise())
+
+
 def test_public_on_hit_ruling_repeats_save_gated_condition_at_turn_end(
     tmp_path: Path,
     monkeypatch,

@@ -7387,12 +7387,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         ammunition = None
         weapon_id = plan.get("weapon_id")
         if spell_resolution is None and weapon_id and weapon_id != "unarmed-strike":
-            weapon = next(
-                item for item in attacker["sheet"]["inventory"]["items"] if item["id"] == weapon_id
-            )
-            if weapon["mechanics"].get("ammunition_item_id"):
+            if plan.get("ammunition_item_id"):
                 updated_sheet, ammunition = consume_weapon_ammunition(
-                    updated_attacker["sheet"], weapon_id
+                    updated_attacker["sheet"],
+                    weapon_id,
+                    ammunition_item_id=str(plan.get("ammunition_item_id") or "") or None,
                 )
                 updated_attacker["sheet"] = updated_sheet
         if defenses:
@@ -9722,12 +9721,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         ammunition = None
         weapon_id = plan.get("weapon_id")
         if weapon_id and weapon_id != "unarmed-strike":
-            weapon = next(
-                item for item in attacker["sheet"]["inventory"]["items"] if item["id"] == weapon_id
-            )
-            if weapon["mechanics"].get("ammunition_item_id"):
+            if plan.get("ammunition_item_id"):
                 updated_sheet, ammunition = consume_weapon_ammunition(
-                    updated_attacker["sheet"], weapon_id
+                    updated_attacker["sheet"],
+                    weapon_id,
+                    ammunition_item_id=str(plan.get("ammunition_item_id") or "") or None,
                 )
                 updated_attacker["sheet"] = updated_sheet
         next_encounter = resolve_choice_window(

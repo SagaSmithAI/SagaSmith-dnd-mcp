@@ -455,6 +455,16 @@ def _arguments() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--source-ammunition-json",
+        action="append",
+        type=json.loads,
+        default=[],
+        help=(
+            "Source-provenanced ammunition selection with actor_id, weapon_id, "
+            "and ammunition_item_id; repeat for distinct actor/weapon pairs"
+        ),
+    )
+    parser.add_argument(
         "--source-attack-environment-json",
         action="append",
         type=json.loads,
@@ -2003,6 +2013,77 @@ def _source_opening_weapons(
                 "weapon id, and exact excerpt"
             )
         normalized[value["actor_id"]] = value
+    return normalized
+
+
+def _source_ammunition_selections(
+    values: list[dict[str, Any]],
+    *,
+    participant_ids: list[str],
+    actors: dict[str, dict[str, Any]],
+) -> dict[tuple[str, str], dict[str, str]]:
+    normalized: dict[tuple[str, str], dict[str, str]] = {}
+    for index, raw in enumerate(values):
+        if not isinstance(raw, dict):
+            raise ValueError(f"source ammunition selection {index} must be an object")
+        unknown = set(raw) - {"actor_id", "weapon_id", "ammunition_item_id"}
+        if unknown:
+            raise ValueError(
+                f"source ammunition selection {index} has unsupported fields: "
+                f"{', '.join(sorted(unknown))}"
+            )
+        value = {
+            key: str(raw.get(key) or "").strip()
+            for key in ("actor_id", "weapon_id", "ammunition_item_id")
+        }
+        identity = (value["actor_id"], value["weapon_id"])
+        actor = actors.get(value["actor_id"])
+        attacks = list(
+            dict(dict(actor or {}).get("derived") or {})
+            .get("inventory", {})
+            .get("weapon_attacks", [])
+        )
+        weapon = next(
+            (
+                item
+                for item in attacks
+                if str(item.get("item_id") or "") == value["weapon_id"]
+            ),
+            None,
+        )
+        ammunition = next(
+            (
+                item
+                for item in (
+                    dict(dict(actor or {}).get("sheet") or {})
+                    .get("inventory", {})
+                    .get("items", [])
+                )
+                if str(item.get("id") or "") == value["ammunition_item_id"]
+            ),
+            None,
+        )
+        properties = {
+            str(item).strip().casefold()
+            for item in dict(weapon or {}).get("properties", [])
+        }
+        if (
+            not all(value.values())
+            or value["actor_id"] not in participant_ids
+            or identity in normalized
+            or weapon is None
+            or "ammunition" not in properties
+            or not isinstance(ammunition, dict)
+            or ammunition.get("kind") != "ammunition"
+            or int(ammunition.get("quantity", 0) or 0) < 1
+            or not str(ammunition.get("source_key") or "").strip()
+        ):
+            raise ValueError(
+                f"source ammunition selection {index} requires one unique "
+                "participant/weapon pair, an ammunition weapon, and a remaining "
+                "source-provenanced ammunition stack on that actor"
+            )
+        normalized[identity] = value
     return normalized
 
 
@@ -3732,9 +3813,14 @@ async def _start(
         party_ids=pc_ids,
         actors=actors,
     )
+    source_ammunition_selections = _source_ammunition_selections(
+        args.source_ammunition_json,
+        participant_ids=[*party_ids, *all_hostile_ids],
+        actors=actors,
+    )
     for actor_id in set(all_hostile_ids) | {
         ruling_actor_id for ruling_actor_id, _ in on_hit_rulings
-    }:
+    } | {actor_id for actor_id, _ in source_ammunition_selections}:
         attacks = list(
             dict(dict(actors[actor_id].get("derived") or {}).get("inventory") or {}).get(
                 "weapon_attacks", []
@@ -4056,6 +4142,7 @@ async def _start(
         ),
         "source_precombat_casts": precombat_cast_results,
         "source_opening_weapons": list(opening_weapons.values()),
+        "source_ammunition_selections": list(source_ammunition_selections.values()),
         "source_on_hit_rulings": list(on_hit_rulings.values()),
         "source_extra_damage_rulings": [
             deepcopy(item)
@@ -5374,6 +5461,9 @@ async def _preflight_attack(
     agent_rulings: list[dict[str, Any]] | None = None,
     source_extra_damage_rulings: dict[str, list[dict[str, Any]]] | None = None,
     source_extra_damage_applications: dict[tuple[str, str], int] | None = None,
+    source_ammunition_selections: (
+        dict[tuple[str, str], dict[str, str]] | None
+    ) = None,
     round_number: int = 1,
 ) -> tuple[str, dict[str, Any], dict[str, Any]] | None:
     knock_out_targets = set(knock_out_target_ids or set())
@@ -5405,6 +5495,36 @@ async def _preflight_attack(
                     "weapon_id": weapon.get("item_id"),
                     "attack_mode": attack_mode,
                 }
+                ammunition_selection = dict(
+                    (source_ammunition_selections or {}).get(
+                        (
+                            str(actor["id"]),
+                            str(weapon.get("item_id") or ""),
+                        )
+                    )
+                    or {}
+                )
+                if ammunition_selection:
+                    ammunition = next(
+                        (
+                            item
+                            for item in (
+                                dict(actor.get("sheet") or {})
+                                .get("inventory", {})
+                                .get("items", [])
+                            )
+                            if str(item.get("id") or "")
+                            == ammunition_selection["ammunition_item_id"]
+                        ),
+                        None,
+                    )
+                    if (
+                        isinstance(ammunition, dict)
+                        and int(ammunition.get("quantity", 0) or 0) > 0
+                    ):
+                        action["ammunition_item_id"] = ammunition_selection[
+                            "ammunition_item_id"
+                        ]
                 if target_id in knock_out_targets:
                     action["knock_out"] = True
                 context = dict(action_context or {})
@@ -5816,6 +5936,11 @@ async def _auto_run(
         client,
         args.campaign_id,
         [*party_ids, *hostile_ids],
+    )
+    source_ammunition_selections = _source_ammunition_selections(
+        args.source_ammunition_json,
+        participant_ids=[*party_ids, *hostile_ids],
+        actors=initial_actors,
     )
     source_extra_damage_rulings = _source_extra_damage_rulings(
         getattr(args, "source_extra_damage_ruling_json", []),
@@ -7308,6 +7433,7 @@ async def _auto_run(
             agent_rulings=agent_preflight_rulings,
             source_extra_damage_rulings=source_extra_damage_rulings,
             source_extra_damage_applications=source_extra_damage_applications,
+            source_ammunition_selections=source_ammunition_selections,
             round_number=int(combat.get("round", 1) or 1),
         )
         source_separation_target = _source_separation_target(
@@ -7367,6 +7493,7 @@ async def _auto_run(
                     agent_rulings=agent_preflight_rulings,
                     source_extra_damage_rulings=source_extra_damage_rulings,
                     source_extra_damage_applications=source_extra_damage_applications,
+                    source_ammunition_selections=source_ammunition_selections,
                     round_number=int(combat.get("round", 1) or 1),
                 )
         if plan is None and source_separation_target is not None:
@@ -7597,6 +7724,7 @@ async def _auto_run(
         "completed_opening_cast_sequences": sorted(completed_opening_casts),
         "source_opening_weapons": list(opening_weapons.values()),
         "completed_opening_weapon_actor_ids": sorted(completed_opening_weapon_actor_ids),
+        "source_ammunition_selections": list(source_ammunition_selections.values()),
         "source_on_hit_rulings": list(on_hit_rulings.values()),
         "source_extra_damage_rulings": [
             deepcopy(item)
