@@ -7961,6 +7961,108 @@ async def _finalize_ended_encounter(
     }
 
 
+def _missing_source_reinforcement_ids(
+    combat: dict[str, Any],
+    *,
+    scene_id: str,
+    reinforcement_hostile_ids: list[str],
+) -> list[str]:
+    """Return only source reinforcements absent from a matching live encounter."""
+
+    if not combat.get("active"):
+        raise RuntimeError("reinforcement recovery requires an active combat")
+    if scene_id and str(combat.get("scene_id") or "") != scene_id:
+        raise RuntimeError("active combat scene does not match reinforcement recovery scene")
+    manifest = dict(combat.get("participant_manifest") or {})
+    declared_ids = [
+        str(item)
+        for item in manifest.get("reinforcement_actor_ids") or []
+        if str(item)
+    ]
+    if declared_ids != reinforcement_hostile_ids:
+        raise RuntimeError(
+            "active combat reinforcement manifest does not match configured source actors"
+        )
+    existing_ids = {
+        str(item.get("actor_id") or "")
+        for item in [
+            *list(combat.get("combatants") or []),
+            *list(combat.get("reinforcements") or []),
+        ]
+        if isinstance(item, dict)
+    }
+    return [
+        actor_id
+        for actor_id in reinforcement_hostile_ids
+        if actor_id not in existing_ids
+    ]
+
+
+async def _resume_source_reinforcements(
+    client: ExposureClient,
+    args: argparse.Namespace,
+    *,
+    party_ids: list[str],
+    initial_hostile_ids: list[str],
+    reinforcement_hostile_ids: list[str],
+) -> list[dict[str, Any]]:
+    """Idempotently complete a source reinforcement queue after partial startup."""
+
+    if not reinforcement_hostile_ids:
+        return []
+    await client.load("combat.observe", "combat.control")
+    combat = await client.domain(
+        "combat_query",
+        {"campaign_id": args.campaign_id, "view": "status"},
+    )
+    missing_ids = _missing_source_reinforcement_ids(
+        combat,
+        scene_id=str(args.scene_id or ""),
+        reinforcement_hostile_ids=reinforcement_hostile_ids,
+    )
+    if not missing_ids:
+        return []
+    all_hostile_ids = [*initial_hostile_ids, *reinforcement_hostile_ids]
+    source_conditions_by_actor = _source_declared_conditions(
+        args.source_condition_json,
+        participant_ids=[*party_ids, *all_hostile_ids],
+    )
+    source_traits_by_actor = _source_traits(
+        args.source_trait_json,
+        participant_ids=[*party_ids, *all_hostile_ids],
+    )
+    branch = await _current_branch(client, args.campaign_id)
+    recovered: list[dict[str, Any]] = []
+    for actor_id in missing_ids:
+        index = reinforcement_hostile_ids.index(actor_id)
+        campaign = await _campaign(client, args.campaign_id)
+        tie_breaker = len(party_ids) + len(initial_hostile_ids) + index
+        recovered.append(
+            await client.domain(
+                "combat_join",
+                {
+                    "campaign_id": args.campaign_id,
+                    "actor_id": actor_id,
+                    "participant_config": _reinforcement_config(
+                        actor_id,
+                        index,
+                        join_round=int(args.reinforcement_round or 0),
+                        tie_breaker=tie_breaker,
+                        source_conditions=source_conditions_by_actor.get(actor_id),
+                        source_traits=source_traits_by_actor.get(actor_id),
+                    ),
+                    "branch_id": branch["id"],
+                    "expected_revision": campaign["revision"],
+                    "idempotency_key": (
+                        "encounter-queue-reinforcement-"
+                        + _operation_token(args, actor_id)
+                    ),
+                },
+            )
+        )
+    return recovered
+
+
 async def _start_or_resume_auto_run(
     client: ExposureClient,
     args: argparse.Namespace,
@@ -7972,6 +8074,7 @@ async def _start_or_resume_auto_run(
     opened = await client.open(args.campaign_id)
     phase = str(opened.get("phase") or "")
     started: dict[str, Any] | None = None
+    recovered_reinforcement_queue: list[dict[str, Any]] = []
     if phase == "play":
         started = await _start(
             client,
@@ -7980,6 +8083,14 @@ async def _start_or_resume_auto_run(
             hostile_ids,
             additional_hostile_ids,
             reinforcement_hostile_ids,
+        )
+    elif phase == "combat":
+        recovered_reinforcement_queue = await _resume_source_reinforcements(
+            client,
+            args,
+            party_ids=party_ids,
+            initial_hostile_ids=[*hostile_ids, *additional_hostile_ids],
+            reinforcement_hostile_ids=reinforcement_hostile_ids,
         )
     elif phase != "combat":
         raise RuntimeError(
@@ -7998,6 +8109,8 @@ async def _start_or_resume_auto_run(
     )
     if started is not None:
         completed["auto_start"] = started
+    if recovered_reinforcement_queue:
+        completed["recovered_reinforcement_queue"] = recovered_reinforcement_queue
     return completed
 
 

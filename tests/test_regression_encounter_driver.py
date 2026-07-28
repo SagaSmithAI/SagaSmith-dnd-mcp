@@ -34,6 +34,7 @@ from scripts.regression_encounter import (
     _has_blocking_pending,
     _has_multiattack_followup,
     _knockout_objective,
+    _missing_source_reinforcement_ids,
     _observable_target_ids,
     _operation_token,
     _participant_config,
@@ -3871,6 +3872,41 @@ def test_source_reinforcements_enter_openly_at_configured_round_positions() -> N
     source_traits[0]["feature_id"] = "changed"
     assert second["source_conditions"][0]["condition"] == "restrained"
     assert second["source_traits"][0]["feature_id"] == "regeneration-passive"
+
+
+def test_partial_start_recovery_queues_only_missing_source_reinforcements() -> None:
+    combat = {
+        "active": True,
+        "scene_id": "scene-1",
+        "participant_manifest": {
+            "reinforcement_actor_ids": ["rift-1", "rift-2"],
+        },
+        "combatants": [{"actor_id": "guard"}],
+        "reinforcements": [{"actor_id": "rift-1"}],
+    }
+
+    assert _missing_source_reinforcement_ids(
+        combat,
+        scene_id="scene-1",
+        reinforcement_hostile_ids=["rift-1", "rift-2"],
+    ) == ["rift-2"]
+
+    combat["combatants"].append({"actor_id": "rift-2"})
+    assert (
+        _missing_source_reinforcement_ids(
+            combat,
+            scene_id="scene-1",
+            reinforcement_hostile_ids=["rift-1", "rift-2"],
+        )
+        == []
+    )
+
+    with pytest.raises(RuntimeError, match="manifest does not match"):
+        _missing_source_reinforcement_ids(
+            combat,
+            scene_id="scene-1",
+            reinforcement_hostile_ids=["other"],
+        )
 
 
 def test_default_ambush_layout_keeps_two_goblins_thirty_feet_away() -> None:
