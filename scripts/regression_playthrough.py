@@ -13,6 +13,7 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 import sys
 from copy import deepcopy
 from pathlib import Path
@@ -235,6 +236,16 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--roll-id", default="")
     parser.add_argument("--roll-expression", default="")
     parser.add_argument("--roll-reason", default="")
+    parser.add_argument(
+        "--roll-modifier-json",
+        action="append",
+        type=json.loads,
+        default=[],
+        help=(
+            "Independent external modifier ledger entry with modifier_id, value, "
+            "kind, lifetime, state_key, and basis; repeat once per source"
+        ),
+    )
     parser.add_argument(
         "--roll-count",
         type=int,
@@ -4456,6 +4467,71 @@ def _dice_result(value: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def _normalize_roll_modifiers(
+    modifiers: list[dict[str, Any]],
+    *,
+    expression: str,
+) -> list[dict[str, Any]]:
+    if not modifiers:
+        return []
+    normalized: list[dict[str, Any]] = []
+    modifier_ids: set[str] = set()
+    state_keys: set[str] = set()
+    for index, raw in enumerate(modifiers):
+        if not isinstance(raw, dict):
+            raise ValueError(f"roll-modifier-json[{index}] must be an object")
+        modifier_id = str(raw.get("modifier_id") or "").strip()
+        state_key = str(raw.get("state_key") or "").strip()
+        basis = str(raw.get("basis") or "").strip()
+        kind = str(raw.get("kind") or "").strip()
+        lifetime = str(raw.get("lifetime") or "").strip()
+        value = raw.get("value")
+        if not modifier_id or not state_key or not basis:
+            raise ValueError(
+                f"roll-modifier-json[{index}] requires modifier_id, state_key, and basis"
+            )
+        if kind not in {"cumulative", "limited_use", "static", "penalty"}:
+            raise ValueError(
+                f"roll-modifier-json[{index}] kind must be cumulative, limited_use, "
+                "static, or penalty"
+            )
+        if lifetime not in {"roll", "scene", "until_consumed", "persistent"}:
+            raise ValueError(
+                f"roll-modifier-json[{index}] lifetime must be roll, scene, "
+                "until_consumed, or persistent"
+            )
+        if isinstance(value, bool) or not isinstance(value, int) or value == 0:
+            raise ValueError(f"roll-modifier-json[{index}] value must be a nonzero integer")
+        if modifier_id in modifier_ids:
+            raise ValueError(f"duplicate roll modifier id: {modifier_id}")
+        if state_key in state_keys:
+            raise ValueError(
+                "independent roll modifiers must not share one state_key: "
+                f"{state_key}"
+            )
+        modifier_ids.add(modifier_id)
+        state_keys.add(state_key)
+        normalized.append(
+            {
+                "modifier_id": modifier_id,
+                "value": value,
+                "kind": kind,
+                "lifetime": lifetime,
+                "state_key": state_key,
+                "basis": basis,
+            }
+        )
+    flat_match = re.search(r"([+-]\d+)\s*$", expression)
+    expression_modifier = int(flat_match.group(1)) if flat_match else 0
+    ledger_total = sum(item["value"] for item in normalized)
+    if ledger_total != expression_modifier:
+        raise ValueError(
+            "roll modifier ledger total does not match the expression's trailing "
+            f"modifier: ledger {ledger_total}, expression {expression_modifier}"
+        )
+    return normalized
+
+
 async def _roll_source_table(
     client: ExposureClient,
     *,
@@ -4470,6 +4546,7 @@ async def _roll_source_table(
     reason: str,
     audience_scope: str,
     defer_checkpoint: bool,
+    modifiers: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     normalized_roll_id = roll_id.strip()
     normalized_expression = expression.strip()
@@ -4489,6 +4566,10 @@ async def _roll_source_table(
         )
     if audience_scope not in {"party", "dm"}:
         raise ValueError("roll-source audience scope must be party or dm")
+    normalized_modifiers = _normalize_roll_modifiers(
+        list(modifiers or []),
+        expression=normalized_expression,
+    )
     scene = await client.domain(
         "module_query",
         {
@@ -4515,6 +4596,7 @@ async def _roll_source_table(
             "location_key": location_key,
             "roll_id": normalized_roll_id,
             "expression": normalized_expression,
+            "modifiers": normalized_modifiers,
             "source_ref": exact_ref,
         },
         ensure_ascii=False,
@@ -4563,6 +4645,7 @@ async def _roll_source_table(
     roll_record = {
         "roll_id": normalized_roll_id,
         "expression": normalized_expression,
+        "modifiers": normalized_modifiers,
         "reason": normalized_reason,
         "result": roll_result,
         "random_stream_receipt": random_receipt,
@@ -4607,6 +4690,7 @@ async def _roll_source_table(
                 "location_key": location_key,
                 "roll_id": normalized_roll_id,
                 "expression": normalized_expression,
+                "modifiers": normalized_modifiers,
                 "result": roll_result,
                 "random_stream_receipt": random_receipt,
                 "source_excerpt": source_excerpt,
@@ -4670,6 +4754,7 @@ async def _roll_source_sequence(
     audience_scope: str,
     count: int,
     defer_checkpoint: bool = False,
+    modifiers: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     if count < 2 or count > 1000:
         raise ValueError("roll-source sequence count must be between 2 and 1000")
@@ -4689,6 +4774,7 @@ async def _roll_source_sequence(
             reason=f"{reason} ({index}/{count})",
             audience_scope=audience_scope,
             defer_checkpoint=defer_checkpoint or index < count,
+            modifiers=modifiers,
         )
         results.append(
             {
@@ -11129,6 +11215,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     "reason": args.roll_reason,
                     "audience_scope": args.event_audience_scope,
                     "defer_checkpoint": args.defer_checkpoint,
+                    "modifiers": args.roll_modifier_json,
                 }
                 if args.roll_count == 1:
                     report["result"] = await _roll_source_table(

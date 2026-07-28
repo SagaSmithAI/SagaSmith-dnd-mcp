@@ -237,6 +237,62 @@ def test_scene_resource_actions_support_deferred_checkpoint_batching() -> None:
     } <= regression_playthrough.DEFERRED_CHECKPOINT_ACTIONS
 
 
+def test_source_roll_modifier_ledger_keeps_independent_lifetimes() -> None:
+    modifiers = regression_playthrough._normalize_roll_modifiers(
+        [
+            {
+                "modifier_id": "day-water-table-count",
+                "value": 2,
+                "kind": "cumulative",
+                "lifetime": "persistent",
+                "state_key": "day_water_table_bonus",
+                "basis": "Two previous daytime table rolls made from the ship on water.",
+            },
+            {
+                "modifier_id": "followed-hunters",
+                "value": 1,
+                "kind": "limited_use",
+                "lifetime": "until_consumed",
+                "state_key": "next_daytime_event_bonus",
+                "basis": "Following the hunters grants +1 to the next daytime event roll.",
+            },
+        ],
+        expression="1d6+3",
+    )
+
+    assert [item["kind"] for item in modifiers] == ["cumulative", "limited_use"]
+    assert sum(item["value"] for item in modifiers) == 3
+
+
+def test_source_roll_modifier_ledger_rejects_merged_state_and_wrong_total() -> None:
+    merged = [
+        {
+            "modifier_id": "cumulative",
+            "value": 2,
+            "kind": "cumulative",
+            "lifetime": "persistent",
+            "state_key": "event_bonus",
+            "basis": "Prior qualifying rolls.",
+        },
+        {
+            "modifier_id": "limited",
+            "value": 1,
+            "kind": "limited_use",
+            "lifetime": "until_consumed",
+            "state_key": "event_bonus",
+            "basis": "Next qualifying roll.",
+        },
+    ]
+    with pytest.raises(ValueError, match="must not share one state_key"):
+        regression_playthrough._normalize_roll_modifiers(merged, expression="1d6+3")
+
+    with pytest.raises(ValueError, match="ledger total does not match"):
+        regression_playthrough._normalize_roll_modifiers(
+            [dict(merged[0], state_key="cumulative_bonus")],
+            expression="1d6+3",
+        )
+
+
 def test_source_queries_load_the_phase_specific_public_group() -> None:
     assert _source_groups("lobby") == ("lobby.modules",)
     assert _source_groups("play") == ("play.scene",)
