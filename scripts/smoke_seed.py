@@ -16,6 +16,8 @@ import os
 from pathlib import Path
 from typing import Any
 
+from sagasmith_core.access import LOCAL_SYSTEM_PRINCIPAL_ID
+
 from sagasmith_dnd_mcp.config import McpConfig
 from sagasmith_dnd_mcp.server import create_server
 
@@ -46,7 +48,7 @@ async def seed(home: Path) -> dict[str, Any]:
         "campaign_create",
         {
             "name": "MCP Smoke: Split Lantern",
-            "principal_id": "system:local",
+            "principal_id": LOCAL_SYSTEM_PRINCIPAL_ID,
             "idempotency_key": "smoke-campaign-create",
         },
     )
@@ -93,7 +95,7 @@ async def seed(home: Path) -> dict[str, Any]:
                 "campaign_id": campaign["id"],
                 "principal_id": principal_id,
                 "role": "player",
-                "by_principal_id": "system:local",
+                "by_principal_id": LOCAL_SYSTEM_PRINCIPAL_ID,
             },
         )
         await _call(
@@ -105,7 +107,7 @@ async def seed(home: Path) -> dict[str, Any]:
                 "actor_id": actor["id"],
                 "can_control": True,
                 "can_view_private": True,
-                "by_principal_id": "system:local",
+                "by_principal_id": LOCAL_SYSTEM_PRINCIPAL_ID,
             },
         )
     event = await _call(
@@ -119,7 +121,7 @@ async def seed(home: Path) -> dict[str, Any]:
             "known_by_actor_ids": [pc_one["id"], npc["id"]],
             "knowledge_key": "lantern-room-sealed",
             "knowledge_proposition": "The lantern room is sealed and the brass key is nearby.",
-            "principal_id": "system:local",
+            "principal_id": LOCAL_SYSTEM_PRINCIPAL_ID,
             "idempotency_key": "smoke-lantern-room-event",
         },
     )
@@ -132,7 +134,7 @@ async def seed(home: Path) -> dict[str, Any]:
             "amount": 25,
             "expected_revision": campaign["revision"],
             "idempotency_key": "smoke-initial-wallet",
-            "principal_id": "system:local",
+            "principal_id": LOCAL_SYSTEM_PRINCIPAL_ID,
         },
     )
     snapshot = await _call(

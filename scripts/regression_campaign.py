@@ -19,10 +19,11 @@ from typing import Any
 
 from mcp import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
+from sagasmith_core.access import LOCAL_SYSTEM_PRINCIPAL_ID
 
 from scripts.regression_lock import campaign_operation_lock
 
-PRINCIPAL_ID = "system:local"
+PRINCIPAL_ID = LOCAL_SYSTEM_PRINCIPAL_ID
 RULE_STATBLOCK_OCR_PROFILE = "layout-ocr-v1"
 RULE_STATBLOCK_CARD_PROFILE = "agent-ruling-v2"
 

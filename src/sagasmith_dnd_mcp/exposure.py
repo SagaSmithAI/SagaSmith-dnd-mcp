@@ -13,17 +13,14 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Callable
 from uuid import uuid4
 
+from sagasmith_core.access import LOCAL_SYSTEM_PRINCIPAL_ID
+from sagasmith_core.clock import operational_utcnow
+
 from .tool_profiles import CORE_TOOLS, GROUP_BY_ID, TOOL_GROUPS
 
 
 class ExposureError(ValueError):
     """Raised when a session attempts to use an unexposed capability."""
-
-
-def operational_utcnow() -> datetime:
-    """Return the wall clock used only for exposure leases and audit timestamps."""
-
-    return datetime.now(UTC)
 
 
 @dataclass
@@ -163,8 +160,10 @@ class ExposureRegistry:
                 f"Tool group {group_id!r} requires a campaign-bound exposure. "
                 "Open a new exposure with campaign_id first."
             )
-        if group.local_only and exposure.principal_id != "system:local":
-            raise ExposureError(f"Tool group {group_id!r} is restricted to system:local.")
+        if group.local_only and exposure.principal_id != LOCAL_SYSTEM_PRINCIPAL_ID:
+            raise ExposureError(
+                f"Tool group {group_id!r} is restricted to {LOCAL_SYSTEM_PRINCIPAL_ID}."
+            )
         if ttl_calls is not None and ttl_calls < 1:
             raise ExposureError("ttl_calls must be at least 1 when provided.")
         exposure.loaded_groups.add(group_id)

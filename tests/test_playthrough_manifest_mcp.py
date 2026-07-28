@@ -11,16 +11,6 @@ from sagasmith_dnd.playthrough import new_playthrough_manifest
 from sagasmith_dnd_mcp.config import McpConfig
 from sagasmith_dnd_mcp.server import create_server
 
-SOURCE_REF = {
-    "purpose": "campaign_setup",
-    "asset_path": "Campaign.md",
-    "asset_sha256": "a" * 64,
-    "page_start": 1,
-    "page_end": 1,
-    "heading_path": ["Chapter One"],
-    "content_sha256": "b" * 64,
-}
-
 
 async def _call(server, name: str, arguments: dict):
     _, structured = await server.call_tool(name, arguments)
@@ -67,7 +57,11 @@ def test_manifest_syncs_canonical_state_and_verifies_source_defined_ending(
                 "action": "stage",
                 "payload": {
                     "name": "Campaign.md",
-                    "content": "# Chapter One\n\n## Opening\n\nThe party begins.\n",
+                    "content": (
+                        "<!-- page: 1 -->\n"
+                        "# Chapter One\n\n## Opening\n\n"
+                        "The party begins. A storm gathers. The gate opens.\n"
+                    ),
                     "source_key": "campaign",
                     "title": "Campaign",
                 },
@@ -133,6 +127,41 @@ def test_manifest_syncs_canonical_state_and_verifies_source_defined_ending(
             },
         )
         opening_scene = module_index[0]
+        hits = await _call(
+            server,
+            "module_search",
+            {
+                "campaign_id": campaign_id,
+                "query": "The party begins.",
+                "module_ids": [module_id],
+            },
+        )
+        expanded = await _call(
+            server,
+            "module_expand",
+            {"chunk_id": hits[0]["id"]},
+        )
+        assets = await _call(
+            server,
+            "module_query",
+            {
+                "campaign_id": campaign_id,
+                "view": "assets",
+                "payload": {"module_id": module_id},
+            },
+        )
+        source_asset = next(
+            item
+            for item in assets
+            if Path(item["source_path"]).name == "Campaign.md"
+        )
+        source_ref = {
+            "purpose": "campaign_setup",
+            "asset_path": Path(source_asset["source_path"]).name,
+            "asset_sha256": source_asset["checksum"],
+            **expanded["source_ref"],
+            "excerpt": "The party begins. The gate opens.",
+        }
         current = await _call(
             server,
             "campaign_query",
@@ -145,8 +174,36 @@ def test_manifest_syncs_canonical_state_and_verifies_source_defined_ending(
             recommended_party_minimum=1,
             recommended_party_maximum=1,
             selected_party_size=1,
-            source_refs=[SOURCE_REF],
+            source_refs=[source_ref],
         )
+        invalid_chunk_manifest = deepcopy(manifest)
+        invalid_chunk_manifest["source_refs"][0]["content_sha256"] = "0" * 64
+        with pytest.raises(Exception, match="content_sha256"):
+            await _call(
+                server,
+                "playthrough_manifest",
+                {
+                    "campaign_id": campaign_id,
+                    "action": "initialize",
+                    "payload": {"manifest": invalid_chunk_manifest},
+                    "expected_revision": current["revision"],
+                    "idempotency_key": "invalid-manifest-chunk",
+                },
+            )
+        invalid_asset_manifest = deepcopy(manifest)
+        invalid_asset_manifest["source_refs"][0]["asset_sha256"] = "0" * 64
+        with pytest.raises(Exception, match="source asset"):
+            await _call(
+                server,
+                "playthrough_manifest",
+                {
+                    "campaign_id": campaign_id,
+                    "action": "initialize",
+                    "payload": {"manifest": invalid_asset_manifest},
+                    "expected_revision": current["revision"],
+                    "idempotency_key": "invalid-manifest-asset",
+                },
+            )
         initialized = await _call(
             server,
             "playthrough_manifest",
@@ -170,6 +227,65 @@ def test_manifest_syncs_canonical_state_and_verifies_source_defined_ending(
             },
         )
         assert replay == initialized
+        invalid_runtime_ref = {
+            key: source_ref[key]
+            for key in (
+                "module_id",
+                "scene_id",
+                "chunk_id",
+                "page_start",
+                "page_end",
+                "heading_path",
+                "content_sha256",
+            )
+        }
+        invalid_runtime_ref["content_sha256"] = "0" * 64
+        with pytest.raises(Exception, match="content_sha256"):
+            await _call(
+                server,
+                "module_set_progress",
+                {
+                    "campaign_id": campaign_id,
+                    "scene_id": opening_scene["scene_id"],
+                    "status": "active",
+                    "state": {"source_ref": invalid_runtime_ref},
+                    "expected_state_version": 0,
+                    "idempotency_key": "invalid-progress-source",
+                },
+            )
+        with pytest.raises(Exception, match="content_sha256"):
+            await _call(
+                server,
+                "campaign_event",
+                {
+                    "campaign_id": campaign_id,
+                    "action": "add",
+                    "payload": {
+                        "summary": "Invalid source evidence must not enter the event log.",
+                        "event_type": "audit",
+                        "payload": {"source_ref": invalid_runtime_ref},
+                    },
+                    "idempotency_key": "invalid-event-source",
+                },
+            )
+        with pytest.raises(Exception, match="content_sha256"):
+            await _call(
+                server,
+                "memory_change",
+                {
+                    "campaign_id": campaign_id,
+                    "action": "commit",
+                    "payload": {
+                        "event": {
+                            "summary": "Invalid source evidence must not enter continuity.",
+                            "event_type": "audit",
+                            "audience_scope": "dm",
+                            "payload": {"source_ref": invalid_runtime_ref},
+                        }
+                    },
+                    "idempotency_key": "invalid-continuity-source",
+                },
+            )
 
         revision_staged = await _call(
             server,
@@ -180,7 +296,9 @@ def test_manifest_syncs_canonical_state_and_verifies_source_defined_ending(
                 "payload": {
                     "name": "Campaign-v2.md",
                     "content": (
-                        "# Chapter One\n\n## Opening\n\nThe party begins.\n"
+                        "<!-- page: 1 -->\n"
+                        "# Chapter One\n\n## Opening\n\n"
+                        "The party begins. A storm gathers. The gate opens.\n"
                         "#### 1. Revised Room\n\nThe indexed room is explicit.\n"
                     ),
                     "source_key": "campaign",
@@ -346,6 +464,13 @@ def test_manifest_syncs_canonical_state_and_verifies_source_defined_ending(
                 "idempotency_key": "historical-combat-start",
             },
         )
+        during_combat = await _call(
+            server,
+            "campaign_query",
+            {"view": "get", "payload": {"campaign_id": campaign_id}},
+        )
+        assert during_combat["state"]["game_phase"] == "play"
+        assert during_combat["effective_game_phase"] == "combat"
         await _call(
             server,
             "combat_end",
@@ -389,10 +514,10 @@ def test_manifest_syncs_canonical_state_and_verifies_source_defined_ending(
             "objective": "Complete the source-defined ending.",
         }
         updated_manifest["ending"]["conditions"] = [
-            {
-                "id": "victory",
-                "label": "The campaign threat is defeated",
-                "source_ref": SOURCE_REF,
+                {
+                    "id": "victory",
+                    "label": "The campaign threat is defeated",
+                    "source_ref": source_ref,
                 "all_of": [
                     {
                         "kind": "manifest_value",

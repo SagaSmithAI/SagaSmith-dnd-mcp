@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 
+import pytest
 from sagasmith_dnd.module_profile import DndModuleProfile
 
 from sagasmith_dnd_mcp.config import McpConfig
@@ -17,7 +18,7 @@ from sagasmith_dnd_mcp.tool_budget import (
     TARGET_PUBLIC_TOOL_COUNT,
     TOOL_BUDGET_VERSION,
 )
-from sagasmith_dnd_mcp.tool_profiles import CORE_TOOLS, profile_catalog
+from sagasmith_dnd_mcp.tool_profiles import CORE_TOOLS, campaign_phase, profile_catalog
 
 
 def test_config_owns_local_storage(tmp_path: Path) -> None:
@@ -221,6 +222,17 @@ def test_server_tool_profiles_are_complete_and_attached_to_tool_metadata(tmp_pat
     asyncio.run(inspect_tools())
 
 
+def test_campaign_phase_uses_combat_as_the_only_effective_override() -> None:
+    assert campaign_phase({}) == "lobby"
+    assert campaign_phase({"game_phase": "play"}) == "play"
+    assert (
+        campaign_phase({"game_phase": "play", "combat": {"active": True}})
+        == "combat"
+    )
+    with pytest.raises(ValueError, match="unsupported persisted campaign phase"):
+        campaign_phase({"game_phase": "combat"})
+
+
 def test_compact_public_tool_and_schema_budgets_are_locked(tmp_path: Path) -> None:
     config = McpConfig(
         home=tmp_path / "home",
@@ -259,7 +271,7 @@ def test_compact_public_tool_and_schema_budgets_are_locked(tmp_path: Path) -> No
                 "combat": 44,
             }
         )
-        assert schema_bytes == TARGET_INPUT_SCHEMA_BYTES == 47_562
+        assert schema_bytes == TARGET_INPUT_SCHEMA_BYTES == 47_558
         assert schema_bytes < BASELINE_INPUT_SCHEMA_BYTES
         by_name = {tool.name: tool for tool in tools}
         assert by_name["chase"].inputSchema["properties"]["action"]["enum"] == [

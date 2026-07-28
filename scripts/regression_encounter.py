@@ -3587,7 +3587,7 @@ async def _start(
         "play.combat_control",
     )
     campaign = await _campaign(client, args.campaign_id)
-    phase = str(dict(campaign.get("state") or {}).get("game_phase") or "")
+    phase = str(campaign.get("effective_game_phase") or "")
     if phase != "play":
         raise RuntimeError("encounter start requires the play phase")
     branch = await _current_branch(client, args.campaign_id)

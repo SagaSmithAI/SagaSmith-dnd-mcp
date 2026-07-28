@@ -936,12 +936,9 @@ def _validate_source_ref(
 
 
 def _campaign_phase(campaign: dict[str, Any]) -> str:
-    state = dict(campaign.get("state") or {})
-    if bool(dict(state.get("combat") or {}).get("active", False)):
-        return "combat"
-    phase = str(state.get("game_phase") or "lobby")
-    if phase not in {"lobby", "play"}:
-        raise RuntimeError(f"unsupported campaign phase: {phase}")
+    phase = str(campaign.get("effective_game_phase") or "")
+    if phase not in {"lobby", "play", "combat"}:
+        raise RuntimeError(f"campaign view has no valid effective_game_phase: {phase!r}")
     return phase
 
 

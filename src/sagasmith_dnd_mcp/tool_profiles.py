@@ -6,13 +6,27 @@ without having to duplicate the D&D tool taxonomy in an agent prompt.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from typing import Any
 
 PROFILE_LOBBY = "lobby"
 PROFILE_PLAY = "play"
 PROFILE_COMBAT = "combat"
 PROFILES = (PROFILE_LOBBY, PROFILE_PLAY, PROFILE_COMBAT)
+
+
+def campaign_phase(state: Mapping[str, Any] | None) -> str:
+    """Resolve the one effective campaign phase from persisted runtime state."""
+
+    value = dict(state or {})
+    combat = value.get("combat")
+    if isinstance(combat, Mapping) and bool(combat.get("active", False)):
+        return PROFILE_COMBAT
+    phase = str(value.get("game_phase") or PROFILE_LOBBY)
+    if phase not in {PROFILE_LOBBY, PROFILE_PLAY}:
+        raise ValueError(f"unsupported persisted campaign phase: {phase}")
+    return phase
 
 
 @dataclass(frozen=True)

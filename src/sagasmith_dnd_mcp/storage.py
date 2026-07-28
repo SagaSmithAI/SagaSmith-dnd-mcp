@@ -16,6 +16,7 @@ from sagasmith_core import (
     file_sha256,
 )
 from sagasmith_core.database import sqlite_database_url
+from sagasmith_dnd.system import DND5E
 
 from sagasmith_dnd_mcp.config import McpConfig
 
@@ -25,7 +26,7 @@ class SagaSmithStorage:
         self.config = config
         self.config.prepare()
         self.database = Database(config.database_url or sqlite_database_url(config.database_path))
-        self.vectors = VectorStore("dnd5e")
+        self.vectors = VectorStore(DND5E.id)
         self._rule_ocr_provider: RapidOcrProvider | None = None
         self._module_ocr_provider: RapidOcrProvider | None = None
 

@@ -48,10 +48,12 @@ from sagasmith_core import (
     normalize_document,
     render_pdf_page,
 )
+from sagasmith_core.access import CAMPAIGN_DM_ROLES, LOCAL_SYSTEM_PRINCIPAL_ID
 from sagasmith_core.idempotency import request_hash
-from sagasmith_core.modules import MarkdownModuleParser
+from sagasmith_core.modules import MarkdownModuleParser, canonical_heading_path
 from sagasmith_core.rule_packs import RulePackError, RulesetUnavailableError, content_checksum
 from sagasmith_core.systems import SystemRegistry
+from sagasmith_core.visibility import PLAYER_OWNED_ACTOR_DISCLOSURE_SCOPES
 from sagasmith_dnd.abilities import ABILITY_IDS
 from sagasmith_dnd.ability_generation import (
     apply_ability_generation,
@@ -163,7 +165,7 @@ from sagasmith_dnd.core_content import PACK_ID as CORE_CONTENT_PACK_ID
 from sagasmith_dnd.core_content import PACK_VERSION as CORE_CONTENT_PACK_VERSION
 from sagasmith_dnd.core_content import build_srd2014_content
 from sagasmith_dnd.core_rule_pack import get_core_rule_pack
-from sagasmith_dnd.editions import normalize_dnd_edition
+from sagasmith_dnd.editions import DEFAULT_CAMPAIGN_EDITION, normalize_dnd_edition
 from sagasmith_dnd.engine import resolve_attack, resolve_check, roll
 from sagasmith_dnd.game_time import (
     TICKS_PER_MINUTE,
@@ -194,7 +196,10 @@ from sagasmith_dnd.lifecycle import (
     validate_song_of_rest_source,
 )
 from sagasmith_dnd.module_profile import DndModuleProfile
-from sagasmith_dnd.playthrough import validate_playthrough_manifest
+from sagasmith_dnd.playthrough import (
+    playthrough_source_bindings,
+    validate_playthrough_manifest,
+)
 from sagasmith_dnd.progression import (
     advance_single_class_level,
     apply_constitution_score_hit_point_change,
@@ -292,6 +297,7 @@ from sagasmith_dnd_mcp.tool_profiles import (
     PROFILE_COMBAT,
     PROFILE_LOBBY,
     PROFILE_PLAY,
+    campaign_phase,
     group_catalog,
     groups_for_tool,
     profile_catalog,
@@ -596,8 +602,7 @@ def _bounded_edit_distance(left: str, right: str, *, limit: int) -> int:
             value = min(
                 current[-1] + 1,
                 previous[right_index] + 1,
-                previous[right_index - 1]
-                + (0 if left_character == right_character else 1),
+                previous[right_index - 1] + (0 if left_character == right_character else 1),
             )
             current.append(value)
             row_minimum = min(row_minimum, value)
@@ -659,10 +664,7 @@ def _agent_evidence_supports_fact(
             candidate = evidence[start : start + candidate_length]
             if re.findall(r"\d+", candidate) != numeric_tokens:
                 continue
-            if (
-                _bounded_edit_distance(fact, candidate, limit=max_edits)
-                <= max_edits
-            ):
+            if _bounded_edit_distance(fact, candidate, limit=max_edits) <= max_edits:
                 return True
     return False
 
@@ -1152,9 +1154,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             for field in ("page_start", "page_end"):
                 if source[field] != expanded.get(field):
                     raise ValueError(f"source_ref {field} does not match its chunk")
-            if [str(item) for item in source["heading_path"]] != [
-                str(item) for item in expanded.get("heading_path") or []
-            ]:
+            source_heading_path = canonical_heading_path(source["heading_path"])
+            expanded_heading_path = canonical_heading_path(expanded.get("heading_path") or [])
+            if source_heading_path != expanded_heading_path:
                 raise ValueError("source_ref heading_path does not match its chunk")
         normalized_source = {
             "module_id": str(source["module_id"]),
@@ -1164,7 +1166,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 {
                     "page_start": source["page_start"],
                     "page_end": source["page_end"],
-                    "heading_path": [str(item) for item in source["heading_path"]],
+                    "heading_path": list(canonical_heading_path(source["heading_path"])),
                 }
                 if exact_required or supplied_exact_fields
                 else {}
@@ -1189,6 +1191,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         field: str = "source_excerpt",
         minimum_length: int = 1,
         maximum_length: int = 2000,
+        allow_ordered_omissions: bool = False,
     ) -> str:
         """Normalize and verify cited text against the already-resolved chunk."""
         display = str(value or "").replace("\x02", "").replace("\u00ad", "")
@@ -1199,9 +1202,152 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 f"{field} must contain {minimum_length} to {maximum_length} characters"
             )
         chunk_content = _normalize_source_evidence_text(expanded.get("content"))
-        if normalized not in chunk_content:
+        ordered_selection = False
+        if allow_ordered_omissions and normalized:
+            excerpt_tokens = normalized.split()
+            chunk_tokens = iter(chunk_content.split())
+            ordered_selection = all(
+                any(candidate == token for candidate in chunk_tokens) for token in excerpt_tokens
+            )
+        if normalized not in chunk_content and not ordered_selection:
             raise ValueError(f"{field} is not present in its cited chunk")
         return display
+
+    def validate_embedded_module_source_refs(
+        campaign_id: str,
+        value: Any,
+        *,
+        field: str,
+    ) -> None:
+        """Validate every embedded managed module citation through one resolver."""
+
+        if isinstance(value, list):
+            for index, item in enumerate(value):
+                validate_embedded_module_source_refs(
+                    campaign_id,
+                    item,
+                    field=f"{field}[{index}]",
+                )
+            return
+        if not isinstance(value, dict):
+            return
+        for key, item in value.items():
+            item_field = f"{field}.{key}"
+            if key in {"source_ref", "source_refs"}:
+                candidates = item if key == "source_refs" and isinstance(item, list) else [item]
+                for index, candidate in enumerate(candidates):
+                    if not isinstance(candidate, dict):
+                        continue
+                    managed_fields = {
+                        "module_id",
+                        "scene_id",
+                        "chunk_id",
+                        "content_sha256",
+                    }
+                    if not (managed_fields & set(candidate)):
+                        continue
+                    candidate_field = (
+                        f"{item_field}[{index}]" if key == "source_refs" else item_field
+                    )
+                    expected_scene_id = str(value.get("source_scene_id") or "").strip() or None
+                    managed_candidate = {
+                        name: candidate.get(name)
+                        for name in (
+                            "module_id",
+                            "scene_id",
+                            "chunk_id",
+                            "page_start",
+                            "page_end",
+                            "heading_path",
+                            "content_sha256",
+                        )
+                    }
+                    try:
+                        _normalized, _source, expanded = managed_module_source_ref(
+                            campaign_id,
+                            managed_candidate,
+                            require_exact=True,
+                            expected_scene_id=expected_scene_id,
+                        )
+                        excerpt = str(
+                            value.get("source_excerpt") or candidate.get("excerpt") or ""
+                        ).strip()
+                        if excerpt:
+                            assert expanded is not None
+                            managed_module_source_excerpt(
+                                expanded,
+                                excerpt,
+                                field=f"{candidate_field}.excerpt",
+                            )
+                    except (LookupError, ValueError) as error:
+                        raise ValueError(f"{candidate_field}: {error}") from error
+                continue
+            validate_embedded_module_source_refs(
+                campaign_id,
+                item,
+                field=item_field,
+            )
+
+    def validate_playthrough_source_bindings(
+        campaign_id: str,
+        manifest: dict[str, Any],
+    ) -> None:
+        """Resolve all manifest evidence against indexed chunks and source assets."""
+
+        module_ids = {str(item) for item in manifest["module_ids"]}
+        module_rows = {
+            str(item["id"]): item for item in modules.list(campaign_id, include_retired=True)
+        }
+        for field, source_ref in playthrough_source_bindings(manifest):
+            module_id = str(source_ref.get("module_id") or "")
+            if module_id not in module_ids:
+                raise ValueError(f"{field}.module_id is not declared by the manifest")
+            managed_source = {
+                key: source_ref.get(key)
+                for key in (
+                    "module_id",
+                    "scene_id",
+                    "chunk_id",
+                    "page_start",
+                    "page_end",
+                    "heading_path",
+                    "content_sha256",
+                )
+            }
+            try:
+                _normalized, _source, expanded = managed_module_source_ref(
+                    campaign_id,
+                    managed_source,
+                    require_exact=True,
+                )
+                excerpt = str(source_ref.get("excerpt") or "").strip()
+                if excerpt:
+                    assert expanded is not None
+                    managed_module_source_excerpt(
+                        expanded,
+                        excerpt,
+                        field=f"{field}.excerpt",
+                        allow_ordered_omissions=True,
+                    )
+            except (LookupError, ValueError) as error:
+                raise ValueError(f"{field}: {error}") from error
+
+            declared_asset_sha = str(source_ref["asset_sha256"]).casefold()
+            asset_candidates = [
+                *modules.list_assets(campaign_id, module_id),
+                {
+                    "source_path": str(module_rows[module_id].get("source_path") or ""),
+                    "checksum": str(module_rows[module_id].get("checksum") or ""),
+                },
+            ]
+            asset_matches = any(
+                str(candidate.get("checksum") or "").casefold() == declared_asset_sha
+                for candidate in asset_candidates
+            )
+            if not asset_matches:
+                raise ValueError(
+                    f"{field}.asset_sha256 does not identify a managed source asset for its module"
+                )
 
     def effective_ruleset_view_from(effective: Any, profile: Any) -> dict[str, Any]:
         """Render one already-resolved lock, including its built-in core."""
@@ -1324,7 +1470,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
 
     def seed_bundled_rules(*, max_files: int = 64) -> dict[str, Any]:
         """Idempotently index the compact bundled SRD reference corpus."""
-        existing = rules.sources(system_id="dnd5e")
+        existing = rules.sources(system_id=DND5E.id)
         if existing:
             return {"status": "ready", "skipped": True, "sources": len(existing)}
         root = config.dnd_skills_dir / "full" / "skills" / "dnd-dm" / "srd"
@@ -1336,7 +1482,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             content = path.read_text(encoding="utf-8")
             edition = "2014" if "references-2014-en" in path.parts else "2024"
             rules.ingest(
-                system_id="dnd5e",
+                system_id=DND5E.id,
                 source_key=f"bundled/{path.relative_to(root).as_posix()}",
                 title=path.stem,
                 content=content,
@@ -1353,12 +1499,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
 
     def authoritative_phase(campaign_id: str) -> str:
         campaign = campaigns.get(campaign_id)
-        state = dict(campaign.state or {})
-        combat = state.get("combat")
-        if isinstance(combat, dict) and combat.get("active", False):
-            return PROFILE_COMBAT
-        phase = str(state.get("game_phase") or PROFILE_LOBBY)
-        return phase if phase in {PROFILE_LOBBY, PROFILE_PLAY} else PROFILE_LOBBY
+        return campaign_phase(campaign.state)
 
     def preparation_setup_closed(campaign: Any) -> bool:
         """Return whether this campaign has ever crossed into live play."""
@@ -1547,7 +1688,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
 
     def library_character_view(character: Any, principal_id: str) -> dict[str, Any]:
         """Keep reusable sheets usable without exposing campaign-less private notes."""
-        if principal_id == "system:local":
+        if principal_id == LOCAL_SYSTEM_PRINCIPAL_ID:
             return character_view(character)
         value = character_view(character)
         value.pop("notes", None)
@@ -1556,7 +1697,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         return value
 
     def is_dm(campaign_id: str, principal_id: str) -> bool:
-        return access.require_campaign(campaign_id, principal_id).role in {"owner", "dm"}
+        return access.require_campaign(campaign_id, principal_id).role in CAMPAIGN_DM_ROLES
 
     def normalized_advancement_mode(mode: Any) -> str:
         value = str(mode or "").strip().casefold()
@@ -1576,7 +1717,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
 
     def require_character_control(character: Any, principal_id: str) -> None:
         if character.campaign_id is None:
-            if principal_id != "system:local":
+            if principal_id != LOCAL_SYSTEM_PRINCIPAL_ID:
                 raise PermissionError("only the local service may modify library characters")
             return
         access.require_actor(character.campaign_id, character.id, principal_id, control=True)
@@ -1591,7 +1732,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
 
     def visible_character_view(character: Any, principal_id: str) -> dict[str, Any]:
         if character.campaign_id is None:
-            if principal_id != "system:local":
+            if principal_id != LOCAL_SYSTEM_PRINCIPAL_ID:
                 return public_character_view(character)
             return character_view(character)
         if is_dm(character.campaign_id, principal_id):
@@ -1844,7 +1985,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 expanded = rules.expand(identifier)
                 rule_source = rules.source(str(expanded["source"]["id"]))
                 campaign_edition = campaign_rules_edition(campaign_id)
-                if str(rule_source.get("system_id") or "") != "dnd5e":
+                if str(rule_source.get("system_id") or "") != DND5E.id:
                     raise ValueError("statblock variant rule chunk must belong to D&D")
                 if str(rule_source.get("edition") or "") != campaign_edition:
                     raise ValueError("statblock variant rule chunk edition does not match campaign")
@@ -2146,7 +2287,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             value["snapshot_role"] = "historical_final_encounter"
             value["combatant_state_is_current"] = False
             value["current_character_state_source"] = "character_query"
-        if membership.role not in {"owner", "dm"}:
+        if membership.role not in CAMPAIGN_DM_ROLES:
             viewer_actor_ids: set[str] = set()
             for item in encounter.get("combatants", []):
                 actor_id_value = str(item.get("actor_id") or "")
@@ -2415,7 +2556,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     ) -> dict[str, Any]:
         membership = access.require_campaign(campaign_id, principal_id)
         value = dict(action)
-        if membership.role not in {"owner", "dm"}:
+        if membership.role not in CAMPAIGN_DM_ROLES:
             # Tactical context (cover, advantage, concealment and reach) is a
             # scene/DM fact, not a client-controlled modifier.
             value["context"] = {}
@@ -4018,7 +4159,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         name: str | None = None,
         player_name: str | None = None,
         summary: str | None = None,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         idempotency_key: str | None = None,
         payload: dict[str, Any] | None = None,
@@ -4553,7 +4694,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     def rule_seed_status() -> dict[str, Any]:
         """Return whether the bundled SRD corpus is indexed."""
         return {
-            "sources": rules.sources(system_id="dnd5e"),
+            "sources": rules.sources(system_id=DND5E.id),
             "auto_seed": config.auto_seed_rules,
         }
 
@@ -4581,11 +4722,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     def campaign_create(
         name: str,
         description: str = "",
-        edition: str = "2024",
+        edition: str = DEFAULT_CAMPAIGN_EDITION,
         locale: str = "en",
         advancement_mode: Literal["milestone", "xp"] = "milestone",
         random_seed: str | None = None,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Create a D&D 5e campaign inside the MCP-owned SQLite database."""
@@ -4602,7 +4743,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         # partially initialized campaign without its required Core lock.
         get_core_rule_pack(edition)
         created = campaigns.create_owned(
-            system_id="dnd5e",
+            system_id=DND5E.id,
             name=name,
             principal_id=principal_id,
             idempotency_key=idempotency_key,
@@ -4633,13 +4774,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     @mcp.tool()
     def campaign_list(
         status: str | None = None,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
     ) -> list[dict[str, Any]]:
         """List D&D 5e campaigns."""
         allowed = access.accessible_campaign_ids(principal_id)
         return [
             campaign_audience_view(item.id, principal_id)
-            for item in campaigns.list(system_id="dnd5e", status=status)
+            for item in campaigns.list(system_id=DND5E.id, status=status)
             if item.id in allowed
         ]
 
@@ -4648,7 +4789,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         membership = access.require_campaign(campaign_id, principal_id)
         campaign = campaigns.get(campaign_id)
         value = asdict(campaign)
-        if membership.role in {"owner", "dm"}:
+        value["effective_game_phase"] = campaign_phase(campaign.state)
+        if membership.role in CAMPAIGN_DM_ROLES:
             return value
         state = dict(value.get("state") or {})
         safe_state: dict[str, Any] = {
@@ -4670,7 +4812,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         return value
 
     @mcp.tool()
-    def campaign_get(campaign_id: str, principal_id: str = "system:local") -> dict[str, Any]:
+    def campaign_get(
+        campaign_id: str, principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID
+    ) -> dict[str, Any]:
         """Read one campaign, including its persisted party and combat state."""
         return campaign_audience_view(campaign_id, principal_id)
 
@@ -4695,7 +4839,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     @mcp.tool()
     def game_phase_get(
         campaign_id: str,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
     ) -> dict[str, Any]:
         """Return the authoritative tool profile for this campaign."""
         access.require_campaign(campaign_id, principal_id)
@@ -4712,13 +4856,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     def game_phase_set(
         campaign_id: str,
         tool_profile: str,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         branch_id: str | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Switch between game-outside lobby and live non-combat play."""
-        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         require_write_contract(expected_revision, idempotency_key)
         profile = str(tool_profile).strip().lower()
         if profile not in {PROFILE_LOBBY, PROFILE_PLAY}:
@@ -4776,20 +4920,20 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     def import_job_get(
         campaign_id: str,
         job_id: str,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
     ) -> dict[str, Any]:
         """Read the durable evidence, review state, and result for one lobby import."""
-        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         return import_job_view(require_import_job(campaign_id, job_id))
 
     @mcp.tool()
     def import_job_list(
         campaign_id: str,
         kind: str | None = None,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
     ) -> list[dict[str, Any]]:
         """List rulebook or module imports, newest first, without reading local files."""
-        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         return [import_job_view(item) for item in import_jobs.list(campaign_id, kind=kind)]
 
     @mcp.tool()
@@ -4803,11 +4947,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         publication_id: str = "",
         version: str = "",
         authority: str = "supplement",
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Create a reviewable rulebook import job for an already staged artifact."""
-        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         edition = normalize_dnd_edition(edition)
         if not idempotency_key:
             raise ValueError("idempotency_key is required for an import job")
@@ -4845,11 +4989,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     def rule_import_job_inspect(
         campaign_id: str,
         job_id: str,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Normalize a staged rulebook and persist the parser report before indexing it."""
-        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         if not idempotency_key:
             raise ValueError("idempotency_key is required for import inspection")
         job = require_import_job(campaign_id, job_id, "rulebook")
@@ -4884,11 +5028,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         campaign_id: str,
         job_id: str,
         acknowledge_warnings: bool = False,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Index an inspected rulebook, retaining its source id for candidate citations."""
-        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         if not idempotency_key:
             raise ValueError("idempotency_key is required for rulebook indexing")
         job = require_import_job(campaign_id, job_id, "rulebook")
@@ -4914,7 +5058,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         values = dict(job.payload)
         embedder, vectors = storage.dense_components()
         result = rules.ingest_path(
-            system_id="dnd5e",
+            system_id=DND5E.id,
             path=storage.artifact_rulebook_path(job.artifact),
             source_key=str(values["source_key"]),
             title=str(values["title"]),
@@ -4951,11 +5095,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     def rule_content_candidates_extract(
         campaign_id: str,
         job_id: str,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Extract conservative source-linked D&D content for Agent-as-DM review."""
-        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         if not idempotency_key:
             raise ValueError("idempotency_key is required for candidate extraction")
         job = require_import_job(campaign_id, job_id, "rulebook")
@@ -4998,11 +5142,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         campaign_id: str,
         job_id: str,
         decisions: list[dict[str, Any]],
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Accept, reject, or complete extracted content cards before pack compilation."""
-        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         if not idempotency_key:
             raise ValueError("idempotency_key is required for candidate review")
         job = require_import_job(campaign_id, job_id)
@@ -5036,8 +5180,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         by_principal_id: str | None = None,
     ) -> dict[str, Any]:
         """Grant DM/player/observer campaign access; caller role is resolved server-side."""
-        caller = by_principal_id or "system:local"
-        access.require_campaign(campaign_id, caller, roles={"owner", "dm"})
+        caller = by_principal_id or LOCAL_SYSTEM_PRINCIPAL_ID
+        access.require_campaign(campaign_id, caller, roles=CAMPAIGN_DM_ROLES)
         access.ensure_principal(principal_id, platform="mcp", external_id=principal_id)
         return asdict(access.grant_campaign(campaign_id, principal_id, role=role))
 
@@ -5051,8 +5195,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         by_principal_id: str | None = None,
     ) -> dict[str, Any]:
         """Grant an explicit PC/NPC control and private-sheet view permission."""
-        caller = by_principal_id or "system:local"
-        access.require_campaign(campaign_id, caller, roles={"owner", "dm"})
+        caller = by_principal_id or LOCAL_SYSTEM_PRINCIPAL_ID
+        access.require_campaign(campaign_id, caller, roles=CAMPAIGN_DM_ROLES)
         access.ensure_principal(principal_id, platform="mcp", external_id=principal_id)
         return asdict(
             access.grant_actor(
@@ -5072,12 +5216,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         description: str | None = None,
         settings: dict[str, Any] | None = None,
         state: dict[str, Any] | None = None,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Apply a reviewed campaign-level update without bypassing its state document."""
-        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         if expected_revision is None or not idempotency_key:
             raise ValueError(
                 "expected_revision and idempotency_key are required for campaign updates"
@@ -5136,13 +5280,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     def campaign_advancement_configure(
         campaign_id: str,
         mode: str,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         branch_id: str | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Select milestone or cumulative-XP advancement for one campaign."""
-        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         require_write_contract(expected_revision, idempotency_key)
         normalized_mode = normalized_advancement_mode(mode)
         resolved_branch_id = require_current_branch(campaign_id, branch_id)
@@ -5194,13 +5338,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         awards: list[dict[str, Any]],
         reason: str,
         source_ref: str,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         branch_id: str | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Atomically award source-bound cumulative XP to one or more PCs."""
-        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         require_write_contract(expected_revision, idempotency_key)
         resolved_branch_id = require_current_branch(campaign_id, branch_id)
         campaign = campaigns.get(campaign_id)
@@ -5379,13 +5523,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         items: list[dict[str, Any]],
         reason: str,
         source_ref: str,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         branch_id: str | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Atomically add one source-bound loot parcel to the shared party inventory."""
-        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         require_write_contract(expected_revision, idempotency_key)
         resolved_branch_id = require_current_branch(campaign_id, branch_id)
         campaign = campaigns.get(campaign_id)
@@ -5512,13 +5656,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         reason: str,
         source_ref: str,
         rule_ref: str,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         branch_id: str | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Atomically pay one source-bound expense from the shared party wallet."""
-        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         require_write_contract(expected_revision, idempotency_key)
         resolved_branch_id = require_current_branch(campaign_id, branch_id)
         campaign = campaigns.get(campaign_id)
@@ -5634,13 +5778,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         quantity: int,
         reason: str,
         source_ref: str,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         branch_id: str | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Atomically expend one source-bound item from the shared party inventory."""
-        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         require_write_contract(expected_revision, idempotency_key)
         resolved_branch_id = require_current_branch(campaign_id, branch_id)
         campaign = campaigns.get(campaign_id)
@@ -5746,13 +5890,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         target_character_id: str,
         expected_character_revision: int,
         reason: str,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         branch_id: str | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Atomically consume one shared healing potion and settle its rolled healing."""
-        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         require_write_contract(expected_revision, idempotency_key)
         resolved_branch_id = require_current_branch(campaign_id, branch_id)
         normalized_use_id = str(use_id).strip()
@@ -5940,13 +6084,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         name: str = "Chase",
         participant_config: list[dict[str, Any]] | None = None,
         close_transition: dict[str, Any] | None = None,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         branch_id: str | None = None,
         expected_revision: int | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Start a source-reviewed 2014 chase without creating a combat map."""
-        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         require_write_contract(expected_revision, idempotency_key)
         resolved_branch_id = require_current_branch(campaign_id, branch_id)
         if not participant_ids or len(participant_ids) != len(set(participant_ids)):
@@ -6093,7 +6237,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     @mcp.tool()
     def chase_query(
         campaign_id: str,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
     ) -> dict[str, Any]:
         """Inspect the current or most recently closed chase and canonical actors."""
         access.require_campaign(campaign_id, principal_id)
@@ -6121,14 +6265,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         complication_choice: str = "",
         stand_from_prone: bool = True,
         quarry_visibility: dict[str, bool] | None = None,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         branch_id: str | None = None,
         expected_revision: int | None = None,
         expected_actor_revision: int | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Settle one ordered chase turn and the DMG urban complication stream."""
-        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         require_write_contract(expected_revision, idempotency_key)
         if expected_actor_revision is None:
             raise ValueError("expected_actor_revision is required")
@@ -6331,13 +6475,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         summary: str,
         source_ref: dict[str, Any],
         source_excerpt: str,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         branch_id: str | None = None,
         expected_revision: int | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Close a chase only at an exact reviewed source or DM outcome boundary."""
-        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         require_write_contract(expected_revision, idempotency_key)
         resolved_branch_id = require_current_branch(campaign_id, branch_id)
         campaign = campaigns.get(campaign_id)
@@ -6412,13 +6556,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         scope_id: str = "party",
         battle_map: dict[str, Any] | None = None,
         ruleset: str | None = None,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         branch_id: str | None = None,
         expected_revision: int | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Start a structured encounter from canonical campaign actors."""
-        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         require_write_contract(expected_revision, idempotency_key)
         resolved_branch_id = require_current_branch(campaign_id, branch_id)
         participant_config = participant_config or []
@@ -6838,13 +6982,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         campaign_id: str,
         actor_id: str,
         participant_config: dict[str, Any] | None = None,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         branch_id: str | None = None,
         expected_revision: int | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Queue one canonical campaign actor to enter combat at the next round."""
-        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         require_write_contract(expected_revision, idempotency_key)
         resolved_branch_id = require_current_branch(campaign_id, branch_id)
         config_value = dict(participant_config or {})
@@ -6973,7 +7117,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     @mcp.tool()
     def combat_status(
         campaign_id: str,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
     ) -> dict[str, Any] | None:
         """Read an audience-filtered structured encounter."""
         return combat_view(campaign_id, principal_id)
@@ -6982,7 +7126,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     def combat_available_actions(
         campaign_id: str,
         actor_id: str,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
     ) -> dict[str, Any]:
         """List legal action categories without consuming a turn resource."""
         access.require_actor(campaign_id, actor_id, principal_id, private=True)
@@ -7024,7 +7168,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         actor_id: str,
         target_id: str,
         action: dict[str, Any] | None = None,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
     ) -> dict[str, Any]:
         """Validate an attack and return a non-mutating resolution plan."""
         access.require_actor(campaign_id, actor_id, principal_id, control=True)
@@ -7048,7 +7192,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 plan,
                 action,
                 authorized=access.require_campaign(campaign_id, principal_id).role
-                in {"owner", "dm"},
+                in CAMPAIGN_DM_ROLES,
             )
             pay_attack_action(
                 encounter,
@@ -7058,7 +7202,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 multiattack_option_id=action.get("multiattack_option_id"),
             )
         except NeedsRulingError as error:
-            if access.require_campaign(campaign_id, principal_id).role not in {"owner", "dm"}:
+            if access.require_campaign(campaign_id, principal_id).role not in CAMPAIGN_DM_ROLES:
                 raise CombatEngineError("attack requires Agent-as-DM adjudication") from None
             weapon_id = str(action.get("weapon_id") or "")
             missing = {str(item) for item in error.missing}
@@ -7090,7 +7234,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         # player receives an opaque plan token and the legal action metadata,
         # never target AC, attack bonus, or damage formulas.
         membership = access.require_campaign(campaign_id, principal_id)
-        if membership.role not in {"owner", "dm"}:
+        if membership.role not in CAMPAIGN_DM_ROLES:
             return {
                 "status": plan["status"],
                 "kind": plan["kind"],
@@ -7108,7 +7252,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         actor_id: str,
         target_id: str,
         action: dict[str, Any] | None = None,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         branch_id: str | None = None,
         expected_revision: int | None = None,
         idempotency_key: str | None = None,
@@ -7205,10 +7349,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     plan,
                     action_payload,
                     authorized=access.require_campaign(campaign_id, principal_id).role
-                    in {"owner", "dm"},
+                    in CAMPAIGN_DM_ROLES,
                 )
         except NeedsRulingError:
-            if access.require_campaign(campaign_id, principal_id).role not in {"owner", "dm"}:
+            if access.require_campaign(campaign_id, principal_id).role not in CAMPAIGN_DM_ROLES:
                 raise CombatEngineError("attack requires Agent-as-DM adjudication") from None
             raise
         if spell_resolution is not None:
@@ -7596,13 +7740,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         target_id: str,
         choice_id: str,
         selection: dict[str, Any],
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         branch_id: str | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Settle a reviewed attack's structured condition or save-and-damage effect."""
-        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         require_write_contract(expected_revision, idempotency_key)
         resolved_branch_id = require_current_branch(campaign_id, branch_id)
         target_record = require_campaign_actor(campaign_id, target_id)
@@ -7935,10 +8079,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 or escape_dc > 40
                 or not escape_abilities
                 or len(escape_abilities) != len(set(escape_abilities))
-                or any(
-                    ability not in ABILITY_IDS
-                    for ability in escape_abilities
-                )
+                or any(ability not in ABILITY_IDS for ability in escape_abilities)
                 or not source_excerpt
                 or source_excerpt.casefold() not in effect.casefold()
             ):
@@ -7951,9 +8092,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             ):
                 raise CombatEngineError("escape DC or ability is not stated by the reviewed attack")
             apply_condition_change(updated_sheet, condition_id=condition, add=True)
-            condition_applied = condition in condition_ids(
-                updated_sheet.get("conditions")
-            )
+            condition_applied = condition in condition_ids(updated_sheet.get("conditions"))
             if condition_applied:
                 end_concentration_for_incapacitating_conditions(updated_sheet)
                 sync_combatant_conditions(next_encounter, target_id, updated_sheet)
@@ -8104,9 +8243,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         "description": source_excerpt,
                     },
                 )
-                condition_applied = condition in condition_ids(
-                    updated_sheet.get("conditions")
-                )
+                condition_applied = condition in condition_ids(updated_sheet.get("conditions"))
                 if condition_applied:
                     end_concentration_for_incapacitating_conditions(updated_sheet)
                     ongoing_effect = {
@@ -8137,8 +8274,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "save": saved,
                 "condition": condition,
                 "condition_applied": condition_applied,
-                "resisted_by_immunity": not saved["success"]
-                and not condition_applied,
+                "resisted_by_immunity": not saved["success"] and not condition_applied,
                 "effect_id": effect_id,
             }
         elif selection_id == "saving_throw_damage":
@@ -8376,9 +8512,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     apply_condition_change(updated_sheet, condition_id="unconscious", add=True)
                     stabilized = stabilize_sheet(updated_sheet)
                     updated_sheet = stabilized["sheet"]
-                    before_special_conditions = condition_ids(
-                        updated_sheet.get("conditions")
-                    )
+                    before_special_conditions = condition_ids(updated_sheet.get("conditions"))
                     effect_id = f"{choice_id}:zero-hp"
                     updated_sheet, _ = add_effect(
                         updated_sheet,
@@ -8400,8 +8534,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         },
                     )
                     added_conditions = sorted(
-                        condition_ids(updated_sheet.get("conditions"))
-                        - before_special_conditions
+                        condition_ids(updated_sheet.get("conditions")) - before_special_conditions
                     )
                     applied_zero_hp_effect = {
                         **normalized_zero_hp_effect,
@@ -8702,7 +8835,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     def combat_end_turn(
         campaign_id: str,
         actor_id: str,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         branch_id: str | None = None,
         idempotency_key: str | None = None,
@@ -9059,7 +9192,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         idempotency_key: str | None,
     ) -> dict[str, Any]:
         """Add or dismiss one structured campaign-space effect outside combat."""
-        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         require_write_contract(expected_revision, idempotency_key)
         resolved_branch_id = require_current_branch(campaign_id, branch_id)
         if action not in {"effect_add", "effect_remove"}:
@@ -9137,13 +9270,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         hour: int = 0,
         minute: int = 0,
         label: str = "",
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         branch_id: str | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Set the branch-local campaign clock without fabricating elapsed time."""
-        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         require_write_contract(expected_revision, idempotency_key)
         resolved_branch_id = require_current_branch(campaign_id, branch_id)
         if isinstance(day, bool) or not isinstance(day, int) or day < 1:
@@ -9219,7 +9352,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         campaign_id: str,
         period: str,
         count: int = 1,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         branch_id: str | None = None,
         idempotency_key: str | None = None,
@@ -9227,7 +9360,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         expected_elapsed_ticks: int | None = None,
     ) -> dict[str, Any]:
         """Advance the campaign clock and matching timed effects atomically."""
-        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         require_write_contract(expected_revision, idempotency_key)
         resolved_branch_id = require_current_branch(campaign_id, branch_id)
         normalized_period = str(period).strip().lower().replace("-", "_")
@@ -9502,7 +9635,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         choice_id: str,
         target_id: str,
         action: dict[str, Any] | None = None,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         branch_id: str | None = None,
         expected_revision: int | None = None,
         idempotency_key: str | None = None,
@@ -9842,7 +9975,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         actor_id: str,
         choice_id: str,
         selection: dict[str, Any],
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         branch_id: str | None = None,
         expected_revision: int | None = None,
         idempotency_key: str | None = None,
@@ -10134,7 +10267,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         path: list[Any] | None = None,
         movement_mode: str = "voluntary",
         crawl: bool = False,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         branch_id: str | None = None,
         idempotency_key: str | None = None,
@@ -10230,7 +10363,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     def combat_stand(
         campaign_id: str,
         actor_id: str,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         branch_id: str | None = None,
         idempotency_key: str | None = None,
@@ -10295,7 +10428,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         target_id: str | None = None,
         trigger: str | None = None,
         payload: dict[str, Any] | None = None,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         branch_id: str | None = None,
         idempotency_key: str | None = None,
@@ -10384,7 +10517,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         actor_id: str,
         choice_id: str,
         selection: dict[str, Any],
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         branch_id: str | None = None,
         expected_revision: int | None = None,
         idempotency_key: str | None = None,
@@ -10612,7 +10745,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     def combat_reactions(
         campaign_id: str,
         actor_id: str,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
     ) -> list[dict[str, Any]]:
         """Read reaction windows an actor may resolve outside its own turn."""
         access.require_actor(campaign_id, actor_id, principal_id, control=True)
@@ -10648,7 +10781,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         component_ruling: dict[str, Any] | None = None,
         source_item_id: str | None = None,
         choice_id: str | None = None,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         branch_id: str | None = None,
         idempotency_key: str | None = None,
@@ -11430,7 +11563,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         trigger: str,
         cast_level: int | None = None,
         declaration: dict[str, Any] | None = None,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         branch_id: str | None = None,
         idempotency_key: str | None = None,
@@ -11543,13 +11676,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         campaign_id: str,
         readied_id: str,
         event: str,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         branch_id: str | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Confirm that a readied spell's perceivable trigger occurred and open its reaction."""
-        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         require_write_contract(expected_revision, idempotency_key)
         resolved_branch_id = require_current_branch(campaign_id, branch_id)
         payload = {"readied_id": readied_id, "event": event, "branch_id": resolved_branch_id}
@@ -11621,7 +11754,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         choice_id: str,
         release: bool,
         declaration: dict[str, Any] | None = None,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         branch_id: str | None = None,
         idempotency_key: str | None = None,
@@ -11757,13 +11890,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         campaign_id: str,
         readied_id: str,
         event: str,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         branch_id: str | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Confirm a generic Ready trigger in the DM role and open its reaction window."""
-        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         require_write_contract(expected_revision, idempotency_key)
         resolved_branch_id = require_current_branch(campaign_id, branch_id)
         payload = {"readied_id": readied_id, "event": event, "branch_id": resolved_branch_id}
@@ -11802,7 +11935,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         choice_id: str,
         release: bool,
         declaration: dict[str, Any] | None = None,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         branch_id: str | None = None,
         idempotency_key: str | None = None,
@@ -11874,7 +12007,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         activity_id: str,
         declaration: dict[str, Any] | None = None,
         choice_id: str | None = None,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         branch_id: str | None = None,
         idempotency_key: str | None = None,
@@ -12724,13 +12857,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         advantage: bool = False,
         disadvantage: bool = False,
         rule_facts: dict[str, Any] | None = None,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         branch_id: str | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Resolve and audit a non-combat check using the branch's exact rule-pack lock."""
-        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         actor = require_campaign_actor(campaign_id, actor_id)
         if narrative_only_actor(actor):
             raise CombatEngineError(
@@ -12837,13 +12970,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         target_disadvantage: bool = False,
         source_rule_facts: dict[str, Any] | None = None,
         target_rule_facts: dict[str, Any] | None = None,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         branch_id: str | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Resolve and audit one non-combat 2014 ability contest atomically."""
-        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         source_actor = require_campaign_actor(campaign_id, source_actor_id)
         target_actor = require_campaign_actor(campaign_id, target_actor_id)
         for actor in (source_actor, target_actor):
@@ -12973,7 +13106,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         reason: str,
         advantage: bool = False,
         disadvantage: bool = False,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         expected_campaign_revision: int | None = None,
         idempotency_key: str | None = None,
@@ -13268,7 +13401,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         advantage: bool = False,
         disadvantage: bool = False,
         rule_facts: dict[str, Any] | None = None,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         branch_id: str | None = None,
         idempotency_key: str | None = None,
@@ -13672,7 +13805,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         target_id: str,
         dc: int,
         effect_ids: list[str],
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         branch_id: str | None = None,
         idempotency_key: str | None = None,
@@ -13792,14 +13925,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         campaign_id: str,
         target_id: str,
         source_excerpt: str,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         branch_id: str | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Apply an explicit module-authored stabilization without inventing an actor."""
 
-        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         require_write_contract(expected_revision, idempotency_key)
         resolved_branch_id = require_current_branch(campaign_id, branch_id)
         normalized_excerpt = " ".join(str(source_excerpt or "").split()).strip()
@@ -13902,7 +14035,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         target_id: str,
         parts: list[dict[str, Any]],
         critical: bool = False,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         branch_id: str | None = None,
         idempotency_key: str | None = None,
@@ -13910,7 +14043,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         melee: bool = False,
     ) -> dict[str, Any]:
         """Apply adjudicator-approved damage; automatic trait and HP settlement is deterministic."""
-        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         require_write_contract(expected_revision, idempotency_key)
         resolved_branch_id = require_current_branch(campaign_id, branch_id)
         require_campaign_actor(campaign_id, target_id)
@@ -14018,7 +14151,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         campaign_id: str,
         target_id: str,
         amount: int,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         branch_id: str | None = None,
         idempotency_key: str | None = None,
@@ -14027,7 +14160,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         spell_level: int | None = None,
     ) -> dict[str, Any]:
         """Apply source-aware healing with feature modifiers and max-HP clamping."""
-        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         require_write_contract(expected_revision, idempotency_key)
         resolved_branch_id = require_current_branch(campaign_id, branch_id)
         require_campaign_actor(campaign_id, target_id)
@@ -14108,13 +14241,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         event: str,
         candidates: list[dict[str, Any]] | None = None,
         kind: str = "reaction",
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         branch_id: str | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Open a reaction/ruling window; the engine never guesses a narrative choice."""
-        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         require_write_contract(expected_revision, idempotency_key)
         resolved_branch_id = require_current_branch(campaign_id, branch_id)
         require_campaign_actor(campaign_id, actor_id)
@@ -14167,7 +14300,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         actor_id: str,
         choice_id: str,
         selection: dict[str, Any],
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         branch_id: str | None = None,
         idempotency_key: str | None = None,
@@ -14252,11 +14385,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         return combat_response(campaign_id, principal_id, response)
 
     @mcp.tool()
-    def branch_list(campaign_id: str, principal_id: str = "system:local") -> list[dict[str, Any]]:
+    def branch_list(
+        campaign_id: str, principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID
+    ) -> list[dict[str, Any]]:
         """List playable, non-destructive campaign timelines."""
         membership = access.require_campaign(campaign_id, principal_id)
         values = [asdict(item) for item in branches.list(campaign_id)]
-        if membership.role not in {"owner", "dm"}:
+        if membership.role not in CAMPAIGN_DM_ROLES:
             current = current_branch_id(campaign_id)
             return [item for item in values if item["id"] == current]
         return values
@@ -14266,10 +14401,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         campaign_id: str,
         left_branch_id: str,
         right_branch_id: str,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
     ) -> dict[str, Any]:
         """Compare facts and actor knowledge across branches without auto-merging them."""
-        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         return branches.compare(campaign_id, left_branch_id, right_branch_id)
 
     @mcp.tool()
@@ -14278,13 +14413,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         name: str,
         from_snapshot_id: str | None = None,
         checkout: bool = False,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         expected_branch_id: str | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Fork a timeline from a snapshot without changing its source branch."""
-        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         if expected_revision is None or expected_branch_id is None or not idempotency_key:
             raise ValueError(
                 "expected_revision, expected_branch_id, and idempotency_key are required "
@@ -14344,13 +14479,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     def branch_checkout(
         campaign_id: str,
         branch_id: str,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         expected_branch_id: str | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Load a branch head as live campaign state without creating a new save."""
-        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         if expected_revision is None or expected_branch_id is None or not idempotency_key:
             raise ValueError(
                 "expected_revision, expected_branch_id, and idempotency_key are required "
@@ -14411,13 +14546,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     def snapshot_create(
         campaign_id: str,
         label: str = "",
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         expected_head_snapshot_id: str = "",
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Commit current D&D state, events, facts, and actor knowledge to this branch."""
-        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         if expected_revision is None or not idempotency_key:
             raise ValueError(
                 "expected_revision, expected_head_snapshot_id, and idempotency_key are "
@@ -14455,21 +14590,23 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         return response
 
     @mcp.tool()
-    def snapshot_list(campaign_id: str, principal_id: str = "system:local") -> list[dict[str, Any]]:
-        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+    def snapshot_list(
+        campaign_id: str, principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID
+    ) -> list[dict[str, Any]]:
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         return [asdict(item) for item in snapshots.list(campaign_id)]
 
     @mcp.tool()
     def snapshot_restore(
         campaign_id: str,
         slot: int,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         expected_branch_id: str | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Fork from an earlier save; existing future history remains intact."""
-        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         if expected_revision is None or expected_branch_id is None or not idempotency_key:
             raise ValueError(
                 "expected_revision, expected_branch_id, and idempotency_key are required "
@@ -14510,10 +14647,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     def snapshot_core_lock(
         campaign_id: str,
         slot: int,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
     ) -> dict[str, Any]:
         """Inspect one snapshot's immutable Core lock and current conversion target."""
-        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         document = snapshots.get(campaign_id, slot)
         profile = dict(document.get("payload", {}).get("rule_profile") or {})
         options = dict(profile.get("options") or {})
@@ -14561,13 +14698,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         expected_snapshot_core_fingerprint: str,
         expected_runtime_core_fingerprint: str,
         reason: str,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         expected_branch_id: str | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Fork an old-Core snapshot after an explicit, audited runtime conversion."""
-        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         if expected_revision is None or expected_branch_id is None or not idempotency_key:
             raise ValueError(
                 "expected_revision, expected_branch_id, and idempotency_key are required "
@@ -14664,28 +14801,28 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
 
     @mcp.tool()
     def snapshot_verify(
-        campaign_id: str, slot: int, principal_id: str = "system:local"
+        campaign_id: str, slot: int, principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID
     ) -> dict[str, bool]:
         """Verify that a saved snapshot has an internally consistent payload."""
-        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         return {"valid": snapshots.verify(campaign_id, slot)}
 
     @mcp.tool()
     def snapshot_lineage(
         campaign_id: str,
         slot: int | None = None,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
     ) -> list[dict[str, Any]]:
         """List the lineage of a save without mutating campaign history."""
-        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         return [asdict(item) for item in snapshots.lineage(campaign_id, slot)]
 
     @mcp.tool()
     def snapshot_regenerate_recap(
-        campaign_id: str, slot: int, principal_id: str = "system:local"
+        campaign_id: str, slot: int, principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID
     ) -> dict[str, Any]:
         """Regenerate a deterministic recap from a saved snapshot payload."""
-        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         return snapshots.regenerate_recap(campaign_id, slot)
 
     @mcp.tool()
@@ -14698,12 +14835,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         summary: str = "",
         sheet: dict[str, Any] | None = None,
         notes: dict[str, Any] | None = None,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Create a D&D PC, NPC, or monster; optionally bind it to a campaign."""
         if campaign_id is not None:
-            access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+            access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         if not idempotency_key:
             raise ValueError("idempotency_key is required for character creation")
         sheet_value = deepcopy(sheet or default_character_sheet())
@@ -14721,7 +14858,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         return character_view(
             characters.create_idempotent(
-                system_id="dnd5e",
+                system_id=DND5E.id,
                 name=name,
                 principal_id=principal_id,
                 idempotency_key=idempotency_key,
@@ -14737,25 +14874,25 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     @mcp.tool()
     def character_list(
         campaign_id: str | None = None,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
     ) -> list[dict[str, Any]]:
         """List D&D characters, optionally restricted to a campaign."""
         if campaign_id is not None:
             access.require_campaign(campaign_id, principal_id)
         return [
             visible_character_view(item, principal_id)
-            for item in characters.list(system_id="dnd5e", campaign_id=campaign_id)
+            for item in characters.list(system_id=DND5E.id, campaign_id=campaign_id)
         ]
 
     @mcp.tool()
     def character_library_list(
         character_type: str | None = None,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
     ) -> list[dict[str, Any]]:
         """List reusable D&D templates that are not bound to a campaign."""
         return [
             library_character_view(item, principal_id)
-            for item in characters.list_library(system_id="dnd5e", character_type=character_type)
+            for item in characters.list_library(system_id=DND5E.id, character_type=character_type)
         ]
 
     @mcp.tool()
@@ -14765,10 +14902,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         campaign_id: str,
         name: str | None = None,
         player_name: str | None = None,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
     ) -> dict[str, Any]:
         """Copy a public D&D character template into one campaign."""
-        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         template = characters.get(template_id)
         sheet = deepcopy(template.sheet)
         sheet["edition"] = campaign_rules_edition(campaign_id)
@@ -14799,11 +14936,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         summary: str = "",
         sheet: dict[str, Any] | None = None,
         notes: dict[str, Any] | None = None,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Atomically create a PC library template and independent campaign instance."""
-        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         if not idempotency_key:
             raise ValueError("idempotency_key is required for character build")
         sheet_value = deepcopy(sheet or default_character_sheet())
@@ -14814,7 +14951,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         normalized_notes = validate_character_notes(notes or default_character_notes())
         template, instance = characters.create_with_instance(
-            system_id="dnd5e",
+            system_id=DND5E.id,
             campaign_id=campaign_id,
             name=name,
             character_type="pc",
@@ -14828,7 +14965,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         return {"template": character_view(template), "instance": character_view(instance)}
 
     @mcp.tool()
-    def character_get(character_id: str, principal_id: str = "system:local") -> dict[str, Any]:
+    def character_get(
+        character_id: str, principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID
+    ) -> dict[str, Any]:
         """Read one validated D&D character card."""
         current = characters.get(character_id)
         if current.campaign_id is not None:
@@ -14846,7 +14985,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         sheet: dict[str, Any],
         *,
         operation: str = "character.sheet.update",
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         idempotency_key: str | None = None,
         payload: dict[str, Any] | None = None,
@@ -14880,7 +15019,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         character_id: str,
         sheet: dict[str, Any],
         notes: dict[str, Any] | None = None,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
@@ -14912,7 +15051,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         character_id: str,
         denomination: str,
         amount: int,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
@@ -14934,7 +15073,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     def character_inventory_add(
         character_id: str,
         item: dict[str, Any],
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
@@ -14943,11 +15082,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         require_character_control(current, principal_id)
         require_outside_active_combat(current, "inventory changes")
         campaign = campaigns.get(current.campaign_id) if current.campaign_id else None
-        phase = (
-            authoritative_phase(current.campaign_id)
-            if campaign is not None
-            else PROFILE_LOBBY
-        )
+        phase = authoritative_phase(current.campaign_id) if campaign is not None else PROFILE_LOBBY
         if item.get("attunement") == "attuned" and phase != PROFILE_LOBBY:
             raise CombatEngineError(
                 "an item can enter Play as required, but attunement must be "
@@ -14970,7 +15105,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         character_id: str,
         item_id: str,
         patch: dict[str, Any],
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
@@ -15004,9 +15139,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if "attunement" in normalized_patch:
             campaign = campaigns.get(current.campaign_id) if current.campaign_id else None
             phase = (
-                authoritative_phase(current.campaign_id)
-                if campaign is not None
-                else PROFILE_LOBBY
+                authoritative_phase(current.campaign_id) if campaign is not None else PROFILE_LOBBY
             )
             current_item = next(
                 (
@@ -15039,7 +15172,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         character_id: str,
         item_id: str,
         quantity: int | None = None,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
@@ -15064,7 +15197,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         character_id: str,
         item_id: str,
         slot: str | None,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
@@ -15087,7 +15220,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         character_id: str,
         item_id: str,
         trigger: str,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
@@ -15148,7 +15281,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         character_id: str,
         weapon_id: str,
         quantity: int = 1,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
@@ -15174,7 +15307,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         target_character_id: str,
         item_id: str,
         quantity: int | None = None,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_campaign_revision: int | None = None,
         expected_source_revision: int | None = None,
         expected_target_revision: int | None = None,
@@ -15257,7 +15390,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     def character_effect_add(
         character_id: str,
         effect: dict[str, Any],
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
@@ -15281,7 +15414,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     def character_effect_remove(
         character_id: str,
         effect_id: str,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
@@ -15304,7 +15437,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         state: str,
         source_ref: str,
         reason: str,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
@@ -15314,7 +15447,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         require_outside_active_combat(current, "source-authored state initialization")
         if current.campaign_id is None:
             raise ValueError("source-authored state requires a campaign-bound actor")
-        access.require_campaign(current.campaign_id, principal_id, roles={"owner", "dm"})
+        access.require_campaign(current.campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         normalized_reason = str(reason).strip()
         if not normalized_reason or len(normalized_reason) > 1000:
             raise ValueError("source state reason must contain 1 to 1000 characters")
@@ -15351,13 +15484,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     def campaign_stable_recovery(
         campaign_id: str,
         members: list[dict[str, Any]],
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         branch_id: str | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Recover simultaneously Stable creatures without summing their wait times."""
-        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         require_write_contract(expected_revision, idempotency_key)
         resolved_branch_id = require_current_branch(campaign_id, branch_id)
         if not isinstance(members, list) or not members:
@@ -15563,7 +15696,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
 
     def character_stand(
         character_id: str,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
@@ -15600,7 +15733,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
 
     def character_knock_prone(
         character_id: str,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
@@ -15641,7 +15774,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         hp_method: str,
         reason: str,
         source_ref: str,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
@@ -15774,7 +15907,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     def character_level_advancement_plan(
         character_id: str,
         class_name: str,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
     ) -> dict[str, Any]:
         """Preview all source-bound follow-up work without committing a level."""
         current = characters.get(character_id)
@@ -15860,7 +15993,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         signature_free_cast: bool = False,
         component_ruling: dict[str, Any] | None = None,
         source_item_id: str | None = None,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
@@ -16072,13 +16205,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         members: list[dict[str, Any]],
         duration_minutes: int = 480,
         rest_type: str = "long_rest",
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         branch_id: str | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Advance one short or long rest and settle every member atomically."""
-        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         require_write_contract(expected_revision, idempotency_key)
         resolved_branch_id = require_current_branch(campaign_id, branch_id)
         normalized_rest_type = str(rest_type).strip().lower().replace("-", "_")
@@ -16522,7 +16655,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         character_id: str,
         activity_id: str,
         declaration: dict[str, Any] | None = None,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
@@ -16791,7 +16924,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         character_id: str,
         resource: str,
         value: int,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
@@ -16813,7 +16946,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     def character_exhaustion_set(
         character_id: str,
         value: int,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
@@ -16838,7 +16971,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         critical: bool = False,
         knock_out: bool = False,
         melee: bool = False,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
@@ -16848,7 +16981,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         require_outside_active_combat(current, "noncombat damage")
         if current.campaign_id is None:
             raise CombatEngineError("noncombat damage requires a campaign-bound actor")
-        access.require_campaign(current.campaign_id, principal_id, roles={"owner", "dm"})
+        access.require_campaign(current.campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         campaign = campaigns.get(current.campaign_id)
         applied = apply_damage_parts_to_sheet(
             current.sheet,
@@ -16889,7 +17022,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         source_actor_id: str | None = None,
         spell_id: str | None = None,
         spell_level: int | None = None,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
@@ -16899,7 +17032,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         require_outside_active_combat(current, "noncombat healing")
         if current.campaign_id is None:
             raise CombatEngineError("noncombat healing requires a campaign-bound actor")
-        access.require_campaign(current.campaign_id, principal_id, roles={"owner", "dm"})
+        access.require_campaign(current.campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         if int(amount) <= 0:
             raise CombatEngineError("healing amount must be positive")
         source = None
@@ -16936,7 +17069,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         character_id: str,
         spell_id: str,
         prepared: bool,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
@@ -16982,7 +17115,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         character_id: str,
         spell_ids: list[str],
         event: str = "setup",
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
@@ -17042,7 +17175,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         method: str,
         assignments: dict[str, int] | None = None,
         rolls: None = None,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
@@ -17122,7 +17255,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
 
     @mcp.tool()
-    def party_show(campaign_id: str, principal_id: str = "system:local") -> dict[str, Any]:
+    def party_show(
+        campaign_id: str, principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID
+    ) -> dict[str, Any]:
         """Read the campaign shared stash, wallet, derived load, and party notes."""
         access.require_campaign(campaign_id, principal_id)
         return party_view_from_state(campaigns.get(campaign_id).state)
@@ -17131,12 +17266,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     def party_inventory_add(
         campaign_id: str,
         item: dict[str, Any],
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Add an item to the campaign shared inventory."""
-        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         if expected_revision is None or not idempotency_key:
             raise ValueError(
                 "expected_revision and idempotency_key are required for party inventory writes"
@@ -17178,12 +17313,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         campaign_id: str,
         item_id: str,
         quantity: int | None = None,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Remove an item or partial stack from the campaign shared inventory."""
-        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         if expected_revision is None or not idempotency_key:
             raise ValueError(
                 "expected_revision and idempotency_key are required for party inventory writes"
@@ -17232,7 +17367,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         item_id: str,
         direction: str,
         quantity: int | None = None,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_campaign_revision: int | None = None,
         expected_character_revision: int | None = None,
         idempotency_key: str | None = None,
@@ -17319,12 +17454,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         campaign_id: str,
         denomination: str,
         amount: int,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Credit or debit one denomination in the shared party wallet."""
-        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         if expected_revision is None or not idempotency_key:
             raise ValueError(
                 "expected_revision and idempotency_key are required for party wallet writes"
@@ -17371,7 +17506,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         denomination: str,
         amount: int,
         direction: str,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_campaign_revision: int | None = None,
         expected_character_revision: int | None = None,
         idempotency_key: str | None = None,
@@ -17520,7 +17655,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     def dnd_dice_roll(
         campaign_id: str,
         expression: str,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         branch_id: str | None = None,
         expected_campaign_revision: int | None = None,
         idempotency_key: str | None = None,
@@ -17548,7 +17683,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         advantage: bool = False,
         disadvantage: bool = False,
         kind: str = "ability",
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         branch_id: str | None = None,
         expected_campaign_revision: int | None = None,
         idempotency_key: str | None = None,
@@ -17578,13 +17713,20 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     @mcp.tool()
     def dnd_ability_roll(
         campaign_id: str,
-        edition: str = "2024",
-        principal_id: str = "system:local",
+        edition: str = "",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         branch_id: str | None = None,
         expected_campaign_revision: int | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Generate ability scores and atomically advance the campaign random stream."""
+        authoritative_edition = campaign_rules_edition(campaign_id)
+        if edition:
+            requested_edition = normalize_dnd_edition(edition)
+            if requested_edition != authoritative_edition:
+                raise ValueError(
+                    "ability-roll edition must match the campaign rule profile"
+                )
         return settle_campaign_randomness(
             campaign_id,
             principal_id=principal_id,
@@ -17592,8 +17734,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             expected_campaign_revision=expected_campaign_revision,
             idempotency_key=idempotency_key,
             operation="dnd.ability.roll",
-            payload={"edition": edition},
-            resolver=lambda: roll_ability_scores(edition),
+            payload={"edition": authoritative_edition},
+            resolver=lambda: roll_ability_scores(authoritative_edition),
         )
 
     @mcp.tool()
@@ -17604,7 +17746,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         summary: str | None = None,
         sheet: dict[str, Any] | None = None,
         notes: dict[str, Any] | None = None,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
@@ -17642,11 +17784,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         subject: str = "",
         metadata: dict[str, Any] | None = None,
         branch_id: str | None = None,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Record a durable campaign fact, event, relationship, or NPC memory."""
-        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         if not idempotency_key:
             raise ValueError("idempotency_key is required for memory writes")
         branch_id = require_current_branch(campaign_id, branch_id)
@@ -17682,11 +17824,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         campaign_id: str,
         kind: str | None = None,
         branch_id: str | None = None,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         include_inactive: bool = False,
     ) -> list[dict[str, Any]]:
         """List durable world facts visible from one campaign branch."""
-        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         return [
             asdict(item)
             for item in memories.list(
@@ -17703,11 +17845,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         query: str,
         limit: int = 8,
         branch_id: str | None = None,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         include_inactive: bool = False,
     ) -> list[dict[str, Any]]:
         """Retrieve branch-scoped durable world facts for DM administration."""
-        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         return [
             asdict(item)
             for item in memories.search(
@@ -17731,11 +17873,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         knowledge_key: str | None = None,
         knowledge_proposition: str | None = None,
         knowledge_disclosure_scope: str = "owner",
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Append a branch-local chronology event; an event is not actor knowledge."""
-        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         if not idempotency_key:
             raise ValueError("idempotency_key is required for event writes")
         branch_id = require_current_branch(campaign_id, branch_id)
@@ -17748,6 +17890,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 )
             for actor_id in known_by_actor_ids:
                 access.require_actor(campaign_id, actor_id, principal_id, private=True)
+        validate_embedded_module_source_refs(
+            campaign_id,
+            payload or {},
+            field="event.payload",
+        )
         request_payload = {
             "summary": summary,
             "event_type": event_type,
@@ -17812,18 +17959,27 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         campaign_id: str,
         limit: int = 50,
         branch_id: str | None = None,
-        principal_id: str = "system:local",
+        actor_id: str | None = None,
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
     ) -> list[dict[str, Any]]:
         membership = access.require_campaign(campaign_id, principal_id)
-        values = events.list(
+        resolved_branch_id = readable_branch(campaign_id, branch_id, principal_id)
+        audience = "dm" if membership.role in CAMPAIGN_DM_ROLES else "player"
+        if actor_id:
+            access.require_actor(
+                campaign_id,
+                actor_id,
+                principal_id,
+                private=True,
+                branch_id=resolved_branch_id,
+            )
+        values = events.list_for_audience(
             campaign_id,
+            audience=audience,
+            actor_id=actor_id,
             limit=limit,
-            branch_id=readable_branch(campaign_id, branch_id, principal_id),
+            branch_id=resolved_branch_id,
         )
-        if membership.role not in {"owner", "dm"}:
-            values = [
-                item for item in values if item.audience_scope in {"public", "party", "player"}
-            ]
         return [asdict(item) for item in values]
 
     @mcp.tool()
@@ -17839,11 +17995,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         cause: str = "witnessed",
         disclosure_scope: str = "dm",
         branch_id: str | None = None,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Record what one live PC, NPC, or monster knows or believes."""
-        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         access.require_actor(campaign_id, actor_id, principal_id, private=True)
         if not idempotency_key:
             raise ValueError("idempotency_key is required for actor knowledge writes")
@@ -17897,13 +18053,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         cause: str = "told_by",
         disclosure_scope: str = "dm",
         branch_id: str | None = None,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision_id: str | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Append a new subjective revision, e.g. a rumor or Modify Memory effect."""
         current = knowledge.get(knowledge_id)
-        access.require_campaign(current.campaign_id, principal_id, roles={"owner", "dm"})
+        access.require_campaign(current.campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         if expected_revision_id is None or not idempotency_key:
             raise ValueError(
                 "expected_revision_id and idempotency_key are required for knowledge revisions"
@@ -17958,7 +18114,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         campaign_id: str,
         actor_id: str,
         branch_id: str | None = None,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
     ) -> list[dict[str, Any]]:
         resolved_branch_id = readable_branch(campaign_id, branch_id, principal_id)
         access.require_actor(
@@ -17974,11 +18130,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             actor_id=actor_id,
             branch_id=resolved_branch_id,
         )
-        if membership.role not in {"owner", "dm"}:
+        if membership.role not in CAMPAIGN_DM_ROLES:
             values = [
                 item
                 for item in values
-                if item.disclosure_scope in {"public", "party", "player", "owner"}
+                if item.disclosure_scope in PLAYER_OWNED_ACTOR_DISCLOSURE_SCOPES
             ]
         return [asdict(item) for item in values]
 
@@ -17989,7 +18145,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         query: str,
         branch_id: str | None = None,
         limit: int = 8,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
     ) -> list[dict[str, Any]]:
         """Search one actor's current subjective knowledge without leaking other actors."""
         resolved_branch_id = readable_branch(campaign_id, branch_id, principal_id)
@@ -18008,11 +18164,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             branch_id=resolved_branch_id,
             limit=limit,
         )
-        if membership.role not in {"owner", "dm"}:
+        if membership.role not in CAMPAIGN_DM_ROLES:
             values = [
                 item
                 for item in values
-                if item.disclosure_scope in {"public", "party", "player", "owner"}
+                if item.disclosure_scope in PLAYER_OWNED_ACTOR_DISCLOSURE_SCOPES
             ]
         return [asdict(item) for item in values]
 
@@ -18020,10 +18176,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         campaign_id: str,
         key: str,
         branch_id: str | None = None,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
     ) -> dict[str, Any]:
         """Read a campaign-owned mutation receipt after a stale-request retry conflict."""
-        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         resolved_branch_id = readable_branch(campaign_id, branch_id, principal_id)
         return asdict(
             idempotency.receipt(
@@ -18037,21 +18193,21 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     def state_history(
         campaign_id: str,
         limit: int = 100,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
     ) -> list[dict[str, Any]]:
         """List audited reversible campaign and character mutations."""
-        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         return [asdict(item) for item in revisions.history(campaign_id, limit=limit)]
 
     @mcp.tool()
     def state_undo(
         campaign_id: str,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_history_sequence: int | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Undo the latest audited mutation without deleting snapshots."""
-        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         if expected_history_sequence is None or not idempotency_key:
             raise ValueError("expected_history_sequence and idempotency_key are required for undo")
         branch_id = current_branch_id(campaign_id)
@@ -18089,12 +18245,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     @mcp.tool()
     def state_redo(
         campaign_id: str,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_history_sequence: int | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Redo the next audited mutation on the current state-revision branch."""
-        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         if expected_history_sequence is None or not idempotency_key:
             raise ValueError("expected_history_sequence and idempotency_key are required for redo")
         branch_id = current_branch_id(campaign_id)
@@ -18133,13 +18289,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     def combat_map_patch(
         campaign_id: str,
         patches: list[dict[str, Any]],
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         branch_id: str | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Record Agent-as-DM-confirmed changes from a temporary battle map."""
-        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         require_write_contract(expected_revision, idempotency_key)
         resolved_branch_id = require_current_branch(campaign_id, branch_id)
         normalized: list[dict[str, Any]] = []
@@ -18282,13 +18438,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     def combat_end(
         campaign_id: str,
         outcome: dict[str, Any] | None = None,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         branch_id: str | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Close an encounter atomically while preserving its final audit state."""
-        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         require_write_contract(expected_revision, idempotency_key)
         campaign = campaigns.get(campaign_id)
         resolved_branch_id = require_current_branch(campaign_id, branch_id)
@@ -18405,12 +18561,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         branch_id: str | None = None,
         limit: int = 8,
         budget_chars: int = 12_000,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
     ) -> dict[str, Any]:
         """Retrieve only current-branch facts, events, and optional actor knowledge."""
         membership = access.require_campaign(campaign_id, principal_id)
         branch_id = readable_branch(campaign_id, branch_id, principal_id)
-        if membership.role not in {"owner", "dm"}:
+        if membership.role not in CAMPAIGN_DM_ROLES:
             audience = "player"
             if actor_id:
                 access.require_actor(
@@ -18443,10 +18599,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     def continuity_diagnostics(
         campaign_id: str,
         branch_id: str | None = None,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
     ) -> dict[str, Any]:
         """Inspect continuity health without returning secret narrative content."""
-        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         branch_id = readable_branch(campaign_id, branch_id, principal_id)
         result = continuity.diagnostics(campaign_id, branch_id=branch_id)
         current_manifest = catalog.manifest()
@@ -18478,12 +18634,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     def continuity_commit(
         campaign_id: str,
         payload: dict[str, Any],
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Atomically save a scene event, fact changes, actor knowledge, and snapshot."""
-        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         if not idempotency_key:
             raise ValueError("idempotency_key is required for continuity commits")
         data = facade_payload(payload)
@@ -18502,6 +18658,21 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         facts_data = [dict(item) for item in raw_facts]
         knowledge_data = [dict(item) for item in raw_knowledge]
         snapshot_data = dict(data["snapshot"]) if data.get("snapshot") is not None else None
+        validate_embedded_module_source_refs(
+            campaign_id,
+            event_data.get("payload") or {},
+            field="payload.event.payload",
+        )
+        validate_embedded_module_source_refs(
+            campaign_id,
+            facts_data,
+            field="payload.facts",
+        )
+        validate_embedded_module_source_refs(
+            campaign_id,
+            knowledge_data,
+            field="payload.actor_knowledge",
+        )
         if event_data.get("audience_scope") == "actor" and not knowledge_data:
             raise ValueError("actor-scoped continuity events require actor_knowledge writes")
         branch_id = require_current_branch(campaign_id, data.get("branch_id"))
@@ -18593,11 +18764,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         artifact: str,
         title: str | None = None,
         source_key: str | None = None,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Create a staged module package job before parsing or activating a revision."""
-        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         if not idempotency_key:
             raise ValueError("idempotency_key is required for an import job")
         path = storage.artifact_module_path(artifact)
@@ -18649,11 +18820,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     def module_import_job_inspect(
         campaign_id: str,
         job_id: str,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Persist parser preview, stable scene keys, and space evidence for a module job."""
-        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         if not idempotency_key:
             raise ValueError("idempotency_key is required for module inspection")
         job = require_import_job(campaign_id, job_id, "module")
@@ -18687,11 +18858,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     def module_import_job_validate(
         campaign_id: str,
         job_id: str,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Validate a staged module and preview scene/progress impact before importing it."""
-        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         if not idempotency_key:
             raise ValueError("idempotency_key is required for module validation")
         job = require_import_job(campaign_id, job_id, "module")
@@ -18754,11 +18925,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     def module_import_job_import(
         campaign_id: str,
         job_id: str,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Ingest a validated module inactive, preserving the current active module."""
-        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         if not idempotency_key:
             raise ValueError("idempotency_key is required for module import")
         job = require_import_job(campaign_id, job_id, "module")
@@ -18805,13 +18976,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     def module_import_job_activate(
         campaign_id: str,
         job_id: str,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         idempotency_key: str | None = None,
         progress_remaps: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """Atomically promote an imported module revision after its diff was reviewed."""
-        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         require_write_contract(expected_revision, idempotency_key)
         job = require_import_job(campaign_id, job_id, "module")
         normalized_remaps: list[dict[str, str]] = []
@@ -18828,9 +18999,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             target_scene_id = str(raw.get("to_scene_id") or "").strip()
             reason = str(raw.get("reason") or "").strip()
             if not source_scene_id or not target_scene_id:
-                raise ValueError(
-                    f"progress_remaps[{index}] requires from_scene_id and to_scene_id"
-                )
+                raise ValueError(f"progress_remaps[{index}] requires from_scene_id and to_scene_id")
             if not reason or len(reason) > 1000:
                 raise ValueError(
                     f"progress_remaps[{index}].reason must contain 1 to 1000 characters"
@@ -18959,7 +19128,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         return response
 
     @mcp.tool()
-    def module_write(name: str, content: str, principal_id: str = "system:local") -> dict[str, str]:
+    def module_write(
+        name: str, content: str, principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID
+    ) -> dict[str, str]:
         """Write generated Markdown to the managed artifact directory before importing it."""
         if not principal_id:
             raise PermissionError("authenticated caller identity is required for module artifacts")
@@ -18967,7 +19138,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         return {"artifact": path.name, "path": str(path)}
 
     @mcp.tool()
-    def module_inspect(artifact: str, principal_id: str = "system:local") -> dict[str, Any]:
+    def module_inspect(
+        artifact: str, principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID
+    ) -> dict[str, Any]:
         """Inspect a managed PDF/Markdown/text artifact before campaign import."""
         if not principal_id:
             raise PermissionError("authenticated caller identity is required for module artifacts")
@@ -18982,11 +19155,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         campaign_id: str,
         artifact: str,
         title: str | None = None,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Import a managed module artifact into a campaign."""
-        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         if not idempotency_key:
             raise ValueError("idempotency_key is required for module import")
         payload = {"artifact": artifact, "title": title}
@@ -19014,11 +19187,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         return asdict(result)
 
     @mcp.tool()
-    def module_list(campaign_id: str, principal_id: str = "system:local") -> list[dict[str, Any]]:
+    def module_list(
+        campaign_id: str, principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID
+    ) -> list[dict[str, Any]]:
         """List a campaign's imported modules."""
         membership = access.require_campaign(campaign_id, principal_id)
         rows = modules.list(campaign_id)
-        if membership.role in {"owner", "dm"}:
+        if membership.role in CAMPAIGN_DM_ROLES:
             return rows
         return [
             {key: value for key, value in row.items() if key not in {"source_path", "metadata"}}
@@ -19029,22 +19204,24 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     def module_index(
         campaign_id: str,
         module_id: str | None = None,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
     ) -> list[dict[str, Any]]:
         """Return a stable scene index for scene selection and safe progression."""
         membership = access.require_campaign(campaign_id, principal_id)
         index = modules.scene_index(campaign_id, module_id=module_id)
-        if membership.role in {"owner", "dm"}:
+        if membership.role in CAMPAIGN_DM_ROLES:
             return index
         return [item for item in index if item.get("visibility", "keeper") in {"public", "party"}]
 
     @mcp.tool()
-    def module_expand(chunk_id: str, principal_id: str = "system:local") -> dict[str, Any]:
+    def module_expand(
+        chunk_id: str, principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID
+    ) -> dict[str, Any]:
         """Read a complete module chunk after it was selected by search."""
         result = modules.expand(chunk_id)
         membership = access.require_campaign(result["campaign_id"], principal_id)
         visibility = result.get("scene", {}).get("visibility", "keeper")
-        if membership.role in {"owner", "dm"} or visibility in {"public", "party"}:
+        if membership.role in CAMPAIGN_DM_ROLES or visibility in {"public", "party"}:
             return result
         return {
             "chunk_id": result["chunk_id"],
@@ -19056,9 +19233,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     def module_assets(
         campaign_id: str,
         module_id: str,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
     ) -> list[dict[str, Any]]:
-        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         return modules.list_assets(campaign_id, module_id)
 
     def module_asset_attach(
@@ -19071,11 +19248,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         location_key: str | None = None,
         title: str | None = None,
         metadata: dict[str, Any] | None = None,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Attach an allowlisted image or support document to an imported module."""
-        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         if not idempotency_key:
             raise ValueError("idempotency_key is required for module asset attachment")
         kind = str(asset_kind).strip()
@@ -19152,10 +19329,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         page_number: int,
         source_asset_id: str | None = None,
         scale: float = 1.5,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
     ) -> Any:
         """Render one imported PDF page as visual evidence for maps or handouts."""
-        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         assets = modules.list_assets(campaign_id, module_id)
         if source_asset_id:
             source_asset = modules.get_asset(campaign_id, source_asset_id)
@@ -19219,12 +19396,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         source_chunk_ids: list[str] | None = None,
         content_kind: Literal["dnd5e_2014_statblock"] = "dnd5e_2014_statblock",
         metadata: dict[str, Any] | None = None,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         idempotency_key: str | None = None,
         agent_fill: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Validate an executable transcription and optional Agent semantic fill."""
-        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         if not idempotency_key:
             raise ValueError("idempotency_key is required for module content review")
         parsed = parse_2014_statblock(
@@ -19323,10 +19500,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     def module_content_candidates(
         campaign_id: str,
         module_id: str,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
     ) -> list[dict[str, Any]]:
         """Recover review-only statblock candidates from imported text chunks."""
-        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         module = next(
             (item for item in modules.list(campaign_id) if str(item.get("id")) == module_id),
             None,
@@ -19387,13 +19564,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         campaign_id: str,
         scene_id: str,
         scope_id: str = "party",
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
     ) -> dict[str, Any]:
         """Read one full scene, including its structured rooms and visibility metadata."""
         membership = access.require_campaign(campaign_id, principal_id)
         result = modules.read_scene(campaign_id, scene_id, scope_id=scope_id)
         visibility = result.get("visibility", "keeper")
-        if membership.role in {"owner", "dm"} or visibility in {"public", "party"}:
+        if membership.role in CAMPAIGN_DM_ROLES or visibility in {"public", "party"}:
             return result
         return {
             "campaign_id": campaign_id,
@@ -19406,10 +19583,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         campaign_id: str,
         scene_id: str,
         participant_manifest: dict[str, Any],
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
     ) -> dict[str, Any]:
         """Validate source-grounded combatants and reserves before an encounter starts."""
-        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         if not isinstance(participant_manifest, dict):
             raise ValueError("participant_manifest must be an object")
         unknown_manifest = set(participant_manifest) - {"schema_version", "groups", "notes"}
@@ -19567,13 +19744,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     def module_current(
         campaign_id: str,
         scope_id: str = "party",
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
     ) -> dict[str, Any] | None:
         """Read the current scene for party, group, or player scope with party fallback."""
         membership = access.require_campaign(campaign_id, principal_id)
         resolved_scope_id = readable_scene_scope(campaign_id, scope_id, principal_id)
         result = modules.current_scene(campaign_id, scope_id=resolved_scope_id)
-        if result is None or membership.role in {"owner", "dm"}:
+        if result is None or membership.role in CAMPAIGN_DM_ROLES:
             return result
         if result.get("visibility", "keeper") in {"public", "party"}:
             return result
@@ -19587,7 +19764,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         campaign_id: str,
         scope_id: str = "party",
         module_id: str | None = None,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
     ) -> list[dict[str, Any]]:
         """Project ordered scene progress without adding another public MCP tool."""
         membership = access.require_campaign(campaign_id, principal_id)
@@ -19597,7 +19774,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             scope_id=resolved_scope_id,
             module_id=module_id,
         )
-        if membership.role in {"owner", "dm"}:
+        if membership.role in CAMPAIGN_DM_ROLES:
             return result
         visible_scene_ids = {
             item["scene_id"] for item in module_index(campaign_id, module_id, principal_id)
@@ -19614,17 +19791,27 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         state: dict[str, Any] | None = None,
         current_room: str | None = None,
         current_location_key: str | None = None,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_state_version: int | None = None,
         idempotency_key: str | None = None,
         spatial_review: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Persist scoped progress or a source-backed visual atlas review."""
-        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         if expected_state_version is None or not idempotency_key:
             raise ValueError(
                 "expected_state_version and idempotency_key are required for scene progress"
             )
+        validate_embedded_module_source_refs(
+            campaign_id,
+            state or {},
+            field="state",
+        )
+        validate_embedded_module_source_refs(
+            campaign_id,
+            spatial_review or {},
+            field="spatial_review",
+        )
         branch_id = current_branch_id(campaign_id)
         request_payload = {
             "scene_id": scene_id,
@@ -19676,7 +19863,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         query: str,
         top_k: int = 8,
         module_ids: list[str] | None = None,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
     ) -> list[dict[str, Any]]:
         """Search adventure content, optionally scoped to exact active module revisions."""
         membership = access.require_campaign(campaign_id, principal_id)
@@ -19689,7 +19876,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             embedder=embedder,
             vector_store=vectors,
         )
-        if membership.role in {"owner", "dm"}:
+        if membership.role in CAMPAIGN_DM_ROLES:
             return [asdict(hit) for hit in hits]
         return [
             asdict(hit)
@@ -19710,7 +19897,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         """Search rules, optionally constrained to exact imported sources/publications."""
         embedder, vectors = storage.dense_components()
         hits = rules.search(
-            system_id="dnd5e",
+            system_id=DND5E.id,
             query=query,
             edition=edition,
             locale=locale,
@@ -19732,20 +19919,20 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     def rule_document_stage(
         campaign_id: str,
         source_path: str,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
     ) -> dict[str, Any]:
         """Stage an allowlisted PDF/Markdown/text rulebook in MCP-owned storage."""
-        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         return storage.stage_rulebook(source_path)
 
     @mcp.tool()
     def rule_document_inspect(
         campaign_id: str,
         artifact: str,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
     ) -> dict[str, Any]:
         """Run Core document normalization and report structure/warnings without importing."""
-        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         return rules.inspect_path(
             storage.artifact_rulebook_path(artifact),
             **rule_document_options(storage.rulebook_checksum(artifact)),
@@ -19757,10 +19944,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         job_id: str,
         page_number: int,
         scale: float = 1.5,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
     ) -> Any:
         """Render one staged rulebook PDF page as checksum-bound Agent review evidence."""
-        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         job = require_import_job(campaign_id, job_id, "rulebook")
         source = storage.artifact_rulebook_path(job.artifact)
         if source.suffix.casefold() != ".pdf":
@@ -19789,13 +19976,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         job_id: str,
         name: str,
         page_number: int | None = None,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         idempotency_key: str | None = None,
         agent_fill: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Recover and review one statblock through layout OCR for text-only agents."""
 
-        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         if not idempotency_key:
             raise ValueError("idempotency_key is required for OCR statblock recovery")
         job = require_import_job(campaign_id, job_id, "rulebook")
@@ -20062,9 +20249,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "evidence exclusion chunk_id must belong to the selected contiguous segment"
                 )
             if not exact_text or len(exact_text) > 20_000:
-                raise ValueError(
-                    "evidence exclusion exact_text must contain 1 to 20000 characters"
-                )
+                raise ValueError("evidence exclusion exact_text must contain 1 to 20000 characters")
             if not 8 <= len(reason) <= 500:
                 raise ValueError("evidence exclusion reason must contain 8 to 500 characters")
             source_text = str(by_id[chunk_id].get("content") or "")
@@ -20086,9 +20271,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "chunk_id": chunk_id,
                     "start": start,
                     "end": end,
-                    "exact_text_sha256": hashlib.sha256(
-                        exact_text.encode("utf-8")
-                    ).hexdigest(),
+                    "exact_text_sha256": hashlib.sha256(exact_text.encode("utf-8")).hexdigest(),
                     "reason": reason,
                     "ordinal": index,
                 }
@@ -20222,9 +20405,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             if final_heading in ability_labels:
                 source_fact = ability_prefix.sub("", source_fact, count=1).strip()
             source_segments = [
-                value.strip()
-                for value in re.split(r"(?<=[.!?])\s+", source_fact)
-                if value.strip()
+                value.strip() for value in re.split(r"(?<=[.!?])\s+", source_fact) if value.strip()
             ]
             for source_segment in source_segments:
                 required_fact = _compact_agent_evidence(source_segment)
@@ -20258,7 +20439,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         page_number: int,
         normalized_content: str,
         observation: str,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         idempotency_key: str | None = None,
         review_mode: Literal["visual", "agent_text"] = "visual",
         evidence_chunk_ids: list[str] | None = None,
@@ -20267,7 +20448,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         evidence_exclusions: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """Retain a reviewed transcription and Agent fill bound to rulebook evidence."""
-        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         if not idempotency_key:
             raise ValueError("idempotency_key is required for a rule statblock review")
         job = require_import_job(campaign_id, job_id, "rulebook")
@@ -20446,12 +20627,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         base_review_id: str,
         observation: str,
         agent_fill: dict[str, Any],
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Add Agent semantic fill without retranscribing immutable reviewed text."""
 
-        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         job = require_import_job(campaign_id, job_id, "rulebook")
         review_id = str(base_review_id or "").strip()
         reviews = list(dict(job.result or {}).get("statblock_reviews") or [])
@@ -20503,11 +20684,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         publication_id: str = "",
         version: str = "",
         authority: str = "supplement",
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Import a staged rulebook through Core's shared structured parser and index."""
-        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         edition = normalize_dnd_edition(edition)
         if not idempotency_key:
             raise ValueError("idempotency_key is required for rulebook import")
@@ -20551,7 +20732,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             }
 
         result = rules.ingest_path(
-            system_id="dnd5e",
+            system_id=DND5E.id,
             path=path,
             source_key=source_key,
             title=title,
@@ -20599,7 +20780,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         """Ingest Markdown rule content into the MCP-owned D&D rule index."""
         embedder, vectors = storage.dense_components()
         result = rules.ingest(
-            system_id="dnd5e",
+            system_id=DND5E.id,
             source_key=source_key,
             title=title,
             content=content,
@@ -20636,9 +20817,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     ) -> dict[str, Any]:
         """Draft a pack whose citations are resolved from imported rule chunks."""
         source = rules.source(source_id)
-        if source["system_id"] != "dnd5e":
+        if source["system_id"] != DND5E.id:
             raise ValueError("rule source is not a D&D source")
-        if str(manifest.get("system_id") or "") != "dnd5e":
+        if str(manifest.get("system_id") or "") != DND5E.id:
             raise ValueError("source-bound D&D packs require manifest.system_id=dnd5e")
         editions = [str(item) for item in manifest.get("editions", [])]
         if not editions:
@@ -20706,11 +20887,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         manifest: dict[str, Any],
         mechanics: list[dict[str, Any]] | None = None,
         provenance: dict[str, Any] | None = None,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Compile accepted candidates; incomplete cards remain catalog-only."""
-        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         if not idempotency_key:
             raise ValueError("idempotency_key is required for pack compilation")
         job = require_import_job(campaign_id, job_id, "rulebook")
@@ -20762,11 +20943,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     def rule_import_job_install(
         campaign_id: str,
         job_id: str,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Install the exact validated pack compiled by an import job without enabling it."""
-        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         if not idempotency_key:
             raise ValueError("idempotency_key is required for pack installation")
         job = require_import_job(campaign_id, job_id, "rulebook")
@@ -20803,13 +20984,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     def rule_import_job_activate(
         campaign_id: str,
         job_id: str,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         branch_id: str | None = None,
         expected_revision: int | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Enable an installed imported pack only through the checked-out branch lock."""
-        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         require_write_contract(expected_revision, idempotency_key)
         job = require_import_job(campaign_id, job_id, "rulebook")
         installed = dict(job.result.get("installed_pack") or {})
@@ -20889,7 +21070,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
 
     @mcp.tool()
     def campaign_rule_profile_get(
-        campaign_id: str, principal_id: str = "system:local"
+        campaign_id: str, principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID
     ) -> dict[str, Any] | None:
         """Read the campaign edition/publication profile and exact branch-local pack lock."""
         access.require_campaign(campaign_id, principal_id)
@@ -20916,12 +21097,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         locale: str = "en",
         publications: list[str] | None = None,
         options: dict[str, Any] | None = None,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Set non-executable edition/publication metadata outside active combat."""
-        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         require_write_contract(expected_revision, idempotency_key)
         edition = normalize_dnd_edition(edition)
         payload = {
@@ -20961,7 +21142,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         campaign_id: str,
         expected_core_fingerprint: str,
         reason: str,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         branch_id: str | None = None,
         expected_revision: int | None = None,
         expected_head_snapshot_id: str | None = None,
@@ -20969,7 +21150,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     ) -> dict[str, Any]:
         """Explicitly adopt the current built-in Core after a checkpointed runtime upgrade."""
 
-        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         require_write_contract(expected_revision, idempotency_key)
         if not expected_head_snapshot_id:
             raise ValueError("expected_head_snapshot_id is required for a Core relock")
@@ -21046,13 +21227,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         version: str,
         enabled: bool = True,
         options: dict[str, Any] | None = None,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         branch_id: str | None = None,
         expected_revision: int | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Explicitly pin and enable/disable an installed pack on one campaign branch."""
-        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         require_write_contract(expected_revision, idempotency_key)
         resolved_branch_id = require_current_branch(campaign_id, branch_id)
         payload = {
@@ -21101,13 +21282,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     def campaign_rule_pack_remove(
         campaign_id: str,
         pack_id: str,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         branch_id: str | None = None,
         expected_revision: int | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Remove a future branch-local activation while preserving historical receipts."""
-        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         require_write_contract(expected_revision, idempotency_key)
         resolved_branch_id = require_current_branch(campaign_id, branch_id)
         payload = {"pack_id": pack_id, "branch_id": resolved_branch_id}
@@ -21146,7 +21327,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     def campaign_rules_explain(
         campaign_id: str,
         event: str | None = None,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         branch_id: str | None = None,
     ) -> dict[str, Any]:
         """Explain the exact lock, fingerprint, and source-cited mechanics used for settlement."""
@@ -21175,13 +21356,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     @mcp.tool()
     def campaign_rule_receipts(
         campaign_id: str,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         branch_id: str | None = None,
         mechanic_id: str | None = None,
         limit: int = 100,
     ) -> list[dict[str, Any]]:
         """Read immutable historical rule evidence for committed settlements."""
-        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         resolved_branch_id = readable_branch(campaign_id, branch_id, principal_id)
         return [
             asdict(item)
@@ -21952,7 +22133,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         campaign_id: str,
         kind: str | None = None,
         query: str = "",
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         branch_id: str | None = None,
     ) -> list[dict[str, Any]]:
         """List core and enabled-extension character options from one uniform catalog."""
@@ -22121,7 +22302,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         """Pay, wait, expire effects, and record one discovered spell atomically."""
         assert current.campaign_id is not None
         campaign_id = current.campaign_id
-        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         if level < 1:
             raise ValueError("cantrips cannot be copied from a spellbook")
         campaign = campaigns.get(campaign_id)
@@ -22361,7 +22542,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         character_id: str,
         artifact_id: str,
         selection: dict[str, Any] | None = None,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
@@ -23995,7 +24176,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         pack_id: str,
         version: str,
         artifact_id: str,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
@@ -24243,7 +24424,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         campaign_id: str,
         action: Literal["check", "contest"] = "check",
         payload: dict[str, Any] | None = None,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         branch_id: str | None = None,
         idempotency_key: str | None = None,
@@ -24338,7 +24519,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         campaign_id: str,
         action: Literal["start", "query", "take_turn", "end"],
         payload: dict[str, Any] | None = None,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         branch_id: str | None = None,
         expected_revision: int | None = None,
         idempotency_key: str | None = None,
@@ -24470,7 +24651,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         view: Literal["get", "list"] = "list",
         job_id: str | None = None,
         kind: Literal["rulebook", "module"] | None = None,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
     ) -> dict[str, Any]:
         """Read staged rulebook or module import jobs without changing their state."""
         if view == "get":
@@ -24498,7 +24679,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "activate",
         ],
         payload: dict[str, Any] | None = None,
-        principal_id: Annotated[str, Field(title="Principal")] = "system:local",
+        principal_id: Annotated[str, Field(title="Principal")] = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: Annotated[int | None, Field(title="Revision")] = None,
         branch_id: Annotated[str | None, Field(title="BranchID")] = None,
         idempotency_key: Annotated[str | None, Field(title="Request Key")] = None,
@@ -24511,7 +24692,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 allowed=set(),
             )
             assert not data
-            access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+            access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
             discovered = storage.discover_rulebooks()
             return facade_result(
                 action,
@@ -24603,9 +24784,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             )
             return facade_result(
                 action,
-                rule_import_job_inspect(
-                    campaign_id, data["job_id"], principal_id, idempotency_key
-                ),
+                rule_import_job_inspect(campaign_id, data["job_id"], principal_id, idempotency_key),
             )
         if action == "ingest":
             data = strict_facade_payload(
@@ -24753,9 +24932,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             )
             return facade_result(
                 action,
-                rule_import_job_install(
-                    campaign_id, data["job_id"], principal_id, idempotency_key
-                ),
+                rule_import_job_install(campaign_id, data["job_id"], principal_id, idempotency_key),
             )
         data = strict_facade_payload(
             payload,
@@ -24787,7 +24964,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "attach_asset",
         ],
         payload: dict[str, Any] | None = None,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
@@ -24798,7 +24975,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 action="module_import(stage)",
                 allowed={"source_path", "name", "content", "title", "source_key"},
             )
-            access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+            access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
             source_path = data.get("source_path")
             generated_fields = {"name", "content"}.intersection(data)
             if source_path is not None and generated_fields:
@@ -24913,7 +25090,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         campaign_id: str,
         action: Literal["render_page", "submit_content"],
         payload: dict[str, Any],
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Render managed module evidence or submit a DM-only content review."""
@@ -25012,7 +25189,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "candidates",
         ] = "list",
         payload: dict[str, Any] | None = None,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
     ) -> dict[str, Any]:
         """Read module cards, indexes, one scene, or current scoped progress."""
         data = facade_payload(payload)
@@ -25039,7 +25216,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         elif view == "assets":
             result = module_assets(campaign_id, required(data, "module_id"), principal_id)
         elif view == "content":
-            access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+            access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
             if data.get("review_id"):
                 result = modules.get_content_review(campaign_id, str(data["review_id"]))
             else:
@@ -25099,7 +25276,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "source_chunks",
         ] = "list",
         payload: dict[str, Any] | None = None,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
     ) -> dict[str, Any]:
         """List, inspect, test, or browse selection-ready rule-pack content."""
         data = facade_payload(payload)
@@ -25119,13 +25296,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             )
         elif view == "sources":
             result = rules.sources(
-                system_id=data.get("system_id", "dnd5e"),
+                system_id=data.get("system_id", DND5E.id),
                 edition=data.get("edition"),
             )
         else:
             source_id = str(required(data, "source_id"))
             source = rules.source(source_id)
-            if str(source.get("system_id") or "") != "dnd5e":
+            if str(source.get("system_id") or "") != DND5E.id:
                 raise ValueError("rule source must belong to the dnd5e rule corpus")
             page = data.get("page")
             if page is not None and (
@@ -25187,7 +25364,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "receipts",
         ],
         payload: dict[str, Any] | None = None,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         branch_id: str | None = None,
         idempotency_key: str | None = None,
@@ -25278,7 +25455,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "advancement",
         ] = "list",
         payload: dict[str, Any] | None = None,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
     ) -> dict[str, Any]:
         """Read characters or inspect an allowlisted character document without inventing data."""
         data = facade_payload(payload)
@@ -25301,7 +25478,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             membership = access.require_campaign(campaign_id, principal_id)
             campaign_characters = {
                 item.id: item
-                for item in characters.list(system_id="dnd5e", campaign_id=campaign_id)
+                for item in characters.list(system_id=DND5E.id, campaign_id=campaign_id)
             }
             missing = [actor_id for actor_id in actor_ids if actor_id not in campaign_characters]
             if missing:
@@ -25310,7 +25487,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     + ", ".join(missing)
                 )
             selected = [campaign_characters[actor_id] for actor_id in actor_ids]
-            if membership.role in {"owner", "dm"}:
+            if membership.role in CAMPAIGN_DM_ROLES:
                 rules_context = effective_rule_context(campaign_id)
                 result = [
                     character_view(character, rules_context=rules_context) for character in selected
@@ -25430,7 +25607,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             result = character_library_list(data.get("character_type"), principal_id)
         elif view == "document":
             campaign_id = str(required(data, "campaign_id"))
-            access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+            access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
             staged = storage.stage_module(str(required(data, "source_path")))
             expected_checksum = str(data.get("expected_checksum") or "").strip()
             if expected_checksum and expected_checksum != staged["checksum"]:
@@ -25477,7 +25654,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "narrative_npc",
         ],
         payload: dict[str, Any],
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Create directly, by build/template, or from source-bound module evidence."""
@@ -25599,7 +25776,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 raise ValueError("narrative NPC role must contain 1 to 500 characters")
             if not summary or len(summary) > 2000:
                 raise ValueError("narrative NPC summary must contain 1 to 2000 characters")
-            access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+            access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
             campaign = campaigns.get(campaign_id)
             if authoritative_phase(campaign_id) != PROFILE_LOBBY:
                 raise CombatEngineError("narrative NPCs can be created only in lobby")
@@ -25702,7 +25879,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             campaign_id = str(required(data, "campaign_id"))
             job_id = str(required(data, "job_id"))
             review_id = str(required(data, "review_id"))
-            access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+            access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
             job = require_import_job(campaign_id, job_id, "rulebook")
             reviews = list(dict(job.result or {}).get("statblock_reviews") or [])
             matches = [item for item in reviews if str(item.get("id") or "") == review_id]
@@ -25860,7 +26037,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         elif mode == "module_statblock":
             campaign_id = str(required(data, "campaign_id"))
             review_id = str(required(data, "review_id"))
-            access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+            access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
             campaign = campaigns.get(campaign_id)
             campaign_edition = campaign_rules_edition(campaign.id)
             if campaign_edition != "2014":
@@ -26001,10 +26178,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         else:
             campaign_id = str(required(data, "campaign_id"))
             source_id = str(required(data, "source_id"))
-            access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+            access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
             campaign = campaigns.get(campaign_id)
             source = rules.source(source_id)
-            if str(source.get("system_id") or "") != "dnd5e":
+            if str(source.get("system_id") or "") != DND5E.id:
                 raise ValueError("statblock source must belong to the dnd5e rule corpus")
             campaign_edition = campaign_rules_edition(campaign.id)
             source_edition = str(source.get("edition") or "")
@@ -26193,7 +26370,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     def character_metadata_update(
         character_id: str,
         payload: dict[str, Any],
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
@@ -26224,7 +26401,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         character_id: str,
         artifact_id: str,
         selection: dict[str, Any] | None = None,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
@@ -26254,7 +26431,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         ],
         owner_id: str,
         payload: dict[str, Any] | None = None,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
@@ -26349,7 +26526,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     def inventory_transfer(
         mode: Literal["character_to_character", "party_to_character", "character_to_party"],
         payload: dict[str, Any],
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Transfer inventory with the revision contract required by every affected owner."""
@@ -26389,7 +26566,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         denomination: str,
         amount: int,
         payload: dict[str, Any] | None = None,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
@@ -26438,7 +26615,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "knock_prone",
         ],
         payload: dict[str, Any] | None = None,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
@@ -26549,7 +26726,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         character_id: str,
         action: Literal["cast_spell", "use_activity", "attack_source_object"],
         payload: dict[str, Any],
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
@@ -26598,7 +26775,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         character_id: str,
         mode: Literal["set", "replace_all"],
         payload: dict[str, Any],
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
@@ -26628,7 +26805,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     def campaign_query(
         view: Literal["list", "get", "party"] = "list",
         payload: dict[str, Any] | None = None,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
     ) -> dict[str, Any]:
         """Read campaigns, one campaign, or its party state."""
         data = facade_payload(payload)
@@ -26659,7 +26836,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "item_spend",
             "consumable_use",
         ] = "update",
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         branch_id: str | None = None,
         idempotency_key: str | None = None,
@@ -26982,7 +27159,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "position": int(stream.get("position", 0) or 0),
             },
             "world_state": {
-                "game_phase": str(campaign.state.get("game_phase") or PROFILE_LOBBY),
+                "game_phase": campaign_phase(campaign.state),
                 "game_time": deepcopy(dict(campaign.state.get("game_time") or {})),
                 "world_time": deepcopy(dict(campaign.state.get("world_time") or {})),
                 "world_effects": deepcopy(list(campaign.state.get("world_effects") or [])),
@@ -27139,13 +27316,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "verify_ending",
         ],
         payload: dict[str, Any] | None = None,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         branch_id: str | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Read or atomically maintain the snapshot-managed full-playthrough manifest."""
-        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         campaign = campaigns.get(campaign_id)
         current_manifest = dict(campaign.state.get("playthrough_manifest") or {})
         if action == "get":
@@ -27153,6 +27330,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 raise LookupError("campaign has no full-playthrough manifest")
             validated = validate_playthrough_manifest(current_manifest)
             projected = sync_playthrough_manifest(campaign_id, validated)
+            validate_playthrough_source_bindings(campaign_id, projected)
             return {
                 "manifest": projected,
                 "runtime": playthrough_runtime_projection(campaign_id, projected),
@@ -27246,6 +27424,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         # and the canonical world projection are owned by their runtime stores.
         # Never persist a caller's stale copy through replace/extend_modules.
         next_manifest = sync_playthrough_manifest(campaign_id, next_manifest)
+        validate_playthrough_source_bindings(campaign_id, next_manifest)
         persisted_manifest = deepcopy(next_manifest)
         # Snapshot nodes are authoritative in core tables and are projected on
         # every public manifest read. Persisting the full derived DAG inside
@@ -27309,7 +27488,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         campaign_id: str,
         action: Literal["add", "list"],
         payload: dict[str, Any] | None = None,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Append an auditable campaign event or retrieve its branch-visible event log."""
@@ -27331,7 +27510,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             )
         else:
             result = event_list(
-                campaign_id, data.get("limit", 50), data.get("branch_id"), principal_id
+                campaign_id,
+                data.get("limit", 50),
+                data.get("branch_id"),
+                data.get("actor_id"),
+                principal_id,
             )
         return facade_result(action, result)
 
@@ -27340,7 +27523,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         campaign_id: str,
         view: Literal["list", "search", "diagnostics"] = "list",
         payload: dict[str, Any] | None = None,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
     ) -> dict[str, Any]:
         """Read objective campaign memory; actor knowledge remains a separate subjective store."""
         if view == "diagnostics":
@@ -27394,12 +27577,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         subject: str = "",
         metadata: dict[str, Any] | None = None,
         branch_id: str | None = None,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Add, upsert, revise, or supersede an objective branch-scoped fact."""
-        access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         if not idempotency_key:
             raise ValueError("idempotency_key is required for memory writes")
         if action == "commit":
@@ -27561,7 +27744,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         actor_id: str,
         view: Literal["list", "search"] = "list",
         payload: dict[str, Any] | None = None,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
     ) -> dict[str, Any]:
         """Read only one actor's branch-scoped, subjective knowledge."""
         data = facade_payload(payload)
@@ -27583,7 +27766,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     def actor_knowledge_change(
         action: Literal["add", "revise"],
         payload: dict[str, Any],
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Add or revise actor knowledge without crossing actor-knowledge boundaries."""
@@ -27625,7 +27808,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         campaign_id: str,
         view: Literal["list", "compare"] = "list",
         payload: dict[str, Any] | None = None,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
     ) -> dict[str, Any]:
         """List branches or compare two branch heads without changing checkout state."""
         data = facade_payload(payload)
@@ -27646,7 +27829,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         campaign_id: str,
         action: Literal["create", "checkout", "create_core_upgrade"],
         payload: dict[str, Any],
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         expected_branch_id: str | None = None,
         idempotency_key: str | None = None,
@@ -27693,7 +27876,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         campaign_id: str,
         view: Literal["list", "verify", "lineage", "recap", "core"] = "list",
         payload: dict[str, Any] | None = None,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
     ) -> dict[str, Any]:
         """Read snapshot history, integrity, lineage, or a regenerated recap."""
         data = facade_payload(payload)
@@ -27714,7 +27897,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         campaign_id: str,
         action: Literal["history", "receipt", "undo", "redo"],
         payload: dict[str, Any] | None = None,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Read revision history or perform guarded undo/redo."""
@@ -27746,7 +27929,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         campaign_id: str,
         view: Literal["status", "available_actions", "reactions"] = "status",
         actor_id: str | None = None,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
     ) -> dict[str, Any]:
         """Read combat status, legal actions, or legal reactions without committing combat state."""
         if view == "status":
@@ -27767,7 +27950,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         actor_id: str,
         action: Literal["move", "stand"],
         payload: dict[str, Any] | None = None,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         branch_id: str | None = None,
         idempotency_key: str | None = None,
@@ -27801,7 +27984,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         target_id: str,
         action: Literal["damage", "heal", "stabilize"],
         payload: dict[str, Any],
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         branch_id: str | None = None,
         idempotency_key: str | None = None,
@@ -27852,7 +28035,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         action: Literal["open", "resolve", "resolve_defense", "on_hit_ruling"],
         payload: dict[str, Any],
         actor_id: str | None = None,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         branch_id: str | None = None,
         idempotency_key: str | None = None,
@@ -27862,7 +28045,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             access.require_campaign(
                 campaign_id,
                 principal_id,
-                roles={"owner", "dm"},
+                roles=CAMPAIGN_DM_ROLES,
             )
         require_facade_phase(
             campaign_id,
@@ -27959,7 +28142,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "ready_spell", "trigger_spell", "resolve_spell", "trigger_action", "resolve_action"
         ],
         payload: dict[str, Any],
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         branch_id: str | None = None,
         idempotency_key: str | None = None,
@@ -28052,7 +28235,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         campaign_id: str,
         action: Literal["get", "set"] = "get",
         tool_profile: Literal["lobby", "play"] | None = None,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         branch_id: str | None = None,
         idempotency_key: str | None = None,
@@ -28075,7 +28258,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     @mcp.tool()
     def exposure_open(
         campaign_id: str | None = None,
-        principal_id: str = "system:local",
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
     ) -> dict[str, Any]:
         """Start or replace this MCP session's server-owned tool exposure."""
         if campaign_id:

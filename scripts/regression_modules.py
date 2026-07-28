@@ -21,8 +21,9 @@ from typing import Any
 
 from mcp import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
+from sagasmith_core.access import LOCAL_SYSTEM_PRINCIPAL_ID
 
-PRINCIPAL_ID = "system:local"
+PRINCIPAL_ID = LOCAL_SYSTEM_PRINCIPAL_ID
 SUPPORTED_SUFFIXES = {".md", ".markdown", ".pdf", ".txt"}
 
 

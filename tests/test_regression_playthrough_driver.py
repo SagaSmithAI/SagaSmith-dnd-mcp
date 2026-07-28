@@ -531,9 +531,7 @@ def test_advance_scene_recovers_when_progress_commits_before_manifest() -> None:
                     "scene_id": requested,
                     "title": "Back in Waterdeep",
                     "spatial": {
-                        "locations": [
-                            {"key": "back-in-waterdeep", "title": "Back in Waterdeep"}
-                        ]
+                        "locations": [{"key": "back-in-waterdeep", "title": "Back in Waterdeep"}]
                     },
                 }
             if tool_id == "module_set_progress":
@@ -597,9 +595,7 @@ def test_advance_scene_recovers_when_progress_commits_before_manifest() -> None:
     assert result["manifest"]["current"]["scene_id"] == "scene-new"
     assert result["scene_progress"]["state_version"] == 1
     assert (
-        result["manifest"]["world_state"]["scene_transitions"]["continue-volume-2"][
-            "from_scene_id"
-        ]
+        result["manifest"]["world_state"]["scene_transitions"]["continue-volume-2"]["from_scene_id"]
         == "scene-old"
     )
 
@@ -834,6 +830,7 @@ def test_failed_module_refresh_restores_its_entry_phase() -> None:
                     "result": {
                         "id": "campaign-1",
                         "revision": self.revision,
+                        "effective_game_phase": self.phase,
                         "state": {"game_phase": self.phase},
                     }
                 }
@@ -983,6 +980,7 @@ def test_narrative_npc_driver_round_trips_lobby_and_registers_manifest(
                     "result": {
                         "id": "campaign-1",
                         "revision": self.revision,
+                        "effective_game_phase": self.phase,
                         "state": {"game_phase": self.phase},
                     }
                 }
@@ -4628,10 +4626,15 @@ def test_replacement_join_preserves_predecessor_and_only_hands_off_explicit_know
 
 
 def test_phase_and_idempotency_namespaces_are_stable() -> None:
-    assert _campaign_phase({"state": {}}) == "lobby"
+    with pytest.raises(RuntimeError, match="effective_game_phase"):
+        _campaign_phase({"state": {}})
+    assert _campaign_phase({"effective_game_phase": "lobby", "state": {}}) == "lobby"
     assert (
         _campaign_phase(
-            {"state": {"game_phase": "play", "combat": {"active": True}}}
+            {
+                "effective_game_phase": "combat",
+                "state": {"game_phase": "play", "combat": {"active": True}},
+            }
         )
         == "combat"
     )
@@ -4744,6 +4747,7 @@ def test_level_advancement_exhausts_public_follow_up_and_restores_play(
                     "result": {
                         "id": "campaign-1",
                         "revision": self.campaign_revision,
+                        "effective_game_phase": self.phase,
                         "state": {"game_phase": self.phase},
                     }
                 }
@@ -5416,7 +5420,8 @@ def test_failed_route_is_preserved_when_branching_from_verified_snapshot(
                     "result": {
                         "id": "campaign-1",
                         "revision": self.revision,
-                        "state": {"game_phase": self.phase},
+                        "effective_game_phase": self.phase,
+                        "state": {"game_phase": ("play" if self.phase == "combat" else self.phase)},
                     }
                 }
             if tool_id == "game_phase":
@@ -9386,12 +9391,8 @@ def test_record_outcome_recovers_completed_retry_after_later_campaign_revisions(
                         "progress": 100,
                         "state_version": 8,
                         "state": {
-                            "full_playthrough_outcomes": {
-                                "hostage-released": outcome_record
-                            },
-                            "full_playthrough_events": {
-                                "later": {"event_type": "later_event"}
-                            },
+                            "full_playthrough_outcomes": {"hostage-released": outcome_record},
+                            "full_playthrough_events": {"later": {"event_type": "later_event"}},
                         },
                     }
                 ]

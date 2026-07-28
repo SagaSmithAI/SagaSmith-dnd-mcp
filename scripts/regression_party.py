@@ -1960,12 +1960,13 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             client = ExposureClient(session)
             await client.open(args.campaign_id)
             campaign = await _campaign(client, args.campaign_id)
-            campaign_state = dict(campaign.get("state") or {})
-            combat_active = bool(
-                dict(campaign_state.get("combat") or {}).get("active", False)
-            )
-            entry_phase = str(campaign_state.get("game_phase") or "lobby")
-            if combat_active:
+            entry_phase = str(campaign.get("effective_game_phase") or "")
+            if entry_phase not in {"lobby", "play", "combat"}:
+                raise RuntimeError(
+                    "campaign view has no valid effective_game_phase: "
+                    f"{entry_phase!r}"
+                )
+            if entry_phase == "combat":
                 raise RuntimeError("party construction cannot run during active combat")
             if (
                 len(profiles) > 1

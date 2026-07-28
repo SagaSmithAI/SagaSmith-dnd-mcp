@@ -200,3 +200,38 @@ def test_ability_roll_rejects_stale_revision_and_caller_roll_payload(
             )
 
     asyncio.run(exercise())
+
+
+def test_low_level_ability_roll_uses_campaign_edition_authority(tmp_path: Path) -> None:
+    async def exercise() -> None:
+        server = create_server(_config(tmp_path))
+        campaign = await _call(
+            server,
+            "campaign_create",
+            {"name": "Edition authority", "edition": "2014", "idempotency_key": "campaign"},
+        )
+
+        with pytest.raises(Exception, match="must match the campaign rule profile"):
+            await _call(
+                server,
+                "dnd_ability_roll",
+                {
+                    "campaign_id": campaign["id"],
+                    "edition": "2024",
+                    "expected_campaign_revision": campaign["revision"],
+                    "idempotency_key": "wrong-edition",
+                },
+            )
+
+        rolled = await _call(
+            server,
+            "dnd_ability_roll",
+            {
+                "campaign_id": campaign["id"],
+                "expected_campaign_revision": campaign["revision"],
+                "idempotency_key": "profile-edition",
+            },
+        )
+        assert rolled["ruleset"] == "dnd5e-2014"
+
+    asyncio.run(exercise())

@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
 from aiohttp import web
+from sagasmith_core.access import LOCAL_SYSTEM_PRINCIPAL_ID
+from sagasmith_dnd.system import DND5E
 
 from sagasmith_dnd_mcp.config import McpConfig
 from sagasmith_dnd_mcp.server import create_server
@@ -61,7 +63,7 @@ class DndGateway:
 
     def principal(self, request: web.Request) -> str:
         return request.headers.get("X-SagaSmith-Principal") or request.query.get(
-            "principal_id", "system:local"
+            "principal_id", LOCAL_SYSTEM_PRINCIPAL_ID
         )
 
     async def campaign_meta(self, campaign_id: str, principal_id: str) -> dict[str, Any]:
@@ -223,7 +225,7 @@ class DndGateway:
             {
                 "view": "sources",
                 "payload": {
-                    "system_id": request.query.get("system_id", "dnd5e"),
+                    "system_id": request.query.get("system_id", DND5E.id),
                     "edition": request.query.get("edition"),
                 },
                 "principal_id": self.principal(request),

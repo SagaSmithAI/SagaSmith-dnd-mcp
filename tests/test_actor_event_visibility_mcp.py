@@ -64,6 +64,33 @@ def test_actor_scoped_event_is_visible_only_to_witnesses(tmp_path: Path) -> None
         )
         assert event["audience_scope"] == "actor"
         assert len(event["actor_knowledge_ids"]) == 1
+        for principal_id, actor_id in (
+            ("player:witness", witness["id"]),
+            ("player:unaware", unaware["id"]),
+        ):
+            await _call(
+                server,
+                "access_grant",
+                {
+                    "scope": "campaign",
+                    "campaign_id": campaign["id"],
+                    "principal_id": principal_id,
+                    "payload": {"role": "player"},
+                },
+            )
+            await _call(
+                server,
+                "access_grant",
+                {
+                    "scope": "actor",
+                    "campaign_id": campaign["id"],
+                    "principal_id": principal_id,
+                    "payload": {
+                        "actor_id": actor_id,
+                        "can_view_private": True,
+                    },
+                },
+            )
 
         seen = await _call(
             server,
@@ -92,6 +119,49 @@ def test_actor_scoped_event_is_visible_only_to_witnesses(tmp_path: Path) -> None
         assert seen["actor_knowledge"][0]["disclosure_scope"] == "owner"
         assert hidden["events"] == []
         assert hidden["actor_knowledge"] == []
+        witness_log = await _call(
+            server,
+            "campaign_event",
+            {
+                "campaign_id": campaign["id"],
+                "action": "list",
+                "payload": {"actor_id": witness["id"]},
+                "principal_id": "player:witness",
+            },
+        )
+        unaware_log = await _call(
+            server,
+            "campaign_event",
+            {
+                "campaign_id": campaign["id"],
+                "action": "list",
+                "payload": {"actor_id": unaware["id"]},
+                "principal_id": "player:unaware",
+            },
+        )
+        unscoped_log = await _call(
+            server,
+            "campaign_event",
+            {
+                "campaign_id": campaign["id"],
+                "action": "list",
+                "principal_id": "player:witness",
+            },
+        )
+        assert [item["id"] for item in witness_log] == [event["id"]]
+        assert unaware_log == []
+        assert unscoped_log == []
+        with pytest.raises(Exception, match="cannot access actor"):
+            await _call(
+                server,
+                "campaign_event",
+                {
+                    "campaign_id": campaign["id"],
+                    "action": "list",
+                    "payload": {"actor_id": witness["id"]},
+                    "principal_id": "player:unaware",
+                },
+            )
 
         before = await _call(
             server,
