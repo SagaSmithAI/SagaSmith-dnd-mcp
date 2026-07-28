@@ -290,6 +290,84 @@ def test_agent_turn_rulings_bind_reviewed_feature_and_server_save() -> None:
     assert ruling["agent_ruling"]["default_resolver"] == "agent"
 
 
+def test_agent_turn_rulings_bind_innate_spell_resource_and_concentration() -> None:
+    actor_excerpt = (
+        "The creature can innately cast suggestion 3/day (save DC 13), "
+        "requiring no material components."
+    )
+    encounter_excerpt = (
+        "The creature uses suggestion to tell a character that a fellow party "
+        "member is a spy and should be attacked."
+    )
+    source_ref = {
+        "module_id": "module-1",
+        "scene_id": "scene-1",
+        "chunk_id": "chunk-1",
+        "content_sha256": "a" * 64,
+    }
+    actors = {
+        "caster": {
+            "sheet": {
+                "content": {
+                    "features": [
+                        {
+                            "id": "innate-spellcasting",
+                            "name": "Innate Spellcasting",
+                            "description": actor_excerpt,
+                        }
+                    ],
+                    "spells": [
+                        {
+                            "id": "suggestion",
+                            "name": "Suggestion",
+                            "grant": {"method": "innate"},
+                            "access": {
+                                "known": True,
+                                "always_prepared": True,
+                                "at_will": False,
+                            },
+                            "definition": {
+                                "duration": {"concentration": True}
+                            },
+                        }
+                    ],
+                }
+            }
+        }
+    }
+
+    rulings = _agent_turn_rulings(
+        [
+            {
+                "actor_id": "caster",
+                "spell_id": "suggestion",
+                "round": 1,
+                "source_ref": source_ref,
+                "actor_source_excerpt": actor_excerpt,
+                "encounter_source_excerpt": encounter_excerpt,
+                "decision": "The caster innately casts Suggestion on the scout.",
+                "ruling_reason": "The cited encounter explicitly selects this tactic.",
+                "target_id": "scout",
+                "save_ability": "wisdom",
+                "save_dc": 13,
+                "success_outcome": "The scout recognizes and rejects the compulsion.",
+                "failure_outcome": "The scout attacks the named ally once.",
+                "forced_target_id": "ally",
+                "ends_if_source_incapacitated": True,
+            }
+        ],
+        participant_ids=["caster", "scout", "ally"],
+        actors=actors,
+        scene_id="scene-1",
+        encounter_source_excerpt=encounter_excerpt,
+    )
+
+    ruling = rulings[("caster", 1)]
+    assert ruling["spell_id"] == "suggestion"
+    assert ruling["innate_payment_economy"] == "innate_spell"
+    assert ruling["concentration_required"] is True
+
+
 def test_agent_turn_ruling_pays_action_rolls_save_and_persists_world_patch() -> None:
     class Client:
         def __init__(self) -> None:
@@ -366,6 +444,91 @@ def test_agent_turn_ruling_pays_action_rolls_save_and_persists_world_patch() -> 
     patch_value = client.calls[-1][1]["patches"][0]["value"]
     assert patch_value["application_id"] == "turn-ruling-1"
     assert patch_value["ends_if_source_incapacitated"] is True
+
+
+def test_agent_turn_innate_spell_pays_daily_use_and_starts_concentration() -> None:
+    class Client:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict]] = []
+
+        async def domain(self, tool_id: str, arguments: dict) -> dict:
+            self.calls.append((tool_id, arguments))
+            if tool_id == "combat_cast_spell":
+                return {
+                    "status": "pending_ruling",
+                    "default_resolver": "agent",
+                    "result": {
+                        "payment": {"economy": "innate_spell"},
+                        "concentration_started": True,
+                    },
+                }
+            if tool_id == "combat_check":
+                return {"status": "committed", "result": {"success": False}}
+            if tool_id == "combat_map_patch":
+                return {"status": "committed", "world_patches": arguments["patches"]}
+            raise AssertionError(tool_id)
+
+    ruling = {
+        "application_id": "turn-ruling-innate-1",
+        "actor_id": "caster",
+        "feature_id": "",
+        "activity_id": "",
+        "spell_id": "suggestion",
+        "innate_payment_economy": "innate_spell",
+        "concentration_required": True,
+        "round": 1,
+        "target_id": "scout",
+        "save": {
+            "ability": "wisdom",
+            "dc": 13,
+            "advantage": False,
+            "disadvantage": False,
+            "success_outcome": "The effect fails.",
+            "failure_outcome": "The scout attacks the named ally once.",
+            "forced_target_id": "ally",
+            "ends_if_source_incapacitated": True,
+        },
+        "agent_ruling": {
+            "default_resolver": "agent",
+            "ruling_kind": "agent_dm_adjudication",
+            "decision": "The caster innately casts Suggestion on the scout.",
+            "reason": "The cited encounter explicitly selects this tactic.",
+            "source_ref": {
+                "module_id": "module-1",
+                "scene_id": "scene-1",
+                "chunk_id": "chunk-1",
+                "content_sha256": "a" * 64,
+            },
+        },
+    }
+    client = Client()
+    with patch(
+        "scripts.regression_encounter.campaign_view",
+        new=AsyncMock(
+            side_effect=[
+                {"revision": 10},
+                {"revision": 11},
+                {"revision": 12},
+            ]
+        ),
+    ):
+        result = asyncio.run(
+            _settle_agent_turn_ruling(
+                client,
+                SimpleNamespace(campaign_id="campaign-1", run_id="run-1"),
+                branch_id="branch-1",
+                ruling=ruling,
+                sequence=4,
+            )
+        )
+
+    assert [name for name, _arguments in client.calls] == [
+        "combat_cast_spell",
+        "combat_check",
+        "combat_map_patch",
+    ]
+    assert result["save_success"] is False
+    assert result["spell_id"] == "suggestion"
 
 
 def test_agent_forced_target_receipts_resume_and_close_through_map_patch() -> None:

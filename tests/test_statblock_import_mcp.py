@@ -133,6 +133,36 @@ turn undead.
 *Hit:* 7 (2d6) fire damage.
 """
 
+STATBLOCK_INNATE_SPELLCASTER = """### Yuan-ti Malison
+
+*Medium monstrosity (shapechanger, yuan-ti), neutral evil*
+
+**Armor Class** 12
+**Hit Points** 66 (12d8 + 12)
+**Speed** 30 ft.
+
+| STR | DEX | CON | INT | WIS | CHA |
+|:---:|:---:|:---:|:---:|:---:|:---:|
+| 16 (+3) | 14 (+2) | 13 (+1) | 14 (+2) | 12 (+1) | 16 (+3) |
+
+**Senses** darkvision 60 ft., passive Perception 11
+**Languages** Abyssal, Common, Draconic
+**Challenge** 3 (700 XP)
+
+***Innate Spellcasting (Yuan-ti Form Only).*** The yuan-ti's innate spellcasting
+ability is Charisma (spell save DC 13). The yuan-ti can innately cast the
+following spells, requiring no material components:
+
+At will: animal friendship (snakes only)
+
+3/day: suggestion
+
+###### Actions
+
+***Bite.*** *Melee Weapon Attack:* +5 to hit, reach 5 ft., one target.
+*Hit:* 5 (1d4 + 3) piercing damage.
+"""
+
 
 async def _call(server, name: str, arguments: dict):
     _, result = await server.call_tool(name, arguments)
@@ -912,6 +942,119 @@ def test_statblock_spellcasting_binds_slots_and_active_content(tmp_path: Path) -
             item["default_resolver"]
             for item in created["statblock"]["ruling_requirements"]
         } == {"agent"}
+
+    asyncio.run(exercise())
+
+
+def test_innate_statblock_spellcasting_binds_daily_uses_and_qualifiers(
+    tmp_path: Path,
+) -> None:
+    workspace = Path(__file__).resolve().parents[2]
+    import_root = tmp_path / "rules"
+    import_root.mkdir()
+    source_path = import_root / "yuan-ti-malison.md"
+    source_path.write_text(STATBLOCK_INNATE_SPELLCASTER, encoding="utf-8")
+    config = McpConfig(
+        home=tmp_path / "home",
+        database_url=None,
+        chroma_url=None,
+        chroma_path_override=None,
+        dnd_skills_dir=workspace / "SagaSmith-dnd-skills",
+        modulegen_skills_dir=tmp_path / "modulegen",
+        rule_import_roots=(import_root,),
+        auto_seed_rules=False,
+    )
+
+    async def exercise() -> None:
+        server = create_server(config)
+        campaign = await _call(
+            server,
+            "campaign_create",
+            {
+                "name": "Innate spellcaster import",
+                "edition": "2014",
+                "idempotency_key": "campaign",
+            },
+        )
+        staged = await _call(
+            server,
+            "rule_import",
+            {
+                "campaign_id": campaign["id"],
+                "action": "stage",
+                "payload": {
+                    "source_path": str(source_path),
+                    "source_key": "module/yuan-ti-malison",
+                    "title": "Yuan-ti Malison",
+                    "edition": "2014",
+                    "publication_id": "module",
+                },
+                "idempotency_key": "stage",
+            },
+        )
+        await _call(
+            server,
+            "rule_import",
+            {
+                "campaign_id": campaign["id"],
+                "action": "inspect",
+                "payload": {"job_id": staged["job"]["id"]},
+                "idempotency_key": "inspect",
+            },
+        )
+        ingested = await _call(
+            server,
+            "rule_import",
+            {
+                "campaign_id": campaign["id"],
+                "action": "ingest",
+                "payload": {"job_id": staged["job"]["id"]},
+                "idempotency_key": "ingest",
+            },
+        )
+        created = await _call(
+            server,
+            "character_create_from",
+            {
+                "mode": "statblock",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "source_id": ingested["source_id"],
+                    "name": "Yuan-ti Malison",
+                    "character_type": "monster",
+                },
+                "idempotency_key": "create",
+            },
+        )
+
+        actor = created["character"]
+        spells = {
+            item["name"]: item for item in actor["sheet"]["content"]["spells"]
+        }
+        animal_friendship = spells["Animal Friendship"]
+        suggestion = spells["Suggestion"]
+        assert animal_friendship["grant"]["method"] == "innate"
+        assert animal_friendship["access"]["at_will"] is True
+        assert animal_friendship["custom_definition"][
+            "statblock_source_qualifier"
+        ] == "snakes only"
+        assert suggestion["grant"]["method"] == "innate"
+        assert suggestion["access"]["at_will"] is False
+        resource_key = suggestion["custom_definition"]["innate_resource_key"]
+        assert actor["sheet"]["resources"][resource_key] == {
+            "label": "Suggestion (3/day)",
+            "value": 3,
+            "max": 3,
+            "recovers_on": "long_rest",
+            "source_key": "rule-source:module/yuan-ti-malison",
+            "slot_level": 0,
+        }
+        assert suggestion["definition"]["duration"]["concentration"] is True
+        assert suggestion["definition"]["components"]["material"] is False
+        assert not any(
+            warning.startswith("Innate Spellcasting")
+            for warning in created["statblock"]["warnings"]
+        )
 
     asyncio.run(exercise())
 

@@ -547,11 +547,13 @@ def _arguments() -> argparse.Namespace:
         type=json.loads,
         default=[],
         help=(
-            "Agent-as-DM settlement for one reviewed descriptive feature or activity: "
-            "actor_id, exactly one feature_id/activity_id, round, source_ref, exact "
+            "Agent-as-DM settlement for one reviewed descriptive feature/activity "
+            "or hydrated unstructured innate spell: actor_id, exactly one "
+            "feature_id/activity_id/spell_id, round, source_ref, exact "
             "actor_source_excerpt, exact encounter_source_excerpt, decision, and "
-            "ruling_reason. Optional target_id plus save_ability/save_dc settle a "
-            "server-rolled save; success_outcome/failure_outcome record its meaning. "
+            "ruling_reason. Innate spells pay their structured daily use and "
+            "concentration first. Optional target_id plus save_ability/save_dc settle "
+            "a server-rolled save; success_outcome/failure_outcome record its meaning. "
             "A failed save may include forced_target_id to direct the target's next "
             "attack without inventing a creature-specific rule."
         ),
@@ -2505,6 +2507,7 @@ def _agent_turn_rulings(
         "actor_id",
         "feature_id",
         "activity_id",
+        "spell_id",
         "round",
         "source_ref",
         "actor_source_excerpt",
@@ -2534,6 +2537,7 @@ def _agent_turn_rulings(
         actor_id = str(raw.get("actor_id") or "").strip()
         feature_id = str(raw.get("feature_id") or "").strip()
         activity_id = str(raw.get("activity_id") or "").strip()
+        spell_id = str(raw.get("spell_id") or "").strip()
         round_number = int(raw.get("round", 0) or 0)
         source_ref = raw.get("source_ref")
         actor_excerpt = " ".join(str(raw.get("actor_source_excerpt") or "").split())
@@ -2559,7 +2563,7 @@ def _agent_turn_rulings(
             actor_id not in participant_set
             or round_number <= 0
             or identity in normalized
-            or bool(feature_id) == bool(activity_id)
+            or sum(bool(item) for item in (feature_id, activity_id, spell_id)) != 1
             or not isinstance(source_ref, dict)
             or any(
                 not str(source_ref.get(key) or "").strip()
@@ -2596,8 +2600,14 @@ def _agent_turn_rulings(
             )
         actor = actors.get(actor_id)
         content = dict(dict(actor or {}).get("sheet") or {}).get("content", {})
-        collection_name = "features" if feature_id else "activities"
-        card_id = feature_id or activity_id
+        collection_name = (
+            "features"
+            if feature_id
+            else "activities"
+            if activity_id
+            else "spells"
+        )
+        card_id = feature_id or activity_id or spell_id
         card = next(
             (
                 item
@@ -2609,23 +2619,57 @@ def _agent_turn_rulings(
         manual_ruling = dict(
             dict(dict(card or {}).get("choices") or {}).get("manual_ruling") or {}
         )
-        expected_kind = "descriptive_passive" if feature_id else "descriptive_activity"
+        expected_kind = (
+            "descriptive_passive"
+            if feature_id
+            else "descriptive_activity"
+            if activity_id
+            else ""
+        )
         card_description = _normalized_source_text(
             str(dict(card or {}).get("description") or "")
         )
         recorded_excerpt = _normalized_source_text(
             str(manual_ruling.get("source_excerpt") or "")
         )
-        if (
-            card is None
-            or manual_ruling.get("kind") != expected_kind
-            or str(manual_ruling.get("default_resolver") or "agent") != "agent"
-            or _normalized_source_text(actor_excerpt) not in card_description
-            or recorded_excerpt != card_description
-        ):
+        innate_feature = None
+        if spell_id:
+            innate_feature = next(
+                (
+                    item
+                    for item in dict(content).get("features", [])
+                    if isinstance(item, dict)
+                    and str(item.get("name") or "")
+                    .strip()
+                    .casefold()
+                    .startswith("innate spellcasting")
+                    and _normalized_source_text(actor_excerpt)
+                    in _normalized_source_text(str(item.get("description") or ""))
+                ),
+                None,
+            )
+        invalid_descriptive_card = (
+            not spell_id
+            and (
+                manual_ruling.get("kind") != expected_kind
+                or str(manual_ruling.get("default_resolver") or "agent") != "agent"
+                or _normalized_source_text(actor_excerpt) not in card_description
+                or recorded_excerpt != card_description
+            )
+        )
+        invalid_innate_spell = (
+            bool(spell_id)
+            and (
+                str(dict(dict(card or {}).get("grant") or {}).get("method") or "")
+                != "innate"
+                or innate_feature is None
+                or isinstance(dict(card or {}).get("resolution"), dict)
+            )
+        )
+        if card is None or invalid_descriptive_card or invalid_innate_spell:
             raise ValueError(
                 f"Agent turn ruling {index} must match a reviewed Agent-owned "
-                f"{expected_kind} on the actor card"
+                "descriptive card or an unstructured innate spell on the actor card"
             )
         application_id = (
             "turn-ruling-"
@@ -2653,6 +2697,24 @@ def _agent_turn_rulings(
             "actor_id": actor_id,
             "feature_id": feature_id,
             "activity_id": activity_id,
+            "spell_id": spell_id,
+            "innate_payment_economy": (
+                "none"
+                if spell_id
+                and bool(dict(dict(card or {}).get("access") or {}).get("at_will"))
+                else "innate_spell"
+                if spell_id
+                else ""
+            ),
+            "concentration_required": bool(
+                spell_id
+                and dict(
+                    dict(dict(card or {}).get("definition") or {}).get(
+                        "duration"
+                    )
+                    or {}
+                ).get("concentration")
+            ),
             "round": round_number,
             "target_id": target_id,
             "save": (
@@ -6077,6 +6139,37 @@ async def _settle_agent_turn_ruling(
             raise RuntimeError(
                 "reviewed descriptive activity did not enter its Agent ruling boundary"
             )
+    elif ruling.get("spell_id"):
+        action_result = await client.domain(
+            "combat_cast_spell",
+            {
+                "campaign_id": args.campaign_id,
+                "actor_id": actor_id,
+                "spell_id": str(ruling["spell_id"]),
+                "branch_id": branch_id,
+                "expected_revision": campaign["revision"],
+                "idempotency_key": (
+                    "encounter-agent-turn-spell-"
+                    + _operation_token(args, ruling["application_id"], sequence)
+                ),
+            },
+        )
+        payment = dict(dict(action_result.get("result") or {}).get("payment") or {})
+        if (
+            action_result.get("status") != "pending_ruling"
+            or action_result.get("default_resolver") != "agent"
+            or payment.get("economy") != ruling["innate_payment_economy"]
+            or bool(
+                dict(action_result.get("result") or {}).get(
+                    "concentration_started"
+                )
+            )
+            is not bool(ruling["concentration_required"])
+        ):
+            raise RuntimeError(
+                "reviewed innate spell did not pay its source-authored use, "
+                "settle concentration, and enter its Agent ruling boundary"
+            )
     else:
         action_result = await client.domain(
             "combat_common_action",
@@ -6143,6 +6236,7 @@ async def _settle_agent_turn_ruling(
         "actor_id": actor_id,
         "feature_id": str(ruling.get("feature_id") or ""),
         "activity_id": str(ruling.get("activity_id") or ""),
+        "spell_id": str(ruling.get("spell_id") or ""),
         "round": int(ruling["round"]),
         "target_id": target_id,
         "agent_ruling": deepcopy(ruling["agent_ruling"]),

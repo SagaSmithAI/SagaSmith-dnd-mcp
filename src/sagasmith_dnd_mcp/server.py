@@ -21698,15 +21698,21 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         candidates = available_content_artifacts(campaign_id, kind="spell")
         prepared_ids: list[str] = []
         warnings: list[str] = []
+        innate = bool(spellcasting.get("innate"))
         for specification in spellcasting.get("spells", []):
             name = str(specification.get("name") or "").strip()
-            level = int(specification.get("level", 0) or 0)
+            raw_level = specification.get("level")
+            level = int(raw_level) if raw_level is not None else None
             exact = [
                 item
                 for item in candidates
                 if str(dict(item[2].get("card") or {}).get("name") or "").casefold()
                 == name.casefold()
-                and int(dict(item[2].get("card") or {}).get("level", 0) or 0) == level
+                and (
+                    level is None
+                    or int(dict(item[2].get("card") or {}).get("level", 0) or 0)
+                    == level
+                )
             ]
             if len(exact) == 1:
                 pack_id, version, artifact = exact[0]
@@ -21752,7 +21758,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "id": f"{source_key}.spell.{slug}",
                     "source_key": source_key,
                     "name": display_name,
-                    "level": level,
+                    "level": int(level or 0),
                     "definition": {
                         "casting_time": "1 action",
                         "range": {
@@ -21809,7 +21815,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             card["grant"] = {
                 "source_type": "statblock",
                 "source_key": source_key,
-                "method": "known",
+                "method": "innate" if innate else "known",
             }
             card["access"] = {
                 "known": True,
@@ -21819,6 +21825,79 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "ritual_available": False,
                 "at_will": bool(specification.get("at_will", False)),
             }
+            if innate:
+                custom_definition = dict(card.get("custom_definition") or {})
+                source_name = str(specification.get("source_name") or name).strip()
+                source_qualifier = str(
+                    specification.get("source_qualifier") or ""
+                ).strip()
+                custom_definition.update(
+                    {
+                        "statblock_source_name": source_name,
+                        "innate_spellcasting": True,
+                    }
+                )
+                if source_qualifier:
+                    custom_definition["statblock_source_qualifier"] = (
+                        source_qualifier
+                    )
+                    requirements = list(card.get("ruling_requirements") or [])
+                    requirements.append(
+                        _ruling_requirement(
+                            "Apply the statblock spell qualifier exactly: "
+                            f"{source_qualifier}.",
+                            "source_or_scene_fact",
+                        )
+                    )
+                    card["ruling_requirements"] = requirements
+                if spellcasting.get("no_material_components"):
+                    components = dict(
+                        dict(card.get("definition") or {}).get("components") or {}
+                    )
+                    components.update(
+                        {
+                            "material": False,
+                            "material_description": "",
+                            "material_cost_cp": 0,
+                            "consumed": False,
+                        }
+                    )
+                    card.setdefault("definition", {})["components"] = components
+                    custom_definition["statblock_omits_material_components"] = True
+                uses_per_day = specification.get("uses_per_day")
+                if uses_per_day is not None:
+                    independent = bool(
+                        specification.get("uses_are_independent")
+                    )
+                    usage_group = str(
+                        specification.get("usage_group") or "daily"
+                    ).strip()
+                    resource_key = (
+                        f"innate_spell:{card['id']}"
+                        if independent
+                        else f"innate_spell_group:{source_key}:{usage_group}"
+                    )
+                    custom_definition["innate_resource_key"] = resource_key
+                    existing_resource = dict(
+                        sheet.setdefault("resources", {}).get(resource_key) or {}
+                    )
+                    resource = {
+                        "label": (
+                            f"{card['name']} ({int(uses_per_day)}/day)"
+                            if independent
+                            else f"Innate spell group ({int(uses_per_day)}/day)"
+                        ),
+                        "value": int(uses_per_day),
+                        "max": int(uses_per_day),
+                        "recovers_on": "long_rest",
+                        "source_key": source_key,
+                    }
+                    if existing_resource and existing_resource != resource:
+                        raise ValueError(
+                            "innate spell usage group has conflicting resource limits"
+                        )
+                    sheet["resources"][resource_key] = resource
+                card["custom_definition"] = custom_definition
             sheet["content"]["spells"].append(card)
             prepared_ids.append(str(card["id"]))
 
