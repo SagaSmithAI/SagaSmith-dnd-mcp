@@ -10,6 +10,7 @@ from scripts.regression_runtime import (
     decode_mcp_result,
     exception_leaf_messages,
     regression_server_parameters,
+    required_core_relock_reason,
 )
 
 
@@ -46,6 +47,14 @@ def test_exception_leaf_messages_flattens_nested_exception_groups() -> None:
         "ValueError: first",
         "RuntimeError: second",
     ]
+
+
+def test_core_relock_reason_is_explicit_and_shared_by_regression_drivers() -> None:
+    assert required_core_relock_reason("  Upgrade for Rise episode 3.  ") == (
+        "Upgrade for Rise episode 3."
+    )
+    with pytest.raises(ValueError, match="--core-relock-reason"):
+        required_core_relock_reason(" ")
 
 
 def test_regression_process_boundary_owns_environment_and_optional_profile(

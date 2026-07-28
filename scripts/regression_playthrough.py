@@ -82,6 +82,7 @@ from scripts.regression_rulings import (
 from scripts.regression_runtime import (
     exception_leaf_messages,
     regression_server_parameters,
+    required_core_relock_reason,
 )
 
 DEFERRED_CHECKPOINT_ACTIONS = frozenset(
@@ -10862,9 +10863,7 @@ async def _relock_core(
     run_id: str,
     reason: str,
 ) -> dict[str, Any]:
-    normalized_reason = reason.strip()
-    if not normalized_reason:
-        raise ValueError("relock-core requires --core-relock-reason")
+    normalized_reason = required_core_relock_reason(reason)
     profile = await client.domain(
         "campaign_rules",
         {

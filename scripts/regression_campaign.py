@@ -28,7 +28,11 @@ from sagasmith_dnd.engine import ability_modifier
 
 from scripts.regression_lock import campaign_operation_lock
 from scripts.regression_modules import _facade_value
-from scripts.regression_runtime import decode_mcp_result, regression_server_parameters
+from scripts.regression_runtime import (
+    decode_mcp_result,
+    regression_server_parameters,
+    required_core_relock_reason,
+)
 
 PRINCIPAL_ID = LOCAL_SYSTEM_PRINCIPAL_ID
 RULE_STATBLOCK_OCR_PROFILE = "layout-ocr-v1"
@@ -156,6 +160,11 @@ def _arguments() -> argparse.Namespace:
         "--run-id",
         default="campaign-regression-v1",
         help="Stable idempotency namespace for mutating actions",
+    )
+    parser.add_argument(
+        "--core-relock-reason",
+        default="",
+        help="Explicit campaign-specific audit reason required by relock-core",
     )
     parser.add_argument("--review-id", help="Reviewed module statblock for prepare-statblock")
     parser.add_argument(
@@ -1877,6 +1886,7 @@ async def _restore_regression(args: argparse.Namespace) -> dict[str, Any]:
 async def _relock_core(args: argparse.Namespace) -> dict[str, Any]:
     """Adopt the current Core only between two verified branch checkpoints."""
 
+    relock_reason = required_core_relock_reason(args.core_relock_reason)
     async with stdio_client(_server_parameters(args)) as (read, write):
         async with ClientSession(read, write) as session:
             await session.initialize()
@@ -1948,10 +1958,7 @@ async def _relock_core(args: argparse.Namespace) -> dict[str, Any]:
                         "action": "core_relock",
                         "payload": {
                             "expected_core_fingerprint": old_fingerprint,
-                            "reason": (
-                                "Adopt the current tested built-in D&D 5e Core before the "
-                                "Avernus structured-spell regression; no character data migration."
-                            ),
+                            "reason": relock_reason,
                             "expected_head_snapshot_id": pre_snapshot["id"],
                         },
                         "branch_id": current_branch["id"],
@@ -2015,6 +2022,7 @@ async def _relock_core(args: argparse.Namespace) -> dict[str, Any]:
                 "rules_before": rules_before,
                 "pre_snapshot": pre_snapshot,
                 "pre_snapshot_verification": pre_verified,
+                "reason": relock_reason,
                 "relock": relocked,
                 "rules_after": rules_after,
                 "post_snapshot": post_snapshot,

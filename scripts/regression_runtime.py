@@ -11,6 +11,15 @@ from typing import Any
 from mcp.client.stdio import StdioServerParameters
 
 
+def required_core_relock_reason(value: object) -> str:
+    """Normalize the explicit audit reason shared by every relock driver."""
+
+    normalized = str(value or "").strip()
+    if not normalized:
+        raise ValueError("relock-core requires --core-relock-reason")
+    return normalized
+
+
 def decode_mcp_result(result: Any) -> Any:
     """Decode the text-or-structured result contract shared by MCP drivers."""
 
