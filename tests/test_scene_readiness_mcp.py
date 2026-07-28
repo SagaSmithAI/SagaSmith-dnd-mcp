@@ -94,6 +94,18 @@ def test_scene_readiness_blocks_missing_combatants_and_reserves(tmp_path: Path) 
                             }
                         }
                         if key == "captain"
+                        else {
+                            "profile": {
+                                "dm_notes": (
+                                    "Reviewed rule statblock: old review.\n"
+                                    "Manual rulings: Claw: on-hit effect requires DM "
+                                    "settlement.\n"
+                                    "Reviewed rule statblock: current review.\n"
+                                    "Agent statblock fill: multiattack-activity."
+                                )
+                            }
+                        }
+                        if key == "guard"
                         else None
                     ),
                     "idempotency_key": f"actor-{key}",
@@ -320,6 +332,10 @@ def test_scene_readiness_blocks_missing_combatants_and_reserves(tmp_path: Path) 
             actors["bandit2"]["id"],
         ]
         assert ready["reinforcement_actor_ids"] == [actors["guard"]["id"]]
+        guard_group = next(
+            item for item in ready["groups"] if item["key"] == "tavern-guard"
+        )
+        assert guard_group["actors"][0]["combat_card"]["manual_rulings"] == []
         assert ready["checksum"]
 
         repaired_sheet = deepcopy(actors["bandit1"]["sheet"])

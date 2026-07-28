@@ -1764,8 +1764,21 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         dm_notes = str(
             dict(dict(view.get("notes") or {}).get("profile") or {}).get("dm_notes") or ""
         )
+        note_lines = dm_notes.splitlines()
+        statblock_provenance_prefixes = (
+            "Statblock import:",
+            "Reviewed rule statblock:",
+            "Reviewed module statblock:",
+        )
+        provenance_indices = [
+            index
+            for index, line in enumerate(note_lines)
+            if line.strip().startswith(statblock_provenance_prefixes)
+        ]
+        if provenance_indices:
+            note_lines = note_lines[provenance_indices[-1] :]
         manual_rulings: list[str] = []
-        for line in dm_notes.splitlines():
+        for line in note_lines:
             if "Manual rulings:" not in line:
                 continue
             value = line.split("Manual rulings:", 1)[1].strip().rstrip(".")
