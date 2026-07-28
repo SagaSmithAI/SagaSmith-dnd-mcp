@@ -5136,6 +5136,18 @@ def _has_blocking_pending(combat: dict[str, Any]) -> bool:
     )
 
 
+def _spell_cast_blocks_turn_progress(
+    cast: dict[str, Any],
+    *,
+    pending_reaction: bool,
+) -> bool:
+    """Keep the current turn open until every spell-created window settles."""
+
+    return pending_reaction or _has_blocking_pending(
+        dict(cast.get("combat") or {})
+    )
+
+
 def _defense_selection(pending: dict[str, Any]) -> dict[str, Any]:
     """Choose a defense only when it prevents the triggering hit or missiles."""
 
@@ -8471,7 +8483,13 @@ async def _auto_run(
                     "source_flee_observations": source_flee_observations,
                 }
             )
-            if pending_reaction:
+            if _spell_cast_blocks_turn_progress(
+                cast,
+                pending_reaction=pending_reaction,
+            ):
+                # Damage from one spell can open one or more server-owned
+                # concentration windows. They must settle before the caster
+                # takes another action or ends the turn.
                 continue
             if _has_action_budget(dict(cast.get("combat") or {}), actor_id):
                 # The server budget is authoritative: a bonus-action spell such as

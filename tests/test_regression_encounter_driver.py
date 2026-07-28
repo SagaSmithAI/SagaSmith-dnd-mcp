@@ -98,6 +98,7 @@ from scripts.regression_encounter import (
     _source_zero_hp_finisher,
     _source_zero_hp_finisher_stage,
     _source_zero_hp_stabilization,
+    _spell_cast_blocks_turn_progress,
     _start_or_resume_auto_run,
     _status,
     _surprise_from_check_report,
@@ -2417,6 +2418,32 @@ def test_movement_pending_reaction_blocks_followup_attack() -> None:
         }
     )
     assert not _has_blocking_pending({"pending": [{"id": "reaction-1", "status": "resolved"}]})
+
+
+def test_spell_damage_pending_concentration_blocks_turn_end() -> None:
+    cast = {
+        "combat": {
+            "pending": [
+                {
+                    "id": "concentration-1",
+                    "kind": "concentration",
+                    "status": "pending",
+                },
+                {
+                    "id": "concentration-2",
+                    "kind": "concentration",
+                    "status": "pending",
+                },
+            ]
+        }
+    }
+
+    assert _spell_cast_blocks_turn_progress(cast, pending_reaction=False)
+    cast["combat"]["pending"] = [
+        {"id": "concentration-1", "kind": "concentration", "status": "resolved"}
+    ]
+    assert not _spell_cast_blocks_turn_progress(cast, pending_reaction=False)
+    assert _spell_cast_blocks_turn_progress(cast, pending_reaction=True)
 
 
 def test_reaction_tactics_spend_shield_only_when_it_changes_the_attack() -> None:
