@@ -542,6 +542,21 @@ def _arguments() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--agent-turn-ruling-json",
+        action="append",
+        type=json.loads,
+        default=[],
+        help=(
+            "Agent-as-DM settlement for one reviewed descriptive feature or activity: "
+            "actor_id, exactly one feature_id/activity_id, round, source_ref, exact "
+            "actor_source_excerpt, exact encounter_source_excerpt, decision, and "
+            "ruling_reason. Optional target_id plus save_ability/save_dc settle a "
+            "server-rolled save; success_outcome/failure_outcome record its meaning. "
+            "A failed save may include forced_target_id to direct the target's next "
+            "attack without inventing a creature-specific rule."
+        ),
+    )
+    parser.add_argument(
         "--source-avoidance-report",
         action="append",
         type=Path,
@@ -2468,6 +2483,205 @@ def _agent_target_reaction_contexts(
     return normalized
 
 
+def _agent_turn_rulings(
+    values: list[dict[str, Any]],
+    *,
+    participant_ids: list[str],
+    actors: dict[str, dict[str, Any]],
+    scene_id: str,
+    encounter_source_excerpt: str,
+) -> dict[tuple[str, int], dict[str, Any]]:
+    """Validate reviewed descriptive actions settled by Agent-as-DM reasoning.
+
+    This is deliberately content-neutral.  It binds an authored encounter tactic
+    to an already-reviewed descriptive card, pays a normal action in combat, and
+    optionally asks the server to roll a save.  Creature-specific behavior stays
+    in the cited sources and Agent decision instead of becoming engine code.
+    """
+
+    normalized: dict[tuple[str, int], dict[str, Any]] = {}
+    compact_encounter = _normalized_source_text(encounter_source_excerpt)
+    allowed = {
+        "actor_id",
+        "feature_id",
+        "activity_id",
+        "round",
+        "source_ref",
+        "actor_source_excerpt",
+        "encounter_source_excerpt",
+        "decision",
+        "ruling_reason",
+        "target_id",
+        "save_ability",
+        "save_dc",
+        "save_advantage",
+        "save_disadvantage",
+        "success_outcome",
+        "failure_outcome",
+        "forced_target_id",
+        "ends_if_source_incapacitated",
+    }
+    participant_set = set(participant_ids)
+    for index, raw in enumerate(values):
+        if not isinstance(raw, dict):
+            raise ValueError(f"Agent turn ruling {index} must be an object")
+        unknown = set(raw) - allowed
+        if unknown:
+            raise ValueError(
+                f"Agent turn ruling {index} has unsupported fields: "
+                f"{', '.join(sorted(unknown))}"
+            )
+        actor_id = str(raw.get("actor_id") or "").strip()
+        feature_id = str(raw.get("feature_id") or "").strip()
+        activity_id = str(raw.get("activity_id") or "").strip()
+        round_number = int(raw.get("round", 0) or 0)
+        source_ref = raw.get("source_ref")
+        actor_excerpt = " ".join(str(raw.get("actor_source_excerpt") or "").split())
+        encounter_excerpt = " ".join(
+            str(raw.get("encounter_source_excerpt") or "").split()
+        )
+        decision = " ".join(str(raw.get("decision") or "").split())
+        ruling_reason = " ".join(str(raw.get("ruling_reason") or "").split())
+        target_id = str(raw.get("target_id") or "").strip()
+        save_ability = str(raw.get("save_ability") or "").strip().casefold()
+        save_dc = int(raw.get("save_dc", 0) or 0)
+        save_advantage = raw.get("save_advantage", False)
+        save_disadvantage = raw.get("save_disadvantage", False)
+        success_outcome = " ".join(str(raw.get("success_outcome") or "").split())
+        failure_outcome = " ".join(str(raw.get("failure_outcome") or "").split())
+        forced_target_id = str(raw.get("forced_target_id") or "").strip()
+        ends_if_source_incapacitated = raw.get(
+            "ends_if_source_incapacitated", False
+        )
+        identity = (actor_id, round_number)
+        has_save = bool(target_id or save_ability or save_dc)
+        if (
+            actor_id not in participant_set
+            or round_number <= 0
+            or identity in normalized
+            or bool(feature_id) == bool(activity_id)
+            or not isinstance(source_ref, dict)
+            or any(
+                not str(source_ref.get(key) or "").strip()
+                for key in ("module_id", "scene_id", "chunk_id", "content_sha256")
+            )
+            or str(source_ref.get("scene_id")) != scene_id
+            or not actor_excerpt
+            or not encounter_excerpt
+            or _normalized_source_text(encounter_excerpt) not in compact_encounter
+            or len(decision) < 10
+            or len(ruling_reason) < 10
+            or not isinstance(save_advantage, bool)
+            or not isinstance(save_disadvantage, bool)
+            or not isinstance(ends_if_source_incapacitated, bool)
+            or (save_advantage and save_disadvantage)
+            or (
+                has_save
+                and (
+                    target_id not in participant_set
+                    or not save_ability
+                    or save_dc <= 0
+                    or not success_outcome
+                    or not failure_outcome
+                )
+            )
+            or (not has_save and (success_outcome or failure_outcome or forced_target_id))
+            or (forced_target_id and forced_target_id not in participant_set)
+            or (forced_target_id and forced_target_id == target_id)
+        ):
+            raise ValueError(
+                f"Agent turn ruling {index} requires one reviewed descriptive card, "
+                "a current-scene source_ref and exact excerpts, concrete Agent "
+                "reasoning, and a complete optional server save contract"
+            )
+        actor = actors.get(actor_id)
+        content = dict(dict(actor or {}).get("sheet") or {}).get("content", {})
+        collection_name = "features" if feature_id else "activities"
+        card_id = feature_id or activity_id
+        card = next(
+            (
+                item
+                for item in dict(content).get(collection_name, [])
+                if isinstance(item, dict) and str(item.get("id") or "") == card_id
+            ),
+            None,
+        )
+        manual_ruling = dict(
+            dict(dict(card or {}).get("choices") or {}).get("manual_ruling") or {}
+        )
+        expected_kind = "descriptive_passive" if feature_id else "descriptive_activity"
+        card_description = _normalized_source_text(
+            str(dict(card or {}).get("description") or "")
+        )
+        recorded_excerpt = _normalized_source_text(
+            str(manual_ruling.get("source_excerpt") or "")
+        )
+        if (
+            card is None
+            or manual_ruling.get("kind") != expected_kind
+            or str(manual_ruling.get("default_resolver") or "agent") != "agent"
+            or _normalized_source_text(actor_excerpt) not in card_description
+            or recorded_excerpt != card_description
+        ):
+            raise ValueError(
+                f"Agent turn ruling {index} must match a reviewed Agent-owned "
+                f"{expected_kind} on the actor card"
+            )
+        application_id = (
+            "turn-ruling-"
+            + _token(
+                json.dumps(
+                    {
+                        "actor_id": actor_id,
+                        "card_id": card_id,
+                        "round": round_number,
+                        "source_ref": source_ref,
+                        "actor_source_excerpt": actor_excerpt,
+                        "encounter_source_excerpt": encounter_excerpt,
+                        "decision": decision,
+                        "target_id": target_id,
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ),
+                length=24,
+            )
+        )
+        normalized[identity] = {
+            "application_id": application_id,
+            "actor_id": actor_id,
+            "feature_id": feature_id,
+            "activity_id": activity_id,
+            "round": round_number,
+            "target_id": target_id,
+            "save": (
+                {
+                    "ability": save_ability,
+                    "dc": save_dc,
+                    "advantage": save_advantage,
+                    "disadvantage": save_disadvantage,
+                    "success_outcome": success_outcome,
+                    "failure_outcome": failure_outcome,
+                    "forced_target_id": forced_target_id,
+                    "ends_if_source_incapacitated": ends_if_source_incapacitated,
+                }
+                if has_save
+                else None
+            ),
+            "agent_ruling": {
+                "default_resolver": "agent",
+                "ruling_kind": "agent_dm_adjudication",
+                "decision": decision,
+                "reason": ruling_reason,
+                "source_ref": deepcopy(source_ref),
+                "actor_source_excerpt": actor_excerpt,
+                "encounter_source_excerpt": encounter_excerpt,
+            },
+        }
+    return normalized
+
+
 def _source_avoidances(
     paths: list[Path],
     *,
@@ -3987,6 +4201,13 @@ async def _start(
         scene_id=str(args.scene_id or ""),
         encounter_source_excerpt=str(args.source_excerpt or ""),
     )
+    agent_turn_rulings = _agent_turn_rulings(
+        getattr(args, "agent_turn_ruling_json", []),
+        participant_ids=[*party_ids, *all_hostile_ids],
+        actors=actors,
+        scene_id=str(args.scene_id or ""),
+        encounter_source_excerpt=str(args.source_excerpt or ""),
+    )
     source_casualty_pools = _source_casualty_pools(
         args.source_casualty_pool_json,
         hostile_ids=initial_hostile_ids,
@@ -4382,6 +4603,7 @@ async def _start(
         "agent_target_reaction_contexts": list(
             agent_target_reaction_contexts.values()
         ),
+        "agent_turn_rulings": list(agent_turn_rulings.values()),
         "source_casualty_pools": list(source_casualty_pools.values()),
         "source_separations": list(source_separations.values()),
         "agent_positions": list(agent_positions.values()),
@@ -5815,6 +6037,232 @@ async def _consume_agent_target_reaction(
     }
 
 
+async def _settle_agent_turn_ruling(
+    client: ExposureClient,
+    args: argparse.Namespace,
+    *,
+    branch_id: str,
+    ruling: dict[str, Any],
+    sequence: int,
+) -> dict[str, Any]:
+    """Pay one descriptive action and persist the Agent's source-bound outcome."""
+
+    actor_id = str(ruling["actor_id"])
+    target_id = str(ruling.get("target_id") or "")
+    campaign = await _campaign(client, args.campaign_id)
+    if ruling.get("activity_id"):
+        action_result = await client.domain(
+            "combat_use_activity",
+            {
+                "campaign_id": args.campaign_id,
+                "actor_id": actor_id,
+                "activity_id": str(ruling["activity_id"]),
+                "branch_id": branch_id,
+                "expected_revision": campaign["revision"],
+                "idempotency_key": (
+                    "encounter-agent-turn-activity-"
+                    + _operation_token(args, ruling["application_id"], sequence)
+                ),
+            },
+        )
+        if (
+            action_result.get("status") != "pending_ruling"
+            or not dict(action_result.get("result") or {}).get("requires_ruling")
+        ):
+            raise RuntimeError(
+                "reviewed descriptive activity did not enter its Agent ruling boundary"
+            )
+    else:
+        action_result = await client.domain(
+            "combat_common_action",
+            {
+                "campaign_id": args.campaign_id,
+                "actor_id": actor_id,
+                "action": "improvise",
+                "target_id": target_id or None,
+                "payload": {
+                    "kind": "agent_dm_adjudication",
+                    "feature_id": str(ruling["feature_id"]),
+                    "application_id": str(ruling["application_id"]),
+                    "decision": str(ruling["agent_ruling"]["decision"]),
+                },
+                "branch_id": branch_id,
+                "expected_revision": campaign["revision"],
+                "idempotency_key": (
+                    "encounter-agent-turn-feature-"
+                    + _operation_token(args, ruling["application_id"], sequence)
+                ),
+            },
+        )
+        if action_result.get("status") != "committed":
+            raise RuntimeError("Agent-adjudicated feature did not pay its combat action")
+
+    save_result = None
+    save_contract = dict(ruling.get("save") or {})
+    save_success = None
+    outcome = str(ruling["agent_ruling"]["decision"])
+    if save_contract:
+        campaign = await _campaign(client, args.campaign_id)
+        save_result = await client.domain(
+            "combat_check",
+            {
+                "campaign_id": args.campaign_id,
+                "actor_id": target_id,
+                "kind": "save",
+                "ability": str(save_contract["ability"]),
+                "dc": int(save_contract["dc"]),
+                "advantage": bool(save_contract["advantage"]),
+                "disadvantage": bool(save_contract["disadvantage"]),
+                "rule_facts": {
+                    "source_ref": deepcopy(ruling["agent_ruling"]["source_ref"]),
+                    "agent_ruling_id": str(ruling["application_id"]),
+                },
+                "branch_id": branch_id,
+                "expected_revision": campaign["revision"],
+                "idempotency_key": (
+                    "encounter-agent-turn-save-"
+                    + _operation_token(args, ruling["application_id"], target_id)
+                ),
+            },
+        )
+        save_success = bool(dict(save_result.get("result") or {}).get("success"))
+        outcome = str(
+            save_contract["success_outcome"]
+            if save_success
+            else save_contract["failure_outcome"]
+        )
+
+    receipt = {
+        "kind": "agent_turn_ruling",
+        "application_id": str(ruling["application_id"]),
+        "actor_id": actor_id,
+        "feature_id": str(ruling.get("feature_id") or ""),
+        "activity_id": str(ruling.get("activity_id") or ""),
+        "round": int(ruling["round"]),
+        "target_id": target_id,
+        "agent_ruling": deepcopy(ruling["agent_ruling"]),
+        "action_result": action_result,
+        "save_result": save_result,
+        "save_success": save_success,
+        "outcome": outcome,
+        "forced_target_id": (
+            str(save_contract.get("forced_target_id") or "")
+            if save_contract and save_success is False
+            else ""
+        ),
+        "ends_if_source_incapacitated": bool(
+            save_contract.get("ends_if_source_incapacitated", False)
+        ),
+    }
+    campaign = await _campaign(client, args.campaign_id)
+    receipt["world_patch"] = await client.domain(
+        "combat_map_patch",
+        {
+            "campaign_id": args.campaign_id,
+            "patches": [
+                {
+                    "key": f"agent_turn_ruling:{ruling['application_id']}",
+                    "value": {
+                        key: deepcopy(value)
+                        for key, value in receipt.items()
+                        if key not in {"action_result", "save_result", "world_patch"}
+                    },
+                }
+            ],
+            "branch_id": branch_id,
+            "expected_revision": campaign["revision"],
+            "idempotency_key": (
+                "encounter-agent-turn-patch-"
+                + _operation_token(args, ruling["application_id"])
+            ),
+        },
+    )
+    return receipt
+
+
+def _pending_agent_forced_targets(combat: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Recover unconsumed Agent-directed attacks from temporary-map receipts."""
+
+    patches = list(dict(combat.get("battle_map") or {}).get("world_patches") or [])
+    consumed = {
+        str(item.get("key") or "").split(":", 1)[1]
+        for item in patches
+        if isinstance(item, dict)
+        and str(item.get("key") or "").startswith("agent_forced_target_consumed:")
+    }
+    pending: dict[str, dict[str, Any]] = {}
+    for item in patches:
+        if not isinstance(item, dict):
+            continue
+        key = str(item.get("key") or "")
+        if not key.startswith("agent_turn_ruling:"):
+            continue
+        value = dict(item.get("value") or {})
+        application_id = str(value.get("application_id") or "")
+        target_actor_id = str(value.get("target_id") or "")
+        forced_target_id = str(value.get("forced_target_id") or "")
+        if (
+            application_id
+            and application_id not in consumed
+            and target_actor_id
+            and forced_target_id
+        ):
+            pending[target_actor_id] = {
+                "application_id": application_id,
+                "target_id": forced_target_id,
+                "source_actor_id": str(value.get("actor_id") or ""),
+                "ends_if_source_incapacitated": bool(
+                    value.get("ends_if_source_incapacitated", False)
+                ),
+            }
+    return pending
+
+
+async def _consume_agent_forced_target(
+    client: ExposureClient,
+    args: argparse.Namespace,
+    *,
+    branch_id: str,
+    actor_id: str,
+    target_id: str,
+    forced_targets: dict[str, dict[str, Any]],
+    reason: str = (
+        "The Agent-adjudicated suggested course was completed by the "
+        "source-directed attack."
+    ),
+) -> dict[str, Any] | None:
+    declaration = forced_targets.get(actor_id)
+    if declaration is None or declaration["target_id"] != target_id:
+        return None
+    campaign = await _campaign(client, args.campaign_id)
+    application_id = str(declaration["application_id"])
+    consumed = await client.domain(
+        "combat_map_patch",
+        {
+            "campaign_id": args.campaign_id,
+            "patches": [
+                {
+                    "key": f"agent_forced_target_consumed:{application_id}",
+                    "value": {
+                        "application_id": application_id,
+                        "actor_id": actor_id,
+                        "target_id": target_id,
+                        "reason": reason,
+                    },
+                }
+            ],
+            "branch_id": branch_id,
+            "expected_revision": campaign["revision"],
+            "idempotency_key": (
+                "encounter-agent-forced-target-consumed-"
+                + _operation_token(args, application_id)
+            ),
+        },
+    )
+    forced_targets.pop(actor_id, None)
+    return consumed
+
+
 async def _preflight_attack(
     client: ExposureClient,
     args: argparse.Namespace,
@@ -6374,6 +6822,13 @@ async def _auto_run(
         scene_id=str(args.scene_id or ""),
         encounter_source_excerpt=str(args.source_excerpt or ""),
     )
+    agent_turn_rulings = _agent_turn_rulings(
+        getattr(args, "agent_turn_ruling_json", []),
+        participant_ids=[*party_ids, *hostile_ids],
+        actors=initial_actors,
+        scene_id=str(args.scene_id or ""),
+        encounter_source_excerpt=str(args.source_excerpt or ""),
+    )
     avoided_cells_by_actor, source_avoidance_evidence = _source_avoidances(
         args.source_avoidance_report,
         campaign_id=args.campaign_id,
@@ -6413,6 +6868,15 @@ async def _auto_run(
     )
     turns: list[dict[str, Any]] = []
     agent_preflight_rulings: list[dict[str, Any]] = []
+    agent_forced_targets = _pending_agent_forced_targets(initial_combat)
+    completed_agent_turn_ruling_ids = {
+        str(item.get("key") or "").split(":", 1)[1]
+        for item in dict(initial_combat.get("battle_map") or {}).get(
+            "world_patches", []
+        )
+        if isinstance(item, dict)
+        and str(item.get("key") or "").startswith("agent_turn_ruling:")
+    }
     source_extra_damage_applications = _source_extra_damage_history(
         initial_combat,
         source_extra_damage_rulings,
@@ -6827,6 +7291,51 @@ async def _auto_run(
                     "until_round": delayed["until_round"],
                     "source_excerpt": delayed["source_excerpt"],
                     "result": ended_turn,
+                }
+            )
+            continue
+        agent_turn_ruling = agent_turn_rulings.get((actor_id, round_number))
+        if (
+            agent_turn_ruling is not None
+            and agent_turn_ruling["application_id"]
+            not in completed_agent_turn_ruling_ids
+            and _hit_points(actor) > 0
+            and not actor_conditions & INCAPACITATING_STATE_IDS
+        ):
+            settled_ruling = await _settle_agent_turn_ruling(
+                client,
+                args,
+                branch_id=str(branch["id"]),
+                ruling=agent_turn_ruling,
+                sequence=sequence,
+            )
+            completed_agent_turn_ruling_ids.add(
+                str(agent_turn_ruling["application_id"])
+            )
+            if settled_ruling.get("forced_target_id"):
+                agent_forced_targets[str(settled_ruling["target_id"])] = {
+                    "application_id": str(settled_ruling["application_id"]),
+                    "target_id": str(settled_ruling["forced_target_id"]),
+                    "source_actor_id": actor_id,
+                    "ends_if_source_incapacitated": bool(
+                        settled_ruling["ends_if_source_incapacitated"]
+                    ),
+                }
+            ended_turn = await _end_turn(
+                client,
+                args,
+                str(branch["id"]),
+                actor_id,
+                sequence,
+            )
+            turns.append(
+                {
+                    "sequence": sequence,
+                    "kind": "agent_turn_ruling",
+                    "actor_id": actor_id,
+                    "round": round_number,
+                    "result": settled_ruling,
+                    "end_turn": ended_turn,
                 }
             )
             continue
@@ -7614,15 +8123,51 @@ async def _auto_run(
                 }
             )
             continue
-        opponents = (
-            [
-                hostile_id
-                for hostile_id in attackable_hostile_ids
-                if hostile_id not in fled_hostile_ids
-            ]
-            if actor_id in effective_party_ids
-            else effective_party_ids
-        )
+        forced_target = agent_forced_targets.get(actor_id)
+        if (
+            forced_target is not None
+            and forced_target.get("ends_if_source_incapacitated")
+        ):
+            source_actor = actors.get(str(forced_target.get("source_actor_id") or ""))
+            if source_actor is None or _hit_points(source_actor) <= 0 or (
+                _conditions(source_actor) & INCAPACITATING_STATE_IDS
+            ):
+                expired = await _consume_agent_forced_target(
+                    client,
+                    args,
+                    branch_id=str(branch["id"]),
+                    actor_id=actor_id,
+                    target_id=str(forced_target["target_id"]),
+                    forced_targets=agent_forced_targets,
+                    reason=(
+                        "The source-bound effect ended before the directed attack "
+                        "because its source became unable to sustain it."
+                    ),
+                )
+                turns.append(
+                    {
+                        "sequence": sequence,
+                        "kind": "agent_forced_target_expired",
+                        "actor_id": actor_id,
+                        "result": expired,
+                    }
+                )
+                forced_target = None
+        if (
+            forced_target is not None
+            and _hit_points(actors[forced_target["target_id"]]) > 0
+        ):
+            opponents = [forced_target["target_id"]]
+        else:
+            opponents = (
+                [
+                    hostile_id
+                    for hostile_id in attackable_hostile_ids
+                    if hostile_id not in fled_hostile_ids
+                ]
+                if actor_id in effective_party_ids
+                else effective_party_ids
+            )
         living_targets = [
             target_id for target_id in opponents if _hit_points(actors[target_id]) > 0
         ]
@@ -7780,6 +8325,18 @@ async def _auto_run(
                     )
             elif cast.get("status") not in {"committed", "pending_reaction"}:
                 raise RuntimeError(f"{spell_id} did not commit through structured spell settlement")
+            forced_target_consumption = await _consume_agent_forced_target(
+                client,
+                args,
+                branch_id=str(branch["id"]),
+                actor_id=actor_id,
+                target_id=spell_target_id,
+                forced_targets=agent_forced_targets,
+            )
+            if forced_target_consumption is not None:
+                spell_result["agent_forced_target_consumption"] = (
+                    forced_target_consumption
+                )
             turns.append(
                 {
                     "sequence": sequence,
@@ -8105,6 +8662,14 @@ async def _auto_run(
                             "application_count": source_extra_damage_applications[identity],
                         }
                     )
+            forced_target_consumption = await _consume_agent_forced_target(
+                client,
+                args,
+                branch_id=str(branch["id"]),
+                actor_id=actor_id,
+                target_id=target_id,
+                forced_targets=agent_forced_targets,
+            )
             turns.append(
                 {
                     "sequence": sequence,
@@ -8122,6 +8687,7 @@ async def _auto_run(
                     "source_flee_observations": source_flee_observations,
                     "on_hit_settlement": on_hit_settlement,
                     "source_extra_damage": applied_extra_damage,
+                    "agent_forced_target_consumption": forced_target_consumption,
                 }
             )
             settlement_combat = (
@@ -8231,6 +8797,8 @@ async def _auto_run(
         "agent_target_reaction_contexts": list(
             agent_target_reaction_contexts.values()
         ),
+        "agent_turn_rulings": list(agent_turn_rulings.values()),
+        "pending_agent_forced_targets": deepcopy(agent_forced_targets),
         "agent_preflight_rulings": agent_preflight_rulings,
         "source_avoidances": source_avoidance_evidence,
         "source_zero_hp_finisher": source_zero_hp_finisher,

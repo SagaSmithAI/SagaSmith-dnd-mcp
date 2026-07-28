@@ -16,6 +16,7 @@ from scripts.regression_encounter import (
     _agent_positions,
     _agent_target_priorities,
     _agent_target_reaction_contexts,
+    _agent_turn_rulings,
     _apply_agent_positions,
     _apply_party_loadouts,
     _apply_source_casualty_rolls,
@@ -27,6 +28,7 @@ from scripts.regression_encounter import (
     _characters,
     _choose_destination,
     _choose_party_spell,
+    _consume_agent_forced_target,
     _consume_agent_target_reaction,
     _defense_selection,
     _encounter_actor_groups,
@@ -43,6 +45,7 @@ from scripts.regression_encounter import (
     _participant_manifest,
     _party_ids,
     _party_loadouts,
+    _pending_agent_forced_targets,
     _postcombat_stabilization_target,
     _preferred_hostile_weapon_id,
     _preferred_multiattack_option_id,
@@ -60,6 +63,7 @@ from scripts.regression_encounter import (
     _resolve_pending,
     _roll_total,
     _selected_prepared_actor_ids,
+    _settle_agent_turn_ruling,
     _settle_source_casualty_pool_turn,
     _should_stand,
     _source_ammunition_selections,
@@ -214,6 +218,199 @@ def test_agent_target_reaction_contexts_bind_source_and_target() -> None:
         f"agent-ruling:{ruling['application_id']}"
     ]
     assert ruling["agent_ruling"]["source_ref"] == source_ref
+
+
+def test_agent_turn_rulings_bind_reviewed_feature_and_server_save() -> None:
+    actor_excerpt = (
+        "The creature can innately cast suggestion (save DC 13), requiring no "
+        "material components."
+    )
+    encounter_excerpt = (
+        "The creature uses suggestion to tell a character that a fellow party "
+        "member is a spy and should be attacked."
+    )
+    source_ref = {
+        "module_id": "module-1",
+        "scene_id": "scene-1",
+        "chunk_id": "chunk-1",
+        "content_sha256": "a" * 64,
+    }
+    actors = {
+        "caster": {
+            "sheet": {
+                "content": {
+                    "features": [
+                        {
+                            "id": "innate-spellcasting",
+                            "description": actor_excerpt,
+                            "choices": {
+                                "manual_ruling": {
+                                    "kind": "descriptive_passive",
+                                    "default_resolver": "agent",
+                                    "source_excerpt": actor_excerpt,
+                                }
+                            },
+                        }
+                    ]
+                }
+            }
+        }
+    }
+
+    rulings = _agent_turn_rulings(
+        [
+            {
+                "actor_id": "caster",
+                "feature_id": "innate-spellcasting",
+                "round": 1,
+                "source_ref": source_ref,
+                "actor_source_excerpt": actor_excerpt,
+                "encounter_source_excerpt": encounter_excerpt,
+                "decision": "The caster uses the reviewed feature on the scout.",
+                "ruling_reason": "The cited encounter explicitly selects this tactic.",
+                "target_id": "scout",
+                "save_ability": "wisdom",
+                "save_dc": 13,
+                "success_outcome": "The scout recognizes and rejects the compulsion.",
+                "failure_outcome": "The scout attacks the named ally once.",
+                "forced_target_id": "ally",
+                "ends_if_source_incapacitated": True,
+            }
+        ],
+        participant_ids=["caster", "scout", "ally"],
+        actors=actors,
+        scene_id="scene-1",
+        encounter_source_excerpt=encounter_excerpt,
+    )
+
+    ruling = rulings[("caster", 1)]
+    assert ruling["feature_id"] == "innate-spellcasting"
+    assert ruling["save"]["dc"] == 13
+    assert ruling["save"]["forced_target_id"] == "ally"
+    assert ruling["agent_ruling"]["default_resolver"] == "agent"
+
+
+def test_agent_turn_ruling_pays_action_rolls_save_and_persists_world_patch() -> None:
+    class Client:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict]] = []
+
+        async def domain(self, tool_id: str, arguments: dict) -> dict:
+            self.calls.append((tool_id, arguments))
+            if tool_id == "combat_common_action":
+                return {"status": "committed", "combat": {}}
+            if tool_id == "combat_check":
+                return {"status": "committed", "result": {"success": False}}
+            if tool_id == "combat_map_patch":
+                return {"status": "committed", "world_patches": arguments["patches"]}
+            raise AssertionError(tool_id)
+
+    ruling = {
+        "application_id": "turn-ruling-1",
+        "actor_id": "caster",
+        "feature_id": "innate-spellcasting",
+        "activity_id": "",
+        "round": 1,
+        "target_id": "scout",
+        "save": {
+            "ability": "wisdom",
+            "dc": 13,
+            "advantage": False,
+            "disadvantage": False,
+            "success_outcome": "The effect fails.",
+            "failure_outcome": "The scout attacks the named ally once.",
+            "forced_target_id": "ally",
+            "ends_if_source_incapacitated": True,
+        },
+        "agent_ruling": {
+            "default_resolver": "agent",
+            "ruling_kind": "agent_dm_adjudication",
+            "decision": "The caster uses the reviewed feature on the scout.",
+            "reason": "The cited encounter explicitly selects this tactic.",
+            "source_ref": {
+                "module_id": "module-1",
+                "scene_id": "scene-1",
+                "chunk_id": "chunk-1",
+                "content_sha256": "a" * 64,
+            },
+        },
+    }
+    client = Client()
+    with patch(
+        "scripts.regression_encounter.campaign_view",
+        new=AsyncMock(
+            side_effect=[
+                {"revision": 10},
+                {"revision": 11},
+                {"revision": 12},
+            ]
+        ),
+    ):
+        result = asyncio.run(
+            _settle_agent_turn_ruling(
+                client,
+                SimpleNamespace(campaign_id="campaign-1", run_id="run-1"),
+                branch_id="branch-1",
+                ruling=ruling,
+                sequence=4,
+            )
+        )
+
+    assert [name for name, _arguments in client.calls] == [
+        "combat_common_action",
+        "combat_check",
+        "combat_map_patch",
+    ]
+    assert result["save_success"] is False
+    assert result["forced_target_id"] == "ally"
+    patch_value = client.calls[-1][1]["patches"][0]["value"]
+    assert patch_value["application_id"] == "turn-ruling-1"
+    assert patch_value["ends_if_source_incapacitated"] is True
+
+
+def test_agent_forced_target_receipts_resume_and_close_through_map_patch() -> None:
+    combat = {
+        "battle_map": {
+            "world_patches": [
+                {
+                    "key": "agent_turn_ruling:turn-ruling-1",
+                    "value": {
+                        "application_id": "turn-ruling-1",
+                        "actor_id": "caster",
+                        "target_id": "scout",
+                        "forced_target_id": "ally",
+                        "ends_if_source_incapacitated": True,
+                    },
+                }
+            ]
+        }
+    }
+    pending = _pending_agent_forced_targets(combat)
+    assert pending["scout"]["target_id"] == "ally"
+    assert pending["scout"]["source_actor_id"] == "caster"
+
+    class Client:
+        async def domain(self, tool_id: str, arguments: dict) -> dict:
+            assert tool_id == "combat_map_patch"
+            return {"status": "committed", "patches": arguments["patches"]}
+
+    with patch(
+        "scripts.regression_encounter.campaign_view",
+        new=AsyncMock(return_value={"revision": 20}),
+    ):
+        result = asyncio.run(
+            _consume_agent_forced_target(
+                Client(),
+                SimpleNamespace(campaign_id="campaign-1", run_id="run-1"),
+                branch_id="branch-1",
+                actor_id="scout",
+                target_id="ally",
+                forced_targets=pending,
+            )
+        )
+
+    assert result["status"] == "committed"
+    assert pending == {}
 
 
 def test_reaction_availability_and_preflight_limit_target_modifier() -> None:
