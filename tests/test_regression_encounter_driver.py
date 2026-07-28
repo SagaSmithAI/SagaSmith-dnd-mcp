@@ -1,7 +1,7 @@
 import asyncio
 import json
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -15,6 +15,7 @@ from scripts.regression_encounter import (
     _agent_party_absences,
     _agent_positions,
     _agent_target_priorities,
+    _agent_target_reaction_contexts,
     _apply_agent_positions,
     _apply_party_loadouts,
     _apply_source_casualty_rolls,
@@ -26,6 +27,7 @@ from scripts.regression_encounter import (
     _characters,
     _choose_destination,
     _choose_party_spell,
+    _consume_agent_target_reaction,
     _defense_selection,
     _encounter_actor_groups,
     _encounter_operation_scope,
@@ -48,6 +50,7 @@ from scripts.regression_encounter import (
     _prepared_actor_ids,
     _primary_hostile_source_excerpt,
     _prioritize_targets,
+    _reaction_available_actor_ids,
     _ready_immediate_source_flee_actor_ids,
     _ready_linked_source_flee_actor_ids,
     _record_source_flee_damage,
@@ -170,6 +173,179 @@ def test_agent_attack_contexts_reject_unbound_or_ambiguous_modifier() -> None:
             scene_id="scene-1",
             encounter_source_excerpt="The actual encounter excerpt.",
         )
+
+
+def test_agent_target_reaction_contexts_bind_source_and_target() -> None:
+    excerpt = (
+        "When targeted by a melee attack, the tile creature can take a reaction "
+        "to turn its narrowest aspect toward the attacker. The attacker has "
+        "disadvantage on the attack roll."
+    )
+    source_ref = {
+        "module_id": "module-1",
+        "scene_id": "scene-1",
+        "chunk_id": "chunk-1",
+        "content_sha256": "a" * 64,
+    }
+
+    contexts = _agent_target_reaction_contexts(
+        [
+            {
+                "actor_id": "tile-creature",
+                "attack_mode": "melee",
+                "advantage": False,
+                "disadvantage": True,
+                "source_ref": source_ref,
+                "source_excerpt": excerpt,
+                "decision": "The tile creature uses its reaction against this attack.",
+                "ruling_reason": "The cited trait triggers when this melee attack targets it.",
+            }
+        ],
+        participant_ids=["tile-creature", "pc-1"],
+        scene_id="scene-1",
+        encounter_source_excerpt=excerpt,
+    )
+
+    ruling = contexts[("tile-creature", "melee")]
+    assert ruling["actor_id"] == "tile-creature"
+    assert ruling["context"]["disadvantage"] is True
+    assert ruling["context"]["disadvantage_sources"] == [
+        f"agent-ruling:{ruling['application_id']}"
+    ]
+    assert ruling["agent_ruling"]["source_ref"] == source_ref
+
+
+def test_reaction_availability_and_preflight_limit_target_modifier() -> None:
+    combat = {
+        "combatants": [
+            {"actor_id": "tile-creature", "turn_budget": {"reaction": 1}},
+            {"actor_id": "spent-target", "turn_budget": {"reaction": 0}},
+        ]
+    }
+    assert _reaction_available_actor_ids(combat) == {"tile-creature"}
+
+    class Client:
+        def __init__(self) -> None:
+            self.calls: list[dict] = []
+
+        async def domain(self, tool_id: str, arguments: dict) -> dict:
+            assert tool_id == "combat_preflight_attack"
+            self.calls.append(arguments)
+            return {"status": "ready", **arguments["action"]}
+
+    client = Client()
+    actor = {
+        "id": "pc-1",
+        "derived": {
+            "inventory": {
+                "weapon_attacks": [
+                    {
+                        "item_id": "longsword",
+                        "attack_type": "melee",
+                        "properties": [],
+                    }
+                ]
+            }
+        },
+    }
+    contexts = {
+        ("tile-creature", "melee"): {
+            "context": {
+                "disadvantage": True,
+                "disadvantage_sources": ["agent-ruling:narrow-dodge"],
+            }
+        },
+        ("spent-target", "melee"): {
+            "context": {
+                "disadvantage": True,
+                "disadvantage_sources": ["agent-ruling:spent"],
+            }
+        },
+    }
+
+    target_id, action, _plan = asyncio.run(
+        _preflight_attack(
+            client,
+            SimpleNamespace(campaign_id="campaign-1"),
+            actor,
+            ["spent-target", "tile-creature"],
+            agent_target_reaction_contexts=contexts,
+            reaction_available_actor_ids={"tile-creature"},
+        )
+    )
+
+    assert target_id == "spent-target"
+    assert "context" not in action
+    assert "context" not in client.calls[0]["action"]
+
+    target_id, action, _plan = asyncio.run(
+        _preflight_attack(
+            client,
+            SimpleNamespace(campaign_id="campaign-1"),
+            actor,
+            ["tile-creature"],
+            agent_target_reaction_contexts=contexts,
+            reaction_available_actor_ids={"tile-creature"},
+        )
+    )
+
+    assert target_id == "tile-creature"
+    assert action["context"]["disadvantage"] is True
+
+
+def test_consume_agent_target_reaction_uses_public_choice_facade() -> None:
+    class Client:
+        def __init__(self) -> None:
+            self.calls: list[dict] = []
+
+        async def domain(self, tool_id: str, arguments: dict) -> dict:
+            assert tool_id == "combat_choice"
+            self.calls.append(arguments)
+            if arguments["action"] == "open":
+                return {
+                    "action": "open",
+                    "result": {"status": "pending", "choice": {"id": "choice-1"}},
+                }
+            return {"action": "resolve", "result": {"status": "committed"}}
+
+    context = {
+        "application_id": "target-reaction-context-1",
+        "actor_id": "tile-creature",
+        "attack_mode": "melee",
+        "agent_ruling": {
+            "decision": "The tile creature turns its narrow side toward the attacker.",
+            "reason": "The attack satisfies the cited source trigger.",
+            "source_ref": {
+                "module_id": "module-1",
+                "scene_id": "scene-1",
+                "chunk_id": "chunk-1",
+                "content_sha256": "a" * 64,
+            },
+            "source_excerpt": "When targeted by a melee attack, it can take a reaction.",
+        },
+    }
+    client = Client()
+
+    with patch(
+        "scripts.regression_encounter.campaign_view",
+        new=AsyncMock(side_effect=[{"revision": 10}, {"revision": 11}]),
+    ):
+        result = asyncio.run(
+            _consume_agent_target_reaction(
+                client,
+                SimpleNamespace(campaign_id="campaign-1", run_id="run-1"),
+                branch_id="branch-1",
+                context=context,
+                attacker_id="pc-1",
+                sequence=3,
+            )
+        )
+
+    assert [call["action"] for call in client.calls] == ["open", "resolve"]
+    assert client.calls[0]["expected_revision"] == 10
+    assert client.calls[1]["expected_revision"] == 11
+    assert client.calls[1]["payload"]["choice_id"] == "choice-1"
+    assert result["resolve"]["status"] == "committed"
 
 
 def test_encounter_operation_scope_separates_consecutive_encounters() -> None:

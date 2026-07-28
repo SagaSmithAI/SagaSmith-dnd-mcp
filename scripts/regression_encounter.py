@@ -520,6 +520,19 @@ def _arguments() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--agent-target-reaction-context-json",
+        action="append",
+        type=json.loads,
+        default=[],
+        help=(
+            "Source-bound Agent-as-DM target reaction with actor_id for the reacting "
+            "target, attack_mode, exact source_ref and source_excerpt, exactly one "
+            "true advantage or disadvantage result, decision, and ruling_reason; "
+            "the driver opens and resolves a public reaction window before applying "
+            "the modifier to that triggering attack"
+        ),
+    )
+    parser.add_argument(
         "--source-avoidance-report",
         action="append",
         type=Path,
@@ -2278,6 +2291,120 @@ def _agent_attack_contexts(
     return normalized
 
 
+def _agent_target_reaction_contexts(
+    values: list[dict[str, Any]],
+    *,
+    participant_ids: list[str],
+    scene_id: str,
+    encounter_source_excerpt: str,
+) -> dict[tuple[str, str], dict[str, Any]]:
+    """Validate Agent rulings that a targeted actor may take as a reaction."""
+
+    normalized: dict[tuple[str, str], dict[str, Any]] = {}
+    compact_encounter = " ".join(encounter_source_excerpt.split()).casefold()
+    allowed = {
+        "actor_id",
+        "attack_mode",
+        "advantage",
+        "disadvantage",
+        "source_ref",
+        "source_excerpt",
+        "decision",
+        "ruling_reason",
+    }
+    for index, raw in enumerate(values):
+        if not isinstance(raw, dict):
+            raise ValueError(f"Agent target reaction context {index} must be an object")
+        unknown = set(raw) - allowed
+        if unknown:
+            raise ValueError(
+                f"Agent target reaction context {index} has unsupported fields: "
+                f"{', '.join(sorted(unknown))}"
+            )
+        actor_id = str(raw.get("actor_id") or "").strip()
+        attack_mode = str(raw.get("attack_mode") or "").strip().casefold()
+        source_ref = raw.get("source_ref")
+        source_excerpt = " ".join(str(raw.get("source_excerpt") or "").split())
+        decision = " ".join(str(raw.get("decision") or "").split())
+        ruling_reason = " ".join(str(raw.get("ruling_reason") or "").split())
+        advantage = raw.get("advantage")
+        disadvantage = raw.get("disadvantage")
+        identity = (actor_id, attack_mode)
+        if (
+            actor_id not in participant_ids
+            or attack_mode not in ATTACK_MODES
+            or identity in normalized
+            or not isinstance(advantage, bool)
+            or not isinstance(disadvantage, bool)
+            or advantage == disadvantage
+            or not isinstance(source_ref, dict)
+            or any(
+                not str(source_ref.get(key) or "").strip()
+                for key in ("module_id", "scene_id", "chunk_id", "content_sha256")
+            )
+            or str(source_ref.get("scene_id")) != scene_id
+            or not source_excerpt
+            or source_excerpt.casefold() not in compact_encounter
+            or len(decision) < 10
+            or len(ruling_reason) < 10
+        ):
+            raise ValueError(
+                f"Agent target reaction context {index} requires one reacting "
+                "participant and triggering attack mode, exactly one true advantage "
+                "state, a source_ref for the current scene, an exact encounter "
+                "excerpt, and concrete Agent reasoning"
+            )
+        application_id = (
+            "target-reaction-context-"
+            + _token(
+                json.dumps(
+                    {
+                        "actor_id": actor_id,
+                        "attack_mode": attack_mode,
+                        "source_ref": source_ref,
+                        "source_excerpt": source_excerpt,
+                        "decision": decision,
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ),
+                length=24,
+            )
+        )
+        source_key = f"agent-ruling:{application_id}"
+        context: dict[str, Any] = {}
+        if advantage:
+            context.update(
+                {
+                    "advantage": True,
+                    "advantage_sources": [source_key],
+                }
+            )
+        else:
+            context.update(
+                {
+                    "disadvantage": True,
+                    "disadvantage_sources": [source_key],
+                }
+            )
+        normalized[identity] = {
+            "application_id": application_id,
+            "actor_id": actor_id,
+            "attack_mode": attack_mode,
+            "context": context,
+            "agent_ruling": {
+                "default_resolver": "agent",
+                "ruling_kind": "agent_dm_adjudication",
+                "decision": decision,
+                "reason": ruling_reason,
+                "source_ref": deepcopy(source_ref),
+                "source_excerpt": source_excerpt,
+            },
+        }
+    return normalized
+
+
 def _source_avoidances(
     paths: list[Path],
     *,
@@ -3791,6 +3918,12 @@ async def _start(
         scene_id=str(args.scene_id or ""),
         encounter_source_excerpt=str(args.source_excerpt or ""),
     )
+    agent_target_reaction_contexts = _agent_target_reaction_contexts(
+        getattr(args, "agent_target_reaction_context_json", []),
+        participant_ids=[*party_ids, *all_hostile_ids],
+        scene_id=str(args.scene_id or ""),
+        encounter_source_excerpt=str(args.source_excerpt or ""),
+    )
     source_casualty_pools = _source_casualty_pools(
         args.source_casualty_pool_json,
         hostile_ids=initial_hostile_ids,
@@ -4165,6 +4298,9 @@ async def _start(
         "source_contest_activities": list(contest_activities.values()),
         "source_attack_environments": list(attack_environments.values()),
         "agent_attack_contexts": list(agent_attack_contexts.values()),
+        "agent_target_reaction_contexts": list(
+            agent_target_reaction_contexts.values()
+        ),
         "source_casualty_pools": list(source_casualty_pools.values()),
         "source_separations": list(source_separations.values()),
         "agent_positions": list(agent_positions.values()),
@@ -5499,6 +5635,105 @@ async def _resolve_pending(
     )
 
 
+def _reaction_available_actor_ids(combat: dict[str, Any]) -> set[str]:
+    """Return combatants that still own their reaction for the current round."""
+
+    return {
+        str(item.get("actor_id") or "")
+        for item in combat.get("combatants", [])
+        if int(dict(item.get("turn_budget") or {}).get("reaction", 0) or 0) > 0
+    }
+
+
+async def _consume_agent_target_reaction(
+    client: ExposureClient,
+    args: argparse.Namespace,
+    *,
+    branch_id: str,
+    context: dict[str, Any],
+    attacker_id: str,
+    sequence: int,
+) -> dict[str, Any]:
+    """Open and accept a source-bound Agent reaction through public combat tools."""
+
+    actor_id = str(context["actor_id"])
+    application_id = str(context["application_id"])
+    ruling = dict(context["agent_ruling"])
+    selection = {
+        "id": application_id,
+        "decision": ruling["decision"],
+        "source_ref": deepcopy(ruling["source_ref"]),
+        "source_excerpt": ruling["source_excerpt"],
+    }
+    campaign = await _campaign(client, args.campaign_id)
+    opened = _facade_value(
+        await client.domain(
+            "combat_choice",
+            {
+                "campaign_id": args.campaign_id,
+                "action": "open",
+                "actor_id": actor_id,
+                "payload": {
+                    "event": (
+                        f"{actor_id} is targeted by a {context['attack_mode']} attack "
+                        f"from {attacker_id}; the Agent elects the source-bound reaction."
+                    ),
+                    "kind": "reaction",
+                    "candidates": [selection],
+                },
+                "branch_id": branch_id,
+                "expected_revision": campaign["revision"],
+                "idempotency_key": (
+                    "encounter-target-reaction-open-"
+                    + _operation_token(
+                        args,
+                        sequence,
+                        application_id,
+                        campaign["revision"],
+                    )
+                ),
+            },
+        )
+    )
+    choice_id = str(dict(opened.get("choice") or {}).get("id") or "")
+    if not choice_id:
+        raise RuntimeError("public target reaction window did not return a choice id")
+    campaign = await _campaign(client, args.campaign_id)
+    resolved = _facade_value(
+        await client.domain(
+            "combat_choice",
+            {
+                "campaign_id": args.campaign_id,
+                "action": "resolve",
+                "actor_id": actor_id,
+                "payload": {
+                    "choice_id": choice_id,
+                    "selection": selection,
+                },
+                "branch_id": branch_id,
+                "expected_revision": campaign["revision"],
+                "idempotency_key": (
+                    "encounter-target-reaction-resolve-"
+                    + _operation_token(
+                        args,
+                        sequence,
+                        application_id,
+                        campaign["revision"],
+                    )
+                ),
+            },
+        )
+    )
+    return {
+        "actor_id": actor_id,
+        "attacker_id": attacker_id,
+        "application_id": application_id,
+        "agent_ruling": deepcopy(ruling),
+        "open": opened,
+        "resolve": resolved,
+    }
+
+
 async def _preflight_attack(
     client: ExposureClient,
     args: argparse.Namespace,
@@ -5509,6 +5744,10 @@ async def _preflight_attack(
     multiattack_option_id: str = "",
     action_context: dict[str, Any] | None = None,
     agent_attack_contexts: dict[tuple[str, str], dict[str, Any]] | None = None,
+    agent_target_reaction_contexts: (
+        dict[tuple[str, str], dict[str, Any]] | None
+    ) = None,
+    reaction_available_actor_ids: set[str] | None = None,
     knock_out_target_ids: set[str] | None = None,
     agent_rulings: list[dict[str, Any]] | None = None,
     source_extra_damage_rulings: dict[str, list[dict[str, Any]]] | None = None,
@@ -5588,6 +5827,17 @@ async def _preflight_attack(
                 )
                 if agent_context:
                     context.update(dict(agent_context["context"]))
+                target_reaction_context = dict(
+                    (agent_target_reaction_contexts or {}).get(
+                        (target_id, attack_mode)
+                    )
+                    or {}
+                )
+                if (
+                    target_reaction_context
+                    and target_id in set(reaction_available_actor_ids or set())
+                ):
+                    context.update(dict(target_reaction_context["context"]))
                 if context:
                     action["context"] = context
                 if multiattack_option_id:
@@ -6033,6 +6283,12 @@ async def _auto_run(
     )
     agent_attack_contexts = _agent_attack_contexts(
         args.agent_attack_context_json,
+        participant_ids=[*party_ids, *hostile_ids],
+        scene_id=str(args.scene_id or ""),
+        encounter_source_excerpt=str(args.source_excerpt or ""),
+    )
+    agent_target_reaction_contexts = _agent_target_reaction_contexts(
+        getattr(args, "agent_target_reaction_context_json", []),
         participant_ids=[*party_ids, *hostile_ids],
         scene_id=str(args.scene_id or ""),
         encounter_source_excerpt=str(args.source_excerpt or ""),
@@ -7516,6 +7772,7 @@ async def _auto_run(
             if actor_id in attack_environments
             else None
         )
+        reaction_available_ids = _reaction_available_actor_ids(combat)
         plan = await _preflight_attack(
             client,
             args,
@@ -7525,6 +7782,8 @@ async def _auto_run(
             multiattack_option_id=multiattack_option_id,
             action_context=attack_context,
             agent_attack_contexts=agent_attack_contexts,
+            agent_target_reaction_contexts=agent_target_reaction_contexts,
+            reaction_available_actor_ids=reaction_available_ids,
             knock_out_target_ids=(
                 knock_out_hostile_ids if actor_id in effective_party_ids else None
             ),
@@ -7576,6 +7835,10 @@ async def _auto_run(
                 )
                 if _has_blocking_pending(dict(moved.get("combat") or {})):
                     continue
+                movement_combat = dict(moved.get("combat") or combat)
+                reaction_available_ids = _reaction_available_actor_ids(
+                    movement_combat
+                )
                 plan = await _preflight_attack(
                     client,
                     args,
@@ -7585,6 +7848,10 @@ async def _auto_run(
                     multiattack_option_id=multiattack_option_id,
                     action_context=attack_context,
                     agent_attack_contexts=agent_attack_contexts,
+                    agent_target_reaction_contexts=(
+                        agent_target_reaction_contexts
+                    ),
+                    reaction_available_actor_ids=reaction_available_ids,
                     knock_out_target_ids=(
                         knock_out_hostile_ids if actor_id in effective_party_ids else None
                     ),
@@ -7607,6 +7874,33 @@ async def _auto_run(
             )
         if plan is not None:
             target_id, action, preflight = plan
+            target_reaction_context = dict(
+                agent_target_reaction_contexts.get(
+                    (target_id, str(action.get("attack_mode") or "melee"))
+                )
+                or {}
+            )
+            if (
+                target_reaction_context
+                and target_id in reaction_available_ids
+            ):
+                reaction_result = await _consume_agent_target_reaction(
+                    client,
+                    args,
+                    branch_id=str(branch["id"]),
+                    context=target_reaction_context,
+                    attacker_id=actor_id,
+                    sequence=sequence,
+                )
+                turns.append(
+                    {
+                        "sequence": sequence,
+                        "kind": "agent_target_reaction",
+                        "actor_id": target_id,
+                        "attacker_id": actor_id,
+                        "result": reaction_result,
+                    }
+                )
             campaign = await _campaign(client, args.campaign_id)
             resolved = await client.domain(
                 "combat_resolve_attack",
@@ -7853,6 +8147,9 @@ async def _auto_run(
         "source_contest_activities": list(contest_activities.values()),
         "source_attack_environments": list(attack_environments.values()),
         "agent_attack_contexts": list(agent_attack_contexts.values()),
+        "agent_target_reaction_contexts": list(
+            agent_target_reaction_contexts.values()
+        ),
         "agent_preflight_rulings": agent_preflight_rulings,
         "source_avoidances": source_avoidance_evidence,
         "source_zero_hp_finisher": source_zero_hp_finisher,
