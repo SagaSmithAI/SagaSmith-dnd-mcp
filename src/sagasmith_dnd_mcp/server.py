@@ -20238,6 +20238,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 candidate_recovery = recover_2014_statblock_from_ocr(
                     layout.as_dict(),
                     name=target_name,
+                    minimum_confidence=0.5,
                 )
             except StatblockImportError:
                 continue
@@ -20283,6 +20284,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             ],
         ]
         corroboration_mode = "dual_layout_ocr"
+        corroboration_scales = [float(getattr(provider, "scale", 2.0))]
         corroborated = [{"field": label, "value": fact} for label, fact in corroboration_pairs]
         if len(identity_indexes) == 1:
             segment_start = identity_indexes[0]
@@ -20306,28 +20308,46 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             corroboration_mode = "embedded_text"
         else:
             primary_scale = float(getattr(provider, "scale", 2.0))
-            secondary_scale = 3.0 if abs(primary_scale - 3.0) >= 0.25 else 2.0
-            secondary_provider = RapidOcrProvider(scale=secondary_scale)
-            secondary_layout = secondary_provider.extract_layout(
-                source_path,
-                page_numbers=[recovered_page],
-            )[0]
-            secondary = recover_2014_statblock_from_ocr(
-                secondary_layout.as_dict(),
-                name=target_name,
-            )
-
             def critical_fingerprint(value: Any) -> Any:
                 if isinstance(value, dict):
                     return {str(key): critical_fingerprint(item) for key, item in value.items()}
                 return compact_ascii_key(value)
 
-            if critical_fingerprint(critical_facts) != critical_fingerprint(
-                dict(secondary["critical_facts"])
-            ):
-                raise RuntimeError(
-                    "independent layout OCR passes disagree on critical statblock facts"
+            primary_fingerprint = critical_fingerprint(critical_facts)
+            secondary_scale = None
+            secondary_failures: list[str] = []
+            for candidate_scale in (3.0, 2.5, 1.5, 3.5, 4.0, 2.0):
+                if abs(primary_scale - candidate_scale) < 0.01:
+                    continue
+                try:
+                    secondary_layout = RapidOcrProvider(
+                        scale=candidate_scale
+                    ).extract_layout(
+                        source_path,
+                        page_numbers=[recovered_page],
+                    )[0]
+                    secondary = recover_2014_statblock_from_ocr(
+                        secondary_layout.as_dict(),
+                        name=target_name,
+                        minimum_confidence=0.5,
+                    )
+                except StatblockImportError as exc:
+                    secondary_failures.append(f"{candidate_scale:.1f}: {exc}")
+                    continue
+                if primary_fingerprint == critical_fingerprint(
+                    dict(secondary["critical_facts"])
+                ):
+                    secondary_scale = candidate_scale
+                    break
+                secondary_failures.append(
+                    f"{candidate_scale:.1f}: critical facts disagree"
                 )
+            if secondary_scale is None:
+                raise RuntimeError(
+                    "no independent layout OCR scale corroborated all critical "
+                    "statblock facts; " + "; ".join(secondary_failures)
+                )
+            corroboration_scales.append(secondary_scale)
         observation = (
             f"Text-only layout OCR v{int(evidence['recovery_version'])} recovered "
             f"{target_name} from PDF page "
@@ -20355,6 +20375,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "page_number": recovered_page,
             "provider": provider.name,
             "corroboration_mode": corroboration_mode,
+            "corroboration_scales": corroboration_scales,
             "corroborated_facts": corroborated,
             "recovery": recovered,
             **reviewed,

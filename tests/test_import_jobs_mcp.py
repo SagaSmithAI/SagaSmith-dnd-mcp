@@ -600,8 +600,15 @@ def test_rule_import_recovers_statblock_for_text_only_agent(
     with source.open("wb") as stream:
         writer.write(stream)
 
-    def ocr_block(text: str, x0: int, y0: int, x1: int, y1: int) -> OcrTextBlock:
-        return OcrTextBlock(text, 0.99, x0, y0, x1, y1)
+    def ocr_block(
+        text: str,
+        x0: int,
+        y0: int,
+        x1: int,
+        y1: int,
+        confidence: float = 0.99,
+    ) -> OcrTextBlock:
+        return OcrTextBlock(text, confidence, x0, y0, x1, y1)
 
     layout = OcrPageLayout(
         page_number=1,
@@ -614,7 +621,14 @@ def test_rule_import_recovers_statblock_for_text_only_agent(
             ocr_block("Hit Points 4 (1d8)", 30, 95, 190, 115),
             ocr_block("Speed 30 ft.", 30, 115, 150, 135),
             *tuple(
-                ocr_block(label, 30 + index * 70, 145, 70 + index * 70, 165)
+                ocr_block(
+                    label,
+                    30 + index * 70,
+                    145,
+                    70 + index * 70,
+                    165,
+                    0.73 if label == "INT" else 0.99,
+                )
                 for index, label in enumerate(("STR", "DEX", "CON", "INT", "WIS", "CHA"))
             ),
             *tuple(
@@ -636,11 +650,26 @@ def test_rule_import_recovers_statblock_for_text_only_agent(
             ocr_block("COMMONER", 30, 355, 180, 380),
         ),
     )
-    monkeypatch.setattr(
-        RapidOcrProvider,
-        "extract_layout",
-        lambda self, path, *, page_numbers=None: [layout],
-    )
+    def extract_layout(
+        provider: RapidOcrProvider,
+        path: Path,
+        *,
+        page_numbers: list[int] | None = None,
+    ) -> list[OcrPageLayout]:
+        if not embedded_text and provider.scale == 3.0:
+            return [
+                OcrPageLayout(
+                    page_number=layout.page_number,
+                    width=layout.width,
+                    height=layout.height,
+                    blocks=tuple(
+                        block for block in layout.blocks if block.text != "CON"
+                    ),
+                )
+            ]
+        return [layout]
+
+    monkeypatch.setattr(RapidOcrProvider, "extract_layout", extract_layout)
     monkeypatch.setattr(
         RapidOcrProvider,
         "extract",
@@ -723,9 +752,13 @@ def test_rule_import_recovers_statblock_for_text_only_agent(
         assert result["corroboration_mode"] == (
             "embedded_text" if embedded_text else "dual_layout_ocr"
         )
+        assert result["corroboration_scales"] == (
+            [2.0] if embedded_text else [2.0, 2.5]
+        )
         assert result["recovery"]["evidence"]["text_only"] is True
         assert result["recovery"]["evidence"]["matching_heading_count"] == 2
         assert result["recovery"]["evidence"]["structural_heading_count"] == 1
+        assert result["recovery"]["evidence"]["minimum_core_confidence"] == 0.73
         assert result["review"]["page_number"] == 1
         assert result["validation"]["experience_points"] == 10
         assert [item["field"] for item in result["corroborated_facts"]] == [
