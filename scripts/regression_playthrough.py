@@ -902,7 +902,8 @@ def _normalized_source_text(value: Any) -> str:
     return " ".join(str(value or "").split())
 
 
-def _validate_source_ref(
+async def _validate_source_ref(
+    client: ExposureClient,
     scene: dict[str, Any],
     source_ref: dict[str, Any] | None,
     *,
@@ -928,11 +929,26 @@ def _validate_source_ref(
         raise ValueError("source_ref scene_id does not match the cited scene")
     if not str(source_ref["chunk_id"]).strip() or not str(source_ref["content_sha256"]).strip():
         raise ValueError("source_ref chunk_id and content_sha256 must not be empty")
+    expanded = await client.domain(
+        "module_expand",
+        {"chunk_id": str(source_ref["chunk_id"])},
+    )
+    expanded_ref = expanded.get("source_ref")
+    if not isinstance(expanded_ref, dict):
+        raise RuntimeError("module_expand returned no exact source_ref")
+    cited = {key: deepcopy(source_ref[key]) for key in required}
+    resolved = {key: deepcopy(expanded_ref.get(key)) for key in required}
+    if resolved != cited:
+        raise ValueError("source_ref does not match the cited chunk's exact source metadata")
+    if str(expanded.get("chunk_id") or "") != str(source_ref["chunk_id"]):
+        raise ValueError("module_expand returned a different cited chunk")
+    if str(expanded.get("content_sha256") or "") != str(source_ref["content_sha256"]):
+        raise ValueError("module_expand returned a different cited chunk digest")
     if excerpt and _normalized_source_text(excerpt) not in _normalized_source_text(
-        scene.get("content")
+        expanded.get("content")
     ):
-        raise ValueError("source excerpt is not contained in the cited scene")
-    return deepcopy(source_ref)
+        raise ValueError("source excerpt is not contained in the cited chunk")
+    return cited
 
 
 def _campaign_phase(campaign: dict[str, Any]) -> str:
@@ -2119,7 +2135,7 @@ async def _register_replacement(
         },
     )
     exact_ref = (
-        _validate_source_ref(scene, source_ref, excerpt=source_excerpt)
+        await _validate_source_ref(client, scene, source_ref, excerpt=source_excerpt)
         if normalized_agent_ruling is None
         else None
     )
@@ -2411,7 +2427,8 @@ async def _advance_scene(
             "payload": {"scene_id": source_scene_id},
         },
     )
-    exact_ref = _validate_source_ref(
+    exact_ref = await _validate_source_ref(
+        client,
         source_scene,
         source_ref,
         excerpt=source_excerpt,
@@ -2442,9 +2459,7 @@ async def _advance_scene(
     }
     existing_transition = transitions.get(scene_identity)
     progress_state = deepcopy(dict((progress_before or {}).get("state") or {}))
-    progress_entries = deepcopy(
-        dict(progress_state.get("full_playthrough_scene_entries") or {})
-    )
+    progress_entries = deepcopy(dict(progress_state.get("full_playthrough_scene_entries") or {}))
     existing_progress_transition = progress_entries.get(scene_identity)
     exact_retry = existing_transition == transition_record and current_scene_id == scene_id
     interrupted_retry = (
@@ -2486,12 +2501,8 @@ async def _advance_scene(
             {
                 "campaign_id": campaign_id,
                 "scene_id": scene_id,
-                "status": (
-                    "completed" if current_status == "completed" else "active"
-                ),
-                "progress": (
-                    100 if current_status == "completed" else max(current_progress, 1)
-                ),
+                "status": ("completed" if current_status == "completed" else "active"),
+                "progress": (100 if current_status == "completed" else max(current_progress, 1)),
                 "state": {
                     **progress_state,
                     "full_playthrough_scene_entries": progress_entries,
@@ -2501,9 +2512,7 @@ async def _advance_scene(
                     or str((progress_before or {}).get("current_location_key") or "")
                     or None
                 ),
-                "expected_state_version": int(
-                    (progress_before or {}).get("state_version", 0) or 0
-                ),
+                "expected_state_version": int((progress_before or {}).get("state_version", 0) or 0),
                 "idempotency_key": _mutation_key(
                     run_id,
                     "scene-transition-progress",
@@ -2614,9 +2623,7 @@ def _segment_completion_record(
         or head.get("is_head") is not True
         or str(head.get("branch_id") or "") != str(dag.get("active_branch_id") or "")
     ):
-        raise ValueError(
-            "continue-segment requires a verified terminal head on the active branch"
-        )
+        raise ValueError("continue-segment requires a verified terminal head on the active branch")
     world_state = deepcopy(dict(manifest.get("world_state") or {}))
     canonical = deepcopy(dict(world_state.get("_canonical") or {}))
     condition = next(
@@ -2657,9 +2664,7 @@ def _prepare_segment_continuation(
     updated = deepcopy(manifest)
     world_state = deepcopy(dict(updated.get("world_state") or {}))
     raw_history = world_state.get("completed_segments") or []
-    if not isinstance(raw_history, list) or any(
-        not isinstance(item, dict) for item in raw_history
-    ):
+    if not isinstance(raw_history, list) or any(not isinstance(item, dict) for item in raw_history):
         raise ValueError("world_state.completed_segments must be a list of objects")
     history = [deepcopy(item) for item in raw_history]
     normalized_condition_id = condition_id.strip()
@@ -2673,9 +2678,7 @@ def _prepare_segment_continuation(
     )
     if updated.get("status") == "completed":
         if existing is not None:
-            raise ValueError(
-                "completed segment cannot already be archived before continuation"
-            )
+            raise ValueError("completed segment cannot already be archived before continuation")
         record = _segment_completion_record(
             updated,
             condition_id=normalized_condition_id,
@@ -2769,8 +2772,7 @@ async def _continue_completed_segment(
             action="replace",
             run_id=run_id,
             identity=(
-                f"continue-segment-archive:{transition_identity}:"
-                f"{condition_id}:{next_module_id}"
+                f"continue-segment-archive:{transition_identity}:{condition_id}:{next_module_id}"
             ),
             payload={"manifest": prepared},
         )
@@ -2806,8 +2808,7 @@ async def _continue_completed_segment(
         final_manifest.get("status") != "in_progress"
         or str(dict(final_manifest.get("ending") or {}).get("status") or "") != "pending"
         or str(dict(final_manifest.get("current") or {}).get("scene_id") or "") != scene_id
-        or str(dict(final_manifest.get("current") or {}).get("module_id") or "")
-        != next_module_id
+        or str(dict(final_manifest.get("current") or {}).get("module_id") or "") != next_module_id
         or _party_continuity_projection(final_manifest) != before_party
         or dict(final_manifest.get("random_stream") or {}) != before_random_stream
         or segment_record
@@ -3035,7 +3036,8 @@ async def _resolve_check(
                 "payload": {"scene_id": cited_scene_id},
             },
         )
-    exact_ref = _validate_source_ref(
+    exact_ref = await _validate_source_ref(
+        client,
         cited_scene,
         source_ref,
         excerpt=source_excerpt,
@@ -3299,7 +3301,8 @@ async def _resolve_contest(
                 "payload": {"scene_id": cited_scene_id},
             },
         )
-    exact_ref = _validate_source_ref(
+    exact_ref = await _validate_source_ref(
+        client,
         cited_scene,
         source_ref,
         excerpt=source_excerpt,
@@ -3589,7 +3592,7 @@ async def _record_event(
             },
         )
     exact_ref = (
-        _validate_source_ref(source_scene, source_ref, excerpt=source_excerpt)
+        await _validate_source_ref(client, source_scene, source_ref, excerpt=source_excerpt)
         if has_source_ref
         else None
     )
@@ -3668,11 +3671,9 @@ async def _record_event(
                 and str(dict(item.get("payload") or {}).get("occurrence_id") or "")
                 == event_identity
                 and str(dict(item.get("payload") or {}).get("scene_id") or "") == scene_id
-                and str(dict(item.get("payload") or {}).get("location_key") or "")
-                == location_key
+                and str(dict(item.get("payload") or {}).get("location_key") or "") == location_key
                 and dict(item.get("payload") or {}).get("source_ref") == exact_ref
-                and dict(item.get("payload") or {}).get("agent_ruling")
-                == normalized_agent_ruling
+                and dict(item.get("payload") or {}).get("agent_ruling") == normalized_agent_ruling
             ),
             None,
         )
@@ -3868,7 +3869,7 @@ async def _prepare_narrative_npc(
             "payload": {"scene_id": scene_id},
         },
     )
-    exact_ref = _validate_source_ref(scene, source_ref, excerpt=source_excerpt)
+    exact_ref = await _validate_source_ref(client, scene, source_ref, excerpt=source_excerpt)
     if location_key not in {str(item.get("key") or "") for item in _scene_locations(scene)}:
         raise ValueError("narrative NPC location is not present in the scene atlas")
     branches = await client.domain(
@@ -4188,7 +4189,7 @@ async def _record_outcome(
             },
         )
     exact_ref = (
-        _validate_source_ref(source_scene, source_ref, excerpt=source_excerpt)
+        await _validate_source_ref(client, source_scene, source_ref, excerpt=source_excerpt)
         if has_source_ref
         else None
     )
@@ -4353,11 +4354,9 @@ async def _record_outcome(
                 and str(dict(item.get("payload") or {}).get("outcome_id") or "")
                 == outcome_id.strip()
                 and str(dict(item.get("payload") or {}).get("scene_id") or "") == scene_id
-                and str(dict(item.get("payload") or {}).get("location_key") or "")
-                == location_key
+                and str(dict(item.get("payload") or {}).get("location_key") or "") == location_key
                 and dict(item.get("payload") or {}).get("source_ref") == exact_ref
-                and dict(item.get("payload") or {}).get("agent_ruling")
-                == normalized_agent_ruling
+                and dict(item.get("payload") or {}).get("agent_ruling") == normalized_agent_ruling
             ),
             None,
         )
@@ -4498,7 +4497,7 @@ async def _roll_source_table(
             "payload": {"scene_id": scene_id},
         },
     )
-    exact_ref = _validate_source_ref(scene, source_ref, excerpt=source_excerpt)
+    exact_ref = await _validate_source_ref(client, scene, source_ref, excerpt=source_excerpt)
     location_keys = {str(item.get("key") or "") for item in _scene_locations(scene)}
     if location_key not in location_keys:
         raise ValueError("roll-source location is not present in the scene atlas")
@@ -4760,7 +4759,7 @@ async def _apply_source_damage(
             "payload": {"scene_id": scene_id},
         },
     )
-    exact_ref = _validate_source_ref(scene, source_ref, excerpt=source_excerpt)
+    exact_ref = await _validate_source_ref(client, scene, source_ref, excerpt=source_excerpt)
     location_keys = {str(item.get("key") or "") for item in _scene_locations(scene)}
     if location_key not in location_keys:
         raise ValueError("apply-damage location is not present in the scene atlas")
@@ -4944,7 +4943,7 @@ async def _stand_after_source_event(
     if bool(source_excerpt) != bool(source_ref):
         raise ValueError("stand-up source excerpt and source ref must be supplied together")
     exact_ref = (
-        _validate_source_ref(scene, source_ref, excerpt=source_excerpt)
+        await _validate_source_ref(client, scene, source_ref, excerpt=source_excerpt)
         if source_ref is not None
         else None
     )
@@ -5097,7 +5096,7 @@ async def _initialize_source_state(
             },
         )
     )
-    exact_ref = _validate_source_ref(cited_scene, source_ref, excerpt=source_excerpt)
+    exact_ref = await _validate_source_ref(client, cited_scene, source_ref, excerpt=source_excerpt)
     if location_key not in {str(item.get("key") or "") for item in _scene_locations(current_scene)}:
         raise ValueError("source-state location is not present in the current scene atlas")
     actor = await client.domain(
@@ -5810,7 +5809,8 @@ async def _cast_source_spell(
             "payload": {"scene_id": source_scene_id},
         },
     )
-    exact_ref = _validate_source_ref(
+    exact_ref = await _validate_source_ref(
+        client,
         cited_scene,
         source_ref,
         excerpt=source_excerpt,
@@ -6035,7 +6035,7 @@ async def _cast_healing_spell(
             "payload": {"scene_id": scene_id},
         },
     )
-    exact_ref = _validate_source_ref(scene, source_ref, excerpt=source_excerpt)
+    exact_ref = await _validate_source_ref(client, scene, source_ref, excerpt=source_excerpt)
     if location_key not in {str(item.get("key") or "") for item in _scene_locations(scene)}:
         raise ValueError("cast-healing-spell location is not present in the scene atlas")
     actor = await client.domain(
@@ -6650,7 +6650,9 @@ async def _advance_time(
         },
     )
     exact_ref = (
-        _validate_source_ref(scene, source_ref, excerpt=source_excerpt) if has_source_ref else None
+        await _validate_source_ref(client, scene, source_ref, excerpt=source_excerpt)
+        if has_source_ref
+        else None
     )
     actors = []
     for actor_id in knowledge_actor_ids:
@@ -7238,7 +7240,8 @@ async def _provision_source_item(
             "payload": {"scene_id": normalized_scene_id},
         },
     )
-    exact_ref = _validate_source_ref(
+    exact_ref = await _validate_source_ref(
+        client,
         source_scene,
         source_ref,
         excerpt=normalized_excerpt,
@@ -7451,7 +7454,7 @@ async def _transfer_source_item_to_party(
             "payload": {"scene_id": scene_id},
         },
     )
-    exact_ref = _validate_source_ref(scene, source_ref, excerpt=source_excerpt)
+    exact_ref = await _validate_source_ref(client, scene, source_ref, excerpt=source_excerpt)
     if location_key not in {str(item.get("key") or "") for item in _scene_locations(scene)}:
         raise ValueError("transfer-source-item location is not present in the scene atlas")
 
@@ -7634,7 +7637,7 @@ async def _claim_party_item_for_character(
             "payload": {"scene_id": scene_id},
         },
     )
-    exact_ref = _validate_source_ref(scene, source_ref, excerpt=source_excerpt)
+    exact_ref = await _validate_source_ref(client, scene, source_ref, excerpt=source_excerpt)
     if location_key not in {str(item.get("key") or "") for item in _scene_locations(scene)}:
         raise ValueError("claim-party-item location is not present in the scene atlas")
 
@@ -7817,7 +7820,7 @@ async def _pool_character_currency(
             },
         )
     )
-    exact_ref = _validate_source_ref(source_scene, source_ref, excerpt=source_excerpt)
+    exact_ref = await _validate_source_ref(client, source_scene, source_ref, excerpt=source_excerpt)
     if location_key not in {
         str(item.get("key") or "") for item in _scene_locations(occurrence_scene)
     }:
@@ -8118,7 +8121,7 @@ async def _apply_source_effect(
             "payload": {"scene_id": scene_id},
         },
     )
-    exact_ref = _validate_source_ref(scene, source_ref, excerpt=source_excerpt)
+    exact_ref = await _validate_source_ref(client, scene, source_ref, excerpt=source_excerpt)
     if location_key not in {str(item.get("key") or "") for item in _scene_locations(scene)}:
         raise ValueError("apply-source-effect location is not present in the scene atlas")
     expected_source = f"module-chunk:{exact_ref['chunk_id']}"
@@ -8255,7 +8258,7 @@ async def _remove_source_effect(
             "payload": {"scene_id": scene_id},
         },
     )
-    exact_ref = _validate_source_ref(scene, source_ref, excerpt=source_excerpt)
+    exact_ref = await _validate_source_ref(client, scene, source_ref, excerpt=source_excerpt)
     if location_key not in {str(item.get("key") or "") for item in _scene_locations(scene)}:
         raise ValueError("remove-source-effect location is not present in the scene atlas")
 
@@ -8379,7 +8382,7 @@ async def _set_source_exhaustion(
             "payload": {"scene_id": scene_id},
         },
     )
-    exact_ref = _validate_source_ref(scene, source_ref, excerpt=source_excerpt)
+    exact_ref = await _validate_source_ref(client, scene, source_ref, excerpt=source_excerpt)
     if location_key not in {str(item.get("key") or "") for item in _scene_locations(scene)}:
         raise ValueError("set-source-exhaustion location is not present in the scene atlas")
     actor = dict(
@@ -8497,7 +8500,7 @@ async def _attack_source_object(
             "payload": {"scene_id": scene_id},
         },
     )
-    exact_ref = _validate_source_ref(scene, source_ref, excerpt=source_excerpt)
+    exact_ref = await _validate_source_ref(client, scene, source_ref, excerpt=source_excerpt)
     if location_key not in {str(item.get("key") or "") for item in _scene_locations(scene)}:
         raise ValueError("attack-source-object location is not present in the scene atlas")
     if str(requested_object.get("scene_id") or "") != scene_id:
@@ -8649,7 +8652,7 @@ async def _acquire_source_loot(
             "payload": {"scene_id": cited_scene_id},
         },
     )
-    exact_ref = _validate_source_ref(source_scene, source_ref, excerpt=source_excerpt)
+    exact_ref = await _validate_source_ref(client, source_scene, source_ref, excerpt=source_excerpt)
     occurrence_scene = (
         source_scene
         if cited_scene_id == scene_id
@@ -8843,7 +8846,7 @@ async def _spend_source_currency(
             "payload": {"scene_id": cited_scene_id},
         },
     )
-    exact_ref = _validate_source_ref(source_scene, source_ref, excerpt=source_excerpt)
+    exact_ref = await _validate_source_ref(client, source_scene, source_ref, excerpt=source_excerpt)
     occurrence_scene = (
         source_scene
         if cited_scene_id == scene_id
@@ -9037,7 +9040,7 @@ async def _spend_source_item(
             "payload": {"scene_id": cited_scene_id},
         },
     )
-    exact_ref = _validate_source_ref(source_scene, source_ref, excerpt=source_excerpt)
+    exact_ref = await _validate_source_ref(client, source_scene, source_ref, excerpt=source_excerpt)
     occurrence_scene = (
         source_scene
         if cited_scene_id == scene_id
@@ -9371,7 +9374,7 @@ async def _award_experience(
             "payload": {"scene_id": scene_id},
         },
     )
-    exact_ref = _validate_source_ref(scene, source_ref)
+    exact_ref = await _validate_source_ref(client, scene, source_ref)
     actors = []
     for actor_id in actor_ids:
         actor = await client.domain(
@@ -10005,7 +10008,7 @@ async def _advance_level(
             "payload": {"scene_id": scene_id},
         },
     )
-    exact_ref = _validate_source_ref(scene, source_ref)
+    exact_ref = await _validate_source_ref(client, scene, source_ref)
     audit_source = _level_audit_source(exact_ref)
     actor = await client.domain(
         "character_query",

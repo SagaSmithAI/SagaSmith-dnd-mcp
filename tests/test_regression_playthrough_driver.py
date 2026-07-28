@@ -107,6 +107,48 @@ def _manifest_source_ref() -> dict:
     }
 
 
+@pytest.fixture(autouse=True)
+def _stub_exact_chunk_expansion(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep action tests focused while the validator's own tests exercise module_expand."""
+    validate = regression_playthrough._validate_source_ref
+
+    async def validate_with_cited_chunk(
+        client,
+        scene: dict,
+        source_ref: dict | None,
+        *,
+        excerpt: str = "",
+    ) -> dict:
+        original_domain = client.domain
+
+        async def domain_with_cited_chunk(tool_id: str, arguments: dict):
+            if tool_id == "module_expand" and isinstance(source_ref, dict):
+                return {
+                    "chunk_id": source_ref.get("chunk_id"),
+                    "content": scene.get("content"),
+                    "content_sha256": source_ref.get("content_sha256"),
+                    "source_ref": deepcopy(source_ref),
+                }
+            return await original_domain(tool_id, arguments)
+
+        client.domain = domain_with_cited_chunk
+        try:
+            return await validate(
+                client,
+                scene,
+                source_ref,
+                excerpt=excerpt,
+            )
+        finally:
+            client.domain = original_domain
+
+    monkeypatch.setattr(
+        regression_playthrough,
+        "_validate_source_ref",
+        validate_with_cited_chunk,
+    )
+
+
 def test_register_party_returns_unresolved_dm_review_to_agent() -> None:
     manifest = new_playthrough_manifest(
         run_id="run-1",
@@ -1014,7 +1056,6 @@ def test_narrative_npc_driver_round_trips_lobby_and_registers_manifest(
             if tool_id == "character_create_from":
                 assert self.phase == "lobby"
                 assert arguments["mode"] == "narrative_npc"
-                assert arguments["payload"]["source_ref"] == source_ref
                 canonical_source_ref = {
                     key: deepcopy(source_ref[key])
                     for key in (
@@ -1027,6 +1068,7 @@ def test_narrative_npc_driver_round_trips_lobby_and_registers_manifest(
                         "content_sha256",
                     )
                 }
+                assert arguments["payload"]["source_ref"] == canonical_source_ref
                 return {
                     "character": deepcopy(self.actor),
                     "narrative_npc": {
