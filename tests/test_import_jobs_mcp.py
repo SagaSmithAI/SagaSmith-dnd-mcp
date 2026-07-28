@@ -475,6 +475,36 @@ def test_rule_import_renders_a_checksum_bound_review_page(
         ]
         assert agent_review["text_evidence"][0]["ordinal"] == 0
 
+        adjacent_column = (
+            " Large dragon, chaotic evil Armor Class 17 Hit Points 133 "
+            "Challenge 6 (2,300 XP)."
+        )
+        evidence_chunks[-1]["content"] += adjacent_column
+        _, excluded_reviewed = await server.call_tool(
+            "rule_import",
+            {
+                **agent_arguments,
+                "payload": {
+                    **agent_arguments["payload"],
+                    "evidence_exclusions": [
+                        {
+                            "chunk_id": evidence_chunks[-1]["id"],
+                            "exact_text": adjacent_column,
+                            "reason": (
+                                "The selected page segment crosses into the adjacent "
+                                "creature column after the reviewed target."
+                            ),
+                        }
+                    ],
+                },
+                "idempotency_key": "review-statblock-agent-adjacent-column",
+            },
+        )
+        exclusion = excluded_reviewed["result"]["review"]["evidence_exclusions"][0]
+        assert exclusion["chunk_id"] == evidence_chunks[-1]["id"]
+        assert exclusion["reason"].startswith("The selected page segment")
+        assert len(exclusion["exact_text_sha256"]) == 64
+
         with pytest.raises(Exception, match="facts absent"):
             await server.call_tool(
                 "rule_import",

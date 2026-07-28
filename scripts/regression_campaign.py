@@ -90,6 +90,14 @@ def _load_json_object(path: Path, label: str) -> tuple[dict[str, Any], Path]:
     return value, resolved
 
 
+def _load_json_list(path: Path, label: str) -> tuple[list[Any], Path]:
+    resolved = path.expanduser().resolve()
+    value = json.loads(resolved.read_text(encoding="utf-8"))
+    if not isinstance(value, list):
+        raise ValueError(f"{label} must contain a JSON list")
+    return value, resolved
+
+
 def _import_job_summary(job: dict[str, Any]) -> dict[str, Any]:
     """Keep discovery reports bounded; use import_query(get) for full diagnostics."""
 
@@ -181,6 +189,14 @@ def _arguments() -> argparse.Namespace:
         help=(
             "Agent-reviewed semantic JSON fill for every reviewed Multiattack; "
             "submitted with the durable module or rule-statblock review"
+        ),
+    )
+    parser.add_argument(
+        "--agent-evidence-exclusions",
+        type=Path,
+        help=(
+            "JSON list of exact, reasoned text spans that the Agent identified as "
+            "adjacent-column contamination inside the selected contiguous evidence"
         ),
     )
     parser.add_argument(
@@ -430,6 +446,7 @@ def _rule_statblock_operation_token(
     review_observation: str | None,
     variant: dict[str, Any] | None,
     agent_fill: dict[str, Any] | None = None,
+    evidence_exclusions: list[Any] | None = None,
     source_statblock_name: str | None = None,
     source_job_id: str | None = None,
     base_rule_review_id: str | None = None,
@@ -457,6 +474,7 @@ def _rule_statblock_operation_token(
             "review_observation": review_observation or "",
             "variant": variant,
             "agent_fill": agent_fill,
+            "evidence_exclusions": evidence_exclusions,
         },
         ensure_ascii=False,
         sort_keys=True,
@@ -2878,6 +2896,18 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
             agent_fill_argument,
             "Agent statblock fill",
         )
+    evidence_exclusions = None
+    evidence_exclusions_path = None
+    evidence_exclusions_argument = getattr(args, "agent_evidence_exclusions", None)
+    if evidence_exclusions_argument is not None:
+        if reviewed_content is None or review_mode != "agent_text":
+            raise ValueError(
+                "--agent-evidence-exclusions requires --agent-rule-statblock-review"
+            )
+        evidence_exclusions, evidence_exclusions_path = _load_json_list(
+            evidence_exclusions_argument,
+            "Agent evidence exclusions",
+        )
     resolved_source_path = args.source_path.expanduser().resolve() if args.source_path else None
     source_identity = (
         {
@@ -2900,11 +2930,12 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
         reviewed_content=reviewed_content,
         review_observation=review_observation,
         variant=variant,
-            agent_fill=agent_fill,
-            source_statblock_name=source_statblock_name,
-            source_job_id=requested_source_job_id,
-            base_rule_review_id=base_rule_review_id,
-        )
+        agent_fill=agent_fill,
+        evidence_exclusions=evidence_exclusions,
+        source_statblock_name=source_statblock_name,
+        source_job_id=requested_source_job_id,
+        base_rule_review_id=base_rule_review_id,
+    )
     async with stdio_client(_server_parameters(args)) as (read, write):
         async with ClientSession(read, write) as session:
             await session.initialize()
@@ -3150,6 +3181,8 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
                             "ordered contiguous page segment"
                         )
                     review_payload["evidence_chunk_ids"] = explicit_chunk_ids
+                    if evidence_exclusions is not None:
+                        review_payload["evidence_exclusions"] = evidence_exclusions
                 if agent_fill is not None:
                     review_payload["agent_fill"] = agent_fill
                 reviewed = _facade_value(
@@ -3415,6 +3448,11 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
                 ),
                 "agent_fill_path": (
                     str(agent_fill_path) if agent_fill_path is not None else None
+                ),
+                "evidence_exclusions_path": (
+                    str(evidence_exclusions_path)
+                    if evidence_exclusions_path is not None
+                    else None
                 ),
                 "statblock": statblock_report,
                 "actors": actors,

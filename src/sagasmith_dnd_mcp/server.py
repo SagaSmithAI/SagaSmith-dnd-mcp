@@ -579,6 +579,94 @@ def _normalize_source_evidence_text(value: Any) -> str:
     return " ".join(text.translate(_SOURCE_EVIDENCE_TRANSLATION).split()).casefold()
 
 
+def _compact_agent_evidence(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").casefold())
+
+
+def _bounded_edit_distance(left: str, right: str, *, limit: int) -> int:
+    """Return an exact small edit distance without paying for unbounded OCR text."""
+
+    if abs(len(left) - len(right)) > limit:
+        return limit + 1
+    previous = list(range(len(right) + 1))
+    for left_index, left_character in enumerate(left, start=1):
+        current = [left_index]
+        row_minimum = left_index
+        for right_index, right_character in enumerate(right, start=1):
+            value = min(
+                current[-1] + 1,
+                previous[right_index] + 1,
+                previous[right_index - 1]
+                + (0 if left_character == right_character else 1),
+            )
+            current.append(value)
+            row_minimum = min(row_minimum, value)
+        if row_minimum > limit:
+            return limit + 1
+        previous = current
+    return previous[-1]
+
+
+def _agent_evidence_supports_fact(
+    fact: str,
+    evidence: str,
+    *,
+    max_edits: int = 2,
+) -> bool:
+    """Allow bounded OCR glyph repairs while preserving every numeric token."""
+
+    if not fact:
+        return True
+    if fact in evidence:
+        return True
+    if len(fact) < 12 or not evidence:
+        return False
+
+    numeric_tokens = re.findall(r"\d+", fact)
+    anchor_width = min(16, max(6, len(fact) // 8))
+    anchor_offsets = list(
+        dict.fromkeys(
+            max(0, min(len(fact) - anchor_width, offset))
+            for offset in (
+                0,
+                len(fact) // 5,
+                (len(fact) * 2) // 5,
+                (len(fact) * 3) // 5,
+                (len(fact) * 4) // 5,
+                len(fact) - anchor_width,
+            )
+        )
+    )
+    candidate_starts: set[int] = set()
+    for offset in anchor_offsets:
+        anchor = fact[offset : offset + anchor_width]
+        search_from = 0
+        while anchor and len(candidate_starts) < 100:
+            position = evidence.find(anchor, search_from)
+            if position < 0:
+                break
+            for adjustment in range(-max_edits, max_edits + 1):
+                candidate_starts.add(position - offset + adjustment)
+            search_from = position + 1
+
+    for start in sorted(candidate_starts):
+        if start < 0:
+            continue
+        for length_adjustment in range(-max_edits, max_edits + 1):
+            candidate_length = len(fact) + length_adjustment
+            if candidate_length < 1 or start + candidate_length > len(evidence):
+                continue
+            candidate = evidence[start : start + candidate_length]
+            if re.findall(r"\d+", candidate) != numeric_tokens:
+                continue
+            if (
+                _bounded_edit_distance(fact, candidate, limit=max_edits)
+                <= max_edits
+            ):
+                return True
+    return False
+
+
 def _has_source_defined_positional_targeting(value: Any) -> bool:
     """Recognize attacks whose source replaces a numeric range with a position."""
 
@@ -19902,7 +19990,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         content: str,
         parsed: Any,
         evidence_chunk_ids: list[str] | None,
-    ) -> list[dict[str, Any]]:
+        evidence_exclusions: list[dict[str, Any]] | None,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         """Bind an Agent transcription to one contiguous indexed page segment."""
 
         if not isinstance(evidence_chunk_ids, list):
@@ -19947,17 +20036,83 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "agent_text statblock evidence chunks must be one ordered contiguous segment"
             )
 
-        def compact(value: str) -> str:
-            return re.sub(r"[^a-z0-9]+", "", value.casefold())
+        if evidence_exclusions is None:
+            exclusions: list[dict[str, Any]] = []
+        elif not isinstance(evidence_exclusions, list) or len(evidence_exclusions) > 50:
+            raise ValueError("evidence_exclusions must be a list with at most 50 entries")
+        else:
+            exclusions = evidence_exclusions
+        selected_ids = set(chunk_ids)
+        validated_exclusions: list[dict[str, Any]] = []
+        exclusions_by_chunk: dict[str, list[tuple[int, int]]] = {}
+        for index, exclusion in enumerate(exclusions):
+            if not isinstance(exclusion, dict) or set(exclusion) != {
+                "chunk_id",
+                "exact_text",
+                "reason",
+            }:
+                raise ValueError(
+                    "each evidence exclusion must contain only chunk_id, exact_text, and reason"
+                )
+            chunk_id = str(exclusion.get("chunk_id") or "").strip()
+            exact_text = str(exclusion.get("exact_text") or "")
+            reason = str(exclusion.get("reason") or "").strip()
+            if chunk_id not in selected_ids:
+                raise ValueError(
+                    "evidence exclusion chunk_id must belong to the selected contiguous segment"
+                )
+            if not exact_text or len(exact_text) > 20_000:
+                raise ValueError(
+                    "evidence exclusion exact_text must contain 1 to 20000 characters"
+                )
+            if not 8 <= len(reason) <= 500:
+                raise ValueError("evidence exclusion reason must contain 8 to 500 characters")
+            source_text = str(by_id[chunk_id].get("content") or "")
+            if source_text.count(exact_text) != 1:
+                raise ValueError(
+                    "evidence exclusion exact_text must occur exactly once in its source chunk"
+                )
+            start = source_text.index(exact_text)
+            end = start + len(exact_text)
+            existing_ranges = exclusions_by_chunk.setdefault(chunk_id, [])
+            if any(
+                start < existing_end and end > existing_start
+                for existing_start, existing_end in existing_ranges
+            ):
+                raise ValueError("evidence exclusion ranges must not overlap")
+            existing_ranges.append((start, end))
+            validated_exclusions.append(
+                {
+                    "chunk_id": chunk_id,
+                    "start": start,
+                    "end": end,
+                    "exact_text_sha256": hashlib.sha256(
+                        exact_text.encode("utf-8")
+                    ).hexdigest(),
+                    "reason": reason,
+                    "ordinal": index,
+                }
+            )
+
+        retained_content_by_id: dict[str, str] = {}
+        for chunk in selected:
+            chunk_id = str(chunk["id"])
+            retained = str(chunk.get("content") or "")
+            for start, end in sorted(
+                exclusions_by_chunk.get(chunk_id, []),
+                reverse=True,
+            ):
+                retained = retained[:start] + retained[end:]
+            retained_content_by_id[chunk_id] = retained
 
         evidence_parts: list[str] = []
         for chunk in selected:
             evidence_parts.extend(
                 str(value) for value in chunk.get("heading_path", []) if str(value).strip()
             )
-            evidence_parts.append(str(chunk.get("content") or ""))
-        compact_evidence = compact("\n".join(evidence_parts))
-        compact_review_body = compact(
+            evidence_parts.append(retained_content_by_id[str(chunk["id"])])
+        compact_evidence = _compact_agent_evidence("\n".join(evidence_parts))
+        compact_review_body = _compact_agent_evidence(
             "\n".join(line for line in content.splitlines() if not re.match(r"^\s*#{1,6}\s+", line))
         )
         unsupported_lines: list[str] = []
@@ -19965,7 +20120,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             line = raw_line.strip()
             if not line:
                 continue
-            fact = compact(line)
+            fact = _compact_agent_evidence(line)
             if line.startswith("|"):
                 if fact == "strdexconintwischa" or not fact:
                     continue
@@ -19980,7 +20135,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             if not fact and any(character.isalnum() for character in line):
                 unsupported_lines.append(line)
                 continue
-            if fact and fact not in compact_evidence:
+            if fact and not _agent_evidence_supports_fact(fact, compact_evidence):
                 unsupported_lines.append(line)
         if unsupported_lines:
             raise ValueError(
@@ -20051,7 +20206,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         ability_prefix = re.compile(r"^\s*\d+\s*\([^)]+\)\s*")
         for chunk in selected:
-            source_fact = str(chunk.get("content") or "").strip()
+            source_fact = retained_content_by_id[str(chunk["id"])].strip()
             if not source_fact:
                 continue
             final_heading = str(list(chunk.get("heading_path") or [""])[-1]).upper()
@@ -20066,12 +20221,22 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         source_fact = source_fact[: following[1].start()]
             if final_heading in ability_labels:
                 source_fact = ability_prefix.sub("", source_fact, count=1).strip()
-            required_fact = compact(source_fact)
-            if required_fact and required_fact not in compact_review_body:
-                raise ValueError(
-                    "agent_text normalized_content omits selected evidence from "
-                    f"chunk {chunk['id']}"
-                )
+            source_segments = [
+                value.strip()
+                for value in re.split(r"(?<=[.!?])\s+", source_fact)
+                if value.strip()
+            ]
+            for source_segment in source_segments:
+                required_fact = _compact_agent_evidence(source_segment)
+                if required_fact and not _agent_evidence_supports_fact(
+                    required_fact,
+                    compact_review_body,
+                    max_edits=min(12, max(2, len(required_fact) // 75)),
+                ):
+                    raise ValueError(
+                        "agent_text normalized_content omits selected evidence from "
+                        f"chunk {chunk['id']}"
+                    )
 
         return [
             {
@@ -20084,7 +20249,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 ).hexdigest(),
             }
             for item in selected
-        ]
+        ], validated_exclusions
 
     @mcp.tool()
     def rule_statblock_review(
@@ -20099,6 +20264,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         evidence_chunk_ids: list[str] | None = None,
         agent_fill: dict[str, Any] | None = None,
         derived_from_review_id: str | None = None,
+        evidence_exclusions: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """Retain a reviewed transcription and Agent fill bound to rulebook evidence."""
         access.require_campaign(campaign_id, principal_id, roles={"owner", "dm"})
@@ -20123,6 +20289,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             raise ValueError("review_mode must be visual or agent_text")
         if review_mode == "visual" and evidence_chunk_ids not in (None, []):
             raise ValueError("visual statblock review does not accept evidence_chunk_ids")
+        if review_mode == "visual" and evidence_exclusions not in (None, []):
+            raise ValueError("visual statblock review does not accept evidence_exclusions")
         payload = {
             "job_id": job_id,
             "operation": "review_statblock",
@@ -20133,6 +20301,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if review_mode == "agent_text":
             payload["review_mode"] = review_mode
             payload["evidence_chunk_ids"] = evidence_chunk_ids
+            payload["evidence_exclusions"] = evidence_exclusions
         if agent_fill is not None:
             payload["agent_fill"] = agent_fill
         if derived_from_review_id is not None:
@@ -20153,6 +20322,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if review_mode == "agent_text":
             evidence_identity = ",".join(str(item) for item in evidence_chunk_ids or [])
             review_identity = f"{review_identity}:{review_mode}:{evidence_identity}"
+            exclusions_identity = json.dumps(
+                evidence_exclusions,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            review_identity = f"{review_identity}:evidence-exclusions:{exclusions_identity}"
         if agent_fill is not None:
             fill_identity = json.dumps(
                 agent_fill,
@@ -20183,16 +20359,17 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             if agent_fill is not None
             else None
         )
-        text_evidence = (
+        text_evidence, validated_evidence_exclusions = (
             validate_agent_text_statblock_review(
                 source_id=job.source_id,
                 page_number=page_number,
                 content=content,
                 parsed=parsed,
                 evidence_chunk_ids=evidence_chunk_ids,
+                evidence_exclusions=evidence_exclusions,
             )
             if review_mode == "agent_text"
-            else []
+            else ([], [])
         )
         review = {
             "id": review_id,
@@ -20213,6 +20390,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "confidence": "reviewed_text" if review_mode == "agent_text" else "reviewed_image",
             "evidence_chunk_ids": [item["id"] for item in text_evidence],
             "text_evidence": text_evidence,
+            "evidence_exclusions": validated_evidence_exclusions,
             "agent_statblock_fill": (filled or {}).get("fill"),
             "derived_from_review_id": derived_from_review_id,
         }
@@ -24490,6 +24668,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "observation",
                     "review_mode",
                     "evidence_chunk_ids",
+                    "evidence_exclusions",
                     "agent_fill",
                 },
                 required_names=(
@@ -24512,6 +24691,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     data.get("review_mode", "visual"),
                     data.get("evidence_chunk_ids"),
                     data.get("agent_fill"),
+                    None,
+                    data.get("evidence_exclusions"),
                 ),
             )
         if action == "extract_candidates":
