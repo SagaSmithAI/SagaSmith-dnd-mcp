@@ -169,8 +169,6 @@ def test_rule_import_renders_a_checksum_bound_review_page(
 
 ***Club***. *Melee Weapon Attack:* +2 to hit, reach 5 ft., one target.
 *Hit:* 2 (1d4) bludgeoning damage.
-
-***Shout***. The commoner calls loudly for help.
 """
         review_arguments = {
             "campaign_id": campaign["id"],
@@ -192,21 +190,8 @@ def test_rule_import_renders_a_checksum_bound_review_page(
         assert review["image_checksum"] == metadata["image_checksum"]
         validation = reviewed["result"]["validation"]
         assert validation["default_dm_resolver"] == "agent"
-        assert validation["settlement"] == "mixed"
-        assert validation["ruling_requirements"] == [
-            {
-                "reason": "Shout: descriptive action is not automatically settled",
-                "default_resolver": "agent",
-                "ruling_kind": "agent_dm_adjudication",
-                "policy_ref": "server_capabilities.ruling_policy",
-                "requires_external_input_only_for": [
-                    "player_owned_choice",
-                    "owner_approval",
-                    "permission_escalation",
-                    "missing_or_conflicting_source_review",
-                ],
-            }
-        ]
+        assert validation["settlement"] == "automatic"
+        assert validation["ruling_requirements"] == []
 
         _, created = await server.call_tool(
             "character_create_from",
@@ -267,17 +252,55 @@ def test_rule_import_renders_a_checksum_bound_review_page(
             },
             "idempotency_key": "review-monster-without-fill",
         }
-        with pytest.raises(Exception, match="requires an Agent statblock fill"):
-            await server.call_tool("rule_import", missing_fill_arguments)
-
-        source_excerpt = (
-            "The hunter makes one bite attack and one claw attack."
+        _, engine_review_response = await server.call_tool(
+            "rule_import",
+            missing_fill_arguments,
         )
+        engine_review = engine_review_response["result"]["review"]
+        engine_validation = engine_review_response["result"]["validation"]
+        assert engine_review["agent_statblock_fill"] is None
+        assert engine_validation["warnings"] == []
+        assert engine_validation["agent_fill_requirements"] == {
+            "required": False,
+            "default_resolver": "engine",
+            "ruling_kind": "standard_rule",
+            "parser_authoritative": True,
+            "allowed_resolutions": ["engine"],
+            "multiattack_options": [
+                {
+                    "activity_id": "multiattack-activity",
+                    "source_excerpt": (
+                        "The hunter makes one bite attack and one claw attack."
+                    ),
+                    "options": [
+                        {
+                            "id": "melee",
+                            "attacks": [
+                                {
+                                    "weapon_id": "bite",
+                                    "attack_mode": "melee",
+                                    "count": 1,
+                                },
+                                {
+                                    "weapon_id": "claw",
+                                    "attack_mode": "melee",
+                                    "count": 1,
+                                },
+                            ],
+                        }
+                    ],
+                }
+            ],
+            "available_weapons": [],
+        }
+
         agent_fill = {
             "multiattack_options": [
                 {
                     "activity_id": "multiattack-activity",
-                    "source_excerpt": source_excerpt,
+                    "source_excerpt": (
+                        "The hunter makes one bite attack and one claw attack."
+                    ),
                     "reason": (
                         "The reviewed sentence explicitly requires one bite and one claw."
                     ),
@@ -301,55 +324,7 @@ def test_rule_import_renders_a_checksum_bound_review_page(
                 }
             ]
         }
-        filled_arguments = {
-            **missing_fill_arguments,
-            "payload": {
-                **missing_fill_arguments["payload"],
-                "agent_fill": agent_fill,
-            },
-            "idempotency_key": "review-monster-with-fill",
-        }
-        _, filled_review_response = await server.call_tool(
-            "rule_import",
-            filled_arguments,
-        )
-        filled_review = filled_review_response["result"]["review"]
-        filled_validation = filled_review_response["result"]["validation"]
-        assert filled_review["agent_statblock_fill"]["multiattack_options"][0][
-            "activity_id"
-        ] == "multiattack-activity"
-        assert filled_validation["resolved_warnings"] == []
-        assert filled_validation["warnings"] == []
-        assert filled_validation["agent_fill_requirements"]["required"] is True
-
-        _, augmented_review_response = await server.call_tool(
-            "rule_import",
-            {
-                "campaign_id": campaign["id"],
-                "action": "review_statblock",
-                "payload": {
-                    "job_id": job_id,
-                    "base_review_id": filled_review["id"],
-                    "observation": (
-                        "Agent reused the checksum-bound transcription and "
-                        "confirmed the exact Multiattack composition."
-                    ),
-                    "agent_fill": agent_fill,
-                },
-                "idempotency_key": "augment-reviewed-monster-fill",
-            },
-        )
-        augmented_review = augmented_review_response["result"]["review"]
-        assert augmented_review["derived_from_review_id"] == filled_review["id"]
-        assert (
-            augmented_review["normalized_content_sha256"]
-            == filled_review["normalized_content_sha256"]
-        )
-        assert (
-            augmented_review["agent_statblock_fill"]
-            == filled_review["agent_statblock_fill"]
-        )
-        with pytest.raises(Exception, match="does not belong"):
+        with pytest.raises(Exception, match="do not accept Agent semantic fills"):
             await server.call_tool(
                 "rule_import",
                 {
@@ -357,56 +332,76 @@ def test_rule_import_renders_a_checksum_bound_review_page(
                     "action": "review_statblock",
                     "payload": {
                         "job_id": job_id,
-                        "base_review_id": "rule-statblock-review:unknown",
-                        "observation": "Agent checked the retained transcription.",
+                        "page_number": 1,
+                        "normalized_content": reviewed_monster,
+                        "observation": (
+                            "Attempted to override an engine-parsed standard rule."
+                        ),
                         "agent_fill": agent_fill,
                     },
-                    "idempotency_key": "augment-unknown-reviewed-monster",
+                    "idempotency_key": "reject-standard-rule-agent-fill",
+                },
+            )
+        with pytest.raises(Exception, match="requires engine implementation"):
+            await server.call_tool(
+                "rule_import",
+                {
+                    "campaign_id": campaign["id"],
+                    "action": "review_statblock",
+                    "payload": {
+                        "job_id": job_id,
+                        "page_number": 1,
+                        "normalized_content": reviewed_monster.replace(
+                            "The hunter makes one bite attack and one claw attack.",
+                            "The hunter attacks and shouts a command.",
+                        ),
+                        "observation": (
+                            "Reviewed an unsupported printed standard-rule composition."
+                        ),
+                    },
+                    "idempotency_key": "reject-unimplemented-standard-rule",
                 },
             )
 
-        _, filled_actor_response = await server.call_tool(
+        _, engine_actor_response = await server.call_tool(
             "character_create_from",
             {
                 "mode": "reviewed_rule_statblock",
                 "payload": {
                     "campaign_id": campaign["id"],
                     "job_id": job_id,
-                    "review_id": filled_review["id"],
+                    "review_id": engine_review["id"],
                     "name": "Reviewed Hunter",
                     "character_type": "monster",
                 },
                 "idempotency_key": "reviewed-hunter",
             },
         )
-        filled_actor = filled_actor_response["result"]
-        assert filled_actor["character"]["derived"]["multiattack_options"] == [
+        engine_actor = engine_actor_response["result"]
+        assert engine_actor["character"]["derived"]["multiattack_options"] == [
             {
-                "id": "bite-and-claw",
+                "id": "melee",
                 "attacks": [
                     {"weapon_id": "bite", "attack_mode": "melee", "count": 1},
                     {"weapon_id": "claw", "attack_mode": "melee", "count": 1},
                 ],
             }
         ]
-        assert filled_actor["statblock"]["warnings"] == []
-        assert filled_actor["statblock"]["agent_fill"]["multiattack_options"][0][
-            "default_resolver"
-        ] == "agent"
-        assert (
-            "Agent statblock fill: multiattack-activity."
-            in filled_actor["character"]["notes"]["profile"]["dm_notes"]
+        assert engine_actor["statblock"]["warnings"] == []
+        assert engine_actor["statblock"]["agent_fill"] is None
+        assert "Agent statblock fill:" not in (
+            engine_actor["character"]["notes"]["profile"]["dm_notes"]
         )
 
         evidence_chunks = [
             {
                 "id": "commoner-core",
                 "ordinal": 0,
-                "heading_path": ["COMMONER"],
-                "content": (
-                    "Medium humanoid (any race), any alignment Armor Class 10 "
-                    "Hit Points 4 (1d8) Speed 30 ft."
-                ),
+                    "heading_path": ["COMMONER"],
+                    "content": (
+                        "Medium humanoid (any race), any alignment Armor Class l0 "
+                        "Hit Points 4 (1d8) Speed 30 ft."
+                    ),
                 "page_start": 1,
                 "page_end": 1,
             },
@@ -419,6 +414,8 @@ def test_rule_import_renders_a_checksum_bound_review_page(
                         "10 (+0) Senses passive Perception 10 Languages Common "
                         "Challenge 0 (10 XP)"
                         if ability == "WIS"
+                        else "l0 (+0)"
+                        if ability == "STR"
                         else "10 (+0)"
                     ),
                     "page_start": 1,
@@ -433,12 +430,11 @@ def test_rule_import_renders_a_checksum_bound_review_page(
                 "id": "commoner-actions",
                 "ordinal": 7,
                 "heading_path": ["ACTIONS"],
-                "content": (
-                    "Club. Melee Weapon Attack: +2 to hit, reach 5 ft., one target. "
-                    "Hit: 2 (1d4) bludgeoning damage. "
-                    "Shout. The commoner calls loudly for help. "
-                    "Commoners include laborers, servants, and ordinary travelers."
-                ),
+                    "content": (
+                        "Club. Melee Weapon Attack: +2 to hit, reach 5 ft., one target. "
+                        "Hit: 2 (1d4) bludgeoning damage. "
+                        "Commoners include laborers, servants, and ordinary travelers."
+                    ),
                 "page_start": 1,
                 "page_end": 1,
             },
@@ -493,66 +489,43 @@ def test_rule_import_renders_a_checksum_bound_review_page(
         )
         web_garrote_evidence = " Web Garrote. " + web_garrote_excerpt
         evidence_chunks[-1]["content"] += web_garrote_evidence
-        _, additional_action_reviewed = await server.call_tool(
-            "rule_import",
-            {
-                **agent_arguments,
-                "payload": {
-                    **agent_arguments["payload"],
-                    "evidence_exclusions": [
-                        {
-                            "chunk_id": evidence_chunks[-1]["id"],
-                            "exact_text": web_garrote_evidence,
-                            "reason": (
-                                "The adjacent variant action is submitted through "
-                                "the separately source-bound Agent action fill."
-                            ),
-                        }
-                    ],
-                    "agent_fill": {
-                        "additional_actions": [
+        with pytest.raises(
+            Exception,
+            match="do not accept Agent semantic fills",
+        ):
+            await server.call_tool(
+                "rule_import",
+                {
+                    **agent_arguments,
+                    "payload": {
+                        **agent_arguments["payload"],
+                        "evidence_exclusions": [
                             {
-                                "name": "Web Garrote",
-                                "source_ref": "rule-chunk:commoner-actions",
-                                "source_excerpt": web_garrote_excerpt,
+                                "chunk_id": evidence_chunks[-1]["id"],
+                                "exact_text": web_garrote_evidence,
                                 "reason": (
-                                    "The Agent identified one mechanically complete "
-                                    "variant weapon action in the adjacent column."
+                                    "The adjacent variant action is not part of "
+                                    "the selected standard statblock."
                                 ),
                             }
-                        ]
+                        ],
+                        "agent_fill": {
+                            "additional_actions": [
+                                {
+                                    "name": "Web Garrote",
+                                    "source_ref": "rule-chunk:commoner-actions",
+                                    "source_excerpt": web_garrote_excerpt,
+                                    "reason": (
+                                        "This attempted semantic addition must be "
+                                        "implemented by the standard-rule engine."
+                                    ),
+                                }
+                            ]
+                        },
                     },
+                    "idempotency_key": "reject-rule-additional-action-fill",
                 },
-                "idempotency_key": "review-statblock-agent-additional-action",
-            },
-        )
-        additional_review = additional_action_reviewed["result"]["review"]
-        assert additional_review["agent_statblock_fill"]["additional_actions"][0][
-            "id"
-        ] == "web-garrote"
-        assert additional_review["agent_statblock_fill_evidence"][0][
-            "source_ref"
-        ] == "rule-chunk:commoner-actions"
-        _, additional_action_actor = await server.call_tool(
-            "character_create_from",
-            {
-                "mode": "reviewed_rule_statblock",
-                "payload": {
-                    "campaign_id": campaign["id"],
-                    "job_id": job_id,
-                    "review_id": additional_review["id"],
-                    "name": "Reviewed Variant Commoner",
-                    "character_type": "npc",
-                },
-                "idempotency_key": "reviewed-additional-action-actor",
-            },
-        )
-        variant_items = additional_action_actor["result"]["character"]["sheet"][
-            "inventory"
-        ]["items"]
-        assert next(item for item in variant_items if item["id"] == "web-garrote")[
-            "mechanics"
-        ]["attack_bonus_override"] == 4
+            )
         evidence_chunks[-1]["content"] = base_actions_content
 
         adjacent_column = (

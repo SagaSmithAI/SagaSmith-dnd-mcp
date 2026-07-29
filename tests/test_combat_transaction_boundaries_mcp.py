@@ -816,6 +816,127 @@ def test_action_surge_is_settled_without_a_manual_ruling(tmp_path: Path) -> None
     asyncio.run(exercise())
 
 
+def test_battle_cry_uses_engine_settlement_and_persists_daily_use(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        server = create_server(_config(tmp_path))
+        campaign = await _call(
+            server,
+            "campaign_create",
+            {"name": "Battle Cry", "edition": "2014", "idempotency_key": "campaign"},
+        )
+        sheet = default_character_sheet()
+        sheet["content"]["activities"] = [
+            {
+                "id": "dnd5e.core.monster.battle-cry",
+                "name": "Battle Cry (1/Day)",
+                "source_key": "monster-manual-2014:p246",
+                "description": (
+                    "Each creature of the war chief's choice that is within 30 feet "
+                    "of it, can hear it, and is not already affected by Battle Cry "
+                    "gains advantage on attack rolls until the start of the war "
+                    "chief's next turn. The war chief can then make one attack as "
+                    "a bonus action."
+                ),
+                "uses": {
+                    "label": "Battle Cry (1/Day)",
+                    "value": 1,
+                    "max": 1,
+                    "recovers_on": "long_rest",
+                },
+                "activation": {"type": "action", "cost": 1},
+                "choices": {
+                    "source_trait": {
+                        "kind": "battle_cry",
+                        "range_ft": 30,
+                        "requires_hearing": True,
+                    }
+                },
+            }
+        ]
+        war_chief = await _call(
+            server,
+            "character_create",
+            {
+                "campaign_id": campaign["id"],
+                "name": "War Chief",
+                "sheet": sheet,
+                "idempotency_key": "war-chief",
+            },
+        )
+        ally = await _call(
+            server,
+            "character_create",
+            {
+                "campaign_id": campaign["id"],
+                "name": "Orc Ally",
+                "idempotency_key": "ally",
+            },
+        )
+        campaign = await _call(server, "campaign_get", {"campaign_id": campaign["id"]})
+        started = await _call_raw(
+            server,
+            "combat_start",
+            {
+                "campaign_id": campaign["id"],
+                "participant_ids": [war_chief["id"], ally["id"]],
+                "participant_config": [
+                    {
+                        "actor_id": war_chief["id"],
+                        "initiative": 20,
+                        "position": {"x": 0, "y": 0},
+                        "disposition": "hostile",
+                    },
+                    {
+                        "actor_id": ally["id"],
+                        "initiative": 10,
+                        "position": {"x": 1, "y": 0},
+                        "disposition": "hostile",
+                    },
+                ],
+                "expected_revision": campaign["revision"],
+                "idempotency_key": "start",
+            },
+        )
+        cried = await _call_raw(
+            server,
+            "combat_use_activity",
+            {
+                "campaign_id": campaign["id"],
+                "actor_id": war_chief["id"],
+                "activity_id": "dnd5e.core.monster.battle-cry",
+                "declaration": {
+                    "targets": [
+                        {
+                            "actor_id": ally["id"],
+                            "can_hear": True,
+                            "reason": "Adjacent in the same open combat area.",
+                        }
+                    ]
+                },
+                "expected_revision": started["campaign_revision"],
+                "idempotency_key": "battle-cry",
+            },
+        )
+
+        assert cried["status"] == "committed"
+        assert cried["result"]["requires_ruling"] is False
+        assert cried["result"]["core_effect"]["target_ids"] == [ally["id"]]
+        assert any(
+            item["mechanic_id"] == "dnd5e.core.activity.battle_cry"
+            for item in cried["result"]["rule_receipts"]
+        )
+        actor_after = await _call(
+            server,
+            "character_get",
+            {"character_id": war_chief["id"]},
+        )
+        assert actor_after["sheet"]["content"]["activities"][0]["uses"]["value"] == 0
+
+    asyncio.run(exercise())
+
+
 def test_descriptive_activity_requires_compilation_before_payment(
     tmp_path: Path,
 ) -> None:

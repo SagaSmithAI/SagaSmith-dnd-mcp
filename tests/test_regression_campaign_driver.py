@@ -916,7 +916,7 @@ def test_prepare_rule_statblock_uses_checksum_bound_visual_review(
     assert report["review_override_path"] == str(override.resolve())
 
 
-def test_prepare_rule_statblock_submits_agent_fill_with_durable_review(
+def test_prepare_rule_statblock_rejects_agent_semantic_fill(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     client = _RuleStatblockClient()
@@ -964,20 +964,12 @@ def test_prepare_rule_statblock_submits_agent_fill_with_durable_review(
     args.review_observation = "Visually checked every Peryton field on rendered PDF page."
     args.agent_statblock_fill = fill_path
 
-    report = asyncio.run(_prepare_rule_statblock(args))
-
-    review_call = next(
-        arguments
-        for scope, tool_id, arguments in client.calls
-        if scope == "domain"
-        and tool_id == "rule_import"
-        and arguments["action"] == "review_statblock"
-    )
-    assert review_call["payload"]["agent_fill"] == fill
-    assert report["agent_fill_path"] == str(fill_path.resolve())
+    with pytest.raises(ValueError, match="standard rulebook mechanics"):
+        asyncio.run(_prepare_rule_statblock(args))
+    assert client.calls == []
 
 
-def test_prepare_rule_statblock_augments_retained_review_without_retranscription(
+def test_prepare_rule_statblock_rejects_retained_review_semantic_fill(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1009,24 +1001,9 @@ def test_prepare_rule_statblock_augments_retained_review_without_retranscription
     )
     args.agent_statblock_fill = fill_path
 
-    report = asyncio.run(_prepare_rule_statblock(args))
-
-    review_call = next(
-        arguments
-        for scope, tool_id, arguments in client.calls
-        if scope == "domain"
-        and tool_id == "rule_import"
-        and arguments["action"] == "review_statblock"
-    )
-    assert review_call["payload"] == {
-        "job_id": "job-source-1",
-        "base_review_id": "rule-statblock-review:retained",
-        "observation": args.review_observation,
-        "agent_fill": fill,
-    }
-    assert report["base_rule_review_id"] == "rule-statblock-review:retained"
-    assert report["review_mode"] == "base_review"
-    assert report["review_override_path"] is None
+    with pytest.raises(ValueError, match="base-rule-review-id is retired"):
+        asyncio.run(_prepare_rule_statblock(args))
+    assert client.calls == []
 
 
 def test_prepare_rule_statblock_uses_contiguous_agent_text_evidence(
@@ -1401,7 +1378,7 @@ def test_prepare_rule_statblock_recovers_an_existing_indexed_source_by_job(
     assert report["ocr_recovery"]["provider"] == "rapidocr"
 
 
-def test_prepare_rule_statblock_augments_automatic_ocr_with_agent_fill(
+def test_prepare_rule_statblock_rejects_automatic_ocr_agent_fill(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1488,22 +1465,9 @@ def test_prepare_rule_statblock_augments_automatic_ocr_with_agent_fill(
     args.agent_statblock_fill = fill_path
     args.review_observation = "Agent mapped the printed different-weapon Multiattack."
 
-    report = asyncio.run(_prepare_rule_statblock(args))
-
-    create_calls = [
-        arguments
-        for scope, tool_id, arguments in client.calls
-        if scope == "domain" and tool_id == "character_create_from"
-    ]
-    assert [call["mode"] for call in create_calls] == [
-        "statblock",
-        "reviewed_rule_statblock",
-    ]
-    assert (
-        create_calls[1]["payload"]["review_id"]
-        == "rule-statblock-review:lizardfolk-filled"
-    )
-    assert report["rule_review"]["id"] == "rule-statblock-review:lizardfolk-filled"
+    with pytest.raises(ValueError, match="standard rulebook mechanics"):
+        asyncio.run(_prepare_rule_statblock(args))
+    assert client.calls == []
 
 
 def test_failed_rule_statblock_preparation_uses_shared_phase_recovery(

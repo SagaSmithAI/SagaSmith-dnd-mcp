@@ -379,12 +379,15 @@ ENGINE_OWNED_STANDARD_ACTIVITY_IDS = frozenset(
         "dnd5e.content.srd2014.feature.fighter-second-wind",
         "dnd5e.content.srd2014.feature.life-domain-channel-divinity-preserve-life",
         "dnd5e.content.srd2014.feature.rogue-cunning-action",
+        "dnd5e.core.monster.aggressive",
+        "dnd5e.core.monster.battle-cry",
     }
 )
 ENGINE_SETTLED_CARD_MECHANIC_IDS = frozenset(
     {
         "dnd5e.core.action.multiattack_choice",
         "dnd5e.core.activity.action_surge",
+        "dnd5e.core.activity.battle_cry",
         "dnd5e.core.activity.cunning_action",
         "dnd5e.core.activity.preserve_life",
         "dnd5e.core.activity.random_save_effects",
@@ -727,6 +730,11 @@ def _agent_evidence_supports_fact(
 ) -> bool:
     """Allow bounded OCR glyph repairs while preserving every numeric token."""
 
+    # Text layers and OCR engines commonly render a slash inside a numeric
+    # weapon range as ``f`` (``150f600``).  Compact evidence has already
+    # removed the real slash, so discard only this digit-bounded impostor.
+    fact = re.sub(r"(?<=\d)f(?=\d)", "", fact)
+    evidence = re.sub(r"(?<=\d)f(?=\d)", "", evidence)
     if not fact:
         return True
     if fact in evidence:
@@ -734,7 +742,6 @@ def _agent_evidence_supports_fact(
     if len(fact) < 12 or not evidence:
         return False
 
-    numeric_tokens = re.findall(r"\d+", fact)
     anchor_width = min(16, max(6, len(fact) // 8))
     anchor_offsets = list(
         dict.fromkeys(
@@ -769,9 +776,33 @@ def _agent_evidence_supports_fact(
             if candidate_length < 1 or start + candidate_length > len(evidence):
                 continue
             candidate = evidence[start : start + candidate_length]
-            if re.findall(r"\d+", candidate) != numeric_tokens:
+            comparable_fact = list(fact)
+            comparable_candidate = list(candidate)
+            if len(comparable_fact) == len(comparable_candidate):
+                for index, (fact_character, candidate_character) in enumerate(
+                    zip(comparable_fact, comparable_candidate)
+                ):
+                    pair = {fact_character, candidate_character}
+                    if pair <= {"1", "l", "i"} and "1" in pair:
+                        comparable_fact[index] = "1"
+                        comparable_candidate[index] = "1"
+                    elif pair <= {"0", "o"} and "0" in pair:
+                        comparable_fact[index] = "0"
+                        comparable_candidate[index] = "0"
+            normalized_fact = "".join(comparable_fact)
+            normalized_candidate = "".join(comparable_candidate)
+            if re.findall(r"\d+", normalized_candidate) != re.findall(
+                r"\d+", normalized_fact
+            ):
                 continue
-            if _bounded_edit_distance(fact, candidate, limit=max_edits) <= max_edits:
+            if (
+                _bounded_edit_distance(
+                    normalized_fact,
+                    normalized_candidate,
+                    limit=max_edits,
+                )
+                <= max_edits
+            ):
                 return True
     return False
 
@@ -2459,6 +2490,86 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 f"{sorted(expected_ids)}, received {sorted(submitted_ids)}"
             )
         return requirements
+
+    def require_standard_statblock_engine_support(
+        sheet: dict[str, Any],
+        agent_fill: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Keep canonical rulebook mechanics authoritative in the engine.
+
+        An Agent may transcribe a damaged text layer, but it must not redefine
+        standard mechanics while doing so.  Structured Multiattack choices
+        produced by the D&D parser are therefore authoritative for rulebook
+        statblocks.  A standard Multiattack that the parser cannot structure is
+        an engine implementation gap, not an Agent-ruling boundary.
+        """
+
+        if agent_fill is not None:
+            raise ValueError(
+                "standard rule statblocks do not accept Agent semantic fills; "
+                "implement the printed mechanic in the D&D engine"
+            )
+        multiattacks = [
+            activity
+            for activity in dict(sheet.get("content") or {}).get("activities", [])
+            if str(activity.get("name") or "").strip().casefold() == "multiattack"
+        ]
+        unresolved = [
+            activity
+            for activity in multiattacks
+            if not isinstance(
+                dict(activity.get("choices") or {}).get("multiattack_options"),
+                list,
+            )
+            or not dict(activity.get("choices") or {}).get("multiattack_options")
+        ]
+        if unresolved:
+            names = sorted(
+                str(activity.get("name") or "Multiattack") for activity in unresolved
+            )
+            raise ValueError(
+                "standard rule Multiattack requires engine implementation: "
+                + ", ".join(names)
+            )
+        unresolved_cards = [
+            card
+            for card in [
+                *dict(sheet.get("content") or {}).get("activities", []),
+                *dict(sheet.get("content") or {}).get("features", []),
+            ]
+            if dict(card.get("choices") or {}).get("manual_ruling")
+        ]
+        if unresolved_cards:
+            names = sorted(
+                str(card.get("name") or card.get("id") or "unnamed card")
+                for card in unresolved_cards
+            )
+            raise ValueError(
+                "standard rule card requires engine implementation: "
+                + ", ".join(names)
+            )
+        return {
+            "required": False,
+            "default_resolver": "engine",
+            "ruling_kind": "standard_rule",
+            "parser_authoritative": True,
+            "allowed_resolutions": ["engine"],
+            "multiattack_options": [
+                {
+                    "activity_id": str(activity.get("id") or ""),
+                    "source_excerpt": " ".join(
+                        str(activity.get("description") or "").split()
+                    ),
+                    "options": deepcopy(
+                        dict(activity.get("choices") or {}).get(
+                            "multiattack_options", []
+                        )
+                    ),
+                }
+                for activity in multiattacks
+            ],
+            "available_weapons": [],
+        }
 
     def is_statblock_normalization_note(reason: str) -> bool:
         """Return whether a parser diagnostic proves safe exclusion, not a rule gap."""
@@ -12892,6 +13003,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             movement_boundary_ids.append("dnd5e.core.movement.grapple_source")
         if "turned" in moving_conditions:
             movement_boundary_ids.append("dnd5e.core.activity.turn_undead")
+        if str(movement_mode).strip().casefold().replace("-", "_") == "aggressive":
+            movement_boundary_ids.append("dnd5e.core.monster.aggressive")
         if destination is not None:
             movement_boundary_ids.append("dnd5e.core.movement.occupied_destination")
         difficult_cells = set(dict(encounter.get("battle_map") or {}).get("difficult_cells") or [])
@@ -15933,6 +16046,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             applied["core_effect"] = core_effect
             mechanic_id = {
                 "action_surge": "dnd5e.core.activity.action_surge",
+                "aggressive": "dnd5e.core.monster.aggressive",
+                "battle_cry": "dnd5e.core.activity.battle_cry",
                 "cunning_action": "dnd5e.core.activity.cunning_action",
                 "second_wind": "dnd5e.core.activity.second_wind",
                 "turn_undead": "dnd5e.core.activity.turn_undead",
@@ -25702,7 +25817,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 (
                     re.match(
                         r"^\s*(\d+)\s*\(\s*([+-])\s*(\d+)\s*\)",
-                        str(chunk.get("content") or ""),
+                        re.sub(
+                            r"(?i)^\s*([li]+)(?=\d*\s*\()",
+                            lambda match: "1" * len(match.group(1)),
+                            str(chunk.get("content") or ""),
+                        ),
                     )
                     for chunk in selected
                     if str(list(chunk.get("heading_path") or [""])[-1]).strip().upper()
@@ -25742,6 +25861,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     if len(following) > 1:
                         source_fact = source_fact[: following[1].start()]
             if final_heading in ability_labels:
+                source_fact = re.sub(
+                    r"(?i)^\s*([li]+)(?=\d*\s*\()",
+                    lambda match: "1" * len(match.group(1)),
+                    source_fact,
+                )
                 source_fact = ability_prefix.sub("", source_fact, count=1).strip()
             source_segments = [
                 value.strip() for value in re.split(r"(?<=[.!?])\s+", source_fact) if value.strip()
@@ -25860,7 +25984,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 f"rule-review:{review_id}",
             ],
         )
-        agent_fill_requirements = require_complete_statblock_agent_fill(
+        agent_fill_requirements = require_standard_statblock_engine_support(
             parsed.sheet,
             agent_fill,
         )
@@ -31450,7 +31574,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 rule_refs=source_rule_refs,
             )
             reviewed_fill = review.get("agent_statblock_fill")
-            require_complete_statblock_agent_fill(
+            require_standard_statblock_engine_support(
                 hydrated_sheet,
                 reviewed_fill,
             )
@@ -31820,6 +31944,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 parsed,
                 source_key=source_key,
                 rule_refs=selected_chunk_ids,
+            )
+            require_standard_statblock_engine_support(
+                hydrated_sheet,
+                None,
             )
             variant = data.get("variant")
             variant_evidence = statblock_variant_evidence(campaign_id, variant)

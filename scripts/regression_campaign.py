@@ -204,8 +204,8 @@ def _arguments() -> argparse.Namespace:
         "--agent-statblock-fill",
         type=Path,
         help=(
-            "Agent-reviewed semantic JSON fill for every reviewed Multiattack; "
-            "submitted with the durable module or rule-statblock review"
+            "Agent-reviewed semantic JSON fill for custom module content only; "
+            "standard rulebook mechanics reject this option"
         ),
     )
     parser.add_argument(
@@ -219,8 +219,8 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument(
         "--base-rule-review-id",
         help=(
-            "Checksum-bound retained rule-statblock review whose immutable text "
-            "the Agent augments with --agent-statblock-fill"
+            "Retired for standard rulebooks: canonical mechanics must be "
+            "implemented by the engine, not added to a retained review"
         ),
     )
     parser.add_argument(
@@ -2827,6 +2827,11 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
     base_rule_review_id = str(
         getattr(args, "base_rule_review_id", "") or ""
     ).strip()
+    if base_rule_review_id:
+        raise ValueError(
+            "--base-rule-review-id is retired for standard rulebooks; "
+            "implement missing standard mechanics in the D&D engine"
+        )
     if args.review_override is not None and agent_rule_review_path is not None:
         raise ValueError(
             "--review-override and --agent-rule-statblock-review are mutually exclusive"
@@ -2894,19 +2899,10 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
     agent_fill_path = None
     agent_fill_argument = getattr(args, "agent_statblock_fill", None)
     if agent_fill_argument is not None:
-        if reviewed_content is None and not base_rule_review_id:
-            if not args.source_id or args.source_path or source_page is None:
-                raise ValueError(
-                    "automatic OCR Agent fill requires --source-id and "
-                    "--source-page without --source-path"
-                )
-            if not str(args.review_observation or "").strip():
-                raise ValueError(
-                    "automatic OCR Agent fill requires --review-observation"
-                )
-        agent_fill, agent_fill_path = _load_json_object(
-            agent_fill_argument,
-            "Agent statblock fill",
+        raise ValueError(
+            "--agent-statblock-fill is reserved for module-authored or homebrew "
+            "content; standard rulebook mechanics must be implemented in the "
+            "D&D engine"
         )
     evidence_exclusions = None
     evidence_exclusions_path = None
