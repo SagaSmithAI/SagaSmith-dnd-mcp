@@ -2237,6 +2237,146 @@ def test_ability_score_improvement_is_applied_and_repeats_at_later_unlocks(
     asyncio.run(exercise())
 
 
+def test_prepared_spell_limit_tracks_spellcasting_ability_score_improvement(
+    tmp_path: Path,
+) -> None:
+    workspace = Path(__file__).resolve().parents[2]
+    config = McpConfig(
+        home=tmp_path / "home",
+        database_url=None,
+        chroma_url=None,
+        chroma_path_override=None,
+        dnd_skills_dir=workspace / "SagaSmith-dnd-skills",
+        modulegen_skills_dir=workspace / "SagaSmith-module-gen-skills",
+        auto_seed_rules=True,
+    )
+
+    async def exercise() -> None:
+        server = create_server(config)
+        campaign = await _call(
+            server,
+            "campaign_create",
+            {
+                "name": "Prepared Limit ASI",
+                "edition": "2014",
+                "idempotency_key": "campaign",
+            },
+        )
+        sheet = _cleric_sheet()
+        sheet["progression"]["level"] = 3
+        sheet["progression"]["classes"][0]["level"] = 3
+        sheet["abilities"]["wisdom"]["score"] = 17
+        sheet["combat"]["hp"] = {"value": 28, "max": 28, "temp": 0}
+        sheet["combat"]["hit_dice"]["d8"].update(value=3, max=3)
+        sheet["combat"]["hp_progression"] = [
+            {
+                "level": level,
+                "method": "manual" if level == 1 else "fixed",
+                "value": 12 if level == 1 else 8,
+                "source": f"Cleric level {level}",
+            }
+            for level in range(1, 4)
+        ]
+        sheet["spellcasting"]["preparation"]["max_prepared"] = 6
+        actor = await _call(
+            server,
+            "character_create_from",
+            {
+                "mode": "direct",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "name": "Prepared Cleric",
+                    "sheet": sheet,
+                },
+                "idempotency_key": "actor",
+            },
+        )
+        level_four = await _call(
+            server,
+            "character_state_change",
+            {
+                "character_id": actor["id"],
+                "action": "level_advance",
+                "payload": {
+                    "class_name": "Cleric",
+                    "hp_method": "fixed",
+                    "reason": "milestone",
+                    "source_ref": "module:chapter-1",
+                },
+                "expected_revision": actor["revision"],
+                "idempotency_key": "level-4",
+            },
+        )
+        assert (
+            level_four["character"]["sheet"]["spellcasting"]["preparation"]["max_prepared"]
+            == 7
+        )
+
+        applied = await _call(
+            server,
+            "character_content_apply",
+            {
+                "character_id": actor["id"],
+                "artifact_id": (
+                    "dnd5e.content.srd2014.feature.cleric-ability-score-improvement"
+                ),
+                "selection": {
+                    "grant_level": 4,
+                    "ability_score_increases": {"wisdom": 1, "constitution": 1},
+                },
+                "expected_revision": level_four["character"]["revision"],
+                "idempotency_key": "asi-4",
+            },
+        )
+
+        assert applied["sheet"]["abilities"]["wisdom"]["score"] == 18
+        assert applied["sheet"]["spellcasting"]["preparation"]["max_prepared"] == 8
+
+        stale_sheet = applied["sheet"]
+        stale_sheet["spellcasting"]["preparation"]["max_prepared"] = 7
+        stale_actor = await _call(
+            server,
+            "character_create_from",
+            {
+                "mode": "direct",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "name": "Legacy Prepared Cleric",
+                    "sheet": stale_sheet,
+                },
+                "idempotency_key": "stale-actor",
+            },
+        )
+        repaired = await _call(
+            server,
+            "character_state_change",
+            {
+                "character_id": stale_actor["id"],
+                "action": "resource_sync",
+                "payload": {
+                    "reason": (
+                        "Recompute a stored prepared-spell limit after a prior "
+                        "spellcasting ability increase."
+                    )
+                },
+                "expected_revision": stale_actor["revision"],
+                "idempotency_key": "repair-prepared-limit",
+            },
+        )
+        assert (
+            repaired["character"]["sheet"]["spellcasting"]["preparation"]["max_prepared"]
+            == 8
+        )
+        assert repaired["changes"][-1] == {
+            "target": "spellcasting.preparation.max_prepared",
+            "old_value": 7,
+            "new_value": 8,
+            "class_limits": {"cleric": 8},
+        }
+
+    asyncio.run(exercise())
+
+
 def test_lobby_level_advance_is_source_bound_and_reports_catalog_follow_up(
     tmp_path: Path,
 ) -> None:
