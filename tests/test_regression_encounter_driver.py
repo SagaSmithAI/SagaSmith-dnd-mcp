@@ -6137,7 +6137,22 @@ def test_auto_run_finalizes_retained_completed_combat_before_readiness() -> None
                 "state": {
                     "combat": {
                         "id": "combat-1",
+                        "name": "Test encounter",
+                        "scene_id": "scene-1",
                         "active": False,
+                        "combatants": [
+                            {"actor_id": "pc-1"},
+                            {"actor_id": "hostile-1"},
+                            {"actor_id": "hostile-2"},
+                        ],
+                        "reinforcements": [
+                            {"actor_id": "hostile-3"},
+                            {"actor_id": "scout-1"},
+                        ],
+                        "participant_manifest": {
+                            "initial_actor_ids": ["hostile-1", "hostile-2"],
+                            "reinforcement_actor_ids": ["hostile-3", "scout-1"],
+                        },
                         "outcome": {
                             "status": "victory",
                             "summary": "Source hostiles defeated.",
@@ -6165,7 +6180,11 @@ def test_auto_run_finalizes_retained_completed_combat_before_readiness() -> None
         result = asyncio.run(
             _start_or_resume_auto_run(
                 Client(),
-                SimpleNamespace(campaign_id="campaign-1"),
+                SimpleNamespace(
+                    campaign_id="campaign-1",
+                    scene_id="scene-1",
+                    encounter_name="Test encounter",
+                ),
                 ["pc-1"],
                 ["hostile-1"],
                 ["hostile-2"],
@@ -6196,6 +6215,92 @@ def test_auto_run_finalizes_retained_completed_combat_before_readiness() -> None
         ),
     ]
     assert result == {"recovered_after_postcombat_interruption": True}
+
+
+def test_auto_run_does_not_finalize_a_different_completed_encounter() -> None:
+    calls: list[tuple[str, object]] = []
+
+    class Client:
+        async def open(self, campaign_id: str) -> dict[str, str]:
+            return {"phase": "play"}
+
+        async def core(self, tool_id: str, arguments: dict) -> dict:
+            return {
+                "state": {
+                    "combat": {
+                        "id": "old-combat",
+                        "name": "Old encounter",
+                        "scene_id": "scene-1",
+                        "active": False,
+                        "combatants": [
+                            {"actor_id": "pc-1"},
+                            {"actor_id": "old-hostile"},
+                        ],
+                        "participant_manifest": {
+                            "initial_actor_ids": ["old-hostile"],
+                            "reinforcement_actor_ids": [],
+                        },
+                        "outcome": {"status": "victory"},
+                    }
+                }
+            }
+
+    async def start(
+        client: object,
+        args: object,
+        party_ids: list[str],
+        hostile_ids: list[str],
+        additional_hostile_ids: list[str],
+        reinforcement_hostile_ids: list[str],
+        reinforcement_ally_ids: list[str],
+    ) -> dict[str, bool]:
+        calls.append(("start", hostile_ids))
+        return {"started": True}
+
+    async def auto_run(
+        client: object,
+        args: object,
+        party_ids: list[str],
+        hostile_ids: list[str],
+    ) -> dict[str, bool]:
+        calls.append(("auto_run", hostile_ids))
+        return {"completed": True}
+
+    async def fail_if_finalized(*args: object, **kwargs: object) -> dict[str, object]:
+        raise AssertionError("a different retained encounter must not be finalized")
+
+    with (
+        patch("scripts.regression_encounter._start", start),
+        patch("scripts.regression_encounter._auto_run", auto_run),
+        patch(
+            "scripts.regression_encounter._finalize_ended_encounter",
+            fail_if_finalized,
+        ),
+    ):
+        result = asyncio.run(
+            _start_or_resume_auto_run(
+                Client(),
+                SimpleNamespace(
+                    campaign_id="campaign-1",
+                    scene_id="scene-1",
+                    encounter_name="New encounter",
+                ),
+                ["pc-1"],
+                ["new-hostile"],
+                [],
+                [],
+                [],
+            )
+        )
+
+    assert calls == [
+        ("start", ["new-hostile"]),
+        ("auto_run", ["new-hostile"]),
+    ]
+    assert result == {
+        "completed": True,
+        "auto_start": {"started": True},
+    }
 
 
 def test_interrupted_guiding_bolt_ruling_resumes_with_exact_effect() -> None:

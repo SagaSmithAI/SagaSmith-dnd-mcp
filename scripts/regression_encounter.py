@@ -11826,6 +11826,13 @@ async def _finalize_ended_encounter(
         raise RuntimeError("campaign does not retain a completed encounter with a source outcome")
     if args.scene_id and str(combat.get("scene_id") or "") != str(args.scene_id):
         raise RuntimeError("completed encounter scene does not match --scene-id")
+    requested_name = str(getattr(args, "encounter_name", "") or "").strip()
+    if requested_name and str(combat.get("name") or "") != requested_name:
+        raise RuntimeError("completed encounter name does not match --encounter-name")
+    if _retained_combat_actor_ids(combat) != set(actor_ids):
+        raise RuntimeError(
+            "completed encounter does not match the requested encounter participants"
+        )
     postcombat_cleanup = None
     stale_grapple_effect_ids = _postcombat_unavailable_grapple_effect_ids(combat)
     if stale_grapple_effect_ids:
@@ -11866,6 +11873,65 @@ async def _finalize_ended_encounter(
         "checkpoint": checkpoint,
         "actors": [_character_summary(actor_values[actor_id]) for actor_id in actor_ids],
     }
+
+
+def _retained_combat_actor_ids(combat: dict[str, Any]) -> set[str]:
+    return {
+        str(item.get("actor_id") or "").strip()
+        for collection in (
+            combat.get("combatants") or [],
+            combat.get("reinforcements") or [],
+        )
+        for item in collection
+        if isinstance(item, dict) and str(item.get("actor_id") or "").strip()
+    }
+
+
+def _retained_combat_matches_requested_encounter(
+    combat: dict[str, Any],
+    args: argparse.Namespace,
+    *,
+    party_ids: list[str],
+    hostile_ids: list[str],
+    additional_hostile_ids: list[str],
+    reinforcement_hostile_ids: list[str],
+    reinforcement_ally_ids: list[str],
+) -> bool:
+    """Only resume/finalize the exact encounter selected by this invocation."""
+
+    requested_actor_ids = {
+        *party_ids,
+        *hostile_ids,
+        *additional_hostile_ids,
+        *reinforcement_hostile_ids,
+        *reinforcement_ally_ids,
+    }
+    retained_actor_ids = _retained_combat_actor_ids(combat)
+    if retained_actor_ids != requested_actor_ids:
+        return False
+    requested_scene_id = str(getattr(args, "scene_id", "") or "").strip()
+    if requested_scene_id and str(combat.get("scene_id") or "") != requested_scene_id:
+        return False
+    requested_name = str(getattr(args, "encounter_name", "") or "").strip()
+    if requested_name and str(combat.get("name") or "") != requested_name:
+        return False
+    manifest = dict(combat.get("participant_manifest") or {})
+    if manifest:
+        retained_source_ids = {
+            str(item).strip()
+            for key in ("initial_actor_ids", "reinforcement_actor_ids")
+            for item in manifest.get(key) or []
+            if str(item).strip()
+        }
+        requested_source_ids = {
+            *hostile_ids,
+            *additional_hostile_ids,
+            *reinforcement_hostile_ids,
+            *reinforcement_ally_ids,
+        }
+        if retained_source_ids != requested_source_ids:
+            return False
+    return True
 
 
 def _missing_source_reinforcement_ids(
@@ -12012,6 +12078,15 @@ async def _start_or_resume_auto_run(
             retained_combat
             and retained_combat.get("active") is False
             and retained_outcome.get("status") in COMBAT_OUTCOME_STATUSES
+            and _retained_combat_matches_requested_encounter(
+                retained_combat,
+                args,
+                party_ids=party_ids,
+                hostile_ids=hostile_ids,
+                additional_hostile_ids=additional_hostile_ids,
+                reinforcement_hostile_ids=reinforcement_hostile_ids,
+                reinforcement_ally_ids=reinforcement_ally_ids,
+            )
         ):
             return await _finalize_ended_encounter(
                 client,
@@ -12034,6 +12109,22 @@ async def _start_or_resume_auto_run(
             reinforcement_ally_ids,
         )
     elif phase == "combat":
+        campaign = await _campaign(client, args.campaign_id)
+        retained_combat = dict(
+            dict(campaign.get("state") or {}).get("combat") or {}
+        )
+        if not _retained_combat_matches_requested_encounter(
+            retained_combat,
+            args,
+            party_ids=party_ids,
+            hostile_ids=hostile_ids,
+            additional_hostile_ids=additional_hostile_ids,
+            reinforcement_hostile_ids=reinforcement_hostile_ids,
+            reinforcement_ally_ids=reinforcement_ally_ids,
+        ):
+            raise RuntimeError(
+                "active combat does not match the requested encounter participants"
+            )
         recovered_reinforcement_queue = await _resume_source_reinforcements(
             client,
             args,
