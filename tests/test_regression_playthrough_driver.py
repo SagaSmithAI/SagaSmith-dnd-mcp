@@ -44,6 +44,7 @@ from scripts.regression_playthrough import (
     _initialize_source_state,
     _level_spell_choice_counts,
     _long_rest,
+    _manifest_recovery_inputs,
     _matching_check_progress,
     _matching_contest_progress,
     _module_progress_remap_rulings,
@@ -107,6 +108,78 @@ def _manifest_source_ref() -> dict:
         "chunk_id": "chunk-1",
         "excerpt": "The hostage is released.",
     }
+
+
+def test_manifest_recovery_revalidates_imported_modules_and_reviewed_templates() -> None:
+    module_sha = "a" * 64
+    player_sha = "b" * 64
+    corpus_manifest = {
+        "campaign_lines": [
+            {
+                "id": "storm-kings-thunder",
+                "modules": [
+                    {
+                        "path": "SKT.pdf",
+                        "sequence": 1,
+                        "sha256": module_sha,
+                    }
+                ],
+                "player_materials": [
+                    {
+                        "path": "HunterRanger.pdf",
+                        "sha256": player_sha,
+                        "review_status": "reviewed_not_module_pregen",
+                    }
+                ],
+                "play_requirements": {
+                    "recommended_party_size": {
+                        "status": "source_confirmed",
+                        "minimum": 4,
+                        "maximum": 6,
+                        "selected": 6,
+                    }
+                },
+            }
+        ]
+    }
+    import_report = {
+        "action": "full-campaign-corpus-import",
+        "passed": True,
+        "campaigns": [
+            {
+                "campaign_line_id": "storm-kings-thunder",
+                "campaign_id": "campaign-1",
+                "documents": [
+                    {
+                        "relative_path": "SKT.pdf",
+                        "checksum": module_sha,
+                        "module_id": "module-1",
+                    },
+                    {
+                        "relative_path": "HunterRanger.pdf",
+                        "checksum": player_sha,
+                        "character_document": {
+                            "document_kind": "character_sheet",
+                            "ready_to_create": False,
+                            "missing_fields": ["name", "level"],
+                        },
+                    },
+                ],
+            }
+        ],
+    }
+
+    recovered = _manifest_recovery_inputs(
+        corpus_manifest=corpus_manifest,
+        import_report=import_report,
+        campaign_id="campaign-1",
+        campaign_line_id="storm-kings-thunder",
+    )
+
+    assert [item["module_id"] for item in recovered["module_documents"]] == [
+        "module-1"
+    ]
+    assert recovered["review_blocks"] == []
 
 
 @pytest.fixture(autouse=True)

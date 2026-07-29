@@ -66,6 +66,11 @@ from sagasmith_dnd.vocabulary import (
     EFFECTIVE_GAME_PHASES,
 )
 
+from scripts.regression_full_campaigns import (
+    _initialize_playthrough_manifest,
+    _line_review_blocks,
+    _load_and_verify_manifest,
+)
 from scripts.regression_lock import campaign_operation_lock
 from scripts.regression_modules import (
     PRINCIPAL_ID,
@@ -149,6 +154,7 @@ EVENT_KNOWLEDGE_ACTOR_PREFLIGHT_ACTIONS = frozenset(
 
 
 def _arguments() -> argparse.Namespace:
+    repo = Path(__file__).resolve().parents[1]
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--home", type=Path, required=True)
     parser.add_argument("--campaign-id", required=True)
@@ -202,6 +208,7 @@ def _arguments() -> argparse.Namespace:
             "read-scene",
             "roll-source",
             "register-party",
+            "initialize-manifest",
             "register-replacement",
             "prepare-narrative-npc",
             "configure-ending",
@@ -211,6 +218,26 @@ def _arguments() -> argparse.Namespace:
         default="status",
     )
     parser.add_argument("--run-id", default="full-playthrough-v1")
+    parser.add_argument(
+        "--corpus-root",
+        type=Path,
+        help="Root of the verified campaign corpus used by initialize-manifest",
+    )
+    parser.add_argument(
+        "--corpus-manifest",
+        type=Path,
+        default=repo / "fixtures" / "full_campaign_corpus.json",
+        help="Verified corpus metadata used by initialize-manifest",
+    )
+    parser.add_argument(
+        "--campaign-import-report",
+        type=Path,
+        help=(
+            "Prior public full-campaign import report whose module IDs are "
+            "revalidated before initialize-manifest"
+        ),
+    )
+    parser.add_argument("--campaign-line-id", default="")
     parser.add_argument("--advancement-mode", choices=tuple(sorted(ADVANCEMENT_MODES)))
     parser.add_argument("--core-relock-reason", default="")
     parser.add_argument("--module-root", type=Path)
@@ -2067,6 +2094,158 @@ def _party_member(actor: dict[str, Any], selection: dict[str, Any]) -> dict[str,
         "wallet": deepcopy(dict(sheet["inventory"]["wallet"])),
         "equipment": sorted(str(item["id"]) for item in sheet["inventory"]["items"]),
         "knowledge_scope_actor_id": actor_id,
+    }
+
+
+def _manifest_recovery_inputs(
+    *,
+    corpus_manifest: dict[str, Any],
+    import_report: dict[str, Any],
+    campaign_id: str,
+    campaign_line_id: str,
+) -> dict[str, Any]:
+    """Recover audited initialization inputs without treating a report as runtime state."""
+
+    if (
+        import_report.get("action") != "full-campaign-corpus-import"
+        or import_report.get("passed") is not True
+    ):
+        raise ValueError("campaign import report must be a successful public corpus import")
+    line = next(
+        (
+            deepcopy(item)
+            for item in corpus_manifest.get("campaign_lines") or []
+            if str(item.get("id") or "") == campaign_line_id
+        ),
+        None,
+    )
+    if line is None:
+        raise ValueError(f"campaign line is absent from the corpus manifest: {campaign_line_id}")
+    imported = next(
+        (
+            deepcopy(item)
+            for item in import_report.get("campaigns") or []
+            if str(item.get("campaign_line_id") or "") == campaign_line_id
+            and str(item.get("campaign_id") or "") == campaign_id
+        ),
+        None,
+    )
+    if imported is None:
+        raise ValueError("campaign import report does not identify this campaign and line")
+    documents = [
+        deepcopy(item)
+        for item in imported.get("documents") or []
+        if isinstance(item, dict)
+    ]
+    documents_by_path = {
+        str(item.get("relative_path") or ""): item for item in documents
+    }
+    if "" in documents_by_path or len(documents_by_path) != len(documents):
+        raise ValueError("campaign import report document paths must be non-empty and unique")
+
+    module_documents: list[dict[str, Any]] = []
+    for entry in sorted(line.get("modules") or [], key=lambda item: int(item["sequence"])):
+        relative_path = str(entry["path"])
+        document = documents_by_path.get(relative_path)
+        if (
+            document is None
+            or str(document.get("checksum") or "").casefold()
+            != str(entry.get("sha256") or "").casefold()
+            or not str(document.get("module_id") or "")
+        ):
+            raise ValueError(
+                f"campaign import report lacks the verified module document: {relative_path}"
+            )
+        module_documents.append(document)
+
+    player_documents: list[dict[str, Any]] = []
+    for entry in line.get("player_materials") or []:
+        relative_path = str(entry["path"])
+        document = documents_by_path.get(relative_path)
+        if (
+            document is None
+            or str(document.get("checksum") or "").casefold()
+            != str(entry.get("sha256") or "").casefold()
+        ):
+            raise ValueError(
+                f"campaign import report lacks the verified player material: {relative_path}"
+            )
+        document["declared_player_material"] = deepcopy(entry)
+        player_documents.append(document)
+
+    return {
+        "line": line,
+        "module_documents": module_documents,
+        "review_blocks": _line_review_blocks(line, player_documents),
+    }
+
+
+async def _initialize_manifest_from_import_report(
+    client: ExposureClient,
+    *,
+    campaign_id: str,
+    run_id: str,
+    campaign_line_id: str,
+    corpus_root: Path | None,
+    corpus_manifest_path: Path,
+    import_report_path: Path | None,
+) -> dict[str, Any]:
+    """Initialize a missing manifest for a previously verified public import."""
+
+    if not campaign_line_id.strip():
+        raise ValueError("initialize-manifest requires --campaign-line-id")
+    if corpus_root is None or import_report_path is None:
+        raise ValueError(
+            "initialize-manifest requires --corpus-root and --campaign-import-report"
+        )
+    resolved_root = corpus_root.expanduser().resolve()
+    resolved_manifest = corpus_manifest_path.expanduser().resolve()
+    resolved_report = import_report_path.expanduser().resolve()
+    if not resolved_report.is_file():
+        raise FileNotFoundError(resolved_report)
+    corpus_manifest = _load_and_verify_manifest(resolved_manifest, resolved_root)
+    import_report = json.loads(resolved_report.read_text(encoding="utf-8"))
+    recovered = _manifest_recovery_inputs(
+        corpus_manifest=corpus_manifest,
+        import_report=import_report,
+        campaign_id=campaign_id,
+        campaign_line_id=campaign_line_id.strip(),
+    )
+
+    active_modules = await client.domain(
+        "module_query",
+        {"campaign_id": campaign_id, "view": "list"},
+    )
+    if not isinstance(active_modules, list) or any(
+        not isinstance(item, dict) for item in active_modules
+    ):
+        raise RuntimeError("module_query(list) returned an invalid collection")
+    actual_module_ids = {str(item.get("id") or "") for item in active_modules}
+    expected_module_ids = {
+        str(item["module_id"]) for item in recovered["module_documents"]
+    }
+    if actual_module_ids != expected_module_ids:
+        raise RuntimeError(
+            "active campaign modules differ from the verified import report: "
+            f"expected {sorted(expected_module_ids)}, found {sorted(actual_module_ids)}"
+        )
+    initialized = await _initialize_playthrough_manifest(
+        client,
+        line=recovered["line"],
+        module_documents=recovered["module_documents"],
+        campaign_id=campaign_id,
+        run_id=run_id,
+        review_blocks=recovered["review_blocks"],
+    )
+    return {
+        "initialization": initialized,
+        "campaign_line_id": campaign_line_id.strip(),
+        "module_ids": [
+            str(item["module_id"]) for item in recovered["module_documents"]
+        ],
+        "review_blocks": deepcopy(recovered["review_blocks"]),
+        "corpus_manifest": str(resolved_manifest),
+        "campaign_import_report": str(resolved_report),
     }
 
 
@@ -11798,7 +11977,20 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     actor_ids=knowledge_actor_ids,
                     operation=f"{args.action} knowledge recipient",
                 )
-            if args.action == "register-party":
+            if args.action == "initialize-manifest":
+                if phase != "lobby":
+                    raise RuntimeError("initialize-manifest requires the lobby phase")
+                await client.load("lobby.modules")
+                report["result"] = await _initialize_manifest_from_import_report(
+                    client,
+                    campaign_id=args.campaign_id,
+                    run_id=args.run_id,
+                    campaign_line_id=args.campaign_line_id,
+                    corpus_root=args.corpus_root,
+                    corpus_manifest_path=args.corpus_manifest,
+                    import_report_path=args.campaign_import_report,
+                )
+            elif args.action == "register-party":
                 await client.load(_character_group(phase))
                 report["result"] = await _register_party(
                     client,
