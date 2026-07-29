@@ -246,6 +246,17 @@ from sagasmith_dnd.random_stream import (
     initial_random_stream,
     use_random_stream,
 )
+from sagasmith_dnd.resolution_plan import (
+    BoundResolutionPlan,
+    ResolutionPlanBindingError,
+    ResolutionPlanCompilationError,
+    ResolutionPlanExecutionError,
+    bind_resolution_plan,
+    compile_resolution_plan,
+    execute_resolution_plan,
+    resolution_plan_contract,
+)
+from sagasmith_dnd.resources import mutate_bounded_resource
 from sagasmith_dnd.rule_engine import (
     AGENT_RULING_KIND_ORDER,
     EXTERNAL_RULING_KIND_ORDER,
@@ -2847,6 +2858,276 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "source_ref": deepcopy(source_ref),
             "source_excerpt": source_excerpt,
         }
+
+    def character_resolution_plan(
+        sheet: dict[str, Any],
+        source_card_id: str,
+        source_card_kind: str,
+    ) -> tuple[dict[str, Any], Any]:
+        """Resolve one executable plan from the exact recorded character card."""
+
+        collections = {
+            "activity": ("activities",),
+            "feature": ("features", "feats"),
+            "monster_action": ("activities",),
+            "spell": ("spells",),
+            "trait": ("features",),
+        }.get(source_card_kind)
+        if collections is None:
+            raise CombatEngineError(
+                "character-bound resolution plans require an activity, feature, "
+                "monster action, spell, or trait source card"
+            )
+        matches = [
+            item
+            for collection in collections
+            for item in dict(sheet.get("content") or {}).get(collection, [])
+            if isinstance(item, dict)
+            and str(item.get("id") or "") == source_card_id
+            and isinstance(item.get("resolution_plan"), dict)
+        ]
+        if len(matches) != 1:
+            raise CombatEngineError(
+                "source card must resolve to exactly one recorded resolution plan"
+            )
+        card = deepcopy(matches[0])
+        try:
+            compiled = compile_resolution_plan(card["resolution_plan"])
+        except ResolutionPlanCompilationError as error:
+            raise CombatEngineError(
+                f"recorded resolution plan is invalid: {error}"
+            ) from error
+        if (
+            compiled.source_card_id != source_card_id
+            or compiled.source_card_kind != source_card_kind
+        ):
+            raise CombatEngineError(
+                "recorded resolution plan does not match its source card"
+            )
+        return card, compiled
+
+    def agent_resolution_commitment(
+        *,
+        application_id: str,
+        plan_id: str,
+        plan_fingerprint: str,
+        bound_plan_fingerprint: str,
+        source_card_id: str,
+        source_card_kind: str,
+        bindings: dict[str, Any],
+        agent_ruling: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Build the immutable payment contract for one bound semantic plan."""
+
+        return {
+            "application_id": application_id,
+            "plan_id": plan_id,
+            "plan_fingerprint": plan_fingerprint,
+            "bound_plan_fingerprint": bound_plan_fingerprint,
+            "source_card_id": source_card_id,
+            "source_card_kind": source_card_kind,
+            "bindings": deepcopy(bindings),
+            "agent_ruling": deepcopy(agent_ruling),
+        }
+
+    def validate_agent_resolution_commitment(
+        campaign_id: str,
+        raw_commitment: Any,
+        *,
+        encounter: dict[str, Any],
+        source_actor_id: str,
+        source_card_id: str,
+        source_card_kind: str,
+        compiled_plan: Any,
+    ) -> tuple[dict[str, Any], BoundResolutionPlan]:
+        """Bind an Agent decision only to slots declared by its recorded rule card."""
+
+        if not isinstance(raw_commitment, dict):
+            raise CombatEngineError(
+                "agent_resolution_commitment must be an object"
+            )
+        required_fields = {
+            "application_id",
+            "plan_id",
+            "plan_fingerprint",
+            "source_card_id",
+            "source_card_kind",
+            "bindings",
+            "agent_ruling",
+        }
+        supplied_fields = set(raw_commitment)
+        if (
+            supplied_fields != required_fields
+            and supplied_fields
+            != {*required_fields, "bound_plan_fingerprint"}
+        ):
+            raise CombatEngineError(
+                "agent_resolution_commitment requires the exact plan-binding contract"
+            )
+        normalized_ruling = validate_current_scene_agent_ruling(
+            campaign_id,
+            raw_commitment.get("agent_ruling"),
+            encounter=encounter,
+            field="semantic plan commitment",
+            allowed_ruling_kinds={
+                "agent_dm_adjudication",
+                "environmental_consequence",
+                "generic_spell_effect",
+                "module_specific_procedure",
+                "source_or_scene_fact",
+            },
+        )
+        if any(
+            definition.get("owner") == "external_input"
+            for definition in compiled_plan.slots.values()
+        ):
+            raise NeedsRulingError(
+                "semantic plan contains player-owned slots that require an "
+                "external choice receipt before Agent settlement",
+                missing=tuple(
+                    f"player_choice:{slot_name}"
+                    for slot_name, definition in compiled_plan.slots.items()
+                    if definition.get("owner") == "external_input"
+                ),
+                ruling_kind="player_owned_choice",
+            )
+        try:
+            bound = bind_resolution_plan(
+                compiled_plan,
+                raw_commitment.get("bindings"),
+                agent_ruling=normalized_ruling,
+            )
+        except ResolutionPlanBindingError as error:
+            raise CombatEngineError(
+                f"agent_resolution_commitment is invalid: {error}"
+            ) from error
+        normalized = agent_resolution_commitment(
+            application_id=str(
+                raw_commitment.get("application_id") or ""
+            ).strip(),
+            plan_id=str(raw_commitment.get("plan_id") or "").strip(),
+            plan_fingerprint=str(
+                raw_commitment.get("plan_fingerprint") or ""
+            ).strip(),
+            bound_plan_fingerprint=bound.fingerprint,
+            source_card_id=str(
+                raw_commitment.get("source_card_id") or ""
+            ).strip(),
+            source_card_kind=str(
+                raw_commitment.get("source_card_kind") or ""
+            ).strip(),
+            bindings=bound.bindings,
+            agent_ruling=normalized_ruling,
+        )
+        supplied_bound_fingerprint = str(
+            raw_commitment.get("bound_plan_fingerprint") or ""
+        )
+        if (
+            not normalized["application_id"]
+            or normalized["application_id"]
+            != normalized_ruling["application_id"]
+            or normalized["plan_id"] != compiled_plan.id
+            or normalized["plan_fingerprint"] != compiled_plan.fingerprint
+            or (
+                supplied_bound_fingerprint
+                and supplied_bound_fingerprint != bound.fingerprint
+            )
+            or normalized["source_card_id"] != source_card_id
+            or normalized["source_card_kind"] != source_card_kind
+        ):
+            raise CombatEngineError(
+                "agent_resolution_commitment does not match the recorded plan"
+            )
+        for slot_name, definition in compiled_plan.slots.items():
+            if definition.get("kind") not in {
+                "actor_id",
+                "actor_ids",
+            }:
+                continue
+            raw_actor_ids = bound.bindings[slot_name]
+            actor_ids = (
+                [raw_actor_ids]
+                if isinstance(raw_actor_ids, str)
+                else list(raw_actor_ids)
+            )
+            for target_id in actor_ids:
+                require_campaign_actor(campaign_id, str(target_id))
+                require_encounter_combatant(
+                    encounter,
+                    str(target_id),
+                    role=f"semantic plan slot {slot_name}",
+                )
+        require_campaign_actor(campaign_id, source_actor_id)
+        require_encounter_combatant(
+            encounter,
+            source_actor_id,
+            role="semantic plan source",
+        )
+        return normalized, bound
+
+    def require_agent_resolution_payment(
+        encounter: dict[str, Any],
+        *,
+        source_actor_id: str,
+        source_card_id: str,
+        source_card_kind: str,
+        commitment: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Require the exact paid current-turn declaration before plan execution."""
+
+        current = current_combatant(encounter)
+        current_round = int(encounter.get("round", 1) or 1)
+        current_turn_index = int(encounter.get("turn_index", 0) or 0)
+        if current is None or str(current.get("actor_id") or "") != source_actor_id:
+            raise CombatEngineError(
+                "semantic plan must settle during its source actor's paid turn"
+            )
+        for entry in reversed(list(encounter.get("log") or [])):
+            if not isinstance(entry, dict):
+                continue
+            if (
+                int(entry.get("round", -1)) != current_round
+                or int(entry.get("turn_index", -1)) != current_turn_index
+                or str(entry.get("actor_id") or "") != source_actor_id
+            ):
+                continue
+            declaration: Any = None
+            if (
+                source_card_kind in {"activity", "monster_action"}
+                and entry.get("type") == "activity"
+                and str(entry.get("activity_id") or "") == source_card_id
+            ):
+                declaration = dict(entry.get("declaration") or {}).get(
+                    "agent_resolution_commitment"
+                )
+            elif (
+                source_card_kind == "spell"
+                and entry.get("type") == "common_action"
+                and entry.get("action") == "cast"
+                and str(dict(entry.get("payload") or {}).get("spell_id") or "")
+                == source_card_id
+            ):
+                declaration = dict(entry.get("payload") or {}).get(
+                    "agent_resolution_commitment"
+                )
+            elif (
+                source_card_kind == "scene_procedure"
+                and entry.get("type") == "common_action"
+                and entry.get("action") == "improvise"
+                and str(
+                    dict(entry.get("payload") or {}).get("procedure_id") or ""
+                )
+                == source_card_id
+            ):
+                declaration = dict(entry.get("payload") or {}).get(
+                    "agent_resolution_commitment"
+                )
+            if declaration == commitment:
+                return deepcopy(entry)
+        raise CombatEngineError(
+            "semantic plan requires its exact current-turn commitment to be "
+            "paid by the source activity, spell, or scene procedure"
+        )
 
     def agent_save_damage_commitment(
         *,
@@ -13748,7 +14029,84 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "campaign revision conflict: "
                 f"expected {expected_revision}, found {campaign.revision}"
             )
-        if "agent_ruling_commitment" in dict(declaration or {}):
+        current = characters.get(actor_id)
+        activity_card = next(
+            (
+                item
+                for item in dict(current.sheet.get("content") or {}).get(
+                    "activities",
+                    [],
+                )
+                if str(item.get("id") or "") == activity_id
+            ),
+            None,
+        )
+        compiled_activity_plan = None
+        if isinstance(activity_card, dict) and isinstance(
+            activity_card.get("resolution_plan"),
+            dict,
+        ):
+            try:
+                compiled_activity_plan = compile_resolution_plan(
+                    activity_card["resolution_plan"]
+                )
+            except ResolutionPlanCompilationError as error:
+                raise CombatEngineError(
+                    f"recorded activity resolution plan is invalid: {error}"
+                ) from error
+            if (
+                compiled_activity_plan.source_card_id != activity_id
+                or compiled_activity_plan.source_card_kind
+                not in {"activity", "monster_action"}
+            ):
+                raise CombatEngineError(
+                    "recorded activity resolution plan does not match its card"
+                )
+            if "agent_resolution_commitment" not in dict(declaration or {}):
+                return {
+                    **_ruling_status(
+                        "pending_ruling",
+                        "module_specific_procedure",
+                    ),
+                    "result": {
+                        "activity_id": activity_id,
+                        "resolution_plan_contract": resolution_plan_contract(
+                            compiled_activity_plan
+                        ),
+                        "payment_required": True,
+                    },
+                    "campaign_revision": campaign.revision,
+                }
+            if set(dict(declaration or {})) != {
+                "agent_resolution_commitment"
+            }:
+                raise CombatEngineError(
+                    "a planned activity accepts only agent_resolution_commitment"
+                )
+            access.require_campaign(
+                campaign_id,
+                principal_id,
+                roles=CAMPAIGN_DM_ROLES,
+            )
+            normalized_commitment, _bound_plan = (
+                validate_agent_resolution_commitment(
+                    campaign_id,
+                    dict(declaration or {}).get(
+                        "agent_resolution_commitment"
+                    ),
+                    encounter=encounter,
+                    source_actor_id=actor_id,
+                    source_card_id=activity_id,
+                    source_card_kind=(
+                        compiled_activity_plan.source_card_kind
+                    ),
+                    compiled_plan=compiled_activity_plan,
+                )
+            )
+            declaration = {
+                "agent_resolution_commitment": normalized_commitment
+            }
+        elif "agent_ruling_commitment" in dict(declaration or {}):
             if set(dict(declaration or {})) != {
                 "agent_ruling_commitment"
             }:
@@ -13775,15 +14133,26 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     )
                 )
             }
-        current = characters.get(actor_id)
         rule_context = effective_rule_context(
             campaign_id,
             facts={"actor_id": actor_id, "activity_id": activity_id},
             branch_id=resolved_branch_id,
         )
-        random_save_spec = gazer_eye_ray_spec(current.sheet, activity_id)
-        source_contest_spec = source_contest_effect_spec(current.sheet, activity_id)
-        source_save_spec = source_save_effect_spec(current.sheet, activity_id)
+        random_save_spec = (
+            None
+            if compiled_activity_plan is not None
+            else gazer_eye_ray_spec(current.sheet, activity_id)
+        )
+        source_contest_spec = (
+            None
+            if compiled_activity_plan is not None
+            else source_contest_effect_spec(current.sheet, activity_id)
+        )
+        source_save_spec = (
+            None
+            if compiled_activity_plan is not None
+            else source_save_effect_spec(current.sheet, activity_id)
+        )
         random_target_records: dict[str, Any] = {}
         random_targets: list[dict[str, Any]] = []
         source_save_target_record = None
@@ -14534,6 +14903,19 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     f"combat.activity.{core_effect['kind']}",
                 ),
             ]
+        if compiled_activity_plan is not None:
+            applied["requires_ruling"] = True
+            applied["semantic_plan"] = {
+                "status": "paid",
+                "contract": resolution_plan_contract(
+                    compiled_activity_plan
+                ),
+                "commitment": deepcopy(
+                    dict(declaration or {}).get(
+                        "agent_resolution_commitment"
+                    )
+                ),
+            }
         if activation_type == "reaction":
             assert choice_id is not None
             next_encounter = resolve_choice_window(
@@ -14569,7 +14951,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             response_fields={
                 **_ruling_status(
                     "pending_ruling" if applied["requires_ruling"] else "committed",
-                    "descriptive_activity",
+                    (
+                        "module_specific_procedure"
+                        if compiled_activity_plan is not None
+                        else "descriptive_activity"
+                    ),
                 ),
                 "result": result,
                 "combat": next_encounter,
@@ -15780,6 +16166,790 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 ["dnd5e.core.damage.zero_hp"],
                 "combat.source.stabilize",
             ),
+        )
+        return combat_response(campaign_id, principal_id, response)
+
+    def combat_resolution_plan(
+        campaign_id: str,
+        source_actor_id: str,
+        commitment: dict[str, Any],
+        *,
+        principal_id: str,
+        expected_revision: int | None,
+        branch_id: str | None,
+        idempotency_key: str | None,
+    ) -> dict[str, Any]:
+        """Execute one paid, source-bound semantic plan as an atomic mutation."""
+
+        access.require_campaign(
+            campaign_id,
+            principal_id,
+            roles=CAMPAIGN_DM_ROLES,
+        )
+        require_write_contract(expected_revision, idempotency_key)
+        resolved_branch_id = require_current_branch(campaign_id, branch_id)
+        request_payload = {
+            "source_actor_id": source_actor_id,
+            "commitment": deepcopy(commitment),
+            "branch_id": resolved_branch_id,
+        }
+        scope = (
+            f"combat-resolution-plan:{campaign_id}:{resolved_branch_id}:"
+            f"{principal_id}"
+        )
+        replay = replay_idempotent(scope, idempotency_key, request_payload)
+        if replay is not None:
+            return combat_response(campaign_id, principal_id, replay)
+        campaign, encounter = active_encounter(campaign_id)
+        if campaign.revision != expected_revision:
+            raise ValueError(
+                "campaign revision conflict: "
+                f"expected {expected_revision}, found {campaign.revision}"
+            )
+        source_record = require_campaign_actor(campaign_id, source_actor_id)
+        source_card_id = str(commitment.get("source_card_id") or "")
+        source_card_kind = str(commitment.get("source_card_kind") or "")
+        _source_card, compiled_plan = character_resolution_plan(
+            source_record.sheet,
+            source_card_id,
+            source_card_kind,
+        )
+        normalized_commitment, bound_plan = (
+            validate_agent_resolution_commitment(
+                campaign_id,
+                commitment,
+                encounter=encounter,
+                source_actor_id=source_actor_id,
+                source_card_id=source_card_id,
+                source_card_kind=source_card_kind,
+                compiled_plan=compiled_plan,
+            )
+        )
+        payment_entry = require_agent_resolution_payment(
+            encounter,
+            source_actor_id=source_actor_id,
+            source_card_id=source_card_id,
+            source_card_kind=source_card_kind,
+            commitment=normalized_commitment,
+        )
+        if any(
+            item.get("type") == "semantic_plan"
+            and item.get("bound_plan_fingerprint") == bound_plan.fingerprint
+            for item in encounter.get("log", [])
+        ):
+            raise CombatEngineError(
+                "this paid semantic plan has already been settled"
+            )
+
+        class CombatPlanRuntime:
+            def __init__(self) -> None:
+                self.encounter = deepcopy(encounter)
+                self.records: dict[str, Any] = {}
+                self.sheets: dict[str, dict[str, Any]] = {}
+                self.knowledge_transfers: list[ActorKnowledgeTransfer] = []
+
+            def begin(self, plan: BoundResolutionPlan) -> None:
+                if plan.fingerprint != bound_plan.fingerprint:
+                    raise CombatEngineError("semantic plan runtime fingerprint mismatch")
+
+            def rollback(self) -> None:
+                self.encounter = deepcopy(encounter)
+                self.records.clear()
+                self.sheets.clear()
+                self.knowledge_transfers.clear()
+
+            def commit(self) -> None:
+                return None
+
+            def record(self, actor_id: str) -> Any:
+                if actor_id not in self.records:
+                    self.records[actor_id] = require_campaign_actor(
+                        campaign_id,
+                        actor_id,
+                    )
+                return self.records[actor_id]
+
+            def sheet(self, actor_id: str) -> dict[str, Any]:
+                if actor_id not in self.sheets:
+                    self.sheets[actor_id] = deepcopy(
+                        self.record(actor_id).sheet
+                    )
+                return self.sheets[actor_id]
+
+            def actor(self, actor_id: str) -> dict[str, Any]:
+                actor = combat_actor_snapshot(actor_id)
+                actor["sheet"] = deepcopy(self.sheet(actor_id))
+                actor["derived"] = derive_character_sheet(actor["sheet"])
+                return actor
+
+            def set_sheet(self, actor_id: str, sheet: dict[str, Any]) -> None:
+                normalized = validate_character_sheet(sheet)
+                self.sheets[actor_id] = normalized
+                sync_combatant_conditions(
+                    self.encounter,
+                    actor_id,
+                    normalized,
+                )
+
+            def execute(
+                self,
+                opcode: str,
+                arguments: dict[str, Any],
+                *,
+                step_id: str,
+                prior_results: dict[str, dict[str, Any]],
+            ) -> dict[str, Any]:
+                del prior_results
+                if opcode == "roll.table":
+                    table = list(arguments["table"])
+                    total_weight = sum(int(item["weight"]) for item in table)
+                    selected_roll = asdict(roll(f"1d{total_weight}"))
+                    cursor = int(selected_roll["total"])
+                    selected: Any = None
+                    for entry in table:
+                        cursor -= int(entry["weight"])
+                        if cursor <= 0:
+                            selected = deepcopy(entry["value"])
+                            break
+                    return {
+                        "roll": selected_roll,
+                        "value": selected,
+                    }
+                if opcode == "check.save":
+                    ability = str(arguments["ability"])
+                    dc = int(arguments["dc"])
+                    success_reduction = str(
+                        arguments.get("success_reduction") or "none"
+                    )
+                    target_results: list[dict[str, Any]] = []
+                    reduction_by_actor_id: dict[str, str] = {}
+                    for target_id in arguments["target_ids"]:
+                        result = resolve_actor_check(
+                            self.actor(str(target_id)),
+                            kind="save",
+                            ability=ability,
+                            dc=dc,
+                            advantage=bool(
+                                arguments.get("advantage", False)
+                            ),
+                            disadvantage=bool(
+                                arguments.get("disadvantage", False)
+                            ),
+                            rules=effective_rule_context(
+                                campaign_id,
+                                facts={
+                                    "actor_id": str(target_id),
+                                    "kind": "save",
+                                    "ability": ability,
+                                    "dc": dc,
+                                    "semantic_plan_id": compiled_plan.id,
+                                },
+                                branch_id=resolved_branch_id,
+                            ),
+                        )
+                        reduction_by_actor_id[str(target_id)] = (
+                            success_reduction
+                            if result["success"]
+                            else "full"
+                        )
+                        target_results.append(
+                            {
+                                "target_id": str(target_id),
+                                **result,
+                            }
+                        )
+                    return {
+                        "targets": target_results,
+                        "success_by_actor_id": {
+                            item["target_id"]: bool(item["success"])
+                            for item in target_results
+                        },
+                        "damage_reduction_by_actor_id": reduction_by_actor_id,
+                    }
+                if opcode == "check.ability":
+                    actor_id = str(arguments["actor_id"])
+                    return resolve_actor_check(
+                        self.actor(actor_id),
+                        kind="ability",
+                        ability=str(arguments["ability"]),
+                        dc=int(arguments["dc"]),
+                        proficient=bool(arguments.get("proficient", False)),
+                        bonus=int(arguments.get("bonus", 0) or 0),
+                        advantage=bool(arguments.get("advantage", False)),
+                        disadvantage=bool(
+                            arguments.get("disadvantage", False)
+                        ),
+                        rules=effective_rule_context(
+                            campaign_id,
+                            facts={
+                                "actor_id": actor_id,
+                                "kind": "ability",
+                                "ability": str(arguments["ability"]),
+                                "semantic_plan_id": compiled_plan.id,
+                            },
+                            branch_id=resolved_branch_id,
+                        ),
+                    )
+                if opcode == "check.contest":
+                    return resolve_actor_contest(
+                        self.actor(str(arguments["source_actor_id"])),
+                        self.actor(str(arguments["target_actor_id"])),
+                        source_ability=str(arguments["source_ability"]),
+                        target_ability=str(arguments["target_ability"]),
+                        source_proficient=bool(
+                            arguments.get("source_proficient", False)
+                        ),
+                        target_proficient=bool(
+                            arguments.get("target_proficient", False)
+                        ),
+                        source_bonus=int(
+                            arguments.get("source_bonus", 0) or 0
+                        ),
+                        target_bonus=int(
+                            arguments.get("target_bonus", 0) or 0
+                        ),
+                        source_advantage=bool(
+                            arguments.get("source_advantage", False)
+                        ),
+                        source_disadvantage=bool(
+                            arguments.get("source_disadvantage", False)
+                        ),
+                        target_advantage=bool(
+                            arguments.get("target_advantage", False)
+                        ),
+                        target_disadvantage=bool(
+                            arguments.get("target_disadvantage", False)
+                        ),
+                    )
+                if opcode == "attack.resolve":
+                    attacker_id = str(arguments["source_actor_id"])
+                    target_id = str(arguments["target_actor_id"])
+                    attack_plan = preflight_attack(
+                        self.actor(attacker_id),
+                        self.actor(target_id),
+                        action={
+                            "weapon_id": str(arguments["attack_ref"]),
+                            "attack_mode": str(
+                                arguments.get("attack_mode") or "melee"
+                            ),
+                            "context": deepcopy(
+                                arguments.get("context") or {}
+                            ),
+                        },
+                        encounter=self.encounter,
+                        require_attack_action=False,
+                        rules=effective_rule_context(
+                            campaign_id,
+                            facts={
+                                "actor_id": attacker_id,
+                                "target_id": target_id,
+                                "semantic_plan_id": compiled_plan.id,
+                            },
+                            branch_id=resolved_branch_id,
+                        ),
+                    )
+                    attack = roll_attack_action(plan=attack_plan)
+                    defenses = available_attack_defenses(
+                        self.actor(target_id),
+                        plan=attack_plan,
+                        attack=attack,
+                        encounter=self.encounter,
+                    )
+                    if defenses:
+                        raise NeedsRulingError(
+                            "semantic-plan attack opened a target-owned reaction "
+                            "window before damage",
+                            missing=tuple(
+                                f"reaction:{item['id']}" for item in defenses
+                            ),
+                            ruling_kind="player_owned_choice",
+                        )
+                    updated_attacker, updated_target, result = (
+                        resolve_attack_damage(
+                            self.actor(attacker_id),
+                            self.actor(target_id),
+                            plan=attack_plan,
+                            attack=attack,
+                            rules=effective_rule_context(
+                                campaign_id,
+                                facts={
+                                    "actor_id": attacker_id,
+                                    "target_id": target_id,
+                                    "semantic_plan_id": compiled_plan.id,
+                                },
+                                branch_id=resolved_branch_id,
+                            ),
+                        )
+                    )
+                    self.set_sheet(
+                        attacker_id,
+                        dict(updated_attacker["sheet"]),
+                    )
+                    self.set_sheet(
+                        target_id,
+                        dict(updated_target["sheet"]),
+                    )
+                    return result
+                if opcode == "damage.apply":
+                    rolled = (
+                        asdict(roll(str(arguments["expression"])))
+                        if "expression" in arguments
+                        else None
+                    )
+                    base_amount = (
+                        int(rolled["total"])
+                        if rolled is not None
+                        else int(arguments["amount"])
+                    )
+                    reduction = arguments.get("reduction", "none")
+                    results: list[dict[str, Any]] = []
+                    for target_id_value in arguments["target_ids"]:
+                        target_id = str(target_id_value)
+                        target_reduction = (
+                            str(reduction.get(target_id, "none"))
+                            if isinstance(reduction, dict)
+                            else str(reduction)
+                        )
+                        amount = damage_amount_after_reduction(
+                            base_amount,
+                            target_reduction,
+                        )
+                        combatant = require_encounter_combatant(
+                            self.encounter,
+                            target_id,
+                            role="semantic plan damage target",
+                        )
+                        applied = apply_damage_to_sheet(
+                            self.sheet(target_id),
+                            amount=amount,
+                            damage_type=str(arguments["damage_type"]),
+                            source=str(arguments["source"]),
+                            critical=bool(
+                                arguments.get("critical", False)
+                            ),
+                            death_saves=bool(
+                                combatant.get("death_saves", False)
+                                or combatant.get(
+                                    "zero_hp_recovery",
+                                    False,
+                                )
+                            ),
+                        )
+                        self.set_sheet(target_id, applied["sheet"])
+                        add_concentration_window(
+                            self.encounter,
+                            target_id,
+                            applied.get("concentration"),
+                            next_revision=campaign.revision + 1,
+                        )
+                        results.append(
+                            {
+                                "target_id": target_id,
+                                "reduction": target_reduction,
+                                **{
+                                    key: value
+                                    for key, value in applied.items()
+                                    if key != "sheet"
+                                },
+                            }
+                        )
+                    return {
+                        "roll": rolled,
+                        "base_amount": base_amount,
+                        "targets": results,
+                    }
+                if opcode == "healing.apply":
+                    rolled = (
+                        asdict(roll(str(arguments["expression"])))
+                        if "expression" in arguments
+                        else None
+                    )
+                    amount = (
+                        int(rolled["total"])
+                        if rolled is not None
+                        else int(arguments["amount"])
+                    )
+                    results: list[dict[str, Any]] = []
+                    for target_id_value in arguments["target_ids"]:
+                        target_id = str(target_id_value)
+                        applied = apply_healing_to_sheet(
+                            self.sheet(target_id),
+                            amount=amount,
+                        )
+                        self.set_sheet(target_id, applied["sheet"])
+                        results.append(
+                            {
+                                "target_id": target_id,
+                                **{
+                                    key: value
+                                    for key, value in applied.items()
+                                    if key != "sheet"
+                                },
+                            }
+                        )
+                    return {
+                        "roll": rolled,
+                        "amount": amount,
+                        "targets": results,
+                    }
+                if opcode in {"condition.apply", "condition.remove"}:
+                    add = opcode == "condition.apply"
+                    target_results: list[dict[str, Any]] = []
+                    for target_id_value in arguments["target_ids"]:
+                        target_id = str(target_id_value)
+                        sheet = deepcopy(self.sheet(target_id))
+                        apply_condition_change(
+                            sheet,
+                            condition_id=str(arguments["condition_id"]),
+                            add=add,
+                        )
+                        self.set_sheet(target_id, sheet)
+                        target_results.append(
+                            {
+                                "target_id": target_id,
+                                "condition_id": str(
+                                    arguments["condition_id"]
+                                ),
+                                "active": add,
+                            }
+                        )
+                    return {"targets": target_results}
+                if opcode == "effect.apply":
+                    target_results = []
+                    for target_id_value in arguments["target_ids"]:
+                        target_id = str(target_id_value)
+                        effect = {
+                            **deepcopy(arguments["effect"]),
+                            "id": str(arguments["effect_id"]),
+                        }
+                        sheet, effect_id = add_effect(
+                            self.sheet(target_id),
+                            effect,
+                        )
+                        self.set_sheet(target_id, sheet)
+                        target_results.append(
+                            {
+                                "target_id": target_id,
+                                "effect_id": effect_id,
+                            }
+                        )
+                    return {"targets": target_results}
+                if opcode == "effect.remove":
+                    target_results = []
+                    for target_id_value in arguments["target_ids"]:
+                        target_id = str(target_id_value)
+                        sheet = remove_effect(
+                            self.sheet(target_id),
+                            str(arguments["effect_id"]),
+                        )
+                        self.set_sheet(target_id, sheet)
+                        target_results.append(
+                            {
+                                "target_id": target_id,
+                                "effect_id": str(arguments["effect_id"]),
+                            }
+                        )
+                    return {"targets": target_results}
+                if opcode in {"resource.spend", "resource.recover"}:
+                    actor_id = str(arguments["actor_id"])
+                    sheet = deepcopy(self.sheet(actor_id))
+                    resource_ref = str(arguments["resource_ref"])
+                    resource_key = resource_ref.removeprefix("resources.")
+                    if (
+                        not resource_ref.startswith("resources.")
+                        or not resource_key
+                    ):
+                        raise CombatEngineError(
+                            "semantic plan resource_ref must use resources.<key>"
+                        )
+                    resource = dict(sheet.get("resources") or {}).get(
+                        resource_key
+                    )
+                    if not isinstance(resource, dict):
+                        raise CombatEngineError(
+                            f"semantic plan resource is not recorded: {resource_key}"
+                        )
+                    mutate_bounded_resource(
+                        resource,
+                        amount=int(arguments["amount"]),
+                        direction=(
+                            "spend"
+                            if opcode == "resource.spend"
+                            else "recover"
+                        ),
+                    )
+                    self.set_sheet(actor_id, sheet)
+                    return {
+                        "actor_id": actor_id,
+                        "resource_ref": resource_ref,
+                        "value": int(resource["value"]),
+                    }
+                if opcode == "movement.force":
+                    moved = force_move_directly_away(
+                        self.encounter,
+                        source_actor_id=str(
+                            arguments["source_actor_id"]
+                        ),
+                        target_actor_id=str(
+                            arguments["target_actor_id"]
+                        ),
+                        distance_ft=int(arguments["distance_ft"]),
+                    )
+                    self.encounter = moved["encounter"]
+                    return {
+                        key: value
+                        for key, value in moved.items()
+                        if key != "encounter"
+                    }
+                if opcode == "movement.move":
+                    actor_id = str(arguments["actor_id"])
+                    self.encounter = spend_movement(
+                        self.encounter,
+                        actor_id,
+                        int(arguments.get("distance_ft", 0) or 0),
+                        destination=arguments.get("destination"),
+                        path=arguments.get("path"),
+                    )
+                    combatant = require_encounter_combatant(
+                        self.encounter,
+                        actor_id,
+                        role="semantic plan movement actor",
+                    )
+                    return {
+                        "actor_id": actor_id,
+                        "position": deepcopy(combatant.get("position")),
+                        "turn_budget": deepcopy(
+                            combatant.get("turn_budget")
+                        ),
+                    }
+                if opcode in {"actor.link", "actor.unlink"}:
+                    links = self.encounter.setdefault(
+                        "semantic_state",
+                        {},
+                    ).setdefault("actor_links", [])
+                    identity = {
+                        "source_actor_id": str(
+                            arguments["source_actor_id"]
+                        ),
+                        "target_actor_id": str(
+                            arguments["target_actor_id"]
+                        ),
+                        "link_kind": str(arguments["link_kind"]),
+                    }
+                    existing = next(
+                        (
+                            item
+                            for item in links
+                            if all(
+                                item.get(key) == value
+                                for key, value in identity.items()
+                            )
+                        ),
+                        None,
+                    )
+                    if opcode == "actor.link":
+                        if existing is not None:
+                            raise CombatEngineError(
+                                "semantic actor link already exists"
+                            )
+                        link = {
+                            **identity,
+                            "properties": deepcopy(
+                                arguments.get("properties") or {}
+                            ),
+                            "plan_id": compiled_plan.id,
+                            "step_id": step_id,
+                        }
+                        links.append(link)
+                        return deepcopy(link)
+                    if existing is None:
+                        raise CombatEngineError(
+                            "semantic actor link does not exist"
+                        )
+                    links.remove(existing)
+                    return {**identity, "removed": True}
+                if opcode == "actor.control":
+                    target_id = str(arguments["target_actor_id"])
+                    target = require_encounter_combatant(
+                        self.encounter,
+                        target_id,
+                        role="semantic plan control target",
+                    )
+                    mode = str(arguments["mode"])
+                    if mode == "release":
+                        target.pop("controlled_by_actor_id", None)
+                    else:
+                        target["controlled_by_actor_id"] = str(
+                            arguments["controller_actor_id"]
+                        )
+                        target["control_mode"] = mode
+                    return {
+                        "target_actor_id": target_id,
+                        "controller_actor_id": target.get(
+                            "controlled_by_actor_id"
+                        ),
+                        "mode": mode,
+                    }
+                if opcode == "knowledge.transfer":
+                    source_id = str(arguments["from_actor_id"])
+                    destination_id = str(arguments["to_actor_id"])
+                    selected_ids = tuple(
+                        str(item)
+                        for item in arguments["proposition_ids"]
+                    )
+                    visible_ids = {
+                        item.id
+                        for item in knowledge.list(
+                            campaign_id,
+                            actor_id=source_id,
+                            branch_id=resolved_branch_id,
+                        )
+                    }
+                    if not set(selected_ids).issubset(visible_ids):
+                        raise CombatEngineError(
+                            "semantic knowledge transfer must name current source "
+                            "knowledge ids"
+                        )
+                    self.knowledge_transfers.append(
+                        ActorKnowledgeTransfer(
+                            source_actor_id=source_id,
+                            destination_actor_id=destination_id,
+                            knowledge_key_prefix=(
+                                f"semantic-plan.{bound_plan.fingerprint}.{step_id}"
+                            ),
+                            knowledge_ids=selected_ids,
+                            cause=str(
+                                arguments.get("reason")
+                                or "semantic_plan"
+                            ),
+                        )
+                    )
+                    return {
+                        "from_actor_id": source_id,
+                        "to_actor_id": destination_id,
+                        "knowledge_ids": list(selected_ids),
+                    }
+                if opcode in {
+                    "world.counter.adjust",
+                    "world.counter.set",
+                }:
+                    counters = self.encounter.setdefault(
+                        "semantic_state",
+                        {},
+                    ).setdefault("counters", {})
+                    key = str(arguments["key"])
+                    before = int(counters.get(key, 0) or 0)
+                    value = (
+                        before + int(arguments["amount"])
+                        if opcode == "world.counter.adjust"
+                        else int(arguments["value"])
+                    )
+                    if "minimum" in arguments:
+                        value = max(value, int(arguments["minimum"]))
+                    if "maximum" in arguments:
+                        value = min(value, int(arguments["maximum"]))
+                    counters[key] = value
+                    return {"key": key, "before": before, "after": value}
+                if opcode == "state.assert":
+                    subject = arguments["subject"]
+                    expected = arguments.get("expected")
+                    operator = str(arguments["operator"])
+                    passed = (
+                        subject == expected
+                        if operator == "equals"
+                        else subject != expected
+                        if operator == "not_equals"
+                        else bool(subject)
+                        if operator == "truthy"
+                        else not bool(subject)
+                        if operator == "falsy"
+                        else expected in subject
+                        if operator == "contains"
+                        else False
+                    )
+                    if not passed:
+                        raise CombatEngineError(
+                            str(arguments.get("message") or "plan state assertion failed")
+                        )
+                    return {"passed": True}
+                raise CombatEngineError(
+                    f"semantic plan primitive is not implemented: {opcode}"
+                )
+
+        runtime = CombatPlanRuntime()
+        try:
+            settled = execute_resolution_plan(bound_plan, runtime)
+        except (
+            ResolutionPlanExecutionError,
+            ValueError,
+        ) as error:
+            raise CombatEngineError(str(error)) from error
+        next_encounter = runtime.encounter
+        next_encounter["log"] = [
+            *list(next_encounter.get("log") or []),
+            {
+                "type": "semantic_plan",
+                "actor_id": source_actor_id,
+                "source_card_id": source_card_id,
+                "source_card_kind": source_card_kind,
+                "plan_id": compiled_plan.id,
+                "plan_fingerprint": compiled_plan.fingerprint,
+                "bound_plan_fingerprint": bound_plan.fingerprint,
+                "payment": deepcopy(payment_entry),
+                "results": deepcopy(settled.results),
+                "round": int(next_encounter.get("round", 1) or 1),
+                "turn_index": int(
+                    next_encounter.get("turn_index", 0) or 0
+                ),
+            },
+        ][-100:]
+        character_updates = [
+            CharacterStateUpdate(
+                character_id=actor_id,
+                sheet=validate_character_sheet(sheet),
+                notes=validate_character_notes(runtime.record(actor_id).notes),
+                expected_revision=runtime.record(actor_id).revision,
+            )
+            for actor_id, sheet in runtime.sheets.items()
+        ]
+        rules = effective_rule_context(
+            campaign_id,
+            facts={
+                "actor_id": source_actor_id,
+                "source_card_id": source_card_id,
+                "semantic_plan_id": compiled_plan.id,
+            },
+            branch_id=resolved_branch_id,
+        )
+        receipt = {
+            **deepcopy(settled.receipt),
+            "ruleset_fingerprint": rules.fingerprint,
+            "mechanic_id": compiled_plan.id,
+            "event": f"combat.semantic_plan.{compiled_plan.trigger}",
+        }
+        response = commit_campaign_state(
+            campaign,
+            {**dict(campaign.state or {}), "combat": next_encounter},
+            operation="combat.semantic_plan.execute",
+            principal_id=principal_id,
+            branch_id=resolved_branch_id,
+            idempotency_key=str(idempotency_key),
+            scope=scope,
+            payload=request_payload,
+            response_fields={
+                "status": "committed",
+                "result": {
+                    "plan_id": compiled_plan.id,
+                    "plan_fingerprint": compiled_plan.fingerprint,
+                    "bound_plan_fingerprint": bound_plan.fingerprint,
+                    "results": deepcopy(settled.results),
+                    "receipt": deepcopy(settled.receipt),
+                },
+                "combat": next_encounter,
+            },
+            character_updates=character_updates,
+            actor_knowledge_transfers=runtime.knowledge_transfers,
+            rule_receipts=[receipt],
         )
         return combat_response(campaign_id, principal_id, response)
 
@@ -31001,7 +32171,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     @mcp.tool()
     def combat_choice(
         campaign_id: str,
-        action: Literal["open", "resolve", "resolve_defense", "on_hit_ruling"],
+        action: Literal[
+            "open",
+            "resolve",
+            "resolve_defense",
+            "on_hit_ruling",
+            "execute_plan",
+        ],
         payload: dict[str, Any],
         actor_id: str | None = None,
         principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
@@ -31010,7 +32186,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Open or resolve a validated choice window during active combat."""
-        if action == "on_hit_ruling":
+        if action in {"on_hit_ruling", "execute_plan"}:
             access.require_campaign(
                 campaign_id,
                 principal_id,
@@ -31022,7 +32198,23 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             PROFILE_COMBAT,
         )
         resolved_actor_id = str(required({"actor_id": actor_id}, "actor_id"))
-        if action == "open":
+        if action == "execute_plan":
+            data = strict_facade_payload(
+                payload,
+                action="combat_choice(execute_plan)",
+                allowed={"commitment"},
+                required_names=("commitment",),
+            )
+            result = combat_resolution_plan(
+                campaign_id,
+                resolved_actor_id,
+                required(data, "commitment"),
+                principal_id=principal_id,
+                expected_revision=expected_revision,
+                branch_id=branch_id,
+                idempotency_key=idempotency_key,
+            )
+        elif action == "open":
             data = strict_facade_payload(
                 payload,
                 action="combat_choice(open)",
