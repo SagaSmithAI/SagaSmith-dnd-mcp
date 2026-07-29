@@ -6675,6 +6675,82 @@ async def _settle_agent_turn_ruling(
 ) -> dict[str, Any]:
     """Pay one descriptive action and persist the Agent's source-bound outcome."""
 
+    async def pay_action(
+        tool_id: str,
+        arguments: dict[str, Any],
+        *,
+        idempotency_prefix: str,
+    ) -> dict[str, Any]:
+        """Replay a partially paid ruling without charging its action twice.
+
+        Agent rulings span several public MCP transactions.  Their action payment
+        therefore needs an identity derived from the durable application, not from
+        a driver's process-local loop counter.  The legacy keys remain replayable
+        so an encounter interrupted between payment and its final map receipt can
+        recover through the server's own idempotency ledger.
+        """
+
+        application_id = str(ruling["application_id"])
+        stable_key = idempotency_prefix + _operation_token(args, application_id)
+        request = {**arguments, "idempotency_key": stable_key}
+        try:
+            return await client.domain(tool_id, request)
+        except RuntimeError as error:
+            if not any(
+                "no action remaining" in message.casefold()
+                for message in exception_leaf_messages(error)
+            ):
+                raise
+
+        combat = await client.domain(
+            "combat_query",
+            {"campaign_id": args.campaign_id, "view": "status"},
+        )
+        combatants = list(combat.get("combatants") or [])
+        absolute_turn_sequence = (
+            max(int(combat.get("round", 1) or 1) - 1, 0) * len(combatants)
+            + int(combat.get("turn_index", 0) or 0)
+            + 1
+        )
+        legacy_sequences: list[int] = []
+        for candidate in (sequence, absolute_turn_sequence):
+            if candidate > 0 and candidate not in legacy_sequences:
+                legacy_sequences.append(candidate)
+        last_error: RuntimeError | None = None
+        for legacy_sequence in legacy_sequences:
+            legacy_key = idempotency_prefix + _operation_token(
+                args,
+                application_id,
+                legacy_sequence,
+            )
+            if legacy_key == stable_key:
+                continue
+            campaign = await _campaign(client, args.campaign_id)
+            legacy_request = {
+                **arguments,
+                "expected_revision": campaign["revision"],
+                "idempotency_key": legacy_key,
+            }
+            try:
+                replayed = await client.domain(tool_id, legacy_request)
+            except RuntimeError as error:
+                last_error = error
+                if any(
+                    "no action remaining" in message.casefold()
+                    for message in exception_leaf_messages(error)
+                ):
+                    continue
+                raise
+            replayed["recovered_legacy_action_payment"] = True
+            replayed["legacy_turn_sequence"] = legacy_sequence
+            return replayed
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError(
+            "Agent turn ruling action was already spent without a replayable "
+            "application receipt"
+        )
+
     actor_id = str(ruling["actor_id"])
     target_id = str(ruling.get("target_id") or "")
     target_ids = [
@@ -6683,7 +6759,7 @@ async def _settle_agent_turn_ruling(
     ]
     campaign = await _campaign(client, args.campaign_id)
     if ruling.get("activity_id"):
-        action_result = await client.domain(
+        action_result = await pay_action(
             "combat_use_activity",
             {
                 "campaign_id": args.campaign_id,
@@ -6691,11 +6767,8 @@ async def _settle_agent_turn_ruling(
                 "activity_id": str(ruling["activity_id"]),
                 "branch_id": branch_id,
                 "expected_revision": campaign["revision"],
-                "idempotency_key": (
-                    "encounter-agent-turn-activity-"
-                    + _operation_token(args, ruling["application_id"], sequence)
-                ),
             },
+            idempotency_prefix="encounter-agent-turn-activity-",
         )
         if (
             action_result.get("status") != "pending_ruling"
@@ -6705,7 +6778,7 @@ async def _settle_agent_turn_ruling(
                 "reviewed descriptive activity did not enter its Agent ruling boundary"
             )
     elif ruling.get("spell_id"):
-        action_result = await client.domain(
+        action_result = await pay_action(
             "combat_cast_spell",
             {
                 "campaign_id": args.campaign_id,
@@ -6713,11 +6786,8 @@ async def _settle_agent_turn_ruling(
                 "spell_id": str(ruling["spell_id"]),
                 "branch_id": branch_id,
                 "expected_revision": campaign["revision"],
-                "idempotency_key": (
-                    "encounter-agent-turn-spell-"
-                    + _operation_token(args, ruling["application_id"], sequence)
-                ),
             },
+            idempotency_prefix="encounter-agent-turn-spell-",
         )
         payment = dict(dict(action_result.get("result") or {}).get("payment") or {})
         if (
@@ -6736,7 +6806,7 @@ async def _settle_agent_turn_ruling(
                 "settle concentration, and enter its Agent ruling boundary"
             )
     else:
-        action_result = await client.domain(
+        action_result = await pay_action(
             "combat_common_action",
             {
                 "campaign_id": args.campaign_id,
@@ -6751,11 +6821,8 @@ async def _settle_agent_turn_ruling(
                 },
                 "branch_id": branch_id,
                 "expected_revision": campaign["revision"],
-                "idempotency_key": (
-                    "encounter-agent-turn-feature-"
-                    + _operation_token(args, ruling["application_id"], sequence)
-                ),
             },
+            idempotency_prefix="encounter-agent-turn-feature-",
         )
         if action_result.get("status") != "committed":
             raise RuntimeError("Agent-adjudicated feature did not pay its combat action")

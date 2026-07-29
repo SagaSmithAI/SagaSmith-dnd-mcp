@@ -774,6 +774,7 @@ def test_agent_turn_ruling_rolls_area_damage_once_and_applies_each_save() -> Non
         },
     }
     client = Client()
+    args = SimpleNamespace(campaign_id="campaign-1", run_id="run-1")
     with patch(
         "scripts.regression_encounter.campaign_view",
         new=AsyncMock(
@@ -783,7 +784,7 @@ def test_agent_turn_ruling_rolls_area_damage_once_and_applies_each_save() -> Non
         result = asyncio.run(
             _settle_agent_turn_ruling(
                 client,
-                SimpleNamespace(campaign_id="campaign-1", run_id="run-1"),
+                args,
                 branch_id="branch-1",
                 ruling=ruling,
                 sequence=4,
@@ -799,6 +800,10 @@ def test_agent_turn_ruling_rolls_area_damage_once_and_applies_each_save() -> Non
         "combat_hp_change",
         "combat_map_patch",
     ]
+    assert client.calls[0][1]["idempotency_key"] == (
+        "encounter-agent-turn-activity-"
+        + _operation_token(args, ruling["application_id"])
+    )
     hp_change_calls = [
         arguments
         for name, arguments in client.calls
@@ -811,6 +816,83 @@ def test_agent_turn_ruling_rolls_area_damage_once_and_applies_each_save() -> Non
     assert [item["applied_amount"] for item in result["damage_results"]] == [28, 56]
     assert result["save_results"][0]["success"] is True
     assert result["save_results"][1]["success"] is False
+
+
+def test_agent_turn_ruling_recovers_legacy_action_payment_after_interruption() -> None:
+    class Client:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict]] = []
+            self.activity_attempts = 0
+
+        async def domain(self, tool_id: str, arguments: dict) -> dict:
+            self.calls.append((tool_id, arguments))
+            if tool_id == "combat_use_activity":
+                self.activity_attempts += 1
+                if self.activity_attempts < 3:
+                    raise RuntimeError("actor has no action remaining")
+                return {
+                    "status": "pending_ruling",
+                    "result": {"requires_ruling": True},
+                }
+            if tool_id == "combat_query":
+                return {
+                    "round": 1,
+                    "turn_index": 5,
+                    "combatants": [{"actor_id": f"actor-{index}"} for index in range(6)],
+                }
+            if tool_id == "combat_map_patch":
+                return {"status": "committed", "world_patches": arguments["patches"]}
+            raise AssertionError(tool_id)
+
+    ruling = {
+        "application_id": "turn-ruling-interrupted-1",
+        "actor_id": "dragon",
+        "feature_id": "",
+        "activity_id": "poison-breath-activity",
+        "spell_id": "",
+        "round": 1,
+        "target_id": "",
+        "target_ids": [],
+        "save": {},
+        "agent_ruling": {
+            "default_resolver": "agent",
+            "ruling_kind": "agent_dm_adjudication",
+            "decision": "The dragon uses its reviewed breath activity.",
+            "reason": "The cited encounter directs this opening action.",
+            "source_ref": {
+                "module_id": "module-1",
+                "scene_id": "scene-1",
+                "chunk_id": "chunk-1",
+                "content_sha256": "a" * 64,
+            },
+        },
+    }
+    client = Client()
+    with patch(
+        "scripts.regression_encounter.campaign_view",
+        new=AsyncMock(
+            side_effect=[{"revision": revision} for revision in range(10, 14)]
+        ),
+    ):
+        result = asyncio.run(
+            _settle_agent_turn_ruling(
+                client,
+                SimpleNamespace(campaign_id="campaign-1", run_id="run-1"),
+                branch_id="branch-1",
+                ruling=ruling,
+                sequence=1,
+            )
+        )
+
+    activity_calls = [
+        arguments
+        for name, arguments in client.calls
+        if name == "combat_use_activity"
+    ]
+    assert len(activity_calls) == 3
+    assert len({call["idempotency_key"] for call in activity_calls}) == 3
+    assert result["action_result"]["recovered_legacy_action_payment"] is True
+    assert result["action_result"]["legacy_turn_sequence"] == 6
 
 
 def test_agent_turn_innate_spell_pays_daily_use_and_starts_concentration() -> None:
