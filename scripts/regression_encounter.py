@@ -5402,17 +5402,35 @@ def _area_spell_declaration(
     height = int(bounds.get("height_cells", 0) or 0)
     if width <= 0 or height <= 0:
         return None
-    living_combatants = {
+    nondead_combatants = {
         target_id: item
         for target_id, item in combatants.items()
-        if _hit_points(actors.get(target_id, {})) > 0
-        and "dead" not in {
+        if "dead" not in {
             str(condition).casefold() for condition in item.get("conditions", [])
         }
     }
-    observable_ids = set(party_ids) | set(living_targets)
-    friendly_ids = set(party_ids)
-    hostile_ids = set(living_targets)
+    observable_ids = {
+        target_id
+        for target_id, item in nondead_combatants.items()
+        if not item.get("hidden")
+        or actor_id in set(item.get("visible_to_actor_ids") or [])
+        or target_id == actor_id
+    }
+    caster_disposition = str((caster or {}).get("disposition") or "")
+    if caster_disposition in {"friendly", "hostile"}:
+        friendly_ids = {
+            target_id
+            for target_id, item in nondead_combatants.items()
+            if str(item.get("disposition") or "") == caster_disposition
+        }
+        hostile_ids = set(nondead_combatants) - friendly_ids
+    elif actor_id in party_ids:
+        friendly_ids = set(party_ids)
+        hostile_ids = set(nondead_combatants) - friendly_ids
+    else:
+        hostile_ids = set(party_ids)
+        friendly_ids = set(nondead_combatants) - hostile_ids
+    active_hostile_ids = set(living_targets)
     best: tuple[int, int, int, dict[str, Any]] | None = None
     for y in range(height):
         for x in range(width):
@@ -5427,7 +5445,7 @@ def _area_spell_declaration(
                 continue
             affected = {
                 target_id
-                for target_id, item in living_combatants.items()
+                for target_id, item in nondead_combatants.items()
                 if isinstance(item.get("position"), dict)
                 and max(
                     abs(float(item["position"]["x"]) - x),
@@ -5442,7 +5460,10 @@ def _area_spell_declaration(
                 continue
             affected_hostiles = affected & hostile_ids
             affected_friendlies = affected & friendly_ids
-            if len(affected_hostiles) < 2 or affected_friendlies:
+            if (
+                len(affected_hostiles & active_hostile_ids) < 2
+                or affected_friendlies
+            ):
                 continue
             declaration = {
                 "origin": {"x": x, "y": y},

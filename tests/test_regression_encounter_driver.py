@@ -3380,7 +3380,7 @@ def test_party_spell_tactics_choose_safe_structured_area_damage() -> None:
         "ally": _spell_actor(slots=0),
         "goblin-1": _spell_actor(slots=0),
         "goblin-2": _spell_actor(slots=0),
-        "goblin-3": _spell_actor(slots=0),
+        "goblin-3": _spell_actor(hp=0, slots=0),
     }
     positions = {
         "wizard": {"x": 0, "y": 0},
@@ -3405,7 +3405,7 @@ def test_party_spell_tactics_choose_safe_structured_area_damage() -> None:
         "wizard",
         party_ids=["wizard", "ally"],
         actors=actors,
-        living_targets=["goblin-1", "goblin-2", "goblin-3"],
+        living_targets=["goblin-1", "goblin-2"],
         combat=combat,
     )
 
@@ -3420,6 +3420,83 @@ def test_party_spell_tactics_choose_safe_structured_area_damage() -> None:
     assert "ally" not in {
         item["target_id"] for item in declaration["target_contexts"]
     }
+
+
+def test_area_spell_tactics_exclude_dead_combatants_from_target_contexts() -> None:
+    fireball_id = "dnd5e.content.srd2014.spell.fireball"
+    wizard = _spell_actor(fireball_id, slots=0)
+    wizard["sheet"]["spellcasting"].update(
+        {
+            "preparation": {
+                "mode": "spellbook",
+                "selected_spell_ids": [fireball_id],
+            },
+            "spell_slots": {"3": {"value": 1, "max": 3}},
+        }
+    )
+    wizard["sheet"]["content"]["spells"][0].update(
+        {
+            "level": 3,
+            "access": {"prepared": True},
+            "definition": {"range": {"normal_ft": 150}},
+            "resolution": {
+                "kind": "saving_throw",
+                "targeting": {
+                    "mode": "area",
+                    "area": {"shape": "sphere", "radius_ft": 20},
+                },
+                "save": {
+                    "ability": "dexterity",
+                    "success": "half",
+                    "damage": {"base_dice": "8d6", "damage_type": "fire"},
+                },
+            },
+        }
+    )
+    actors = {
+        "wizard": wizard,
+        "goblin-1": _spell_actor(slots=0),
+        "goblin-2": _spell_actor(slots=0),
+        "goblin-dead": _spell_actor(hp=0, slots=0),
+    }
+    combat = {
+        "battle_map": {"bounds": {"width_cells": 12, "height_cells": 12}},
+        "combatants": [
+            {
+                "actor_id": "wizard",
+                "position": {"x": 0, "y": 0},
+                "conditions": [],
+            },
+            {
+                "actor_id": "goblin-1",
+                "position": {"x": 2, "y": 0},
+                "conditions": [],
+            },
+            {
+                "actor_id": "goblin-2",
+                "position": {"x": 2, "y": 1},
+                "conditions": [],
+            },
+            {
+                "actor_id": "goblin-dead",
+                "position": {"x": 2, "y": 2},
+                "conditions": ["dead"],
+            },
+        ],
+    }
+
+    choice = _choose_party_spell(
+        "wizard",
+        party_ids=["wizard"],
+        actors=actors,
+        living_targets=["goblin-1", "goblin-2"],
+        combat=combat,
+    )
+
+    assert choice is not None
+    assert {
+        item["target_id"] for item in choice[3]["target_contexts"]
+    } == {"goblin-1", "goblin-2"}
 
 
 def test_party_tactics_do_not_target_unobserved_hidden_combatants() -> None:
