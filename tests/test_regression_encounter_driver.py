@@ -3446,6 +3446,49 @@ def test_source_flee_becomes_ready_immediately_after_another_actors_damage() -> 
     ) == []
 
 
+def test_source_flee_uses_authoritative_current_hp_after_driver_resume() -> None:
+    actors = {
+        "neronvain": {
+            "sheet": {
+                "combat": {"hp": {"value": 58, "max": 117}},
+                "conditions": [],
+            }
+        }
+    }
+
+    assert _ready_immediate_source_flee_actor_ids(
+        flee_actor_ids={"neronvain"},
+        actors=actors,
+        already_fled_actor_ids=set(),
+        damage_taken_by_actor={"neronvain": 0},
+        flee_after_damage=0,
+        critical_hit_actor_ids=set(),
+        flee_on_critical=False,
+        flee_at_hp=58,
+    ) == ["neronvain"]
+    assert _source_flee_ready(
+        acting_actor_id="neronvain",
+        flee_actor_ids={"neronvain"},
+        defeated_hostile_ids=[],
+        flee_after_defeated=0,
+        trigger_defeated_actor_id="",
+        actor=actors["neronvain"],
+        flee_at_hp=58,
+    )
+
+    actors["neronvain"]["sheet"]["combat"]["hp"]["value"] = 59
+    assert _ready_immediate_source_flee_actor_ids(
+        flee_actor_ids={"neronvain"},
+        actors=actors,
+        already_fled_actor_ids=set(),
+        damage_taken_by_actor={"neronvain": 98},
+        flee_after_damage=0,
+        critical_hit_actor_ids=set(),
+        flee_on_critical=False,
+        flee_at_hp=58,
+    ) == []
+
+
 def test_immediate_source_flee_ignores_defeat_turn_triggers() -> None:
     actors = {
         "runner": {
@@ -3510,6 +3553,30 @@ def test_source_flee_configuration_allows_authored_damage_or_critical_alternativ
         ),
         hostile_ids=["lennithon", "troll-1", "troll-2"],
     ) == {"lennithon"}
+
+
+def test_source_flee_configuration_allows_authored_current_hp_threshold() -> None:
+    assert _validate_source_flee_configuration(
+        SimpleNamespace(
+            flee_actor_id=["neronvain"],
+            flee_trigger_defeated_actor_id="",
+            flee_on_start_actor_id="",
+            flee_after_defeated=0,
+            flee_after_damage=0,
+            flee_at_hp=58,
+            flee_on_critical=False,
+            linked_flee_actor_id=[],
+            linked_flee_trigger_actor_id="",
+            linked_flee_source_excerpt="",
+            flee_source_excerpt=(
+                "He flees when he is reduced to half his hit points or fewer."
+            ),
+            source_excerpt=(
+                "He flees when he is reduced to half his hit points or fewer."
+            ),
+        ),
+        hostile_ids=["neronvain"],
+    ) == {"neronvain"}
 
 
 @pytest.mark.parametrize(

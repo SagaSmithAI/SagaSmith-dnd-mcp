@@ -454,6 +454,15 @@ def _arguments() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--flee-at-hp",
+        type=int,
+        default=0,
+        help=(
+            "Source-defined current hit-point threshold at or below which every "
+            "designated actor attempts to flee"
+        ),
+    )
+    parser.add_argument(
         "--flee-on-critical",
         action="store_true",
         help=(
@@ -5762,6 +5771,8 @@ def _source_flee_ready(
     flee_after_damage: int = 0,
     critical_hit_actor_ids: set[str] | None = None,
     flee_on_critical: bool = False,
+    actor: dict[str, Any] | None = None,
+    flee_at_hp: int = 0,
 ) -> bool:
     """Return whether the source-designated actor must now attempt to leave."""
 
@@ -5776,6 +5787,8 @@ def _source_flee_ready(
         dict(damage_taken_by_actor or {}).get(acting_actor_id, 0) or 0
     ) >= flee_after_damage:
         return True
+    if flee_at_hp > 0 and actor is not None and _hit_points(actor) <= flee_at_hp:
+        return True
     return flee_on_critical and acting_actor_id in set(critical_hit_actor_ids or set())
 
 
@@ -5788,6 +5801,7 @@ def _ready_immediate_source_flee_actor_ids(
     flee_after_damage: int,
     critical_hit_actor_ids: set[str],
     flee_on_critical: bool,
+    flee_at_hp: int = 0,
 ) -> list[str]:
     """Select living actors whose source retreat resolves at damage settlement."""
 
@@ -5803,6 +5817,7 @@ def _ready_immediate_source_flee_actor_ids(
                 and int(damage_taken_by_actor.get(actor_id, 0) or 0)
                 >= flee_after_damage
             )
+            or (flee_at_hp > 0 and _hit_points(actors[actor_id]) <= flee_at_hp)
             or (flee_on_critical and actor_id in critical_hit_actor_ids)
         )
     )
@@ -5847,6 +5862,7 @@ def _validate_source_flee_configuration(
     linked_source_excerpt = str(
         getattr(args, "linked_flee_source_excerpt", "") or ""
     ).strip()
+    flee_at_hp = int(getattr(args, "flee_at_hp", 0) or 0)
     source_flee_ids = {
         *(str(actor_id) for actor_id in args.flee_actor_id),
         str(args.flee_trigger_defeated_actor_id or ""),
@@ -5859,6 +5875,7 @@ def _validate_source_flee_configuration(
         or args.flee_trigger_defeated_actor_id
         or args.flee_after_defeated
         or args.flee_after_damage
+        or flee_at_hp
         or args.flee_on_critical
     )
     defeated_flee_triggers = int(bool(args.flee_trigger_defeated_actor_id)) + int(
@@ -5867,6 +5884,7 @@ def _validate_source_flee_configuration(
     has_triggered_flee_condition = bool(
         defeated_flee_triggers
         or args.flee_after_damage
+        or flee_at_hp
         or args.flee_on_critical
     )
     if triggered_flee_configured and (
@@ -5876,9 +5894,14 @@ def _validate_source_flee_configuration(
     ):
         raise ValueError(
             "source-specific triggered flee requires --flee-actor-id, at least one "
-            "damage, critical-hit, or defeat trigger, and no more than one defeat trigger"
+            "HP, damage, critical-hit, or defeat trigger, and no more than one "
+            "defeat trigger"
         )
-    if args.flee_after_defeated < 0 or args.flee_after_damage < 0:
+    if (
+        args.flee_after_defeated < 0
+        or args.flee_after_damage < 0
+        or flee_at_hp < 0
+    ):
         raise ValueError("source flee thresholds must not be negative")
     if source_flee_ids and (
         not source_flee_ids <= set(hostile_ids) or not str(args.flee_source_excerpt or "").strip()
@@ -8115,6 +8138,7 @@ async def _auto_run(
             flee_after_damage=args.flee_after_damage,
             critical_hit_actor_ids=critical_hit_flee_actor_ids,
             flee_on_critical=args.flee_on_critical,
+            flee_at_hp=args.flee_at_hp,
         )
         for fleeing_actor_id in ready_flee_actor_ids:
             campaign = await _campaign(client, args.campaign_id)
@@ -8152,6 +8176,8 @@ async def _auto_run(
                         else None
                     ),
                     "trigger_damage_threshold": (args.flee_after_damage or None),
+                    "trigger_current_hp": _hit_points(actors[fleeing_actor_id]),
+                    "trigger_hp_threshold": (args.flee_at_hp or None),
                     "trigger_critical_hit": (
                         fleeing_actor_id in critical_hit_flee_actor_ids
                         if args.flee_on_critical
@@ -8324,6 +8350,8 @@ async def _auto_run(
                 flee_after_damage=args.flee_after_damage,
                 critical_hit_actor_ids=critical_hit_flee_actor_ids,
                 flee_on_critical=args.flee_on_critical,
+                actor=actor,
+                flee_at_hp=args.flee_at_hp,
             )
             and _hit_points(actor) > 0
             and actor_id not in fled_hostile_ids
@@ -8370,6 +8398,8 @@ async def _auto_run(
                         else None
                     ),
                     "trigger_damage_threshold": (args.flee_after_damage or None),
+                    "trigger_current_hp": _hit_points(actor),
+                    "trigger_hp_threshold": (args.flee_at_hp or None),
                     "trigger_critical_hit": (
                         actor_id in critical_hit_flee_actor_ids
                         if args.flee_on_critical
@@ -9962,6 +9992,7 @@ async def _auto_run(
         "turns": turns,
         "fled_hostile_ids": sorted(fled_hostile_ids),
         "source_flee_damage_taken": dict(sorted(damage_taken_by_flee_actor.items())),
+        "source_flee_hp_threshold": (args.flee_at_hp or None),
         "source_flee_critical_hit_actor_ids": sorted(critical_hit_flee_actor_ids),
         "linked_source_flee": {
             "actor_ids": sorted(linked_flee_actor_ids),
