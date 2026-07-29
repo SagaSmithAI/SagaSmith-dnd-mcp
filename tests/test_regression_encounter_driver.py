@@ -6002,6 +6002,21 @@ def test_source_six_hostile_layout_keeps_every_actor_on_a_unique_space() -> None
     assert {item["actor_id"] for item in config} == {*party_ids, *hostile_ids}
 
 
+def test_source_eleven_hostile_layout_keeps_every_actor_on_a_unique_space() -> None:
+    party_ids = [f"pc-{index}" for index in range(1, 5)]
+    hostile_ids = [f"ritual-hostile-{index}" for index in range(1, 12)]
+
+    config = _participant_config(party_ids, hostile_ids, surprise_by_actor={})
+    positions = [(item["position"]["x"], item["position"]["y"]) for item in config]
+
+    assert len(config) == 15
+    assert len(positions) == len(set(positions))
+    assert {item["actor_id"] for item in config} == {*party_ids, *hostile_ids}
+    assert next(
+        item["position"] for item in config if item["actor_id"] == "ritual-hostile-11"
+    ) == {"x": 10, "y": 6}
+
+
 def test_no_surprise_layout_marks_neither_side_surprised() -> None:
     party_ids = ["pc-1", "pc-2"]
     hostile_ids = ["goblin-1", "goblin-2"]

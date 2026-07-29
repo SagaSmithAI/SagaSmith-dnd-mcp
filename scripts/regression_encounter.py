@@ -1402,9 +1402,35 @@ def _participant_config(
     agent_positions: dict[str, dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     allies = list(ally_ids or [])
-    if len(party_ids) + len(allies) > 10 or len(hostile_ids) > 10:
+    hostile_positions = (
+        (2, 2),
+        (2, 4),
+        (7, 2),
+        (7, 4),
+        (4, 2),
+        (4, 4),
+        (9, 2),
+        (9, 4),
+        (6, 6),
+        (8, 6),
+        (10, 6),
+        (2, 7),
+        (4, 7),
+        (6, 7),
+        (8, 7),
+        (10, 7),
+        (2, 9),
+        (4, 9),
+        (6, 9),
+        (8, 9),
+        (10, 9),
+    )
+    if len(party_ids) + len(allies) > 10 or len(hostile_ids) > len(
+        hostile_positions
+    ):
         raise ValueError(
-            "default encounter layout supports at most 10 friendly actors and 10 hostiles"
+            "default encounter layout supports at most 10 friendly actors and "
+            f"{len(hostile_positions)} hostiles"
         )
     if set(party_ids) & set(allies):
         raise ValueError("PC and allied-NPC participant ids must be disjoint")
@@ -1442,18 +1468,6 @@ def _participant_config(
             **source_fields(actor_id),
         }
         for index, actor_id in enumerate(allies)
-    )
-    hostile_positions = (
-        (2, 2),
-        (2, 4),
-        (7, 2),
-        (7, 4),
-        (4, 2),
-        (4, 4),
-        (9, 2),
-        (9, 4),
-        (6, 6),
-        (8, 6),
     )
     selected_hidden_ids = set(hidden_actor_ids or [])
     configs.extend(
