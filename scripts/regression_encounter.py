@@ -2115,7 +2115,7 @@ def _agent_target_priorities(
             "priority_groups": priority_groups,
             "ruling_reason": ruling_reason,
             "default_resolver": "agent",
-            "ruling_kind": "tactical_decision",
+            "ruling_kind": "agent_dm_adjudication",
         }
         for actor_id in actor_ids:
             by_actor[actor_id] = value

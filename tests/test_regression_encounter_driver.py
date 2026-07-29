@@ -4899,7 +4899,7 @@ def test_agent_target_priorities_are_tactical_and_party_scoped() -> None:
 
     assert priorities["cleric"] == priorities["rogue"]
     assert priorities["cleric"]["default_resolver"] == "agent"
-    assert priorities["cleric"]["ruling_kind"] == "tactical_decision"
+    assert priorities["cleric"]["ruling_kind"] == "agent_dm_adjudication"
     assert _prioritize_targets(
         "cleric",
         ["drake", "kobold-2", "kobold-1"],
