@@ -21,6 +21,7 @@ from mcp.client.stdio import StdioServerParameters, stdio_client
 from sagasmith_core.text import ascii_slug
 from sagasmith_dnd.abilities import ABILITY_NAMES
 from sagasmith_dnd.engine import ability_modifier
+from sagasmith_dnd.progression import CANTRIPS_KNOWN, KNOWN_SPELLS
 from sagasmith_dnd.vocabulary import (
     CAMPAIGN_GAME_PHASES,
     EFFECTIVE_GAME_PHASES,
@@ -1497,6 +1498,144 @@ def _configure_notes(actor: dict[str, Any], profile: dict[str, Any]) -> dict[str
     return notes
 
 
+def _spellcasting_audit(
+    actor: dict[str, Any],
+    profile: dict[str, Any],
+) -> dict[str, Any]:
+    """Prove that the generated card retained every legal level-one spell choice."""
+
+    configured = dict(profile.get("spellcasting") or {})
+    sheet = dict(actor["sheet"])
+    spellcasting = dict(sheet["spellcasting"])
+    cards = [
+        dict(item)
+        for item in dict(sheet.get("content") or {}).get("spells", [])
+        if isinstance(item, dict)
+    ]
+    cantrips = [item for item in cards if int(item.get("level", -1)) == 0]
+    leveled = [item for item in cards if int(item.get("level", -1)) > 0]
+    known_ids = [
+        str(item["id"])
+        for item in cards
+        if bool(dict(item.get("access") or {}).get("known"))
+    ]
+    prepared_ids = [
+        str(item)
+        for item in dict(spellcasting.get("preparation") or {}).get(
+            "selected_spell_ids", []
+        )
+    ]
+    spellbook_ids = [
+        str(item)
+        for item in dict(spellcasting.get("spellbook") or {}).get("spell_ids", [])
+    ]
+    mode = str(configured.get("mode") or "none")
+    if not configured:
+        return {
+            "mode": "none",
+            "cantrip_spell_ids": [str(item["id"]) for item in cantrips],
+            "cantrip_spell_names": [str(item["name"]) for item in cantrips],
+            "known_spell_ids": known_ids,
+            "prepared_spell_ids": prepared_ids,
+            "spellbook_spell_ids": spellbook_ids,
+            "leveled_spell_ids": [str(item["id"]) for item in leveled],
+        }
+
+    class_name = str(profile["class"]).casefold()
+    level = int(sheet["progression"]["level"])
+    expected_class_cantrips = [
+        str(item) for item in configured.get("cantrips", [])
+    ]
+    expected_cantrip_count = CANTRIPS_KNOWN.get(class_name, (0,) * 20)[level - 1]
+    if len(expected_class_cantrips) != expected_cantrip_count:
+        raise RuntimeError(
+            f"{profile['name']} profile records {len(expected_class_cantrips)} "
+            f"class cantrips but 2014 {profile['class']} level {level} requires "
+            f"{expected_cantrip_count}"
+        )
+    expected_species_cantrip = str(
+        dict(profile.get("species_selection") or {}).get("cantrip") or ""
+    ).strip()
+    expected_cantrip_names = [
+        *expected_class_cantrips,
+        *([expected_species_cantrip] if expected_species_cantrip else []),
+    ]
+    cards_by_name = {
+        str(item.get("name") or "").strip().casefold(): item
+        for item in cards
+    }
+    missing_cantrips = [
+        name for name in expected_cantrip_names if name.casefold() not in cards_by_name
+    ]
+    invalid_cantrips = [
+        name
+        for name in expected_cantrip_names
+        if name.casefold() in cards_by_name
+        and (
+            int(cards_by_name[name.casefold()].get("level", -1)) != 0
+            or not bool(
+                dict(cards_by_name[name.casefold()].get("access") or {}).get("known")
+            )
+        )
+    ]
+    if missing_cantrips or invalid_cantrips:
+        raise RuntimeError(
+            f"{profile['name']} generated card has an incomplete cantrip grant: "
+            f"missing={missing_cantrips}, invalid={invalid_cantrips}"
+        )
+
+    expected_leveled_names = [
+        str(item) for item in configured.get("spells", [])
+    ]
+    missing_leveled = [
+        name for name in expected_leveled_names if name.casefold() not in cards_by_name
+    ]
+    if missing_leveled:
+        raise RuntimeError(
+            f"{profile['name']} generated card is missing configured spells: "
+            + ", ".join(missing_leveled)
+        )
+    expected_leveled_ids = [
+        str(cards_by_name[name.casefold()]["id"])
+        for name in expected_leveled_names
+    ]
+    if class_name in KNOWN_SPELLS:
+        required_known = KNOWN_SPELLS[class_name][level - 1]
+        if len(expected_leveled_names) != required_known:
+            raise RuntimeError(
+                f"{profile['name']} profile records {len(expected_leveled_names)} "
+                f"known leveled spells but 2014 {profile['class']} level {level} "
+                f"requires {required_known}"
+            )
+    if mode == "known" and any(
+        not bool(dict(cards_by_name[name.casefold()].get("access") or {}).get("known"))
+        for name in expected_leveled_names
+    ):
+        raise RuntimeError(f"{profile['name']} known caster has an unowned spell")
+    if mode == "spellbook" and set(spellbook_ids) != set(expected_leveled_ids):
+        raise RuntimeError(
+            f"{profile['name']} spellbook does not exactly match its six "
+            "level-one Wizard spells"
+        )
+    expected_prepared_ids = [
+        str(cards_by_name[str(name).casefold()]["id"])
+        for name in configured.get("prepared", [])
+    ]
+    if prepared_ids != expected_prepared_ids:
+        raise RuntimeError(
+            f"{profile['name']} prepared spell ids do not match the audited profile"
+        )
+    return {
+        "mode": mode,
+        "cantrip_spell_ids": [str(item["id"]) for item in cantrips],
+        "cantrip_spell_names": [str(item["name"]) for item in cantrips],
+        "known_spell_ids": known_ids,
+        "prepared_spell_ids": prepared_ids,
+        "spellbook_spell_ids": spellbook_ids,
+        "leveled_spell_ids": [str(item["id"]) for item in leveled],
+    }
+
+
 async def _catalog(client: ExposureClient, campaign_id: str) -> list[dict[str, Any]]:
     return list(
         _facade_value(
@@ -1988,6 +2127,7 @@ async def _build_character(
             )
         )
         actor = dict(updated)
+    spellcasting_audit = _spellcasting_audit(actor, profile)
     return {
         "actor_id": actor["id"],
         "name": actor["name"],
@@ -2017,10 +2157,12 @@ async def _build_character(
         "level": actor["sheet"]["progression"]["level"],
         "hp": deepcopy(actor["derived"]["hit_points"]),
         "armor_class": actor["derived"]["armor_class"],
-        "spellcasting_mode": actor["sheet"]["spellcasting"]["preparation"]["mode"],
-        "prepared_spell_ids": list(
-            actor["sheet"]["spellcasting"]["preparation"]["selected_spell_ids"]
-        ),
+        "spellcasting_mode": spellcasting_audit["mode"],
+        "cantrip_spell_ids": spellcasting_audit["cantrip_spell_ids"],
+        "known_spell_ids": spellcasting_audit["known_spell_ids"],
+        "prepared_spell_ids": spellcasting_audit["prepared_spell_ids"],
+        "spellbook_spell_ids": spellcasting_audit["spellbook_spell_ids"],
+        "spellcasting_audit": spellcasting_audit,
         "inventory_item_ids": [
             str(item["id"]) for item in actor["sheet"]["inventory"]["items"]
         ],

@@ -19,6 +19,7 @@ from scripts.regression_party import (
     _pack_contents,
     _repair_existing_party_equipment,
     _source_linked_starting_items,
+    _spellcasting_audit,
     _switch_phase,
     audit_profiles,
     lost_mine_party_profiles,
@@ -134,6 +135,91 @@ def test_base_casters_record_their_spell_class_list(
         "max": expected_hp,
         "temp": 0,
     }
+
+
+def test_spellcasting_audit_reports_class_and_species_cantrips_separately() -> None:
+    profile = next(
+        item
+        for item in storm_kings_party_profiles()
+        if item["name"] == "Aelar Quill"
+    )
+    sheet = default_character_sheet()
+    sheet["progression"]["level"] = 1
+    configured = profile["spellcasting"]
+    cantrip_names = [
+        profile["species_selection"]["cantrip"],
+        *configured["cantrips"],
+    ]
+    spell_names = list(configured["spells"])
+
+    def card(name: str, *, level: int) -> dict:
+        identifier = name.casefold().replace(" ", "-")
+        return {
+            "id": identifier,
+            "name": name,
+            "level": level,
+            "access": {
+                "known": level == 0,
+                "prepared": name in configured["prepared"],
+                "always_prepared": False,
+                "in_spellbook": level > 0,
+                "ritual_available": False,
+                "at_will": False,
+                "at_will_sources": [],
+            },
+        }
+
+    sheet["content"]["spells"] = [
+        *[card(name, level=0) for name in cantrip_names],
+        *[card(name, level=1) for name in spell_names],
+    ]
+    spell_ids = [name.casefold().replace(" ", "-") for name in spell_names]
+    sheet["spellcasting"]["spellbook"] = {
+        "enabled": True,
+        "spell_ids": spell_ids,
+    }
+    sheet["spellcasting"]["preparation"]["selected_spell_ids"] = [
+        name.casefold().replace(" ", "-")
+        for name in configured["prepared"]
+    ]
+
+    audit = _spellcasting_audit({"sheet": sheet}, profile)
+
+    assert audit["mode"] == "spellbook"
+    assert audit["cantrip_spell_names"] == cantrip_names
+    assert len(audit["cantrip_spell_ids"]) == 4
+    assert audit["spellbook_spell_ids"] == spell_ids
+    assert len(audit["prepared_spell_ids"]) == 4
+
+
+def test_spellcasting_audit_rejects_a_missing_level_one_cantrip() -> None:
+    profile = next(
+        item
+        for item in storm_kings_party_profiles()
+        if item["name"] == "Seraphine Vale"
+    )
+    sheet = default_character_sheet()
+    sheet["progression"]["level"] = 1
+    sheet["content"]["spells"] = [
+        {
+            "id": "vicious-mockery",
+            "name": "Vicious Mockery",
+            "level": 0,
+            "access": {"known": True},
+        },
+        *[
+            {
+                "id": name.casefold().replace(" ", "-"),
+                "name": name,
+                "level": 1,
+                "access": {"known": True},
+            }
+            for name in profile["spellcasting"]["spells"]
+        ],
+    ]
+
+    with pytest.raises(RuntimeError, match="incomplete cantrip grant"):
+        _spellcasting_audit({"sheet": sheet}, profile)
 
 
 def test_starting_equipment_packs_expand_to_rule_accurate_consumable_items() -> None:
