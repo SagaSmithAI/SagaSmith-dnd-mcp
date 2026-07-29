@@ -7557,6 +7557,7 @@ async def _settle_agent_turn_ruling(
         "feature_id": str(ruling.get("feature_id") or ""),
         "activity_id": str(ruling.get("activity_id") or ""),
         "spell_id": str(ruling.get("spell_id") or ""),
+        "procedure_id": str(ruling.get("procedure_id") or ""),
         "round": int(ruling["round"]),
         "target_id": target_id,
         "target_ids": target_ids,

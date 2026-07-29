@@ -862,9 +862,11 @@ def test_agent_turn_ruling_pays_action_rolls_save_and_persists_world_patch() -> 
     ]
     assert result["save_success"] is False
     assert result["forced_target_id"] == "ally"
+    assert result["procedure_id"] == "scene-compulsion"
     assert client.calls[0][1]["payload"]["procedure_id"] == "scene-compulsion"
     patch_value = client.calls[-1][1]["patches"][0]["value"]
     assert patch_value["application_id"] == "turn-ruling-1"
+    assert patch_value["procedure_id"] == "scene-compulsion"
     assert patch_value["ends_if_source_incapacitated"] is True
 
 
