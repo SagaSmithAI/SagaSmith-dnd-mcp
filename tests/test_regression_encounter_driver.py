@@ -12,6 +12,7 @@ from scripts.regression_encounter import (
     MAGIC_MISSILE_ID,
     EncounterRulingRequiredError,
     _agent_attack_contexts,
+    _agent_casting_perception_ruling,
     _agent_party_absences,
     _agent_positions,
     _agent_target_priorities,
@@ -3126,6 +3127,70 @@ def test_party_spell_tactics_prioritize_recovery_then_supported_offense() -> Non
         actors=actors,
         living_targets=["wizard"],
     ) == (MAGIC_MISSILE_ID, "wizard", 1)
+
+
+def test_agent_casting_perception_adjudicates_only_unseen_living_observers() -> None:
+    ruling = _agent_casting_perception_ruling(
+        {
+            "combatants": [
+                {
+                    "actor_id": "hidden-mage",
+                    "hidden": True,
+                    "visible_to_actor_ids": ["seen-enemy"],
+                    "conditions": [],
+                },
+                {"actor_id": "seen-enemy", "conditions": []},
+                {"actor_id": "unseen-ally", "conditions": []},
+                {"actor_id": "dead-observer", "conditions": ["dead"]},
+            ]
+        },
+        caster_id="hidden-mage",
+    )
+
+    assert ruling is not None
+    assert ruling["casting_perception"] == [
+        {
+            "observer_id": "unseen-ally",
+            "perceived": True,
+            "reason": (
+                "Agent-as-DM: the active encounter records no sound-blocking "
+                "or total-cover fact, so the spell's perceivable components "
+                "betray the hidden casting."
+            ),
+        }
+    ]
+
+
+def test_agent_casting_perception_skips_visible_caster_or_complete_visibility() -> None:
+    assert (
+        _agent_casting_perception_ruling(
+            {
+                "combatants": [
+                    {"actor_id": "mage", "hidden": False, "conditions": []},
+                    {"actor_id": "enemy", "conditions": []},
+                ]
+            },
+            caster_id="mage",
+        )
+        is None
+    )
+    assert (
+        _agent_casting_perception_ruling(
+            {
+                "combatants": [
+                    {
+                        "actor_id": "mage",
+                        "hidden": True,
+                        "visible_to_actor_ids": ["enemy"],
+                        "conditions": [],
+                    },
+                    {"actor_id": "enemy", "conditions": []},
+                ]
+            },
+            caster_id="mage",
+        )
+        is None
+    )
 
 
 def test_party_spell_tactics_respect_preparation_and_upcast_when_needed() -> None:

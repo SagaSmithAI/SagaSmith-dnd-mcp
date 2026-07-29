@@ -5373,6 +5373,57 @@ def _observable_target_ids(
     return observable
 
 
+def _agent_casting_perception_ruling(
+    combat: dict[str, Any],
+    *,
+    caster_id: str,
+) -> dict[str, Any] | None:
+    """Supply the Agent-as-DM observer ruling for perceivable hidden casting."""
+
+    combatants = [
+        item
+        for item in combat.get("combatants", [])
+        if isinstance(item, dict) and str(item.get("actor_id") or "")
+    ]
+    caster = next(
+        (
+            item
+            for item in combatants
+            if str(item.get("actor_id") or "") == caster_id
+        ),
+        None,
+    )
+    if caster is None or not bool(caster.get("hidden", False)):
+        return None
+    visible_to = {
+        str(item) for item in list(caster.get("visible_to_actor_ids") or []) if str(item)
+    }
+    observers = sorted(
+        str(item["actor_id"])
+        for item in combatants
+        if str(item.get("actor_id") or "") != caster_id
+        and "dead"
+        not in {str(value).casefold() for value in item.get("conditions", [])}
+        and str(item.get("actor_id") or "") not in visible_to
+    )
+    if not observers:
+        return None
+    return {
+        "casting_perception": [
+            {
+                "observer_id": observer_id,
+                "perceived": True,
+                "reason": (
+                    "Agent-as-DM: the active encounter records no sound-blocking "
+                    "or total-cover fact, so the spell's perceivable components "
+                    "betray the hidden casting."
+                ),
+            }
+            for observer_id in observers
+        ]
+    }
+
+
 def _body_thief_sides(
     combat: dict[str, Any],
     *,
@@ -9444,8 +9495,18 @@ async def _auto_run(
                 cast_arguments["declaration"] = {"target_id": spell_target_id}
             elif area_declaration is not None:
                 cast_arguments["declaration"] = area_declaration
+            casting_perception_ruling = _agent_casting_perception_ruling(
+                combat,
+                caster_id=actor_id,
+            )
+            if casting_perception_ruling is not None:
+                cast_arguments["component_ruling"] = casting_perception_ruling
             cast = await client.domain("combat_cast_spell", cast_arguments)
             spell_result: dict[str, Any] = {"cast": cast}
+            if casting_perception_ruling is not None:
+                spell_result["agent_casting_perception_ruling"] = (
+                    casting_perception_ruling
+                )
             source_flee_observations = _record_source_flee_damage(
                 cast,
                 flee_actor_ids=set(args.flee_actor_id),
