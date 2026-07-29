@@ -153,6 +153,7 @@ def test_character_check_contest_is_atomic_branch_scoped_and_replayable(
                 "target_actor_id": target["id"],
                 "source_ability": "deception",
                 "target_ability": "insight",
+                "source_bonus": 2,
                 "target_advantage": True,
             },
             "expected_revision": current["revision"],
@@ -160,7 +161,7 @@ def test_character_check_contest_is_atomic_branch_scoped_and_replayable(
             "idempotency_key": "contest",
         }
 
-        with pytest.raises(Exception, match="skill checks derive proficiency, expertise"):
+        with pytest.raises(Exception, match="skill checks derive proficiency and expertise"):
             await _call(
                 server,
                 "character_check",
@@ -191,6 +192,34 @@ def test_character_check_contest_is_atomic_branch_scoped_and_replayable(
                     "idempotency_key": "invalid-contest-override",
                 },
             )
+        adjusted_check = await _call(
+            server,
+            "character_check",
+            {
+                "campaign_id": campaign["id"],
+                "action": "check",
+                "payload": {
+                    "actor_id": source["id"],
+                    "kind": "ability",
+                    "ability": "deception",
+                    "dc": 10,
+                    "bonus": 2,
+                },
+                "expected_revision": current["revision"],
+                "branch_id": branch_id,
+                "idempotency_key": "source-modified-skill-check",
+            },
+        )
+        assert (
+            adjusted_check["total"] - adjusted_check["natural"]
+            == 9
+        )
+        current = await _call(
+            server,
+            "campaign_get",
+            {"campaign_id": campaign["id"]},
+        )
+        arguments["expected_revision"] = current["revision"]
         settled = await _call(server, "character_check", arguments)
         replay = await _call(server, "character_check", arguments)
 
@@ -204,7 +233,7 @@ def test_character_check_contest_is_atomic_branch_scoped_and_replayable(
         assert "success" not in settled["target_check"]
         assert (
             settled["source_check"]["total"] - settled["source_check"]["natural"]
-            == 7
+            == 9
         )
         source_total = settled["source_check"]["total"]
         target_total = settled["target_check"]["total"]

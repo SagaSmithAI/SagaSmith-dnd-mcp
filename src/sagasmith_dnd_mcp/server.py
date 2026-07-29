@@ -13792,9 +13792,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         derived_skill = normalized_ability in dict(
             actor_snapshot["derived"].get("skills") or {}
         )
-        if kind in ABILITY_CHECK_KINDS and derived_skill and (proficient or bonus):
+        if kind in ABILITY_CHECK_KINDS and derived_skill and proficient:
             raise CombatEngineError(
-                "skill checks derive proficiency, expertise, and bonuses from the actor card"
+                "skill checks derive proficiency and expertise from the actor card; "
+                "bonus is reserved for external rule or source modifiers"
             )
         require_write_contract(expected_revision, idempotency_key)
         resolved_branch_id = require_current_branch(campaign_id, branch_id)
@@ -13933,10 +13934,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             derived_skill = normalized_ability in dict(
                 actor_snapshot["derived"].get("skills") or {}
             )
-            if derived_skill and (proficient or bonus):
+            if derived_skill and proficient:
                 raise CombatEngineError(
-                    f"contest {label} skill derives proficiency, expertise, and "
-                    "bonuses from the actor card"
+                    f"contest {label} skill derives proficiency and expertise "
+                    "from the actor card; bonus is reserved for external modifiers"
                 )
         campaign = campaigns.get(campaign_id)
         if campaign_rules_edition(campaign.id) != "2014":
@@ -14466,9 +14467,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         actor = combat_actor_snapshot(actor_id)
         normalized_ability = str(ability).strip().casefold().replace(" ", "_")
         derived_skill = normalized_ability in dict(actor["derived"].get("skills") or {})
-        if kind in ABILITY_CHECK_KINDS and derived_skill and (proficient or bonus):
+        if kind in ABILITY_CHECK_KINDS and derived_skill and proficient:
             raise CombatEngineError(
-                "skill checks derive proficiency and bonuses from the actor card"
+                "skill checks derive proficiency from the actor card; bonus is "
+                "reserved for external rule or source modifiers"
             )
         next_state = dict(campaign.state or {})
         encounter = dict(next_state.get("combat") or {})
