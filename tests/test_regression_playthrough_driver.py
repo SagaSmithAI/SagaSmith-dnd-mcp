@@ -79,6 +79,7 @@ from scripts.regression_playthrough import (
     _roll_source_sequence,
     _roll_source_table,
     _scene_progress_percent,
+    _scene_progress_write_status,
     _segment_completion_record,
     _set_source_exhaustion,
     _short_rest,
@@ -108,6 +109,13 @@ def _manifest_source_ref() -> dict:
         "chunk_id": "chunk-1",
         "excerpt": "The hostage is released.",
     }
+
+
+def test_scene_progress_writes_keep_current_scene_authoritative() -> None:
+    assert _scene_progress_write_status({"status": "current"}, completed=False) == "current"
+    assert _scene_progress_write_status({"status": "current"}, completed=True) == "current"
+    assert _scene_progress_write_status({"status": "active"}, completed=True) == "completed"
+    assert _scene_progress_write_status(None, completed=False) == "active"
 
 
 def test_manifest_recovery_revalidates_imported_modules_and_reviewed_templates() -> None:
@@ -495,6 +503,16 @@ def test_advance_scene_identity_supports_exact_retry_and_later_revisit() -> None
             if tool_id == "module_query":
                 if arguments["view"] == "progress":
                     return [deepcopy(self.progress)] if self.progress is not None else []
+                if arguments["view"] == "current":
+                    if self.progress is None or self.progress["status"] != "current":
+                        return None
+                    return {
+                        "scene_id": self.progress["scene_id"],
+                        "progress": {
+                            "status": self.progress["status"],
+                            "percent": self.progress["progress"],
+                        },
+                    }
                 requested_scene_id = arguments["payload"]["scene_id"]
                 if requested_scene_id == "scene-old":
                     return {
@@ -576,15 +594,28 @@ def test_advance_scene_identity_supports_exact_retry_and_later_revisit() -> None
         == client.replace_calls[1]["payload"]["manifest"]
     )
     assert len(client.progress_calls) == 1
+    assert client.progress_calls[0]["status"] == "current"
     assert client.progress_calls[0]["expected_state_version"] == 0
+
+    # Repair playthroughs written by the former driver without replaying the
+    # already-committed transition under a changed idempotency payload.
+    assert client.progress is not None
+    client.progress["status"] = "active"
+    asyncio.run(advance(client, "town-visit-1"))
+    assert len(client.progress_calls) == 2
+    assert client.progress_calls[-1]["status"] == "current"
+    assert (
+        client.progress_calls[-1]["idempotency_key"]
+        != client.progress_calls[0]["idempotency_key"]
+    )
 
     client.manifest["world_state"]["visit_marker"] = 2
     client.manifest["current"]["scene_id"] = "scene-old"
     asyncio.run(advance(client, "town-visit-2"))
-    revisit_key = client.replace_calls[2]["idempotency_key"]
+    revisit_key = client.replace_calls[3]["idempotency_key"]
     assert revisit_key != first_key
-    assert len(client.progress_calls) == 2
-    assert client.progress_calls[1]["expected_state_version"] == 1
+    assert len(client.progress_calls) == 3
+    assert client.progress_calls[2]["expected_state_version"] == 2
     assert client.manifest["world_state"]["scene_transitions"] == {
         "town-visit-1": {
             "from_scene_id": "scene-old",
@@ -630,7 +661,7 @@ def test_advance_scene_identity_supports_exact_retry_and_later_revisit() -> None
         "source_excerpt": "The survivors carry the Stone to Town.",
         "source_ref": citation_ref,
     }
-    assert len(client.progress_calls) == 3
+    assert len(client.progress_calls) == 4
 
 
 def test_advance_scene_recovers_when_progress_commits_before_manifest() -> None:
@@ -677,6 +708,16 @@ def test_advance_scene_recovers_when_progress_commits_before_manifest() -> None:
             if tool_id == "module_query" and arguments["view"] == "progress":
                 return [deepcopy(self.progress)] if self.progress is not None else []
             if tool_id == "module_query":
+                if arguments["view"] == "current":
+                    if self.progress is None or self.progress["status"] != "current":
+                        return None
+                    return {
+                        "scene_id": self.progress["scene_id"],
+                        "progress": {
+                            "status": self.progress["status"],
+                            "percent": self.progress["progress"],
+                        },
+                    }
                 requested = arguments["payload"]["scene_id"]
                 if requested == "scene-old":
                     return {
@@ -10490,7 +10531,20 @@ def test_start_play_uses_public_quality_gate_phase_and_scene_tools() -> None:
         async def domain(self, tool_id: str, arguments: dict):
             self.calls.append((tool_id, arguments))
             if tool_id == "playthrough_manifest" and arguments["action"] == "get":
-                return {"manifest": deepcopy(self.manifest)}
+                return {
+                    "manifest": deepcopy(self.manifest),
+                    "runtime": {
+                        "current_scene": (
+                            {
+                                "scene_id": "scene-1",
+                                "progress": {"status": "current", "percent": 1},
+                            }
+                            if self.manifest.get("current", {}).get("scene_id") == "scene-1"
+                            else None
+                        )
+                    },
+                    "campaign_revision": 10,
+                }
             if tool_id == "playthrough_manifest" and arguments["action"] == "replace":
                 self.manifest = deepcopy(arguments["payload"]["manifest"])
                 return {"manifest": deepcopy(self.manifest), "campaign_revision": 9}
@@ -10501,6 +10555,11 @@ def test_start_play_uses_public_quality_gate_phase_and_scene_tools() -> None:
             if tool_id == "module_query":
                 if arguments["view"] == "progress":
                     return []
+                if arguments["view"] == "current":
+                    return {
+                        "scene_id": "scene-1",
+                        "progress": {"status": "current", "percent": 1},
+                    }
                 return {
                     "module_id": "module-1",
                     "scene_id": "scene-1",
@@ -10512,7 +10571,7 @@ def test_start_play_uses_public_quality_gate_phase_and_scene_tools() -> None:
             if tool_id == "module_set_progress":
                 return {
                     "scene_id": "scene-1",
-                    "status": "active",
+                    "status": arguments["status"],
                     "progress": 1,
                     "state": deepcopy(arguments["state"]),
                     "current_location_key": "",
@@ -10540,3 +10599,9 @@ def test_start_play_uses_public_quality_gate_phase_and_scene_tools() -> None:
     assert client.manifest["current"]["scene_id"] == "scene-1"
     assert client.manifest["traversal"]["visited_scene_ids"] == ["scene-1"]
     assert any(name == "game_phase" for name, _ in client.calls)
+    progress_call = next(
+        arguments
+        for name, arguments in client.calls
+        if name == "module_set_progress"
+    )
+    assert progress_call["status"] == "current"

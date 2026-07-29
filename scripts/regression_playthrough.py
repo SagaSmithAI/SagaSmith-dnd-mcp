@@ -849,6 +849,21 @@ def _scene_progress_percent(progress: dict[str, Any] | None) -> int:
     return int(value or 0)
 
 
+def _scene_progress_write_status(
+    progress: dict[str, Any] | None,
+    *,
+    completed: bool = False,
+) -> str:
+    """Preserve the authoritative current-scene selector while updating progress."""
+
+    current = str((progress or {}).get("status") or "")
+    if current == "current":
+        return "current"
+    if completed:
+        return "completed"
+    return current or "active"
+
+
 def _scene_revision_signature(scene: dict[str, Any]) -> tuple[str, str, int, int]:
     return (
         " ".join(str(scene.get("chapter") or "").casefold().split()),
@@ -2872,7 +2887,11 @@ async def _advance_scene(
             "advance-scene occurrence id already exists in SceneProgress with "
             "different transition evidence"
         )
-    if existing_progress_transition == transition_record:
+    needs_current_repair = (
+        existing_progress_transition == transition_record
+        and str((progress_before or {}).get("status") or "") != "current"
+    )
+    if existing_progress_transition == transition_record and not needs_current_repair:
         progress_result = deepcopy(progress_before)
     else:
         progress_entries[scene_identity] = transition_record
@@ -2883,7 +2902,7 @@ async def _advance_scene(
             {
                 "campaign_id": campaign_id,
                 "scene_id": scene_id,
-                "status": ("completed" if current_status == "completed" else "active"),
+                "status": "current",
                 "progress": (100 if current_status == "completed" else max(current_progress, 1)),
                 "state": {
                     **progress_state,
@@ -2897,10 +2916,29 @@ async def _advance_scene(
                 "expected_state_version": int((progress_before or {}).get("state_version", 0) or 0),
                 "idempotency_key": _mutation_key(
                     run_id,
-                    "scene-transition-progress",
+                    (
+                        "scene-transition-current-repair"
+                        if needs_current_repair
+                        else "scene-transition-progress"
+                    ),
                     scene_identity,
                 ),
             },
+        )
+    current_runtime_scene = _facade_value(
+        await client.domain(
+            "module_query",
+            {"campaign_id": campaign_id, "view": "current"},
+        )
+    )
+    if (
+        not isinstance(current_runtime_scene, dict)
+        or str(current_runtime_scene.get("scene_id") or "") != scene_id
+        or str(dict(current_runtime_scene.get("progress") or {}).get("status") or "")
+        != "current"
+    ):
+        raise RuntimeError(
+            "module current-scene projection did not converge with the scene transition"
         )
     transitions[scene_identity] = transition_record
     manifest["world_state"] = {
@@ -2953,9 +2991,17 @@ async def _advance_scene(
         identity=f"advance-scene:{scene_identity}",
         payload={"manifest": manifest},
     )
+    observed = await _manifest_get(client, campaign_id)
+    observed_current = dict(dict(observed.get("runtime") or {}).get("current_scene") or {})
+    if observed_current and str(observed_current.get("scene_id") or "") != scene_id:
+        raise RuntimeError(
+            "live playthrough projection diverged from the authoritative current scene"
+        )
     return {
-        **replaced,
+        **observed,
+        "mutation_receipt": replaced,
         "scene_progress": progress_result,
+        "current_scene": current_runtime_scene,
     }
 
 
@@ -3548,7 +3594,7 @@ async def _resolve_check(
             {
                 "campaign_id": campaign_id,
                 "scene_id": scene_id,
-                "status": "active",
+                "status": _scene_progress_write_status(progress_before),
                 "progress": max(_scene_progress_percent(progress_before), 50),
                 "state": {
                     **deepcopy(dict((progress_before or {}).get("state") or {})),
@@ -3835,7 +3881,7 @@ async def _resolve_contest(
             {
                 "campaign_id": campaign_id,
                 "scene_id": scene_id,
-                "status": "active",
+                "status": _scene_progress_write_status(progress_before),
                 "progress": max(_scene_progress_percent(progress_before), 50),
                 "state": {
                     **deepcopy(dict((progress_before or {}).get("state") or {})),
@@ -4114,7 +4160,10 @@ async def _record_event(
             {
                 "campaign_id": campaign_id,
                 "scene_id": scene_id,
-                "status": "completed" if progress_percent == 100 else "active",
+                "status": _scene_progress_write_status(
+                    progress_before,
+                    completed=progress_percent == 100,
+                ),
                 "progress": (
                     progress_percent
                     if progress_percent is not None
@@ -4787,7 +4836,10 @@ async def _record_outcome(
             {
                 "campaign_id": campaign_id,
                 "scene_id": scene_id,
-                "status": "completed" if progress_percent == 100 else "active",
+                "status": _scene_progress_write_status(
+                    progress_before,
+                    completed=progress_percent == 100,
+                ),
                 "progress": (
                     progress_percent
                     if progress_percent is not None
@@ -10462,18 +10514,20 @@ async def _start_play(
         reachable_scene_ids=reachable_scene_ids,
         excluded_scenes=[],
     )
-    synced = await _manifest_mutation(
+    sync_receipt = await _manifest_mutation(
         client,
         campaign_id=campaign_id,
         action="sync",
         run_id=run_id,
         identity=f"start-play-sync:{scene_id}",
     )
+    synced = await _manifest_get(client, campaign_id)
     return {
         "ready": ready,
         "phase_change": phase_change,
         "scene": scene,
         "sync": synced,
+        "sync_receipt": sync_receipt,
     }
 
 
