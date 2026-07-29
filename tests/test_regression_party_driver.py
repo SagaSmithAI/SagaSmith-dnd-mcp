@@ -167,6 +167,13 @@ def test_spellcasting_audit_reports_class_and_species_cantrips_separately() -> N
                 "at_will": False,
                 "at_will_sources": [],
             },
+            "ruling_requirements": [
+                {
+                    "default_resolver": "agent",
+                    "ruling_kind": "generic_spell_effect",
+                    "source_excerpt": f"{name} uses its source-described effect.",
+                }
+            ],
         }
 
     sheet["content"]["spells"] = [
@@ -190,6 +197,11 @@ def test_spellcasting_audit_reports_class_and_species_cantrips_separately() -> N
     assert len(audit["cantrip_spell_ids"]) == 4
     assert audit["spellbook_spell_ids"] == spell_ids
     assert len(audit["prepared_spell_ids"]) == 4
+    assert audit["resolution_audit"]["complete"] is True
+
+    sheet["content"]["spells"][0].pop("ruling_requirements")
+    with pytest.raises(RuntimeError, match="without a settlement path"):
+        _spellcasting_audit({"sheet": sheet}, profile)
 
 
 def test_spellcasting_audit_rejects_a_missing_level_one_cantrip() -> None:

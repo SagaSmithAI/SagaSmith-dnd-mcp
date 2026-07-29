@@ -242,16 +242,27 @@ def test_scene_readiness_blocks_missing_combatants_and_reserves(tmp_path: Path) 
                         "always_prepared": True,
                         "ritual_available": False,
                     },
-                "definition": {
-                    "casting_time": "1 action",
+                    "definition": {
+                        "casting_time": "1 action",
                     "duration": {
                         "kind": "instantaneous",
                         "value": 0,
                         "unit": "round",
-                        "concentration": False,
+                            "concentration": False,
+                        },
                     },
-                },
-            }
+                    "ruling_requirements": [
+                        {
+                            "kind": "effect_semantics",
+                            "reason": "Resolve the module spell from its reviewed text.",
+                            "source_excerpt": "The module spell affects one creature.",
+                            "default_resolver": "agent",
+                            "ruling_kind": "generic_spell_effect",
+                            "policy_ref": "resolution_plan.v1",
+                            "requires_external_input_only_for": [],
+                        }
+                    ],
+                }
         ]
         actors["bandit1"] = await _call(
             server,
@@ -310,12 +321,16 @@ def test_scene_readiness_blocks_missing_combatants_and_reserves(tmp_path: Path) 
         mixed_card = bandit_group["actors"][0]["combat_card"]
         assert mixed_card["settlement"] == "mixed"
         assert mixed_card["ruling_spell_ids"] == ["module-spell"]
+        assert mixed_card["cantrip_spell_ids"] == ["module-spell"]
+        assert mixed_card["spell_resolution_audit"]["entries"][0][
+            "resolution_path"
+        ] == "agent_ruling"
         assert mixed_card["automatic_spell_ids"] == []
         assert mixed_card["unarmed_fallback"] is True
         assert mixed_card["unarmed_attack_id"] == "unarmed-strike"
         assert mixed_card["manual_rulings"] == [
             "Mystery Bow: ranged weapon range is missing",
-            "Prepared spells require DM effect settlement: module-spell",
+            "Available spells require Agent effect settlement: module-spell",
         ]
         assert mixed_card["blocking_reasons"] == ["missing_attack_range"]
         assert [
@@ -326,7 +341,7 @@ def test_scene_readiness_blocks_missing_combatants_and_reserves(tmp_path: Path) 
             ("agent", "agent_dm_adjudication"),
         ]
         assert mixed_card["agent_rulings"] == [
-            "Prepared spells require DM effect settlement: module-spell"
+            "Available spells require Agent effect settlement: module-spell"
         ]
         assert mixed_card["external_input_requirements"] == [
             "Mystery Bow: ranged weapon range is missing"
@@ -374,7 +389,7 @@ def test_scene_readiness_blocks_missing_combatants_and_reserves(tmp_path: Path) 
             item for item in ready["groups"] if item["key"] == "rusk-bandits"
         )
         assert repaired_bandit_group["actors"][0]["combat_card"]["manual_rulings"] == [
-            "Prepared spells require DM effect settlement: module-spell"
+            "Available spells require Agent effect settlement: module-spell"
         ]
         assert repaired_bandit_group["actors"][0]["combat_card"]["ruling_requirements"][0][
             "default_resolver"

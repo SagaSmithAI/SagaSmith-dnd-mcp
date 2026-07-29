@@ -189,7 +189,7 @@ def test_custom_monster_plan_pays_executes_replays_and_rejects_mutation(
                                 "target_ids": {"$slot": "targets"},
                                 "ability": "wisdom",
                                 "dc": 14,
-                                "success_reduction": "none",
+                                "success_damage": "none",
                                 "source": "Prismatic Pulse",
                             },
                         },
@@ -206,6 +206,67 @@ def test_custom_monster_plan_pays_executes_replays_and_rejects_mutation(
                                 },
                             },
                         },
+                    ],
+                    "citations": [
+                        {
+                            "source": "module:prism-chamber",
+                            "source_ref": deepcopy(expanded["source_ref"]),
+                            "source_excerpt": mechanic_excerpt,
+                        }
+                    ],
+                },
+            }
+        ]
+        spell_plan_id = "module.prism-chamber.chromatic-spark"
+        beast_sheet["content"]["spells"] = [
+            {
+                "id": "chromatic-spark",
+                "name": "Chromatic Spark",
+                "level": 0,
+                "access": {
+                    "known": True,
+                    "prepared": False,
+                    "always_prepared": False,
+                    "ritual_available": False,
+                    "at_will": False,
+                    "at_will_sources": [],
+                },
+                "definition": {
+                    "casting_time": "1 action",
+                    "duration": {
+                        "kind": "instantaneous",
+                        "value": 0,
+                        "unit": "round",
+                        "concentration": False,
+                    },
+                    "effect": mechanic_excerpt,
+                },
+                "resolution_plan": {
+                    "schema_version": 1,
+                    "id": spell_plan_id,
+                    "source_card_id": "chromatic-spark",
+                    "source_card_kind": "spell",
+                    "trigger": "action",
+                    "slots": {
+                        "target": {
+                            "kind": "actor_ids",
+                            "owner": "agent",
+                            "description": "One visible creature selected for the spark.",
+                            "minimum_items": 1,
+                            "maximum_items": 1,
+                        }
+                    },
+                    "steps": [
+                        {
+                            "id": "damage",
+                            "op": "damage.apply",
+                            "args": {
+                                "target_ids": {"$slot": "target"},
+                                "expression": "1d4",
+                                "damage_type": "radiant",
+                                "source": "Chromatic Spark",
+                            },
+                        }
                     ],
                     "citations": [
                         {
@@ -423,5 +484,95 @@ def test_custom_monster_plan_pays_executes_replays_and_rejects_mutation(
             },
         )
         assert replayed == settled
+
+        revision = settled["campaign_revision"]
+        for index, actor in enumerate((beast, hero_one, hero_two)):
+            ended = await _call(
+                server,
+                "combat_end_turn",
+                {
+                    "campaign_id": campaign["id"],
+                    "actor_id": actor["id"],
+                    "expected_revision": revision,
+                    "idempotency_key": f"next-round-{index}",
+                },
+            )
+            revision = ended["campaign_revision"]
+        spell_pending = await _raw(
+            server,
+            "combat_cast_spell",
+            {
+                "campaign_id": campaign["id"],
+                "actor_id": beast["id"],
+                "spell_id": "chromatic-spark",
+                "expected_revision": revision,
+                "idempotency_key": "spell-contract",
+            },
+        )
+        spell_contract = spell_pending["result"]["resolution_plan_contract"]
+        assert spell_pending["status"] == "pending_ruling"
+        assert spell_pending["result"]["payment_required"] is True
+        spell_ruling = {
+            **agent_ruling,
+            "application_id": "chromatic-spark-round-2",
+            "decision": "Hero One is the one visible target of Chromatic Spark.",
+        }
+        spell_commitment = {
+            "application_id": spell_ruling["application_id"],
+            "plan_id": spell_plan_id,
+            "plan_fingerprint": spell_contract["plan_fingerprint"],
+            "source_card_id": "chromatic-spark",
+            "source_card_kind": "spell",
+            "bindings": {"target": [hero_one["id"]]},
+            "agent_ruling": spell_ruling,
+        }
+        spell_paid = await _raw(
+            server,
+            "combat_cast_spell",
+            {
+                "campaign_id": campaign["id"],
+                "actor_id": beast["id"],
+                "spell_id": "chromatic-spark",
+                "declaration": {
+                    "agent_resolution_commitment": spell_commitment,
+                },
+                "expected_revision": revision,
+                "idempotency_key": "spell-pay",
+            },
+        )
+        paid_spell_commitment = spell_paid["result"]["semantic_plan"][
+            "commitment"
+        ]
+        before_spell = await _call(
+            server,
+            "character_get",
+            {"character_id": hero_one["id"]},
+        )
+        spell_settled = await _call(
+            server,
+            "combat_choice",
+            {
+                "campaign_id": campaign["id"],
+                "actor_id": beast["id"],
+                "action": "execute_plan",
+                "payload": {"commitment": paid_spell_commitment},
+                "expected_revision": spell_paid["campaign_revision"],
+                "idempotency_key": "spell-settle",
+            },
+        )
+        after_spell = await _call(
+            server,
+            "character_get",
+            {"character_id": hero_one["id"]},
+        )
+        applied_spell_damage = spell_settled["result"]["results"]["damage"][
+            "targets"
+        ][0]["applied_amount"]
+        assert applied_spell_damage > 0
+        assert (
+            after_spell["sheet"]["combat"]["hp"]["value"]
+            == before_spell["sheet"]["combat"]["hp"]["value"]
+            - applied_spell_damage
+        )
 
     asyncio.run(exercise())

@@ -22,6 +22,7 @@ from sagasmith_core.text import ascii_slug
 from sagasmith_dnd.abilities import ABILITY_NAMES
 from sagasmith_dnd.engine import ability_modifier
 from sagasmith_dnd.progression import CANTRIPS_KNOWN, KNOWN_SPELLS
+from sagasmith_dnd.spell_resolution import audit_spell_resolution_paths
 from sagasmith_dnd.vocabulary import (
     CAMPAIGN_GAME_PHASES,
     EFFECTIVE_GAME_PHASES,
@@ -1530,6 +1531,7 @@ def _spellcasting_audit(
         for item in dict(spellcasting.get("spellbook") or {}).get("spell_ids", [])
     ]
     mode = str(configured.get("mode") or "none")
+    resolution_audit = audit_spell_resolution_paths(sheet)
     if not configured:
         return {
             "mode": "none",
@@ -1539,6 +1541,7 @@ def _spellcasting_audit(
             "prepared_spell_ids": prepared_ids,
             "spellbook_spell_ids": spellbook_ids,
             "leveled_spell_ids": [str(item["id"]) for item in leveled],
+            "resolution_audit": resolution_audit,
         }
 
     class_name = str(profile["class"]).casefold()
@@ -1625,6 +1628,11 @@ def _spellcasting_audit(
         raise RuntimeError(
             f"{profile['name']} prepared spell ids do not match the audited profile"
         )
+    if resolution_audit["missing_spell_ids"]:
+        raise RuntimeError(
+            f"{profile['name']} generated card has spells without a settlement path: "
+            + ", ".join(resolution_audit["missing_spell_ids"])
+        )
     return {
         "mode": mode,
         "cantrip_spell_ids": [str(item["id"]) for item in cantrips],
@@ -1633,6 +1641,7 @@ def _spellcasting_audit(
         "prepared_spell_ids": prepared_ids,
         "spellbook_spell_ids": spellbook_ids,
         "leveled_spell_ids": [str(item["id"]) for item in leveled],
+        "resolution_audit": resolution_audit,
     }
 
 

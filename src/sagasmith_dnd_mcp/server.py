@@ -284,6 +284,7 @@ from sagasmith_dnd.spatial import (
 )
 from sagasmith_dnd.spell_resolution import (
     SPELL_RESOLUTION_MECHANIC_ID,
+    audit_spell_resolution_paths,
     overlay_spell_attack_card,
     scaled_roll_expression,
     spell_attack_action_resolution,
@@ -300,7 +301,6 @@ from sagasmith_dnd.spells import (
     consume_shield_reaction,
     consume_spell_cast,
     is_core_magic_missile_spell,
-    is_core_shield_spell,
     magic_item_spell_card,
     recharge_magic_item_charges,
     replace_prepared_spells,
@@ -1913,29 +1913,35 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             ):
                 unavailable_attack_ids.append(attack_id)
 
-        spells_by_id = {
-            str(item.get("id") or ""): item
-            for item in dict(sheet.get("content") or {}).get("spells", [])
-        }
+        spell_resolution_audit = audit_spell_resolution_paths(sheet)
         automatic_spell_ids: list[str] = []
         ruling_spell_ids: list[str] = []
-        for spell_id in prepared_spells:
-            spell = spells_by_id.get(str(spell_id))
-            if spell is not None and (
-                is_core_magic_missile_spell(spell)
-                or is_core_shield_spell(spell)
-                or (
-                    isinstance(spell.get("resolution"), dict)
-                    and SPELL_RESOLUTION_MECHANIC_ID
-                    in {str(item) for item in spell.get("mechanic_refs", [])}
-                )
-            ):
-                automatic_spell_ids.append(str(spell_id))
+        incomplete_spell_ids: list[str] = []
+        for entry in spell_resolution_audit["entries"]:
+            if not entry["available"]:
+                continue
+            spell_id = str(entry["spell_id"])
+            path = str(entry["resolution_path"])
+            if path in {
+                "engine_mechanic",
+                "semantic_plan",
+                "structured_resolution",
+            }:
+                automatic_spell_ids.append(spell_id)
+            elif path == "agent_ruling":
+                ruling_spell_ids.append(spell_id)
             else:
-                ruling_spell_ids.append(str(spell_id))
+                incomplete_spell_ids.append(spell_id)
         if ruling_spell_ids:
             manual_rulings.append(
-                "Prepared spells require DM effect settlement: " + ", ".join(ruling_spell_ids)
+                "Available spells require Agent effect settlement: "
+                + ", ".join(ruling_spell_ids)
+            )
+        if incomplete_spell_ids:
+            blockers.append("incomplete_spell_resolution")
+            manual_rulings.append(
+                "Available spells lack a recorded settlement path: "
+                + ", ".join(incomplete_spell_ids)
             )
         manual_rulings = list(dict.fromkeys(manual_rulings))
         if missing_attack_range_reasons:
@@ -1988,8 +1994,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "weapon_attack_ids": [str(item.get("item_id") or "") for item in attacks],
             "multiattack_option_ids": [str(item.get("id") or "") for item in multiattacks],
             "prepared_spell_ids": prepared_spells,
+            "available_spell_ids": spell_resolution_audit["available_spell_ids"],
+            "cantrip_spell_ids": spell_resolution_audit["cantrip_spell_ids"],
+            "spell_resolution_audit": spell_resolution_audit,
             "automatic_spell_ids": automatic_spell_ids,
             "ruling_spell_ids": ruling_spell_ids,
+            "incomplete_spell_ids": incomplete_spell_ids,
             "unavailable_attack_ids": sorted(set(unavailable_attack_ids)),
             "unarmed_fallback": True,
             "unarmed_attack_id": "unarmed-strike",
@@ -12799,6 +12809,31 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             if isinstance(spell_entry.get("resolution"), dict)
             else None
         )
+        compiled_spell_plan = None
+        if isinstance(spell_entry.get("resolution_plan"), dict):
+            if source_item_id:
+                raise CombatEngineError(
+                    "magic-item spell resolution plans must first be materialized "
+                    "onto the actor spell card"
+                )
+            try:
+                _spell_card, compiled_spell_plan = character_resolution_plan(
+                    current.sheet,
+                    spell_id,
+                    "spell",
+                )
+            except (
+                CombatEngineError,
+                ResolutionPlanCompilationError,
+            ) as error:
+                raise CombatEngineError(
+                    f"recorded spell resolution plan is invalid: {error}"
+                ) from error
+            if structured_resolution is not None or magic_missile:
+                raise CombatEngineError(
+                    "a spell card cannot combine a semantic plan with another "
+                    "effect-settlement path"
+                )
         if magic_missile and target_allocations is None:
             raise CombatEngineError("Magic Missile requires target_allocations at cast time")
         if not magic_missile and target_allocations is not None:
@@ -12807,8 +12842,56 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             )
         if magic_missile and declaration:
             raise CombatEngineError("Magic Missile uses target_allocations, not declaration")
+        semantic_plan_commitment: dict[str, Any] | None = None
+        if compiled_spell_plan is not None:
+            if "agent_resolution_commitment" not in dict(declaration or {}):
+                return {
+                    **_ruling_status(
+                        "pending_ruling",
+                        "generic_spell_effect",
+                    ),
+                    "result": {
+                        "spell_id": spell_id,
+                        "resolution_plan_contract": resolution_plan_contract(
+                            compiled_spell_plan
+                        ),
+                        "payment_required": True,
+                    },
+                    "campaign_revision": campaign.revision,
+                }
+            if set(dict(declaration or {})) != {
+                "agent_resolution_commitment"
+            }:
+                raise CombatEngineError(
+                    "a planned spell accepts only agent_resolution_commitment"
+                )
+            access.require_campaign(
+                campaign_id,
+                principal_id,
+                roles=CAMPAIGN_DM_ROLES,
+            )
+            semantic_plan_commitment, _bound_plan = (
+                validate_agent_resolution_commitment(
+                    campaign_id,
+                    dict(declaration or {}).get(
+                        "agent_resolution_commitment"
+                    ),
+                    encounter=encounter,
+                    source_actor_id=actor_id,
+                    source_card_id=spell_id,
+                    source_card_kind="spell",
+                    compiled_plan=compiled_spell_plan,
+                )
+            )
+            declaration = {
+                "agent_resolution_commitment": semantic_plan_commitment
+            }
         agent_ruling_commitment: dict[str, Any] | None = None
-        if structured_resolution is None and declaration:
+        if (
+            structured_resolution is None
+            and compiled_spell_plan is None
+            and declaration
+        ):
             declared = dict(declaration)
             if (
                 set(declared) != {"agent_ruling_commitment"}
@@ -13004,6 +13087,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 **(
                     {"agent_ruling_commitment": agent_ruling_commitment}
                     if agent_ruling_commitment is not None
+                    else {}
+                ),
+                **(
+                    {
+                        "agent_resolution_commitment": (
+                            semantic_plan_commitment
+                        )
+                    }
+                    if semantic_plan_commitment is not None
                     else {}
                 ),
             },
@@ -13513,6 +13605,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             )
             return combat_response(campaign_id, principal_id, response)
         sync_combatant_conditions(next_encounter, actor_id, applied["sheet"])
+        if compiled_spell_plan is not None:
+            applied["semantic_plan"] = {
+                "status": "paid",
+                "contract": resolution_plan_contract(
+                    compiled_spell_plan
+                ),
+                "commitment": deepcopy(semantic_plan_commitment),
+            }
         next_state = {**dict(campaign.state or {}), "combat": next_encounter}
         response = commit_campaign_state(
             campaign,
@@ -13525,7 +13625,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             payload=payload,
             response_fields={
                 **_ruling_status(
-                    "committed" if applied.get("automatic_effect") else "pending_ruling",
+                    (
+                        "committed"
+                        if applied.get("automatic_effect")
+                        else "pending_ruling"
+                    ),
                     "generic_spell_effect",
                 ),
                 "result": {key: value for key, value in applied.items() if key != "sheet"},
@@ -16318,8 +16422,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 if opcode == "check.save":
                     ability = str(arguments["ability"])
                     dc = int(arguments["dc"])
-                    success_reduction = str(
-                        arguments.get("success_reduction") or "none"
+                    success_damage = str(
+                        arguments.get("success_damage") or "none"
                     )
                     target_results: list[dict[str, Any]] = []
                     reduction_by_actor_id: dict[str, str] = {}
@@ -16348,7 +16452,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                             ),
                         )
                         reduction_by_actor_id[str(target_id)] = (
-                            success_reduction
+                            success_damage
                             if result["success"]
                             else "full"
                         )
@@ -16501,12 +16605,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         if rolled is not None
                         else int(arguments["amount"])
                     )
-                    reduction = arguments.get("reduction", "none")
+                    reduction = arguments.get("reduction", "full")
                     results: list[dict[str, Any]] = []
                     for target_id_value in arguments["target_ids"]:
                         target_id = str(target_id_value)
                         target_reduction = (
-                            str(reduction.get(target_id, "none"))
+                            str(reduction.get(target_id, "full"))
                             if isinstance(reduction, dict)
                             else str(reduction)
                         )
@@ -16795,7 +16899,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     destination_id = str(arguments["to_actor_id"])
                     selected_ids = tuple(
                         str(item)
-                        for item in arguments["proposition_ids"]
+                        for item in arguments["knowledge_ids"]
                     )
                     visible_ids = {
                         item.id
