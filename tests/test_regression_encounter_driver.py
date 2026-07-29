@@ -17,6 +17,7 @@ from scripts.regression_encounter import (
     _agent_object_interactions,
     _agent_party_absences,
     _agent_positions,
+    _agent_reinforcement_triggers,
     _agent_spell_priorities,
     _agent_target_priorities,
     _agent_target_reaction_contexts,
@@ -97,6 +98,7 @@ from scripts.regression_encounter import (
     _source_opening_casts,
     _source_opening_weapons,
     _source_outcome,
+    _source_outcome_allows_checkpoint,
     _source_passive_allies,
     _source_precombat_casts,
     _source_random_activities,
@@ -3080,6 +3082,27 @@ def test_body_thief_sides_substitutes_host_without_erasing_actors() -> None:
     assert sides["hostile_turn_actor_ids"] == {"kobold", "pc-1"}
 
 
+def test_queued_reinforcements_are_potential_but_not_attackable_sides() -> None:
+    sides = _body_thief_sides(
+        {
+            "combatants": [
+                {"actor_id": "pc-1"},
+                {"actor_id": "orc-1"},
+            ],
+            "reinforcements": [
+                {"actor_id": "scout-1"},
+                {"actor_id": "orc-2"},
+            ],
+        },
+        party_ids=["pc-1", "scout-1"],
+        hostile_ids=["orc-1", "orc-2"],
+    )
+
+    assert sides["potential_party_ids"] == ["pc-1", "scout-1"]
+    assert sides["effective_party_ids"] == ["pc-1"]
+    assert sides["attackable_hostile_ids"] == ["orc-1"]
+
+
 def test_body_thief_targets_living_zero_hp_incapacitated_creature() -> None:
     combat = {
         "combatants": [
@@ -4008,6 +4031,12 @@ def test_party_defeat_does_not_invent_a_source_defined_aftermath() -> None:
         "characters; their later treatment requires explicit source support or "
         "Agent-as-DM adjudication.",
     )
+
+
+def test_party_defeat_cannot_create_a_caller_named_success_checkpoint() -> None:
+    assert _source_outcome_allows_checkpoint("victory") is True
+    assert _source_outcome_allows_checkpoint("surrender") is True
+    assert _source_outcome_allows_checkpoint("defeat") is False
 
 
 def test_source_flee_count_threshold_targets_every_designated_survivor() -> None:
@@ -6019,6 +6048,7 @@ def test_auto_run_starts_from_play_before_loading_combat_tools() -> None:
         hostile_ids: list[str],
         additional_hostile_ids: list[str],
         reinforcement_hostile_ids: list[str],
+        reinforcement_ally_ids: list[str],
     ) -> dict[str, bool]:
         calls.append(
             (
@@ -6028,6 +6058,7 @@ def test_auto_run_starts_from_play_before_loading_combat_tools() -> None:
                     hostile_ids,
                     additional_hostile_ids,
                     reinforcement_hostile_ids,
+                    reinforcement_ally_ids,
                 ),
             )
         )
@@ -6054,6 +6085,7 @@ def test_auto_run_starts_from_play_before_loading_combat_tools() -> None:
                 ["hostile-1"],
                 ["hostile-2"],
                 ["hostile-3"],
+                ["scout-1"],
             )
         )
 
@@ -6067,8 +6099,23 @@ def test_auto_run_starts_from_play_before_loading_combat_tools() -> None:
                 "principal_id": "system:local",
             },
         ),
-        ("start", (["pc-1"], ["hostile-1"], ["hostile-2"], ["hostile-3"])),
-        ("auto_run", (["pc-1"], ["hostile-1", "hostile-2", "hostile-3"])),
+        (
+            "start",
+            (
+                ["pc-1"],
+                ["hostile-1"],
+                ["hostile-2"],
+                ["hostile-3"],
+                ["scout-1"],
+            ),
+        ),
+        (
+            "auto_run",
+            (
+                ["pc-1", "scout-1"],
+                ["hostile-1", "hostile-2", "hostile-3"],
+            ),
+        ),
     ]
     assert result == {
         "completed": True,
@@ -6123,6 +6170,7 @@ def test_auto_run_finalizes_retained_completed_combat_before_readiness() -> None
                 ["hostile-1"],
                 ["hostile-2"],
                 ["hostile-3"],
+                ["scout-1"],
             )
         )
 
@@ -6138,7 +6186,13 @@ def test_auto_run_finalizes_retained_completed_combat_before_readiness() -> None
         ),
         (
             "finalize",
-            ["pc-1", "hostile-1", "hostile-2", "hostile-3"],
+            [
+                "pc-1",
+                "scout-1",
+                "hostile-1",
+                "hostile-2",
+                "hostile-3",
+            ],
         ),
     ]
     assert result == {"recovered_after_postcombat_interruption": True}
@@ -6511,6 +6565,73 @@ def test_encounter_manifest_tracks_delayed_source_reinforcements() -> None:
     }
 
 
+def test_encounter_manifest_tracks_friendly_source_reinforcements() -> None:
+    source_excerpt = (
+        "If the characters are in danger of being overwhelmed, eight elves "
+        "arrive from the north to assist them."
+    )
+    manifest = _participant_manifest(
+        ["orc"],
+        label="Ear Seekers",
+        source_excerpt="One orc attacks the village.",
+        reinforcement_ally_ids=["scout-1", "scout-2"],
+        reinforcement_ally_label="Ardeep Forest scouts",
+        reinforcement_ally_source_excerpt=source_excerpt,
+    )
+
+    assert manifest["groups"][1] == {
+        "key": "source-friendly-reinforcements",
+        "label": "Ardeep Forest scouts",
+        "role": "reinforcement",
+        "required_count": 2,
+        "actor_ids": ["scout-1", "scout-2"],
+        "source_excerpt": source_excerpt,
+    }
+
+
+def test_agent_semantic_reinforcement_trigger_is_source_bound() -> None:
+    source_excerpt = (
+        "If the characters are in danger of being overwhelmed, eight elves "
+        "arrive from the north to assist them."
+    )
+    triggers = _agent_reinforcement_triggers(
+        [
+            {
+                "actor_ids": ["scout-1", "scout-2"],
+                "trigger_round": 4,
+                "source_excerpt": source_excerpt,
+                "decision": "The defenders are now in danger of being overwhelmed.",
+                "ruling_reason": (
+                    "Multiple defenders are down while a large hostile force "
+                    "remains active, so the module's semantic condition is met."
+                ),
+            }
+        ],
+        reinforcement_ids=["scout-1", "scout-2"],
+        reinforcement_round=4,
+        encounter_source_excerpt=f"Before. {source_excerpt} After.",
+    )
+
+    assert triggers[0]["trigger_round"] == 4
+    assert triggers[0]["agent_ruling"]["default_resolver"] == "agent"
+
+    with pytest.raises(ValueError, match="requires unique prepared reinforcements"):
+        _agent_reinforcement_triggers(
+            [
+                {
+                    "actor_ids": ["scout-1"],
+                    "trigger_round": 4,
+                    "source_excerpt": "This sentence is not in the module.",
+                    "decision": "The defenders are now in danger of being overwhelmed.",
+                    "ruling_reason": "The Agent must not invent source evidence.",
+                }
+            ],
+            reinforcement_ids=["scout-1"],
+            reinforcement_round=4,
+            encounter_source_excerpt=source_excerpt,
+        )
+
+
 def test_source_reinforcements_enter_openly_at_configured_round_positions() -> None:
     first = _reinforcement_config("rift-1", 0)
     source_conditions = [
@@ -6552,6 +6673,14 @@ def test_source_reinforcements_enter_openly_at_configured_round_positions() -> N
     source_traits[0]["feature_id"] = "changed"
     assert second["source_conditions"][0]["condition"] == "restrained"
     assert second["source_traits"][0]["feature_id"] == "regeneration-passive"
+    friendly = _reinforcement_config(
+        "scout-1",
+        2,
+        disposition="friendly",
+        join_round=4,
+    )
+    assert friendly["disposition"] == "friendly"
+    assert friendly["join_round"] == 4
 
 
 def test_partial_start_recovery_queues_only_missing_source_reinforcements() -> None:
@@ -6568,7 +6697,7 @@ def test_partial_start_recovery_queues_only_missing_source_reinforcements() -> N
     assert _missing_source_reinforcement_ids(
         combat,
         scene_id="scene-1",
-        reinforcement_hostile_ids=["rift-1", "rift-2"],
+        reinforcement_ids=["rift-1", "rift-2"],
     ) == ["rift-2"]
 
     combat["combatants"].append({"actor_id": "rift-2"})
@@ -6576,7 +6705,7 @@ def test_partial_start_recovery_queues_only_missing_source_reinforcements() -> N
         _missing_source_reinforcement_ids(
             combat,
             scene_id="scene-1",
-            reinforcement_hostile_ids=["rift-1", "rift-2"],
+            reinforcement_ids=["rift-1", "rift-2"],
         )
         == []
     )
@@ -6585,7 +6714,7 @@ def test_partial_start_recovery_queues_only_missing_source_reinforcements() -> N
         _missing_source_reinforcement_ids(
             combat,
             scene_id="scene-1",
-            reinforcement_hostile_ids=["other"],
+            reinforcement_ids=["other"],
         )
 
 

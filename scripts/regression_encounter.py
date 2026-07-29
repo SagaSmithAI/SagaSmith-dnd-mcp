@@ -138,6 +138,7 @@ def _encounter_operation_scope(
     hostile_ids: list[str],
     additional_hostile_ids: list[str] | None = None,
     reinforcement_hostile_ids: list[str] | None = None,
+    reinforcement_ally_ids: list[str] | None = None,
     combat_id: str = "",
 ) -> str:
     excluded = {
@@ -155,6 +156,7 @@ def _encounter_operation_scope(
         "hostile_ids": hostile_ids,
         "additional_hostile_ids": list(additional_hostile_ids or []),
         "reinforcement_hostile_ids": list(reinforcement_hostile_ids or []),
+        "reinforcement_ally_ids": list(reinforcement_ally_ids or []),
         "configuration": configuration,
     }
     return _token(
@@ -351,6 +353,25 @@ def _arguments() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--reinforcement-ally-report",
+        type=Path,
+        action="append",
+        default=[],
+        help=(
+            "Source-cited friendly reinforcements queued through public "
+            "combat_join without registering them as party members"
+        ),
+    )
+    parser.add_argument(
+        "--reinforcement-ally-actor-id",
+        action="append",
+        default=[],
+        help=(
+            "Select an exact friendly reinforcement from the prepared reports; "
+            "repeat as needed. When omitted, every actor is selected."
+        ),
+    )
+    parser.add_argument(
         "--required-hostile-weapon-id",
         action="append",
         default=[],
@@ -377,6 +398,11 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--additional-hostile-source-excerpt", default="")
     parser.add_argument("--reinforcement-hostile-label", default="Source reinforcements")
     parser.add_argument("--reinforcement-hostile-source-excerpt", default="")
+    parser.add_argument(
+        "--reinforcement-ally-label",
+        default="Source friendly reinforcements",
+    )
+    parser.add_argument("--reinforcement-ally-source-excerpt", default="")
     parser.add_argument("--surprise-check-report", type=Path)
     parser.add_argument(
         "--party-stealth-check-report",
@@ -435,6 +461,18 @@ def _arguments() -> argparse.Namespace:
         help=(
             "Exact future round when every source-cited reinforcement enters; "
             "defaults to the next round"
+        ),
+    )
+    parser.add_argument(
+        "--agent-reinforcement-trigger-json",
+        action="append",
+        type=json.loads,
+        default=[],
+        help=(
+            "Agent-as-DM interpretation of a source-semantic reinforcement "
+            "condition with actor_ids, trigger_round, exact source_excerpt, "
+            "decision, and ruling_reason. The actors still enter through public "
+            "combat_join at that future round."
         ),
     )
     parser.add_argument(
@@ -1022,6 +1060,11 @@ def _encounter_actor_groups(args: argparse.Namespace) -> dict[str, Any]:
             getattr(args, "reinforcement_hostile_actor_id", []),
             report_kind="reinforcement hostile",
         ),
+        "reinforcement_ally_ids": _selected_prepared_actor_ids(
+            getattr(args, "reinforcement_ally_report", []),
+            getattr(args, "reinforcement_ally_actor_id", []),
+            report_kind="reinforcement ally",
+        ),
     }
     required_hostile_count = getattr(args, "required_hostile_count", None)
     hostile_count_basis = str(getattr(args, "hostile_count_basis", "") or "").strip()
@@ -1045,8 +1088,20 @@ def _encounter_actor_groups(args: argparse.Namespace) -> dict[str, Any]:
         isinstance(reinforcement_round, bool)
         or not isinstance(reinforcement_round, int)
         or reinforcement_round < 0
-        or (reinforcement_round and not groups["reinforcement_hostile_ids"])
-        or (groups["reinforcement_hostile_ids"] and reinforcement_round == 1)
+        or (
+            reinforcement_round
+            and not (
+                groups["reinforcement_hostile_ids"]
+                or groups["reinforcement_ally_ids"]
+            )
+        )
+        or (
+            (
+                groups["reinforcement_hostile_ids"]
+                or groups["reinforcement_ally_ids"]
+            )
+            and reinforcement_round == 1
+        )
     ):
         raise ValueError(
             "reinforcement round must be zero/omitted for next-round entry or "
@@ -1060,6 +1115,7 @@ def _encounter_actor_groups(args: argparse.Namespace) -> dict[str, Any]:
             "hostile_ids",
             "additional_hostile_ids",
             "reinforcement_hostile_ids",
+            "reinforcement_ally_ids",
         )
     ]
     overlaps = [
@@ -1126,6 +1182,9 @@ def _participant_manifest(
     reinforcement_hostile_ids: list[str] | None = None,
     reinforcement_label: str = "",
     reinforcement_source_excerpt: str = "",
+    reinforcement_ally_ids: list[str] | None = None,
+    reinforcement_ally_label: str = "",
+    reinforcement_ally_source_excerpt: str = "",
 ) -> dict[str, Any]:
     if not source_excerpt.strip():
         raise ValueError("encounter start requires an exact source excerpt")
@@ -1135,6 +1194,11 @@ def _participant_manifest(
     reinforcement_ids = list(reinforcement_hostile_ids or [])
     if reinforcement_ids and not reinforcement_source_excerpt.strip():
         raise ValueError("source reinforcements require an exact source excerpt")
+    reinforcement_friend_ids = list(reinforcement_ally_ids or [])
+    if reinforcement_friend_ids and not reinforcement_ally_source_excerpt.strip():
+        raise ValueError(
+            "source friendly reinforcements require an exact source excerpt"
+        )
     groups = [
         {
             "key": "source-hostiles",
@@ -1165,6 +1229,17 @@ def _participant_manifest(
                 "required_count": len(reinforcement_ids),
                 "actor_ids": reinforcement_ids,
                 "source_excerpt": reinforcement_source_excerpt,
+            }
+        )
+    if reinforcement_friend_ids:
+        groups.append(
+            {
+                "key": "source-friendly-reinforcements",
+                "label": reinforcement_ally_label,
+                "role": "reinforcement",
+                "required_count": len(reinforcement_friend_ids),
+                "actor_ids": reinforcement_friend_ids,
+                "source_excerpt": reinforcement_ally_source_excerpt,
             }
         )
     return {
@@ -1604,6 +1679,7 @@ def _reinforcement_config(
     actor_id: str,
     index: int,
     *,
+    disposition: str = "hostile",
     join_round: int = 0,
     tie_breaker: int | None = None,
     source_conditions: list[dict[str, Any]] | None = None,
@@ -1613,6 +1689,10 @@ def _reinforcement_config(
 
     if not actor_id.strip():
         raise ValueError("source reinforcement actor_id must be non-empty")
+    if disposition not in {"friendly", "hostile"}:
+        raise ValueError(
+            "source reinforcement disposition must be friendly or hostile"
+        )
     positions = (
         (7, 2),
         (7, 4),
@@ -1637,7 +1717,7 @@ def _reinforcement_config(
         raise ValueError("Agent reinforcement tie breaker must be a non-negative integer")
     return {
         "position": {"x": positions[index][0], "y": positions[index][1]},
-        "disposition": "hostile",
+        "disposition": disposition,
         "hidden": False,
         "surprised": False,
         "death_saves": False,
@@ -2240,6 +2320,87 @@ def _validate_agent_target_refinements(
                 f"Agent target priority for {actor_id} contradicts the "
                 "source-authored target order"
             )
+
+
+def _agent_reinforcement_triggers(
+    declarations: list[dict[str, Any]],
+    *,
+    reinforcement_ids: list[str],
+    reinforcement_round: int,
+    encounter_source_excerpt: str,
+) -> list[dict[str, Any]]:
+    """Validate Agent interpretations of source-semantic arrival conditions."""
+
+    available = set(reinforcement_ids)
+    encounter_excerpt = _normalized_source_text(encounter_source_excerpt)
+    allowed = {
+        "actor_ids",
+        "trigger_round",
+        "source_excerpt",
+        "decision",
+        "ruling_reason",
+    }
+    normalized: list[dict[str, Any]] = []
+    used_actor_ids: set[str] = set()
+    for index, declaration in enumerate(declarations):
+        if not isinstance(declaration, dict):
+            raise ValueError(
+                f"Agent reinforcement trigger {index} must be an object"
+            )
+        unknown = set(declaration) - allowed
+        actor_ids = [
+            str(item).strip()
+            for item in declaration.get("actor_ids") or []
+        ]
+        trigger_round = declaration.get("trigger_round")
+        source_excerpt = " ".join(
+            str(declaration.get("source_excerpt") or "").split()
+        ).strip()
+        decision = " ".join(str(declaration.get("decision") or "").split())
+        ruling_reason = " ".join(
+            str(declaration.get("ruling_reason") or "").split()
+        )
+        if (
+            unknown
+            or not actor_ids
+            or any(not item for item in actor_ids)
+            or len(actor_ids) != len(set(actor_ids))
+            or not set(actor_ids) <= available
+            or used_actor_ids & set(actor_ids)
+            or isinstance(trigger_round, bool)
+            or not isinstance(trigger_round, int)
+            or trigger_round < 2
+            or trigger_round != reinforcement_round
+            or len(source_excerpt) < 8
+            or _normalized_source_text(source_excerpt) not in encounter_excerpt
+            or not 10 <= len(decision) <= 500
+            or not 10 <= len(ruling_reason) <= 1000
+        ):
+            raise ValueError(
+                f"Agent reinforcement trigger {index} requires unique prepared "
+                "reinforcements, the configured future round, an exact encounter "
+                "excerpt, decision, and ruling_reason"
+            )
+        used_actor_ids.update(actor_ids)
+        normalized.append(
+            {
+                "actor_ids": actor_ids,
+                "trigger_round": trigger_round,
+                "source_excerpt": source_excerpt,
+                "agent_ruling": {
+                    "default_resolver": "agent",
+                    "ruling_kind": "agent_dm_adjudication",
+                    "decision": decision,
+                    "reason": ruling_reason,
+                },
+            }
+        )
+    if normalized and used_actor_ids != available:
+        raise ValueError(
+            "Agent reinforcement triggers must cover every configured "
+            "reinforcement exactly once"
+        )
+    return normalized
 
 
 def _weapon_attack_modes(weapon: dict[str, Any]) -> set[str]:
@@ -5408,6 +5569,7 @@ async def _start(
     hostile_ids: list[str],
     additional_hostile_ids: list[str],
     reinforcement_hostile_ids: list[str],
+    reinforcement_ally_ids: list[str],
 ) -> dict[str, Any]:
     if not args.scene_id:
         raise ValueError("encounter start requires --scene-id")
@@ -5431,6 +5593,7 @@ async def _start(
         hostile_ids=hostile_ids,
         additional_hostile_ids=additional_hostile_ids,
         reinforcement_hostile_ids=reinforcement_hostile_ids,
+        reinforcement_ally_ids=reinforcement_ally_ids,
     )
     ally_ids = _selected_prepared_actor_ids(
         args.ally_report,
@@ -5448,14 +5611,29 @@ async def _start(
     )
     initial_hostile_ids = [*hostile_ids, *additional_hostile_ids]
     all_hostile_ids = [*initial_hostile_ids, *reinforcement_hostile_ids]
+    all_party_ids = [*party_ids, *reinforcement_ally_ids]
+    all_participant_ids = [*all_party_ids, *all_hostile_ids]
+    _validate_source_flee_configuration(
+        args,
+        hostile_ids=all_hostile_ids,
+    )
+    agent_reinforcement_triggers = _agent_reinforcement_triggers(
+        getattr(args, "agent_reinforcement_trigger_json", []),
+        reinforcement_ids=[
+            *reinforcement_hostile_ids,
+            *reinforcement_ally_ids,
+        ],
+        reinforcement_round=int(args.reinforcement_round or 0),
+        encounter_source_excerpt=str(args.source_excerpt or ""),
+    )
     source_target_priorities = _source_target_priorities(
         args.source_target_priority_json,
-        participant_ids=[*party_ids, *all_hostile_ids],
+        participant_ids=all_participant_ids,
         encounter_source_excerpt=str(args.source_excerpt or ""),
     )
     agent_target_priorities = _agent_target_priorities(
         getattr(args, "agent_target_priority_json", []),
-        party_ids=party_ids,
+        party_ids=all_party_ids,
         hostile_ids=all_hostile_ids,
     )
     _validate_agent_target_refinements(
@@ -5464,11 +5642,11 @@ async def _start(
     )
     source_conditions_by_actor = _source_declared_conditions(
         args.source_condition_json,
-        participant_ids=[*party_ids, *all_hostile_ids],
+        participant_ids=all_participant_ids,
     )
     source_traits_by_actor = _source_traits(
         args.source_trait_json,
-        participant_ids=[*party_ids, *all_hostile_ids],
+        participant_ids=all_participant_ids,
     )
     source_zero_hp_finisher = _source_zero_hp_finisher(
         args.source_zero_hp_finisher_json,
@@ -5486,34 +5664,34 @@ async def _start(
     actors = await _characters(
         client,
         args.campaign_id,
-        [*party_ids, *all_hostile_ids],
+        all_participant_ids,
     )
     agent_weapon_priorities = _agent_weapon_priorities(
         getattr(args, "agent_weapon_priority_json", []),
-        participant_ids=[*party_ids, *all_hostile_ids],
+        participant_ids=all_participant_ids,
         actors=actors,
     )
     agent_spell_priorities = _agent_spell_priorities(
         getattr(args, "agent_spell_priority_json", []),
-        participant_ids=[*party_ids, *all_hostile_ids],
+        participant_ids=all_participant_ids,
         actors=actors,
     )
     agent_common_action_priorities = _agent_common_action_priorities(
         getattr(args, "agent_common_action_priority_json", []),
-        participant_ids=[*party_ids, *all_hostile_ids],
+        participant_ids=all_participant_ids,
     )
     opening_weapons = _source_opening_weapons(
         args.source_opening_weapon_json,
-        participant_ids=[*party_ids, *all_hostile_ids],
+        participant_ids=all_participant_ids,
     )
     on_hit_rulings = _source_on_hit_rulings(
         args.source_on_hit_ruling_json,
-        participant_ids=[*party_ids, *all_hostile_ids],
+        participant_ids=all_participant_ids,
         actors=actors,
     )
     source_extra_damage_rulings = _source_extra_damage_rulings(
         getattr(args, "source_extra_damage_ruling_json", []),
-        participant_ids=[*party_ids, *all_hostile_ids],
+        participant_ids=all_participant_ids,
         actors=actors,
     )
     delayed_actions = _source_delayed_actions(
@@ -5526,50 +5704,50 @@ async def _start(
     )
     random_activities = _source_random_activities(
         args.source_random_activity_json,
-        participant_ids=[*party_ids, *all_hostile_ids],
+        participant_ids=all_participant_ids,
         actors=actors,
     )
     save_activities = _source_save_activities(
         args.source_save_activity_json,
-        participant_ids=[*party_ids, *all_hostile_ids],
+        participant_ids=all_participant_ids,
         actors=actors,
     )
     contest_activities = _source_contest_activities(
         args.source_contest_activity_json,
-        participant_ids=[*party_ids, *all_hostile_ids],
+        participant_ids=all_participant_ids,
         actors=actors,
     )
     attack_environments = _source_attack_environments(
         args.source_attack_environment_json,
-        participant_ids=[*party_ids, *all_hostile_ids],
+        participant_ids=all_participant_ids,
         actors=actors,
     )
     agent_attack_contexts = _agent_attack_contexts(
         args.agent_attack_context_json,
-        participant_ids=[*party_ids, *all_hostile_ids],
+        participant_ids=all_participant_ids,
         scene_id=str(args.scene_id or ""),
         encounter_source_excerpt=str(args.source_excerpt or ""),
     )
     agent_casting_perception_rulings = _agent_casting_perception_rulings(
         getattr(args, "agent_casting_perception_json", []),
-        participant_ids=[*party_ids, *all_hostile_ids],
+        participant_ids=all_participant_ids,
     )
     agent_target_reaction_contexts = _agent_target_reaction_contexts(
         getattr(args, "agent_target_reaction_context_json", []),
-        participant_ids=[*party_ids, *all_hostile_ids],
+        participant_ids=all_participant_ids,
         scene_id=str(args.scene_id or ""),
         encounter_source_excerpt=str(args.source_excerpt or ""),
     )
     agent_turn_rulings = _agent_turn_rulings(
         getattr(args, "agent_turn_ruling_json", []),
-        participant_ids=[*party_ids, *all_hostile_ids],
+        participant_ids=all_participant_ids,
         actors=actors,
         scene_id=str(args.scene_id or ""),
         encounter_source_excerpt=str(args.source_excerpt or ""),
     )
     agent_object_interactions = _agent_object_interactions(
         getattr(args, "agent_object_interaction_json", []),
-        participant_ids=[*party_ids, *all_hostile_ids],
+        participant_ids=all_participant_ids,
         source_conditions=[
             {"actor_id": actor_id, **deepcopy(item)}
             for actor_id, conditions in source_conditions_by_actor.items()
@@ -5597,7 +5775,7 @@ async def _start(
         args.source_avoidance_report,
         campaign_id=args.campaign_id,
         scene_id=args.scene_id,
-        participant_ids=[*party_ids, *all_hostile_ids],
+        participant_ids=all_participant_ids,
     )
     participant_manifest = _participant_manifest(
         hostile_ids,
@@ -5609,6 +5787,13 @@ async def _start(
         reinforcement_hostile_ids=reinforcement_hostile_ids,
         reinforcement_label=args.reinforcement_hostile_label,
         reinforcement_source_excerpt=str(args.reinforcement_hostile_source_excerpt or ""),
+        reinforcement_ally_ids=reinforcement_ally_ids,
+        reinforcement_ally_label=str(
+            getattr(args, "reinforcement_ally_label", "")
+        ),
+        reinforcement_ally_source_excerpt=str(
+            getattr(args, "reinforcement_ally_source_excerpt", "") or ""
+        ),
     )
     encounter_readiness = await _require_encounter_readiness(
         client,
@@ -5618,7 +5803,7 @@ async def _start(
     )
     source_ammunition_selections = _source_ammunition_selections(
         args.source_ammunition_json,
-        participant_ids=[*party_ids, *all_hostile_ids],
+        participant_ids=all_participant_ids,
         actors=actors,
     )
     for actor_id in set(all_hostile_ids) | {
@@ -5898,7 +6083,11 @@ async def _start(
     )
     reinforcement_queue: list[dict[str, Any]] = []
     agent_reinforcement_initiative_rulings: list[dict[str, Any]] = []
-    for index, actor_id in enumerate(reinforcement_hostile_ids):
+    reinforcements = [
+        *((actor_id, "hostile") for actor_id in reinforcement_hostile_ids),
+        *((actor_id, "friendly") for actor_id in reinforcement_ally_ids),
+    ]
+    for index, (actor_id, disposition) in enumerate(reinforcements):
         campaign = await _campaign(client, args.campaign_id)
         tie_breaker = len(party_ids) + len(initial_hostile_ids) + index
         agent_reinforcement_initiative_rulings.append(
@@ -5906,7 +6095,7 @@ async def _start(
                 "actor_id": actor_id,
                 "tie_breaker": tie_breaker,
                 "ruling_reason": (
-                    "The Agent places a late-arriving hostile after every already "
+                    "The Agent places a late-arriving reinforcement after every already "
                     "ordered participant with the same rolled initiative; this "
                     "preselects only the DM-owned tie and does not replace the "
                     "server initiative roll."
@@ -5922,6 +6111,7 @@ async def _start(
                     "participant_config": _reinforcement_config(
                         actor_id,
                         index,
+                        disposition=disposition,
                         join_round=int(args.reinforcement_round or 0),
                         tie_breaker=tie_breaker,
                         source_conditions=source_conditions_by_actor.get(actor_id),
@@ -6002,6 +6192,7 @@ async def _start(
         "agent_reinforcement_initiative_rulings": (
             agent_reinforcement_initiative_rulings
         ),
+        "agent_reinforcement_triggers": agent_reinforcement_triggers,
         "start": started,
         "reinforcement_queue": reinforcement_queue,
         "combat_exposure": opened_combat,
@@ -6357,14 +6548,24 @@ def _body_thief_sides(
         for actor_id, item in combatants.items()
         if actor_id in hostile_ids and item.get("inside_host")
     }
-    effective_party_ids = [actor_id for actor_id in party_ids if actor_id not in controlled_hosts]
+    potential_party_ids = [
+        actor_id for actor_id in party_ids if actor_id not in controlled_hosts
+    ]
+    effective_party_ids = [
+        actor_id
+        for actor_id in potential_party_ids
+        if actor_id in combatants
+    ]
     attackable_hostile_ids = [
-        actor_id for actor_id in hostile_ids if actor_id not in inside_sources
+        actor_id
+        for actor_id in hostile_ids
+        if actor_id in combatants and actor_id not in inside_sources
     ] + list(controlled_hosts)
     hostile_turn_actor_ids = set(attackable_hostile_ids)
     return {
         "controlled_hosts": controlled_hosts,
         "inside_sources": inside_sources,
+        "potential_party_ids": potential_party_ids,
         "effective_party_ids": effective_party_ids,
         "attackable_hostile_ids": attackable_hostile_ids,
         "hostile_turn_actor_ids": hostile_turn_actor_ids,
@@ -6703,6 +6904,12 @@ def _source_outcome(
             "Agent-as-DM adjudication.",
         )
     return None
+
+
+def _source_outcome_allows_checkpoint(status: str) -> bool:
+    """Never label a source encounter defeat with a caller's success checkpoint."""
+
+    return str(status).strip().casefold() != "defeat"
 
 
 def _postcombat_stabilization_target(
@@ -9304,6 +9511,7 @@ async def _auto_run(
             party_ids=party_ids,
             hostile_ids=hostile_ids,
         )
+        potential_party_ids = list(body_thief_sides["potential_party_ids"])
         effective_party_ids = list(body_thief_sides["effective_party_ids"])
         attackable_hostile_ids = list(body_thief_sides["attackable_hostile_ids"])
         defeated_hostiles = [
@@ -9424,7 +9632,10 @@ async def _auto_run(
             if _hit_points(actors[actor_id]) == 0
             and not _conditions(actors[actor_id]) & DEATH_SAVE_SETTLED_CONDITIONS
         ]
-        party_down = all(_hit_points(actors[actor_id]) <= 0 for actor_id in effective_party_ids)
+        party_down = bool(potential_party_ids) and all(
+            _hit_points(actors[actor_id]) <= 0
+            for actor_id in potential_party_ids
+        )
         outcome = (
             _source_surrender_outcome(
                 actor_hit_points=_hit_points(actors[args.surrender_actor_id]),
@@ -11464,13 +11675,15 @@ async def _auto_run(
     )
     opened_play = await client.open(args.campaign_id)
     await client.load("play.scene", "play.scene_control", "play.characters")
-    checkpoint = await _checkpoint(
-        client,
-        campaign_id=args.campaign_id,
-        run_id=args.run_id,
-        label=args.checkpoint_label,
-        checkpoint_id=f"encounter:{str(ended['combat']['id'])}",
-    )
+    checkpoint = None
+    if _source_outcome_allows_checkpoint(outcome_status):
+        checkpoint = await _checkpoint(
+            client,
+            campaign_id=args.campaign_id,
+            run_id=args.run_id,
+            label=args.checkpoint_label,
+            checkpoint_id=f"encounter:{str(ended['combat']['id'])}",
+        )
     final_actor_ids = [*party_ids, *hostile_ids]
     final_actor_values = await _characters(client, args.campaign_id, final_actor_ids)
     captured_hostile_ids = _captured_hostile_ids(
@@ -11633,13 +11846,15 @@ async def _finalize_ended_encounter(
         )
         combat = dict(postcombat_cleanup["combat"])
         outcome = dict(combat.get("outcome") or outcome)
-    checkpoint = await _checkpoint(
-        client,
-        campaign_id=args.campaign_id,
-        run_id=args.run_id,
-        label=args.checkpoint_label,
-        checkpoint_id=f"encounter:{str(combat['id'])}",
-    )
+    checkpoint = None
+    if _source_outcome_allows_checkpoint(str(outcome.get("status") or "")):
+        checkpoint = await _checkpoint(
+            client,
+            campaign_id=args.campaign_id,
+            run_id=args.run_id,
+            label=args.checkpoint_label,
+            checkpoint_id=f"encounter:{str(combat['id'])}",
+        )
     actor_values = await _characters(client, args.campaign_id, actor_ids)
     return {
         "play_exposure": opened,
@@ -11657,7 +11872,7 @@ def _missing_source_reinforcement_ids(
     combat: dict[str, Any],
     *,
     scene_id: str,
-    reinforcement_hostile_ids: list[str],
+    reinforcement_ids: list[str],
 ) -> list[str]:
     """Return only source reinforcements absent from a matching live encounter."""
 
@@ -11671,7 +11886,7 @@ def _missing_source_reinforcement_ids(
         for item in manifest.get("reinforcement_actor_ids") or []
         if str(item)
     ]
-    if declared_ids != reinforcement_hostile_ids:
+    if declared_ids != reinforcement_ids:
         raise RuntimeError(
             "active combat reinforcement manifest does not match configured source actors"
         )
@@ -11685,7 +11900,7 @@ def _missing_source_reinforcement_ids(
     }
     return [
         actor_id
-        for actor_id in reinforcement_hostile_ids
+        for actor_id in reinforcement_ids
         if actor_id not in existing_ids
     ]
 
@@ -11697,10 +11912,21 @@ async def _resume_source_reinforcements(
     party_ids: list[str],
     initial_hostile_ids: list[str],
     reinforcement_hostile_ids: list[str],
+    reinforcement_ally_ids: list[str],
 ) -> list[dict[str, Any]]:
     """Idempotently complete a source reinforcement queue after partial startup."""
 
-    if not reinforcement_hostile_ids:
+    reinforcement_ids = [
+        *reinforcement_hostile_ids,
+        *reinforcement_ally_ids,
+    ]
+    _agent_reinforcement_triggers(
+        getattr(args, "agent_reinforcement_trigger_json", []),
+        reinforcement_ids=reinforcement_ids,
+        reinforcement_round=int(args.reinforcement_round or 0),
+        encounter_source_excerpt=str(args.source_excerpt or ""),
+    )
+    if not reinforcement_ids:
         return []
     await client.load("combat.observe", "combat.control")
     combat = await client.domain(
@@ -11710,25 +11936,32 @@ async def _resume_source_reinforcements(
     missing_ids = _missing_source_reinforcement_ids(
         combat,
         scene_id=str(args.scene_id or ""),
-        reinforcement_hostile_ids=reinforcement_hostile_ids,
+        reinforcement_ids=reinforcement_ids,
     )
     if not missing_ids:
         return []
     all_hostile_ids = [*initial_hostile_ids, *reinforcement_hostile_ids]
+    all_party_ids = [*party_ids, *reinforcement_ally_ids]
+    all_participant_ids = [*all_party_ids, *all_hostile_ids]
     source_conditions_by_actor = _source_declared_conditions(
         args.source_condition_json,
-        participant_ids=[*party_ids, *all_hostile_ids],
+        participant_ids=all_participant_ids,
     )
     source_traits_by_actor = _source_traits(
         args.source_trait_json,
-        participant_ids=[*party_ids, *all_hostile_ids],
+        participant_ids=all_participant_ids,
     )
     branch = await _current_branch(client, args.campaign_id)
     recovered: list[dict[str, Any]] = []
     for actor_id in missing_ids:
-        index = reinforcement_hostile_ids.index(actor_id)
+        index = reinforcement_ids.index(actor_id)
         campaign = await _campaign(client, args.campaign_id)
         tie_breaker = len(party_ids) + len(initial_hostile_ids) + index
+        disposition = (
+            "hostile"
+            if actor_id in set(reinforcement_hostile_ids)
+            else "friendly"
+        )
         recovered.append(
             await client.domain(
                 "combat_join",
@@ -11738,6 +11971,7 @@ async def _resume_source_reinforcements(
                     "participant_config": _reinforcement_config(
                         actor_id,
                         index,
+                        disposition=disposition,
                         join_round=int(args.reinforcement_round or 0),
                         tie_breaker=tie_breaker,
                         source_conditions=source_conditions_by_actor.get(actor_id),
@@ -11762,6 +11996,7 @@ async def _start_or_resume_auto_run(
     hostile_ids: list[str],
     additional_hostile_ids: list[str],
     reinforcement_hostile_ids: list[str],
+    reinforcement_ally_ids: list[str],
 ) -> dict[str, Any]:
     opened = await client.open(args.campaign_id)
     phase = str(opened.get("phase") or "")
@@ -11783,6 +12018,7 @@ async def _start_or_resume_auto_run(
                 args,
                 [
                     *party_ids,
+                    *reinforcement_ally_ids,
                     *hostile_ids,
                     *additional_hostile_ids,
                     *reinforcement_hostile_ids,
@@ -11795,6 +12031,7 @@ async def _start_or_resume_auto_run(
             hostile_ids,
             additional_hostile_ids,
             reinforcement_hostile_ids,
+            reinforcement_ally_ids,
         )
     elif phase == "combat":
         recovered_reinforcement_queue = await _resume_source_reinforcements(
@@ -11803,6 +12040,7 @@ async def _start_or_resume_auto_run(
             party_ids=party_ids,
             initial_hostile_ids=[*hostile_ids, *additional_hostile_ids],
             reinforcement_hostile_ids=reinforcement_hostile_ids,
+            reinforcement_ally_ids=reinforcement_ally_ids,
         )
     elif phase != "combat":
         raise RuntimeError(
@@ -11812,7 +12050,7 @@ async def _start_or_resume_auto_run(
     completed = await _auto_run(
         client,
         args,
-        party_ids,
+        [*party_ids, *reinforcement_ally_ids],
         [
             *hostile_ids,
             *additional_hostile_ids,
@@ -11869,6 +12107,8 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
     hostile_ids = actor_groups["hostile_ids"]
     additional_hostile_ids = actor_groups["additional_hostile_ids"]
     reinforcement_hostile_ids = actor_groups["reinforcement_hostile_ids"]
+    reinforcement_ally_ids = actor_groups["reinforcement_ally_ids"]
+    all_friendly_ids = [*friendly_ids, *reinforcement_ally_ids]
     all_hostile_ids = [
         *hostile_ids,
         *additional_hostile_ids,
@@ -11886,6 +12126,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
         "hostile_ids": hostile_ids,
         "additional_hostile_ids": additional_hostile_ids,
         "reinforcement_hostile_ids": reinforcement_hostile_ids,
+        "reinforcement_ally_ids": reinforcement_ally_ids,
     }
     async with stdio_client(_server_parameters(args)) as (read, write):
         async with ClientSession(read, write) as session:
@@ -11899,6 +12140,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     hostile_ids,
                     additional_hostile_ids,
                     reinforcement_hostile_ids,
+                    reinforcement_ally_ids,
                 )
             elif args.action == "auto-run":
                 report["result"] = await _start_or_resume_auto_run(
@@ -11908,15 +12150,16 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     hostile_ids,
                     additional_hostile_ids,
                     reinforcement_hostile_ids,
+                    reinforcement_ally_ids,
                 )
             elif args.action == "finalize":
                 report["result"] = await _finalize_ended_encounter(
                     client,
                     args,
-                    [*friendly_ids, *all_hostile_ids],
+                    [*all_friendly_ids, *all_hostile_ids],
                 )
             else:
-                actor_ids = [*friendly_ids, *all_hostile_ids]
+                actor_ids = [*all_friendly_ids, *all_hostile_ids]
                 report["result"] = await _status(
                     client,
                     campaign_id=args.campaign_id,
