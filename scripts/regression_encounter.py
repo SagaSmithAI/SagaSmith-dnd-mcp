@@ -474,6 +474,18 @@ def _arguments() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--agent-common-action-priority-json",
+        action="append",
+        type=json.loads,
+        default=[],
+        help=(
+            "Agent tactical fallback with actor_id, ordered choices containing "
+            "action=dodge, decision, and ruling_reason. This lets a participant "
+            "legally spend its turn when the reviewed scene makes every recorded "
+            "attack or spell inappropriate."
+        ),
+    )
+    parser.add_argument(
         "--no-surprise",
         action="store_true",
         help="Explicitly start with neither side surprised when the cited scene warrants it",
@@ -2374,6 +2386,29 @@ def _agent_weapon_priorities(
     return normalized
 
 
+def _safe_single_target_spell_declaration(
+    spell: dict[str, Any],
+    *,
+    target_id: str,
+) -> dict[str, str] | None:
+    """Return a complete declaration only when no unrecorded cover fact is needed."""
+
+    resolution = dict(spell.get("resolution") or {})
+    targeting = dict(resolution.get("targeting") or {})
+    save = dict(resolution.get("save") or {})
+    if (
+        resolution.get("kind") != "saving_throw"
+        or targeting.get("mode") != "creature"
+        or int(targeting.get("max_targets", 1) or 1) != 1
+        or (
+            str(save.get("ability") or "") == "dexterity"
+            and not bool(save.get("ignores_cover"))
+        )
+    ):
+        return None
+    return {"target_id": target_id}
+
+
 def _agent_spell_priorities(
     declarations: list[dict[str, Any]],
     *,
@@ -2451,8 +2486,14 @@ def _agent_spell_priorities(
             )
             spell = spell_cards.get(spell_id)
             resolution = dict(dict(spell or {}).get("resolution") or {})
-            area_targeting = (
-                dict(resolution.get("targeting") or {}).get("mode") == "area"
+            targeting = dict(resolution.get("targeting") or {})
+            area_targeting = targeting.get("mode") == "area"
+            safe_single_target_save = (
+                _safe_single_target_spell_declaration(
+                    dict(spell or {}),
+                    target_id="validation-target",
+                )
+                is not None
             )
             identity = (spell_id, target_policy)
             compatible = (
@@ -2463,7 +2504,10 @@ def _agent_spell_priorities(
                 )
             ) or (
                 target_policy == "prioritized_opponent"
-                and spell_id in {MAGIC_MISSILE_ID, GUIDING_BOLT_ID}
+                and (
+                    spell_id in {MAGIC_MISSILE_ID, GUIDING_BOLT_ID}
+                    or safe_single_target_save
+                )
             ) or (
                 target_policy == "maximize_opponents_without_allies"
                 and resolution.get("kind") == "saving_throw"
@@ -2490,6 +2534,73 @@ def _agent_spell_priorities(
                 }
             )
             identities.add(identity)
+        normalized[actor_id] = {
+            "actor_id": actor_id,
+            "choices": choices,
+            "agent_ruling": {
+                "default_resolver": "agent",
+                "ruling_kind": "agent_dm_adjudication",
+                "decision": decision,
+                "reason": ruling_reason,
+            },
+        }
+    return normalized
+
+
+def _agent_common_action_priorities(
+    declarations: list[dict[str, Any]],
+    *,
+    participant_ids: list[str],
+) -> dict[str, dict[str, Any]]:
+    """Validate explicit, source-neutral Agent fallback actions."""
+
+    participants = set(participant_ids)
+    normalized: dict[str, dict[str, Any]] = {}
+    allowed = {"actor_id", "choices", "decision", "ruling_reason"}
+    choice_allowed = {"action"}
+    for index, declaration in enumerate(declarations):
+        if not isinstance(declaration, dict):
+            raise ValueError(f"Agent common-action priority {index} must be an object")
+        unknown = set(declaration) - allowed
+        actor_id = str(declaration.get("actor_id") or "").strip()
+        raw_choices = declaration.get("choices")
+        decision = " ".join(str(declaration.get("decision") or "").split())
+        ruling_reason = " ".join(
+            str(declaration.get("ruling_reason") or "").split()
+        )
+        if (
+            unknown
+            or actor_id not in participants
+            or actor_id in normalized
+            or not isinstance(raw_choices, list)
+            or not raw_choices
+            or not 10 <= len(decision) <= 500
+            or not 10 <= len(ruling_reason) <= 500
+        ):
+            raise ValueError(
+                f"Agent common-action priority {index} requires one unique "
+                "participant, ordered choices, decision, and ruling_reason"
+            )
+        choices: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for choice_index, raw_choice in enumerate(raw_choices):
+            if not isinstance(raw_choice, dict):
+                raise ValueError(
+                    f"Agent common-action priority choice {index}:{choice_index} "
+                    "must be an object"
+                )
+            action = str(raw_choice.get("action") or "").strip().casefold()
+            if (
+                set(raw_choice) - choice_allowed
+                or action != "dodge"
+                or action in seen
+            ):
+                raise ValueError(
+                    f"Agent common-action priority choice {index}:{choice_index} "
+                    "must name the safe fallback action dodge exactly once"
+                )
+            choices.append({"action": action})
+            seen.add(action)
         normalized[actor_id] = {
             "actor_id": actor_id,
             "choices": choices,
@@ -5378,6 +5489,10 @@ async def _start(
         participant_ids=[*party_ids, *all_hostile_ids],
         actors=actors,
     )
+    agent_common_action_priorities = _agent_common_action_priorities(
+        getattr(args, "agent_common_action_priority_json", []),
+        participant_ids=[*party_ids, *all_hostile_ids],
+    )
     opening_weapons = _source_opening_weapons(
         args.source_opening_weapon_json,
         participant_ids=[*party_ids, *all_hostile_ids],
@@ -5839,6 +5954,9 @@ async def _start(
         ),
         "agent_weapon_priorities": list(agent_weapon_priorities.values()),
         "agent_spell_priorities": list(agent_spell_priorities.values()),
+        "agent_common_action_priorities": list(
+            agent_common_action_priorities.values()
+        ),
         "source_precombat_casts": precombat_cast_results,
         "source_opening_weapons": list(opening_weapons.values()),
         "source_ammunition_selections": list(source_ammunition_selections.values()),
@@ -6071,7 +6189,7 @@ def _choose_agent_spell(
 ) -> tuple[str, str, int] | tuple[str, str, int, dict[str, Any]] | None:
     """Apply one explicit Agent spell policy to current structured state."""
 
-    if not leveled_spell_available or not spell_choices:
+    if not spell_choices:
         return None
     actor = actors[actor_id]
     sheet = dict(actor.get("sheet") or {})
@@ -6105,8 +6223,6 @@ def _choose_agent_spell(
         for level, slot in dict(spellcasting.get("spell_slots") or {}).items()
         if str(level).isdigit() and int(level) >= 1 and int(dict(slot).get("value", 0) or 0) > 0
     )
-    if not available_slot_levels:
-        return None
     allied_ids = (
         list(party_ids)
         if actor_id in party_ids
@@ -6126,9 +6242,17 @@ def _choose_agent_spell(
             None,
         )
         spell_level = int(dict(spell or {}).get("level", 1) or 0)
-        cast_level = next(
-            (level for level in available_slot_levels if level >= spell_level),
-            None,
+        cast_level = (
+            0
+            if spell_level == 0
+            else next(
+                (
+                    level
+                    for level in available_slot_levels
+                    if leveled_spell_available and level >= spell_level
+                ),
+                None,
+            )
         )
         if cast_level is None:
             continue
@@ -8961,6 +9085,10 @@ async def _auto_run(
         participant_ids=[*party_ids, *hostile_ids],
         actors=initial_actors,
     )
+    agent_common_action_priorities = _agent_common_action_priorities(
+        getattr(args, "agent_common_action_priority_json", []),
+        participant_ids=[*party_ids, *hostile_ids],
+    )
     on_hit_rulings = _source_on_hit_rulings(
         args.source_on_hit_ruling_json,
         participant_ids=[*party_ids, *hostile_ids],
@@ -10652,6 +10780,29 @@ async def _auto_run(
                 cast_arguments["declaration"] = {"target_id": spell_target_id}
             elif area_declaration is not None:
                 cast_arguments["declaration"] = area_declaration
+            else:
+                spell_card = next(
+                    (
+                        item
+                        for item in dict(
+                            dict(actors[actor_id].get("sheet") or {}).get(
+                                "content"
+                            )
+                            or {}
+                        ).get("spells", [])
+                        if isinstance(item, dict)
+                        and str(item.get("id") or "") == spell_id
+                    ),
+                    None,
+                )
+                single_target_declaration = (
+                    _safe_single_target_spell_declaration(
+                        dict(spell_card or {}),
+                        target_id=spell_target_id,
+                    )
+                )
+                if single_target_declaration is not None:
+                    cast_arguments["declaration"] = single_target_declaration
             casting_perception_decision = dict(
                 agent_casting_perception_rulings.get(actor_id) or {}
             )
@@ -10821,6 +10972,52 @@ async def _auto_run(
                 # Healing Word leaves a main action available. The cast-declared
                 # guard above still prevents a second leveled spell this turn.
                 continue
+            await _end_turn(client, args, str(branch["id"]), actor_id, sequence)
+            continue
+        agent_common_action_priority = dict(
+            agent_common_action_priorities.get(actor_id) or {}
+        )
+        common_action = next(
+            (
+                str(choice["action"])
+                for choice in agent_common_action_priority.get("choices", [])
+                if str(choice["action"]) in available_actions
+            ),
+            "",
+        )
+        if common_action:
+            campaign = await _campaign(client, args.campaign_id)
+            common_result = await client.domain(
+                "combat_common_action",
+                {
+                    "campaign_id": args.campaign_id,
+                    "actor_id": actor_id,
+                    "action": common_action,
+                    "branch_id": branch["id"],
+                    "expected_revision": campaign["revision"],
+                    "idempotency_key": (
+                        "encounter-agent-common-action-"
+                        + _operation_token(
+                            args,
+                            sequence,
+                            actor_id,
+                            common_action,
+                        )
+                    ),
+                },
+            )
+            turns.append(
+                {
+                    "sequence": sequence,
+                    "kind": "agent_common_action",
+                    "actor_id": actor_id,
+                    "action": common_action,
+                    "agent_ruling": deepcopy(
+                        agent_common_action_priority["agent_ruling"]
+                    ),
+                    "result": common_result,
+                }
+            )
             await _end_turn(client, args, str(branch["id"]), actor_id, sequence)
             continue
         if actor_id in effective_party_ids and not living_targets:
@@ -11313,6 +11510,9 @@ async def _auto_run(
         "completed_opening_weapon_actor_ids": sorted(completed_opening_weapon_actor_ids),
         "agent_weapon_priorities": list(agent_weapon_priorities.values()),
         "agent_spell_priorities": list(agent_spell_priorities.values()),
+        "agent_common_action_priorities": list(
+            agent_common_action_priorities.values()
+        ),
         "source_ammunition_selections": list(source_ammunition_selections.values()),
         "source_on_hit_rulings": list(on_hit_rulings.values()),
         "source_extra_damage_rulings": [

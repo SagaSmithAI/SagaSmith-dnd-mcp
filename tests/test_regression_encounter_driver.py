@@ -13,6 +13,7 @@ from scripts.regression_encounter import (
     EncounterRulingRequiredError,
     _agent_attack_contexts,
     _agent_casting_perception_rulings,
+    _agent_common_action_priorities,
     _agent_object_interactions,
     _agent_party_absences,
     _agent_positions,
@@ -72,6 +73,7 @@ from scripts.regression_encounter import (
     _required_source_opening_weapon,
     _resolve_pending,
     _roll_total,
+    _safe_single_target_spell_declaration,
     _selected_prepared_actor_ids,
     _settle_agent_turn_ruling,
     _settle_source_casualty_pool_turn,
@@ -3446,6 +3448,114 @@ def test_agent_spell_priority_preserves_explicit_order_and_target_policy() -> No
             "cast_level_policy": "lowest_available",
         },
     ]
+
+
+def test_agent_spell_priority_accepts_reviewed_single_target_save_cantrip() -> None:
+    actor = _spell_actor("sacred-flame", slots=0)
+    actor["sheet"]["content"]["spells"][0].update(
+        {
+            "level": 0,
+            "resolution": {
+                "kind": "saving_throw",
+                "targeting": {
+                    "mode": "creature",
+                    "max_targets": 1,
+                    "requires_sight": True,
+                },
+                "save": {
+                    "ability": "dexterity",
+                    "ignores_cover": True,
+                    "success": "none",
+                    "damage": {
+                        "base_dice": "1d8",
+                        "damage_type": "radiant",
+                    },
+                },
+            },
+        }
+    )
+
+    priorities = _agent_spell_priorities(
+        [
+            {
+                "actor_id": "cleric",
+                "choices": [
+                    {
+                        "spell_id": "sacred-flame",
+                        "target_policy": "prioritized_opponent",
+                    }
+                ],
+                "decision": "Use the reviewed saving-throw cantrip against one foe.",
+                "ruling_reason": "The spell card completely defines its target and save.",
+            }
+        ],
+        participant_ids=["cleric"],
+        actors={"cleric": actor},
+    )
+
+    assert priorities["cleric"]["choices"][0]["spell_id"] == "sacred-flame"
+    assert _safe_single_target_spell_declaration(
+        actor["sheet"]["content"]["spells"][0],
+        target_id="goblin",
+    ) == {"target_id": "goblin"}
+    assert _choose_agent_spell(
+        "cleric",
+        party_ids=["cleric"],
+        actors={"cleric": actor},
+        living_targets=["goblin"],
+        spell_choices=priorities["cleric"]["choices"],
+        leveled_spell_available=False,
+    ) == ("sacred-flame", "goblin", 0)
+
+
+def test_single_target_dexterity_save_requires_explicit_cover_semantics() -> None:
+    spell = {
+        "level": 0,
+        "resolution": {
+            "kind": "saving_throw",
+            "targeting": {"mode": "creature", "max_targets": 1},
+            "save": {"ability": "dexterity", "success": "none"},
+        },
+    }
+
+    assert (
+        _safe_single_target_spell_declaration(spell, target_id="goblin")
+        is None
+    )
+
+
+def test_agent_common_action_priority_is_explicit_and_source_neutral() -> None:
+    priorities = _agent_common_action_priorities(
+        [
+            {
+                "actor_id": "guard",
+                "choices": [{"action": "dodge"}],
+                "decision": "Take the Dodge action when no reviewed attack is suitable.",
+                "ruling_reason": "Dodge is a legal common action and invents no source fact.",
+            }
+        ],
+        participant_ids=["guard"],
+    )
+
+    assert priorities["guard"]["choices"] == [{"action": "dodge"}]
+    assert priorities["guard"]["agent_ruling"] == {
+        "default_resolver": "agent",
+        "ruling_kind": "agent_dm_adjudication",
+        "decision": "Take the Dodge action when no reviewed attack is suitable.",
+        "reason": "Dodge is a legal common action and invents no source fact.",
+    }
+    with pytest.raises(ValueError, match="safe fallback action dodge"):
+        _agent_common_action_priorities(
+            [
+                {
+                    "actor_id": "guard",
+                    "choices": [{"action": "attack"}],
+                    "decision": "Invent an unreviewed attack for this otherwise idle turn.",
+                    "ruling_reason": "This must not bypass the recorded character card.",
+                }
+            ],
+            participant_ids=["guard"],
+        )
 
 
 def test_agent_casting_perception_requires_an_explicit_observer_matrix() -> None:
