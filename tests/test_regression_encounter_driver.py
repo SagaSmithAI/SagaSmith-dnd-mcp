@@ -39,6 +39,7 @@ from scripts.regression_encounter import (
     _consume_agent_forced_target,
     _consume_agent_target_reaction,
     _defense_selection,
+    _destination_within_range,
     _encounter_actor_groups,
     _encounter_battle_map_request,
     _encounter_operation_scope,
@@ -7237,6 +7238,57 @@ def test_movement_destination_stops_next_to_target_without_sharing_space() -> No
         == 1
     )
     assert destination[1] <= 30
+
+
+def test_movement_destination_reports_difficult_terrain_cost() -> None:
+    combat = {
+        "battle_map": {
+            "bounds": {"width_cells": 5, "height_cells": 1},
+            "blocked_cells": [],
+            "difficult_cells": ["1,0"],
+        },
+        "combatants": [
+            {
+                "actor_id": "pc",
+                "position": {"x": 0, "y": 0},
+                "turn_budget": {"movement": 15},
+            },
+            {
+                "actor_id": "goblin",
+                "position": {"x": 4, "y": 0},
+                "turn_budget": {"movement": 30},
+            },
+        ],
+    }
+
+    destination = _choose_destination(combat, "pc", "goblin")
+
+    assert destination == (
+        {"x": 2, "y": 0},
+        15,
+        [{"x": 1, "y": 0}, {"x": 2, "y": 0}],
+    )
+    assert (
+        _destination_within_range(
+            destination[0],
+            {"x": 4, "y": 0},
+            range_ft=5,
+        )
+        is False
+    )
+
+
+def test_destination_range_requires_actual_melee_reach() -> None:
+    assert _destination_within_range(
+        {"x": 3, "y": 3},
+        {"x": 4, "y": 4},
+        range_ft=5,
+    )
+    assert not _destination_within_range(
+        {"x": 2, "y": 3},
+        {"x": 4, "y": 4},
+        range_ft=5,
+    )
 
 
 def test_movement_destination_never_approaches_a_visible_fear_source() -> None:

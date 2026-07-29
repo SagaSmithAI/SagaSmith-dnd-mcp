@@ -6807,13 +6807,28 @@ def _choose_destination(
         )
     if not candidates:
         return None
-    _, _, steps, x, y = min(candidates)
+    _, cost, _, x, y = min(candidates)
     selected = (x, y)
     reverse_path = [selected]
     while reverse_path[-1] != origin_cell:
         reverse_path.append(previous[reverse_path[-1]])
     route = [{"x": point[0], "y": point[1]} for point in reversed(reverse_path[:-1])]
-    return {"x": x, "y": y}, steps * 5, route
+    return {"x": x, "y": y}, cost, route
+
+
+def _destination_within_range(
+    destination: dict[str, int],
+    target_position: dict[str, int],
+    *,
+    range_ft: int,
+) -> bool:
+    if (
+        range_ft < 0
+        or set(destination) != {"x", "y"}
+        or set(target_position) != {"x", "y"}
+    ):
+        return False
+    return _distance(destination, target_position) * 5 <= range_ft
 
 
 def _current_actor_id(combat: dict[str, Any]) -> str:
@@ -10490,6 +10505,32 @@ async def _auto_run(
                             "planned_path": destination[2],
                             "avoided_cells": sorted(avoided_cells_by_actor.get(actor_id, set())),
                             "result": moved,
+                        }
+                    )
+                    continue
+                if not _destination_within_range(
+                    destination[0],
+                    target_position,
+                    range_ft=5,
+                ):
+                    turns.append(
+                        {
+                            "sequence": sequence,
+                            "kind": "stabilize_approach",
+                            "actor_id": actor_id,
+                            "target_id": stabilization_target_id,
+                            "planned_path": destination[2],
+                            "avoided_cells": sorted(
+                                avoided_cells_by_actor.get(actor_id, set())
+                            ),
+                            "move": moved,
+                            "end_turn": await _end_turn(
+                                client,
+                                args,
+                                str(branch["id"]),
+                                actor_id,
+                                sequence,
+                            ),
                         }
                     )
                     continue
