@@ -887,6 +887,11 @@ def test_core_relock_driver_requires_current_checkpoint_and_public_profile() -> 
             if tool_id == "campaign_rules" and arguments["action"] == "core_relock":
                 assert arguments["payload"]["expected_core_fingerprint"] == "old-core"
                 assert arguments["payload"]["expected_head_snapshot_id"] == "snapshot-1"
+                assert arguments["idempotency_key"] == _mutation_key(
+                    "run-1",
+                    "core-relock",
+                    "old-core:snapshot-1",
+                )
                 self.revision += 1
                 return {
                     "status": "relocked",

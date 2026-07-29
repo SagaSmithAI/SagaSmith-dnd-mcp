@@ -11362,7 +11362,11 @@ async def _relock_core(
                 },
                 "branch_id": str(branch["id"]),
                 "expected_revision": campaign["revision"],
-                "idempotency_key": _mutation_key(run_id, "core-relock", previous_fingerprint),
+                "idempotency_key": _mutation_key(
+                    run_id,
+                    "core-relock",
+                    f"{previous_fingerprint}:{branch['head_snapshot_id']}",
+                ),
             },
         )
     )
@@ -11373,7 +11377,10 @@ async def _relock_core(
         campaign_id=campaign_id,
         action="sync",
         run_id=run_id,
-        identity=f"core-relock-sync:{previous_fingerprint}",
+        identity=(
+            f"core-relock-sync:{previous_fingerprint}:"
+            f"{branch['head_snapshot_id']}"
+        ),
     )
     return {
         "reason": normalized_reason,
