@@ -6624,6 +6624,33 @@ def test_default_ambush_layout_keeps_two_goblins_thirty_feet_away() -> None:
     assert warned_by_actor["goblin-1"]["hidden"] is True
 
 
+def test_default_layout_fits_large_source_authored_battle_without_scaling() -> None:
+    party_ids = [f"pc-{index}" for index in range(1, 7)]
+    ally_ids = [f"ally-{index}" for index in range(1, 9)]
+    hostile_ids = [f"hostile-{index}" for index in range(1, 23)]
+
+    config = _participant_config(
+        party_ids,
+        hostile_ids,
+        ally_ids=ally_ids,
+        surprise_by_actor={},
+        hostiles_hidden=False,
+    )
+
+    assert len(config) == 36
+    positions = [
+        (int(item["position"]["x"]), int(item["position"]["y"]))
+        for item in config
+    ]
+    assert len(positions) == len(set(positions))
+    assert all(0 <= x < 12 and 0 <= y < 12 for x, y in positions)
+    by_actor = {item["actor_id"]: item for item in config}
+    assert by_actor["pc-6"]["position"] == {"x": 1, "y": 6}
+    assert by_actor["ally-8"]["position"] == {"x": 0, "y": 8}
+    assert by_actor["hostile-21"]["position"] == {"x": 10, "y": 9}
+    assert by_actor["hostile-22"]["position"] == {"x": 2, "y": 1}
+
+
 def test_hidden_hostile_visibility_preserves_each_observer_detection() -> None:
     config = _participant_config(
         ["pc-1", "pc-2"],

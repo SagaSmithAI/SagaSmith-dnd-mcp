@@ -1496,7 +1496,7 @@ def _participant_config(
     agent_positions: dict[str, dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     allies = list(ally_ids or [])
-    hostile_positions = (
+    preferred_hostile_positions = (
         (2, 2),
         (2, 4),
         (7, 2),
@@ -1519,12 +1519,21 @@ def _participant_config(
         (8, 9),
         (10, 9),
     )
-    if len(party_ids) + len(allies) > 10 or len(hostile_ids) > len(
+    hostile_positions = [
+        *preferred_hostile_positions,
+        *[
+            (x, y)
+            for y in range(1, 12)
+            for x in range(2, 12)
+            if (x, y) not in set(preferred_hostile_positions)
+        ],
+    ]
+    if len(party_ids) > 11 or len(allies) > 11 or len(hostile_ids) > len(
         hostile_positions
     ):
         raise ValueError(
-            "default encounter layout supports at most 10 friendly actors and "
-            f"{len(hostile_positions)} hostiles"
+            "default encounter layout supports at most 11 PCs, 11 allied NPCs, "
+            f"and {len(hostile_positions)} hostiles"
         )
     if set(party_ids) & set(allies):
         raise ValueError("PC and allied-NPC participant ids must be disjoint")
