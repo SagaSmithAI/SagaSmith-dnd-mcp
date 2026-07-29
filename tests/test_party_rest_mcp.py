@@ -626,7 +626,17 @@ def test_party_long_rest_honors_source_granted_elf_trance(tmp_path: Path) -> Non
 
 def test_party_long_rest_accounts_for_2014_preparation_time(tmp_path: Path) -> None:
     async def exercise() -> None:
-        server = create_server(_config(tmp_path))
+        workspace = Path(__file__).resolve().parents[2]
+        config = McpConfig(
+            home=tmp_path / "home",
+            database_url=None,
+            chroma_url=None,
+            chroma_path_override=None,
+            dnd_skills_dir=workspace / "SagaSmith-dnd-skills",
+            modulegen_skills_dir=tmp_path / "modulegen",
+            auto_seed_rules=False,
+        )
+        server = create_server(config)
         campaign = await _call(
             server,
             "campaign_create",
@@ -646,11 +656,11 @@ def test_party_long_rest_accounts_for_2014_preparation_time(tmp_path: Path) -> N
             "mode": "prepared",
             "max_prepared": 6,
             "changes_on": "long_rest",
-            "selected_spell_ids": ["bless"],
+            "selected_spell_ids": ["dnd5e.content.srd2014.spell.bless"],
         }
         sheet["content"]["spells"] = [
             {
-                "id": "bless",
+                "id": "dnd5e.content.srd2014.spell.bless",
                 "name": "Bless",
                 "level": 1,
                 "grant": {
@@ -659,17 +669,6 @@ def test_party_long_rest_accounts_for_2014_preparation_time(tmp_path: Path) -> N
                     "method": "class_prepared",
                 },
                 "access": {"prepared": True},
-            },
-            {
-                "id": "aid",
-                "name": "Aid",
-                "level": 2,
-                "grant": {
-                    "source_type": "class",
-                    "source_key": "cleric",
-                    "method": "class_prepared",
-                },
-                "access": {"prepared": False},
             },
         ]
         cleric = await _call(
@@ -685,6 +684,24 @@ def test_party_long_rest_accounts_for_2014_preparation_time(tmp_path: Path) -> N
                 "idempotency_key": "cleric",
             },
         )
+        prepared_setup = await _call(
+            server,
+            "character_spell_prepare_list",
+            {
+                "character_id": cleric["id"],
+                "spell_ids": [
+                    "dnd5e.content.srd2014.spell.bless",
+                    "dnd5e.content.srd2014.spell.aid",
+                ],
+                "event": "setup",
+                "expected_revision": cleric["revision"],
+                "idempotency_key": "prepared-setup",
+            },
+        )
+        assert prepared_setup["preparation"]["materialized_spell_ids"] == [
+            "dnd5e.content.srd2014.spell.aid"
+        ]
+        cleric = prepared_setup["character"]
         current = await _call(
             server,
             "campaign_query",
@@ -714,7 +731,10 @@ def test_party_long_rest_accounts_for_2014_preparation_time(tmp_path: Path) -> N
                             {
                                 "character_id": cleric["id"],
                                 "expected_revision": cleric["revision"],
-                                "prepared_spell_ids": ["bless", "aid"],
+                                "prepared_spell_ids": [
+                                    "dnd5e.content.srd2014.spell.bless",
+                                    "dnd5e.content.srd2014.spell.lesser-restoration",
+                                ],
                                 "rest_schedule": {
                                     "sleep_minutes": 479,
                                     "light_activity_minutes": 1,
@@ -739,7 +759,10 @@ def test_party_long_rest_accounts_for_2014_preparation_time(tmp_path: Path) -> N
                         {
                             "character_id": cleric["id"],
                             "expected_revision": cleric["revision"],
-                            "prepared_spell_ids": ["bless", "aid"],
+                            "prepared_spell_ids": [
+                                "dnd5e.content.srd2014.spell.bless",
+                                "dnd5e.content.srd2014.spell.lesser-restoration",
+                            ],
                             "rest_schedule": {
                                 "sleep_minutes": 477,
                                 "light_activity_minutes": 3,
@@ -753,14 +776,68 @@ def test_party_long_rest_accounts_for_2014_preparation_time(tmp_path: Path) -> N
             },
         )
         assert rested["preparations"][cleric["id"]]["preparation_minutes"] == 3
+        assert rested["preparations"][cleric["id"]]["materialized_spell_ids"] == [
+            "dnd5e.content.srd2014.spell.lesser-restoration"
+        ]
         updated = await _call(
             server,
             "character_query",
             {"view": "get", "payload": {"character_id": cleric["id"]}},
         )
         assert updated["sheet"]["spellcasting"]["preparation"]["selected_spell_ids"] == [
-            "bless",
-            "aid",
+            "dnd5e.content.srd2014.spell.bless",
+            "dnd5e.content.srd2014.spell.lesser-restoration",
         ]
+        lesser_restoration = next(
+            item
+            for item in updated["sheet"]["content"]["spells"]
+            if item["id"] == "dnd5e.content.srd2014.spell.lesser-restoration"
+        )
+        assert lesser_restoration["grant"] == {
+            "source_type": "class",
+            "source_key": "cleric",
+            "method": "class_prepared",
+        }
+        assert lesser_restoration["pack_id"] == "dnd5e.content.srd2014"
+
+        multiclass_sheet = default_character_sheet()
+        multiclass_sheet["progression"] = {
+            "level": 6,
+            "classes": [
+                {"name": "Cleric", "level": 3, "hit_die": 8},
+                {"name": "Druid", "level": 3, "hit_die": 8},
+            ],
+        }
+        multiclass_sheet["spellcasting"]["preparation"] = {
+            "mode": "prepared",
+            "max_prepared": 8,
+            "changes_on": "long_rest",
+            "selected_spell_ids": [],
+        }
+        multiclass = await _call(
+            server,
+            "character_create_from",
+            {
+                "mode": "direct",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "name": "Multiclass prepared caster",
+                    "sheet": multiclass_sheet,
+                },
+                "idempotency_key": "multiclass",
+            },
+        )
+        with pytest.raises(Exception, match="unambiguous source class"):
+            await _call(
+                server,
+                "character_spell_prepare_list",
+                {
+                    "character_id": multiclass["id"],
+                    "spell_ids": ["dnd5e.content.srd2014.spell.cure-wounds"],
+                    "event": "setup",
+                    "expected_revision": multiclass["revision"],
+                    "idempotency_key": "ambiguous-multiclass-preparation",
+                },
+            )
 
     asyncio.run(exercise())

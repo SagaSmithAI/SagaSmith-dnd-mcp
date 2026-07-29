@@ -17607,8 +17607,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 rest_schedule=member["rest_schedule"],
             )
             if normalized_rest_type == "long_rest" and member["prepared_spell_ids"] is not None:
-                preparation_preview = replace_prepared_spells(
+                preparation_hydration = hydrate_class_prepared_spell_cards(
+                    campaign_id,
                     current.sheet,
+                    spell_ids=member["prepared_spell_ids"],
+                    branch_id=resolved_branch_id,
+                )
+                preparation_preview = replace_prepared_spells(
+                    preparation_hydration["sheet"],
                     spell_ids=member["prepared_spell_ids"],
                     event="long_rest",
                 )
@@ -17752,11 +17758,20 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 )
                 preparation_result = None
                 if normalized_rest_type == "long_rest" and member["prepared_spell_ids"] is not None:
-                    preparation_result = replace_prepared_spells(
+                    preparation_hydration = hydrate_class_prepared_spell_cards(
+                        campaign_id,
                         sheet,
+                        spell_ids=member["prepared_spell_ids"],
+                        branch_id=resolved_branch_id,
+                    )
+                    preparation_result = replace_prepared_spells(
+                        preparation_hydration["sheet"],
                         spell_ids=member["prepared_spell_ids"],
                         event="long_rest",
                     )
+                    preparation_result["materialized_spell_ids"] = preparation_hydration[
+                        "materialized_spell_ids"
+                    ]
                     sheet = preparation_result["sheet"]
                     preparations[current.id] = {
                         key: value for key, value in preparation_result.items() if key != "sheet"
@@ -18368,14 +18383,27 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         preparation_rules = (
             effective_rule_context(current.campaign_id) if current.campaign_id else None
         )
+        hydrated = (
+            hydrate_class_prepared_spell_cards(
+                current.campaign_id,
+                current.sheet,
+                spell_ids=[spell_id],
+                branch_id=require_current_branch(current.campaign_id, None),
+            )
+            if prepared and current.campaign_id is not None
+            else {"sheet": current.sheet, "materialized_spell_ids": []}
+        )
         return update_sheet(
             character_id,
-            set_spell_prepared(current.sheet, spell_id, prepared),
+            set_spell_prepared(hydrated["sheet"], spell_id, prepared),
             operation="character.spell.prepare" if prepared else "character.spell.unprepare",
             principal_id=principal_id,
             expected_revision=expected_revision,
             idempotency_key=idempotency_key,
             payload={"spell_id": spell_id, "prepared": prepared},
+            response_extra={
+                "materialized_spell_ids": hydrated["materialized_spell_ids"],
+            },
             rule_receipts=core_receipts(
                 preparation_rules,
                 ["dnd5e.core.spell.preparation"],
@@ -18416,8 +18444,18 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             raise CombatEngineError(
                 "this tool accepts setup or level_up; long-rest changes belong in party_rest"
             )
+        hydrated = (
+            hydrate_class_prepared_spell_cards(
+                current.campaign_id,
+                current.sheet,
+                spell_ids=list(spell_ids),
+                branch_id=require_current_branch(current.campaign_id, None),
+            )
+            if current.campaign_id is not None
+            else {"sheet": current.sheet, "materialized_spell_ids": []}
+        )
         result = replace_prepared_spells(
-            current.sheet,
+            hydrated["sheet"],
             spell_ids=list(spell_ids),
             event=normalized_event,
         )
@@ -18433,7 +18471,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             idempotency_key=idempotency_key,
             payload={"spell_ids": list(spell_ids), "event": normalized_event},
             response_extra={
-                "preparation": {key: value for key, value in result.items() if key != "sheet"}
+                "preparation": {
+                    **{key: value for key, value in result.items() if key != "sheet"},
+                    "materialized_spell_ids": hydrated["materialized_spell_ids"],
+                }
             },
             rule_receipts=core_receipts(
                 preparation_rules,
@@ -22752,6 +22793,108 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             pack = rule_packs.get_version(activation.pack_id, activation.version)
             values.extend((pack.pack_id, pack.version, dict(item)) for item in pack.artifacts)
         return [item for item in values if kind is None or item[2].get("kind") == kind]
+
+    def hydrate_class_prepared_spell_cards(
+        campaign_id: str,
+        sheet: dict[str, Any],
+        *,
+        spell_ids: list[str],
+        branch_id: str,
+    ) -> dict[str, Any]:
+        """Materialize legal catalog choices before strict prepared-list validation."""
+        value = deepcopy(sheet)
+        preparation_mode = str(
+            value.get("spellcasting", {}).get("preparation", {}).get("mode") or "known"
+        )
+        if preparation_mode != "prepared":
+            return {"sheet": value, "materialized_spell_ids": []}
+
+        existing = {
+            str(item.get("id") or "")
+            for item in value.get("content", {}).get("spells", [])
+        }
+        requested = list(dict.fromkeys(str(item).strip() for item in spell_ids))
+        missing = [item for item in requested if item and item not in existing]
+        if not missing:
+            return {"sheet": value, "materialized_spell_ids": []}
+
+        catalog: dict[str, list[tuple[str, str, dict[str, Any]]]] = {}
+        for candidate in available_content_artifacts(
+            campaign_id,
+            kind="spell",
+            branch_id=branch_id,
+        ):
+            catalog.setdefault(str(candidate[2].get("id") or ""), []).append(candidate)
+
+        class_names = list(
+            dict.fromkeys(
+                str(item.get("name") or "").strip()
+                for item in value.get("progression", {}).get("classes", [])
+                if str(item.get("name") or "").strip()
+            )
+        )
+        materialized: list[str] = []
+        for spell_id in missing:
+            matches = catalog.get(spell_id, [])
+            if not matches:
+                raise CombatEngineError(
+                    f"prepared spell is not available from the campaign's active "
+                    f"content packs: {spell_id}"
+                )
+            if len(matches) != 1:
+                raise CombatEngineError(
+                    f"prepared spell resolves to multiple active content artifacts: {spell_id}"
+                )
+            pack_id, version, artifact = matches[0]
+            if str(artifact.get("application_state") or "selection_ready") != "selection_ready":
+                raise CombatEngineError(
+                    f"prepared spell requires reviewed selection-ready content: {spell_id}"
+                )
+            card = deepcopy(dict(artifact.get("card") or {}))
+            eligible_sources: list[str] = []
+            eligibility_errors: list[CombatEngineError] = []
+            for class_name in class_names:
+                try:
+                    eligible_sources.append(
+                        validate_spell_grant(
+                            value,
+                            card,
+                            source_class=class_name,
+                        )
+                    )
+                except CombatEngineError as error:
+                    eligibility_errors.append(error)
+            eligible_sources = list(dict.fromkeys(eligible_sources))
+            if not eligible_sources:
+                if len(class_names) == 1 and eligibility_errors:
+                    raise eligibility_errors[0]
+                raise CombatEngineError(
+                    f"prepared spell has no legal recorded source class: {spell_id}"
+                )
+            if len(eligible_sources) != 1:
+                raise CombatEngineError(
+                    f"prepared spell needs one unambiguous source class: {spell_id}"
+                )
+            source_class = eligible_sources[0]
+            card.pop("classes", None)
+            card["grant"] = {
+                "source_type": "class",
+                "source_key": source_class,
+                "method": "class_prepared",
+            }
+            access_state = card.setdefault("access", {})
+            access_state["known"] = False
+            access_state["prepared"] = False
+            card.update(
+                id=spell_id,
+                pack_id=pack_id,
+                pack_version=version,
+                rule_refs=list(artifact.get("rule_refs") or []),
+                mechanic_refs=list(artifact.get("mechanic_refs") or []),
+            )
+            value.setdefault("content", {}).setdefault("spells", []).append(card)
+            materialized.append(spell_id)
+        return {"sheet": value, "materialized_spell_ids": materialized}
 
     def hydrate_statblock_spellcasting(
         campaign_id: str,
