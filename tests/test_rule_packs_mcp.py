@@ -1,13 +1,34 @@
 import asyncio
+import re
 from pathlib import Path
 
 import pytest
 from sagasmith_core import Database, RuleProfileService
 from sagasmith_core.database import sqlite_database_url
 from sagasmith_dnd.character_schema import default_character_sheet
+from sagasmith_dnd.core_rule_pack import get_core_rule_pack
 
 from sagasmith_dnd_mcp.config import McpConfig
 from sagasmith_dnd_mcp.server import create_server
+
+
+def test_mcp_runtime_never_emits_an_unregistered_core_boundary() -> None:
+    source_root = Path(__file__).parents[1] / "src" / "sagasmith_dnd_mcp"
+    emitted = {
+        mechanic_id
+        for path in source_root.rglob("*.py")
+        for mechanic_id in re.findall(
+            r'["\'](dnd5e\.core\.[a-z0-9_.]+)["\']',
+            path.read_text(encoding="utf-8"),
+        )
+    }
+    registered = {
+        boundary.id
+        for edition in ("2014", "2024")
+        for boundary in get_core_rule_pack(edition).boundaries
+    }
+
+    assert emitted <= registered
 
 
 @pytest.mark.fresh_database
