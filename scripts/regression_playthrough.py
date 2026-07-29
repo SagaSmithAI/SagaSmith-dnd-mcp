@@ -4086,6 +4086,29 @@ def _upsert_manifest_rows(
     return rows
 
 
+def _merge_manifest_objects(
+    existing: dict[str, Any],
+    patch: dict[str, Any],
+) -> dict[str, Any]:
+    """Recursively apply an additive manifest object patch.
+
+    Nested objects retain siblings that are absent from the patch. Lists and
+    scalar values are complete values and replace the existing value.
+    """
+
+    merged = deepcopy(existing)
+    for key, value in patch.items():
+        current = merged.get(key)
+        if isinstance(value, dict):
+            merged[key] = _merge_manifest_objects(
+                current if isinstance(current, dict) else {},
+                value,
+            )
+        else:
+            merged[key] = deepcopy(value)
+    return merged
+
+
 async def _prepare_narrative_npc(
     client: ExposureClient,
     *,
@@ -4460,10 +4483,10 @@ async def _record_outcome(
     manifest["clues"] = _upsert_manifest_rows(
         list(manifest.get("clues") or []), clue_states, key="id"
     )
-    manifest["world_state"] = {
-        **deepcopy(dict(manifest.get("world_state") or {})),
-        **deepcopy(world_state),
-    }
+    manifest["world_state"] = _merge_manifest_objects(
+        dict(manifest.get("world_state") or {}),
+        world_state,
+    )
     if objective.strip():
         manifest["current"]["objective"] = objective.strip()
     manifest = validate_playthrough_manifest(manifest)

@@ -9822,7 +9822,14 @@ def test_record_outcome_commits_facts_then_syncs_manifest_and_checkpoint(
                     "status": "missing",
                 }
             ]
-            self.manifest["world_state"] = {"prior_state": True}
+            self.manifest["world_state"] = {
+                "prior_state": True,
+                "episode": {
+                    "prisoners": {"status": "stopped"},
+                    "ritual": {"focused_rounds": 1},
+                },
+                "replace_list": ["old"],
+            }
             self.replaced_manifest: dict = {}
             self.continuity_payload: dict = {}
 
@@ -9997,7 +10004,14 @@ def test_record_outcome_commits_facts_then_syncs_manifest_and_checkpoint(
                 }
             ],
             clue_states=[],
-            world_state={"hostage_released": True},
+            world_state={
+                "hostage_released": True,
+                "episode": {
+                    "ritual": {"status": "collapsed"},
+                    "mask": {"status": "removed"},
+                },
+                "replace_list": ["new"],
+            },
             objective="Escort the hostage to safety.",
             progress_percent=100,
             source_scene_id="source-scene-1",
@@ -10020,6 +10034,15 @@ def test_record_outcome_commits_facts_then_syncs_manifest_and_checkpoint(
     assert client.replaced_manifest["world_state"] == {
         "prior_state": True,
         "hostage_released": True,
+        "episode": {
+            "prisoners": {"status": "stopped"},
+            "ritual": {
+                "focused_rounds": 1,
+                "status": "collapsed",
+            },
+            "mask": {"status": "removed"},
+        },
+        "replace_list": ["new"],
     }
     assert client.replaced_manifest["npcs"][0]["status"] == "active"
     assert client.replaced_manifest["npcs"][1]["actor_id"] == "npc-2"
