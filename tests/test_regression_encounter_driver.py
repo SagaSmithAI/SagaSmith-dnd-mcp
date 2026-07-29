@@ -5211,6 +5211,18 @@ def test_source_authored_precombat_and_attack_tactics_are_structured() -> None:
                 ),
             },
             {
+                "actor_id": "worg-1",
+                "weapon_id": "bite",
+                "id": "saving_throw_condition",
+                "condition": "prone",
+                "save_ability": "strength",
+                "save_dc": 13,
+                "source_excerpt": (
+                    "If the target is a creature, it must succeed on a DC 13 "
+                    "Strength saving throw or be knocked prone."
+                ),
+            },
+            {
                 "actor_id": "ettercap-1",
                 "weapon_id": "web-garrote",
                 "condition": "grappled",
@@ -5230,6 +5242,7 @@ def test_source_authored_precombat_and_attack_tactics_are_structured() -> None:
             "stirge",
             "duergar",
             "jamna",
+            "worg-1",
         ],
     )
     delayed = _source_delayed_actions(
@@ -5273,6 +5286,18 @@ def test_source_authored_precombat_and_attack_tactics_are_structured() -> None:
         "source_excerpt": (
             "and the target is grappled (escape DC 12). Until this grapple "
             "ends, the target can't breathe."
+        ),
+    }
+    assert rulings[("worg-1", "bite")] == {
+        "actor_id": "worg-1",
+        "weapon_id": "bite",
+        "id": "saving_throw_condition",
+        "condition": "prone",
+        "save_ability": "strength",
+        "save_dc": 13,
+        "source_excerpt": (
+            "If the target is a creature, it must succeed on a DC 13 "
+            "Strength saving throw or be knocked prone."
         ),
     }
     assert rulings[("durnan", "grimvault")]["target_has_limbs"] is True

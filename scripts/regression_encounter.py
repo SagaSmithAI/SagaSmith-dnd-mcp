@@ -3585,11 +3585,13 @@ def _source_on_hit_rulings(
                 raw.get("repeat_save_timing") or ""
             ).strip().casefold()
             raw_duration = raw.get("duration")
-            if not isinstance(raw_duration, dict):
+            instant_condition = not repeat_save_timing and raw_duration is None
+            if not instant_condition and not isinstance(raw_duration, dict):
                 raise ValueError(
-                    f"source on-hit ruling {index} requires a structured duration"
+                    f"source on-hit ruling {index} requires both repeat timing "
+                    "and a structured duration, or neither for an immediate condition"
                 )
-            duration = dict(raw_duration)
+            duration = dict(raw_duration or {})
             duration_period = str(duration.get("period") or "").strip().casefold()
             duration_remaining = duration.get("remaining")
             if (
@@ -3599,15 +3601,20 @@ def _source_on_hit_rulings(
                 or isinstance(save_dc, bool)
                 or not isinstance(save_dc, int)
                 or not 1 <= save_dc <= 40
-                or repeat_save_timing != "turn_end"
-                or duration_period not in {"round", "minute", "hour", "day"}
-                or isinstance(duration_remaining, bool)
-                or not isinstance(duration_remaining, int)
-                or duration_remaining < 1
+                or (
+                    not instant_condition
+                    and (
+                        repeat_save_timing != "turn_end"
+                        or duration_period not in {"round", "minute", "hour", "day"}
+                        or isinstance(duration_remaining, bool)
+                        or not isinstance(duration_remaining, int)
+                        or duration_remaining < 1
+                    )
+                )
             ):
                 raise ValueError(
                     f"source on-hit ruling {index} requires reviewed condition, "
-                    "save, turn-end repeat, duration, and exact excerpt terms"
+                    "save, optional turn-end repeat and duration, and exact excerpt terms"
                 )
             normalized[identity] = {
                 "actor_id": actor_id,
@@ -3616,12 +3623,18 @@ def _source_on_hit_rulings(
                 "condition": condition,
                 "save_ability": save_ability,
                 "save_dc": save_dc,
-                "repeat_save_timing": repeat_save_timing,
-                "duration": {
-                    "period": duration_period,
-                    "remaining": duration_remaining,
-                },
                 "source_excerpt": source_excerpt,
+                **(
+                    {
+                        "repeat_save_timing": repeat_save_timing,
+                        "duration": {
+                            "period": duration_period,
+                            "remaining": duration_remaining,
+                        },
+                    }
+                    if not instant_condition
+                    else {}
+                ),
             }
             continue
         if selection_id == "saving_throw_damage":

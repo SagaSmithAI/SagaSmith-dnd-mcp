@@ -1743,6 +1743,183 @@ def test_attack_can_select_and_consume_slaying_ammunition(
     asyncio.run(exercise())
 
 
+def test_public_on_hit_ruling_applies_immediate_save_gated_condition(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    original_attack_roll = server_module.roll_attack_action
+    original_actor_check = server_module.resolve_actor_check
+
+    def forced_hit(*, plan, rng=None):
+        result = original_attack_roll(plan=plan, rng=rng)
+        result.update(
+            natural=10,
+            total=max(int(plan["target_ac"]), int(result.get("total", 0) or 0)),
+            armor_class=int(plan["target_ac"]),
+            hit=True,
+            critical=False,
+            fumble=False,
+        )
+        return result
+
+    def forced_failed_save(*args, **kwargs):
+        result = original_actor_check(*args, **kwargs)
+        result.update(
+            natural=5,
+            total=int(kwargs["dc"]) - 1,
+            success=False,
+        )
+        return result
+
+    monkeypatch.setattr(server_module, "roll_attack_action", forced_hit)
+    monkeypatch.setattr(server_module, "resolve_actor_check", forced_failed_save)
+
+    async def exercise() -> None:
+        server = create_server(_config(tmp_path))
+
+        async def raw(name: str, arguments: dict):
+            _, result = await server.call_tool(name, arguments)
+            return result
+
+        async def call(name: str, arguments: dict):
+            result = await raw(name, arguments)
+            return result.get("result", result)
+
+        campaign = await call(
+            "campaign_create",
+            {
+                "name": "Immediate save-gated on-hit condition",
+                "edition": "2014",
+                "idempotency_key": "campaign",
+            },
+        )
+        worg = await call(
+            "character_create",
+            {
+                "campaign_id": campaign["id"],
+                "name": "Worg",
+                "character_type": "monster",
+                "idempotency_key": "worg",
+            },
+        )
+        target = await call(
+            "character_create",
+            {
+                "campaign_id": campaign["id"],
+                "name": "Target",
+                "character_type": "pc",
+                "idempotency_key": "target",
+            },
+        )
+        bite_effect = (
+            "If the target is a creature, it must succeed on a DC 13 Strength "
+            "saving throw or be knocked prone."
+        )
+        worg_sheet = default_character_sheet()
+        worg_sheet["combat"]["hp"] = {"value": 26, "max": 26, "temp": 0}
+        worg_sheet["inventory"]["items"] = [
+            {
+                "id": "bite",
+                "name": "Bite",
+                "kind": "weapon",
+                "equipped": True,
+                "equipped_slot": "main_hand",
+                "mechanics": {
+                    "attack_type": "melee",
+                    "attack_ability": "strength",
+                    "damage_formula": "2d6",
+                    "damage_bonus_override": 3,
+                    "damage_type": "piercing",
+                    "on_hit_effect": bite_effect,
+                    "reach_ft": 5,
+                    "attack_bonus_override": 5,
+                    "always_available": True,
+                },
+            }
+        ]
+        worg_sheet["inventory"]["equipment_slots"]["main_hand"] = "bite"
+        target_sheet = default_character_sheet()
+        target_sheet["combat"]["hp"] = {"value": 30, "max": 30, "temp": 0}
+        for actor, sheet, key in (
+            (worg, worg_sheet, "worg-sheet"),
+            (target, target_sheet, "target-sheet"),
+        ):
+            await call(
+                "character_sheet_replace",
+                {
+                    "character_id": actor["id"],
+                    "sheet": sheet,
+                    "expected_revision": actor["revision"],
+                    "idempotency_key": key,
+                },
+            )
+        campaign = await call("campaign_get", {"campaign_id": campaign["id"]})
+        started = await raw(
+            "combat_start",
+            {
+                "campaign_id": campaign["id"],
+                "participant_ids": [worg["id"], target["id"]],
+                "participant_config": [
+                    {
+                        "actor_id": worg["id"],
+                        "initiative": 20,
+                        "position": {"x": 0, "y": 0},
+                    },
+                    {
+                        "actor_id": target["id"],
+                        "initiative": 10,
+                        "position": {"x": 1, "y": 0},
+                        "death_saves": True,
+                    },
+                ],
+                "expected_revision": campaign["revision"],
+                "idempotency_key": "start",
+            },
+        )
+        attacked = await raw(
+            "combat_resolve_attack",
+            {
+                "campaign_id": campaign["id"],
+                "actor_id": worg["id"],
+                "target_id": target["id"],
+                "action": {"weapon_id": "bite", "attack_mode": "melee"},
+                "expected_revision": started["campaign_revision"],
+                "idempotency_key": "bite",
+            },
+        )
+        arguments = {
+            "campaign_id": campaign["id"],
+            "action": "on_hit_ruling",
+            "actor_id": target["id"],
+            "payload": {
+                "choice_id": attacked["result"]["pending_on_hit_ruling_id"],
+                "selection": {
+                    "id": "saving_throw_condition",
+                    "condition": "prone",
+                    "save_ability": "strength",
+                    "save_dc": 13,
+                    "source_excerpt": bite_effect,
+                },
+            },
+            "expected_revision": attacked["campaign_revision"],
+            "idempotency_key": "rule-bite",
+        }
+        ruled = await call("combat_choice", arguments)
+        replayed = await call("combat_choice", arguments)
+
+        assert replayed == ruled
+        assert ruled["result"]["save"]["success"] is False
+        assert ruled["result"]["condition_applied"] is True
+        assert ruled["result"]["effect_id"] is None
+        assert ruled["result"]["resolution"] == "instant"
+        assert ruled["ongoing_effect"] is None
+        target_after = await call("character_get", {"character_id": target["id"]})
+        assert target_after["sheet"]["conditions"] == ["prone"]
+        assert target_after["sheet"]["effects"] == []
+
+    asyncio.run(exercise())
+
+
 def test_public_on_hit_ruling_repeats_save_gated_condition_at_turn_end(
     tmp_path: Path,
     monkeypatch,

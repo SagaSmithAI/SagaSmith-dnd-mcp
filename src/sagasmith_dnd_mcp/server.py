@@ -8709,11 +8709,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             )
             raw_duration = normalized_selection.get("duration")
             source_excerpt = str(normalized_selection.get("source_excerpt") or "").strip()
-            if not isinstance(raw_duration, dict):
+            instant_condition = not repeat_save_timing and raw_duration is None
+            if not instant_condition and not isinstance(raw_duration, dict):
                 raise CombatEngineError(
-                    "on-hit save condition requires a structured source duration"
+                    "on-hit save condition requires both reviewed repeat timing "
+                    "and a structured source duration, or neither for an immediate "
+                    "condition"
                 )
-            duration = dict(raw_duration)
+            duration = dict(raw_duration or {})
             duration_period = str(duration.get("period") or "").strip().casefold()
             duration_remaining = duration.get("remaining")
             if (
@@ -8723,17 +8726,22 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 or isinstance(save_dc, bool)
                 or not isinstance(save_dc, int)
                 or not 1 <= save_dc <= 40
-                or repeat_save_timing != "turn_end"
-                or duration_period not in {"round", "minute", "hour", "day"}
-                or isinstance(duration_remaining, bool)
-                or not isinstance(duration_remaining, int)
-                or duration_remaining < 1
+                or (
+                    not instant_condition
+                    and (
+                        repeat_save_timing != "turn_end"
+                        or duration_period not in {"round", "minute", "hour", "day"}
+                        or isinstance(duration_remaining, bool)
+                        or not isinstance(duration_remaining, int)
+                        or duration_remaining < 1
+                    )
+                )
                 or not source_excerpt
                 or source_excerpt.casefold() != effect.casefold()
             ):
                 raise CombatEngineError(
                     "on-hit save condition requires exact reviewed condition, save, "
-                    "repeat timing, duration, and excerpt terms"
+                    "optional repeat timing and duration, and excerpt terms"
                 )
             if (
                 re.search(rf"(?i)\b{re.escape(condition)}\b", effect) is None
@@ -8746,7 +8754,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 raise CombatEngineError(
                     "condition, save DC, or ability is not stated by the reviewed attack"
                 )
-            if not (
+            if not instant_condition and not (
                 re.search(r"(?i)\brepeat\b", effect)
                 and re.search(r"(?i)\bsaving throw\b", effect)
                 and re.search(r"(?i)\bend\b[^.]{0,120}\bturns?\b", effect)
@@ -8754,7 +8762,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 raise CombatEngineError(
                     "turn-end repeat saving throw is not stated by the reviewed attack"
                 )
-            if (
+            if not instant_condition and (
                 re.search(
                     rf"(?i)\b{duration_remaining}\s+"
                     rf"{re.escape(duration_period)}s?\b",
@@ -8790,51 +8798,59 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             effect_id: str | None = None
             condition_applied = False
             if not saved["success"]:
-                effect_id = f"{choice_id}:save-condition"
-                updated_sheet, _ = add_effect(
-                    updated_sheet,
-                    {
-                        "id": effect_id,
-                        "name": "Attack save-gated condition",
-                        "kind": "timed_conditions",
-                        "source": str(window.get("weapon_id") or ""),
-                        "active": True,
-                        "duration": normalized_duration,
-                        "changes": [
-                            {
-                                "path": "conditions",
-                                "mode": "add",
-                                "value": [condition],
-                            }
-                        ],
-                        "description": source_excerpt,
-                    },
-                )
+                if instant_condition:
+                    apply_condition_change(
+                        updated_sheet,
+                        condition_id=condition,
+                        add=True,
+                    )
+                else:
+                    effect_id = f"{choice_id}:save-condition"
+                    updated_sheet, _ = add_effect(
+                        updated_sheet,
+                        {
+                            "id": effect_id,
+                            "name": "Attack save-gated condition",
+                            "kind": "timed_conditions",
+                            "source": str(window.get("weapon_id") or ""),
+                            "active": True,
+                            "duration": normalized_duration,
+                            "changes": [
+                                {
+                                    "path": "conditions",
+                                    "mode": "add",
+                                    "value": [condition],
+                                }
+                            ],
+                            "description": source_excerpt,
+                        },
+                    )
                 condition_applied = condition in condition_ids(updated_sheet.get("conditions"))
                 if condition_applied:
                     end_concentration_for_incapacitating_conditions(updated_sheet)
-                    ongoing_effect = {
-                        "id": effect_id,
-                        "kind": "on_hit_save_condition",
-                        "source_actor_id": str(window.get("attacker_id") or ""),
-                        "target_id": target_id,
-                        "weapon_id": str(window.get("weapon_id") or ""),
-                        "condition": condition,
-                        "save_ability": save_ability,
-                        "save_dc": save_dc,
-                        "repeat_save_timing": repeat_save_timing,
-                        "duration": normalized_duration,
-                        "source_excerpt": source_excerpt,
-                        "effect": effect,
-                        "active": True,
-                    }
-                    next_encounter["ongoing_effects"] = [
-                        *list(next_encounter.get("ongoing_effects") or []),
-                        ongoing_effect,
-                    ]
+                    if not instant_condition:
+                        ongoing_effect = {
+                            "id": effect_id,
+                            "kind": "on_hit_save_condition",
+                            "source_actor_id": str(window.get("attacker_id") or ""),
+                            "target_id": target_id,
+                            "weapon_id": str(window.get("weapon_id") or ""),
+                            "condition": condition,
+                            "save_ability": save_ability,
+                            "save_dc": save_dc,
+                            "repeat_save_timing": repeat_save_timing,
+                            "duration": normalized_duration,
+                            "source_excerpt": source_excerpt,
+                            "effect": effect,
+                            "active": True,
+                        }
+                        next_encounter["ongoing_effects"] = [
+                            *list(next_encounter.get("ongoing_effects") or []),
+                            ongoing_effect,
+                        ]
                     sync_combatant_conditions(next_encounter, target_id, updated_sheet)
                     reconcile_readied_spells(next_encounter, target_id, updated_sheet)
-                else:
+                elif not instant_condition:
                     updated_sheet = remove_effect(updated_sheet, effect_id)
                     effect_id = None
             settlement_result = {
@@ -8843,6 +8859,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "condition_applied": condition_applied,
                 "resisted_by_immunity": not saved["success"] and not condition_applied,
                 "effect_id": effect_id,
+                "resolution": "instant" if instant_condition else "timed_repeat",
             }
         elif selection_id == "ongoing_damage":
             allowed_fields = {
