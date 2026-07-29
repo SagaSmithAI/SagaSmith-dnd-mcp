@@ -15,6 +15,7 @@ import scripts.regression_campaign as campaign_driver
 from scripts.regression_campaign import (
     _arguments,
     _campaign_phase_lock,
+    _candidate_review_idempotency_key,
     _character_summary,
     _configure_utf8_streams,
     _discover_rule_chunks,
@@ -233,6 +234,21 @@ def test_prepare_statblock_accepts_agent_semantic_fill(
     )
 
     assert _arguments().agent_statblock_fill == fill_path
+
+
+def test_candidate_review_idempotency_is_scoped_to_candidate() -> None:
+    first = _candidate_review_idempotency_key(
+        "campaign-run",
+        "candidate:first-card",
+    )
+    second = _candidate_review_idempotency_key(
+        "campaign-run",
+        "candidate:second-card",
+    )
+
+    assert first == "campaign-run-review-candidate-first-card"
+    assert second == "campaign-run-review-candidate-second-card"
+    assert first != second
 
 
 def test_prepare_statblock_accepts_deferred_main_timeline_checkpoint(
@@ -464,6 +480,113 @@ def _patch_rule_statblock_transport(
         "CampaignMcp",
         lambda _session, _campaign_id: client,
     )
+
+
+class _ModuleStatblockClient(_RuleStatblockClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.characters: dict[str, dict] = {}
+
+    async def domain(self, tool_id: str, arguments: dict):
+        self.calls.append(("domain", tool_id, arguments))
+        if tool_id == "branch_query":
+            return [
+                {
+                    "id": self.branch_id,
+                    "is_current": True,
+                    "head_snapshot_id": "snapshot-0",
+                }
+            ]
+        if tool_id == "campaign_rules":
+            return {"effective_error": None}
+        if tool_id == "module_query":
+            assert arguments["view"] == "content"
+            return {
+                "id": "review-1",
+                "content_kind": "dnd5e_2014_statblock",
+                "scene_id": "scene-1",
+                "content_key": "kobold",
+                "checksum": "checksum-1",
+                "content_preview": "Kobold",
+                "evidence": {},
+            }
+        if tool_id == "character_create_from":
+            actor_id = f"actor-{len(self.characters) + 1}"
+            actor = {
+                "id": actor_id,
+                "name": arguments["payload"]["name"],
+                "summary": "Small humanoid",
+                "character_type": "monster",
+                "revision": 1,
+                "sheet": {
+                    "content": {"spells": []},
+                    "inventory": {
+                        "items": [
+                            {
+                                "id": "dagger",
+                                "source_key": "module-review:review-1",
+                            }
+                        ]
+                    },
+                },
+                "derived": {
+                    "hit_points": {"value": 5, "max": 5, "temp": 0},
+                    "armor_class": 12,
+                    "inventory": {"weapon_attacks": [{"item_id": "dagger"}]},
+                },
+            }
+            self.characters[actor_id] = actor
+            self.revision += 1
+            return {
+                "character": actor,
+                "statblock": {"challenge_rating": "1/8"},
+                "spell_warnings": [],
+            }
+        if tool_id == "character_query":
+            return self.characters[arguments["payload"]["character_id"]]
+        raise AssertionError((tool_id, arguments))
+
+
+def test_prepare_module_statblock_honors_actor_count(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = _ModuleStatblockClient()
+    _patch_rule_statblock_transport(monkeypatch, client)
+    args = argparse.Namespace(
+        campaign_id="campaign-1",
+        review_id="review-1",
+        candidate_id=None,
+        review_override=None,
+        source_page=None,
+        review_observation="",
+        agent_statblock_fill=None,
+        statblock_variant=None,
+        actor_name="Kobold",
+        actor_type="monster",
+        actor_count=3,
+        replace_actor_id=None,
+        defer_checkpoint=True,
+        isolate_branch=False,
+        run_id="kobold-batch",
+        home=tmp_path,
+        module_root=None,
+    )
+
+    report = asyncio.run(_prepare_statblock(args))
+
+    assert [actor["name"] for actor in report["actors"]] == [
+        "Kobold 1",
+        "Kobold 2",
+        "Kobold 3",
+    ]
+    assert len(
+        [
+            arguments
+            for scope, tool_id, arguments in client.calls
+            if scope == "domain" and tool_id == "character_create_from"
+        ]
+    ) == 3
+    assert report["created"]["character"]["id"] == "actor-1"
 
 
 def test_prepare_rule_statblock_can_defer_scene_batch_checkpoint(

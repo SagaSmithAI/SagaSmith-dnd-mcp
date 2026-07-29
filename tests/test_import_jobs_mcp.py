@@ -448,6 +448,14 @@ def test_rule_import_renders_a_checksum_bound_review_page(
             "source_chunks",
             lambda _service, _source_id: evidence_chunks,
         )
+        monkeypatch.setattr(
+            RuleService,
+            "expand",
+            lambda _service, chunk_id: {
+                **next(item for item in evidence_chunks if item["id"] == chunk_id),
+                "source": {"id": ingested["result"]["source_id"]},
+            },
+        )
         agent_commoner = (
             commoner
             + "\n###### Commoner\n\n"
@@ -474,6 +482,78 @@ def test_rule_import_renders_a_checksum_bound_review_page(
             item["id"] for item in evidence_chunks
         ]
         assert agent_review["text_evidence"][0]["ordinal"] == 0
+
+        base_actions_content = evidence_chunks[-1]["content"]
+        web_garrote_excerpt = (
+            "Melee Weapon Attack: +4 to hit, reach 5 ft., one Medium or Small "
+            "creature against which the ettercap has advantage on the attack roll. "
+            "Hit: 4 (1d4 + 2) bludgeoning damage, and the target is grappled "
+            "(escape DC 12). Until this grapple ends, the target can't breathe, "
+            "and the ettercap has advantage on attack rolls against it."
+        )
+        web_garrote_evidence = " Web Garrote. " + web_garrote_excerpt
+        evidence_chunks[-1]["content"] += web_garrote_evidence
+        _, additional_action_reviewed = await server.call_tool(
+            "rule_import",
+            {
+                **agent_arguments,
+                "payload": {
+                    **agent_arguments["payload"],
+                    "evidence_exclusions": [
+                        {
+                            "chunk_id": evidence_chunks[-1]["id"],
+                            "exact_text": web_garrote_evidence,
+                            "reason": (
+                                "The adjacent variant action is submitted through "
+                                "the separately source-bound Agent action fill."
+                            ),
+                        }
+                    ],
+                    "agent_fill": {
+                        "additional_actions": [
+                            {
+                                "name": "Web Garrote",
+                                "source_ref": "rule-chunk:commoner-actions",
+                                "source_excerpt": web_garrote_excerpt,
+                                "reason": (
+                                    "The Agent identified one mechanically complete "
+                                    "variant weapon action in the adjacent column."
+                                ),
+                            }
+                        ]
+                    },
+                },
+                "idempotency_key": "review-statblock-agent-additional-action",
+            },
+        )
+        additional_review = additional_action_reviewed["result"]["review"]
+        assert additional_review["agent_statblock_fill"]["additional_actions"][0][
+            "id"
+        ] == "web-garrote"
+        assert additional_review["agent_statblock_fill_evidence"][0][
+            "source_ref"
+        ] == "rule-chunk:commoner-actions"
+        _, additional_action_actor = await server.call_tool(
+            "character_create_from",
+            {
+                "mode": "reviewed_rule_statblock",
+                "payload": {
+                    "campaign_id": campaign["id"],
+                    "job_id": job_id,
+                    "review_id": additional_review["id"],
+                    "name": "Reviewed Variant Commoner",
+                    "character_type": "npc",
+                },
+                "idempotency_key": "reviewed-additional-action-actor",
+            },
+        )
+        variant_items = additional_action_actor["result"]["character"]["sheet"][
+            "inventory"
+        ]["items"]
+        assert next(item for item in variant_items if item["id"] == "web-garrote")[
+            "mechanics"
+        ]["attack_bonus_override"] == 4
+        evidence_chunks[-1]["content"] = base_actions_content
 
         adjacent_column = (
             " Large dragon, chaotic evil Armor Class 17 Hit Points 133 "

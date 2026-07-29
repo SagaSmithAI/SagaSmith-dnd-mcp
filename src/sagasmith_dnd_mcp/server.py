@@ -310,6 +310,7 @@ from sagasmith_dnd.system import DND5E
 from sagasmith_dnd.vocabulary import (
     ADVANCEMENT_MODES,
     COMBAT_OUTCOME_STATUSES,
+    DAMAGE_TYPES,
     DENOMINATION_CP_VALUES,
     DENOMINATIONS,
     INVENTORY_OWNER_SCOPES,
@@ -350,6 +351,94 @@ from sagasmith_dnd_mcp.tool_profiles import (
     profiles_for_tool,
     validate_profile_coverage,
 )
+
+CORE_GRAPPLE_ESCAPE_CHECKS = frozenset({"athletics", "acrobatics"})
+
+
+def reviewed_on_hit_escape_checks(
+    effect: str,
+    *,
+    condition: str,
+    escape_dc: int,
+    escape_abilities: list[str],
+    escape_checks: list[str],
+) -> tuple[list[str], str]:
+    """Validate source-local escapes or the 2014 Core grapple escape rule."""
+
+    if escape_abilities and escape_checks:
+        raise CombatEngineError(
+            "on-hit escape must use source-stated abilities or Core-defined checks, not both"
+        )
+    if escape_abilities:
+        if any(ability not in ABILITY_IDS for ability in escape_abilities) or any(
+            re.search(rf"(?i)\b{re.escape(ability)}\b", effect) is None
+            for ability in escape_abilities
+        ):
+            raise CombatEngineError(
+                "escape DC or ability is not stated by the reviewed attack"
+            )
+        return escape_abilities, "source_explicit"
+    if (
+        condition == "grappled"
+        and set(escape_checks) == CORE_GRAPPLE_ESCAPE_CHECKS
+        and len(escape_checks) == len(CORE_GRAPPLE_ESCAPE_CHECKS)
+        and re.search(rf"(?i)\bescape\s+DC\s*{escape_dc}\b", effect) is not None
+    ):
+        return escape_checks, "core_2014_grapple"
+    raise CombatEngineError(
+        "escape checks must be stated by the reviewed attack or be the "
+        "2014 Core Athletics/Acrobatics grapple escape"
+    )
+
+
+def release_unavailable_source_grapples(
+    encounter: dict[str, Any],
+    unavailable_source_ids: set[str],
+) -> dict[str, list[str]]:
+    """End source-owned grapples when their source can no longer maintain them."""
+
+    released_by_target: dict[str, list[str]] = {}
+    for effect in encounter.get("ongoing_effects", []):
+        if (
+            not isinstance(effect, dict)
+            or not effect.get("active", True)
+            or effect.get("kind") != "on_hit_condition"
+            or str(effect.get("condition") or "").casefold() != "grappled"
+        ):
+            continue
+        source_actor_id = str(effect.get("source_actor_id") or "")
+        if source_actor_id not in unavailable_source_ids:
+            continue
+        target_id = str(effect.get("target_id") or "")
+        if not target_id:
+            continue
+        effect["active"] = False
+        effect["resolution"] = {
+            "kind": "source_unavailable",
+            "source_actor_id": source_actor_id,
+        }
+        released_by_target.setdefault(target_id, []).append(str(effect.get("id") or ""))
+    return released_by_target
+
+
+def has_active_owned_condition(
+    encounter: dict[str, Any],
+    *,
+    target_id: str,
+    condition: str,
+) -> bool:
+    """Return whether another active on-hit effect still owns the condition."""
+
+    normalized_condition = condition.casefold()
+    return any(
+        isinstance(effect, dict)
+        and effect.get("active", True)
+        and effect.get("kind") == "on_hit_condition"
+        and str(effect.get("target_id") or "") == target_id
+        and str(effect.get("condition") or "").casefold() == normalized_condition
+        for effect in encounter.get("ongoing_effects", [])
+    )
+
 
 AGENT_RULING_TRANSACTION_RULES = (
     "inspect_existing_payment_before_settlement",
@@ -1957,6 +2046,122 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         source_refs.extend(str(item).strip() for item in variant.get("source_refs", []))
         return ", ".join(source_refs)
 
+    def reviewed_statblock_fill_evidence(
+        campaign_id: str,
+        agent_fill: dict[str, Any] | None,
+        *,
+        rule_source_id: str | None = None,
+        module_id: str | None = None,
+        page_number: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Verify every Agent-added attack against one managed source excerpt."""
+
+        if not isinstance(agent_fill, dict):
+            return []
+        declarations = agent_fill.get("additional_actions", [])
+        if not isinstance(declarations, list):
+            raise ValueError("reviewed additional_actions must be a list")
+        evidence: list[dict[str, Any]] = []
+        for index, declaration in enumerate(declarations):
+            if not isinstance(declaration, dict):
+                raise ValueError(
+                    f"reviewed additional action {index} must be an object"
+                )
+            source_ref = str(declaration.get("source_ref") or "").strip()
+            source_excerpt = " ".join(
+                str(declaration.get("source_excerpt") or "").split()
+            )
+            kind, separator, identifier = source_ref.partition(":")
+            if not separator or not identifier or not source_excerpt:
+                raise ValueError(
+                    f"reviewed additional action {index} requires managed source "
+                    "evidence and an exact excerpt"
+                )
+            if rule_source_id is not None:
+                if kind != "rule-chunk":
+                    raise ValueError(
+                        "reviewed rule-statblock additional actions must cite rule-chunk"
+                    )
+                expanded = rules.expand(identifier)
+                expanded_source_id = str(
+                    dict(expanded.get("source") or {}).get("id") or ""
+                )
+                if expanded_source_id != rule_source_id:
+                    raise ValueError(
+                        "reviewed additional action rule chunk does not belong to "
+                        "the reviewed statblock source"
+                    )
+            elif module_id is not None:
+                if kind != "module-chunk":
+                    raise ValueError(
+                        "reviewed module-statblock additional actions must cite "
+                        "module-chunk"
+                    )
+                expanded = modules.expand(identifier)
+                if str(dict(expanded.get("module") or {}).get("id") or "") != module_id:
+                    raise ValueError(
+                        "reviewed additional action module chunk does not belong "
+                        "to the reviewed module"
+                    )
+            else:
+                raise RuntimeError(
+                    "reviewed additional action validation has no source boundary"
+                )
+            source_content = str(expanded.get("content") or "")
+            compact_excerpt = _compact_agent_evidence(source_excerpt)
+            compact_content = _compact_agent_evidence(source_content)
+            if not compact_excerpt or not _agent_evidence_supports_fact(
+                compact_excerpt,
+                compact_content,
+                max_edits=min(12, max(2, len(compact_excerpt) // 75)),
+            ):
+                raise ValueError(
+                    "reviewed additional action source_excerpt is absent from "
+                    f"managed source {source_ref}"
+                )
+            page_start = expanded.get("page_start")
+            page_end = expanded.get("page_end")
+            if (
+                page_number is not None
+                and page_start is not None
+                and page_end is not None
+                and not int(page_start) <= page_number <= int(page_end)
+            ):
+                raise ValueError(
+                    "reviewed additional action source evidence is not on the "
+                    "reviewed statblock page"
+                )
+            evidence.append(
+                {
+                    "source_ref": source_ref,
+                    "kind": kind,
+                    "id": identifier,
+                    "page_start": page_start,
+                    "page_end": page_end,
+                    "content_sha256": hashlib.sha256(
+                        source_content.encode("utf-8")
+                    ).hexdigest(),
+                    "source_excerpt_sha256": hashlib.sha256(
+                        source_excerpt.encode("utf-8")
+                    ).hexdigest(),
+                }
+            )
+        return evidence
+
+    def reviewed_statblock_fill_labels(fill: dict[str, Any]) -> list[str]:
+        return [
+            *[
+                str(item.get("activity_id") or "")
+                for item in fill.get("multiattack_options", [])
+                if isinstance(item, dict)
+            ],
+            *[
+                str(item.get("id") or item.get("name") or "")
+                for item in fill.get("additional_actions", [])
+                if isinstance(item, dict)
+            ],
+        ]
+
     def retained_statblock_warnings(
         warnings: list[str],
         variant: dict[str, Any] | None,
@@ -2511,6 +2716,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         plan: dict[str, Any],
         action: dict[str, Any],
         *,
+        encounter: dict[str, Any],
         authorized: bool,
     ) -> dict[str, Any]:
         """Bind Agent-adjudicated source riders to one atomic attack plan."""
@@ -2591,6 +2797,70 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 raise CombatEngineError(
                     f"source conditional extra-damage ruling {index} is incomplete"
                 )
+            requires_advantage = trigger_facts.get("requires_attack_advantage")
+            if requires_advantage is not None and not isinstance(requires_advantage, bool):
+                raise CombatEngineError(
+                    "requires_attack_advantage trigger fact must be a boolean"
+                )
+            if requires_advantage and (
+                not bool(result.get("advantage"))
+                or bool(result.get("disadvantage"))
+            ):
+                raise CombatEngineError(
+                    "source conditional extra damage requires this attack to have advantage"
+                )
+            max_per_turn = trigger_facts.get("max_applications_per_turn")
+            if (
+                max_per_turn is not None
+                and (
+                    isinstance(max_per_turn, bool)
+                    or not isinstance(max_per_turn, int)
+                    or max_per_turn < 1
+                )
+            ):
+                raise CombatEngineError(
+                    "max_applications_per_turn trigger fact must be a positive integer"
+                )
+            if max_per_turn is not None:
+                current = current_combatant(encounter)
+                if current is None:
+                    raise CombatEngineError(
+                        "per-turn source conditional extra damage requires an active turn"
+                    )
+                turn_token = (
+                    f"{int(encounter.get('round', 1) or 1)}:"
+                    f"{int(encounter.get('turn_index', 0) or 0)}:"
+                    f"{str(current.get('actor_id') or '')}"
+                )
+                attacker_combatant = next(
+                    (
+                        item
+                        for item in encounter.get("combatants", [])
+                        if str(item.get("actor_id") or "")
+                        == str(plan.get("attacker_id") or "")
+                    ),
+                    None,
+                )
+                if attacker_combatant is None:
+                    raise CombatEngineError(
+                        "source conditional extra-damage attacker is absent from combat"
+                    )
+                usage = dict(
+                    dict(attacker_combatant.get("turn_flags") or {}).get(
+                        "agent_extra_damage_applications"
+                    )
+                    or {}
+                )
+                feature_usage = dict(usage.get(feature_id) or {})
+                used = (
+                    int(feature_usage.get("count", 0) or 0)
+                    if feature_usage.get("turn_token") == turn_token
+                    else 0
+                )
+                if used >= max_per_turn:
+                    raise CombatEngineError(
+                        "source conditional extra damage has reached its per-turn limit"
+                    )
             feature = next(
                 (item for item in features if str(item.get("id") or "") == feature_id),
                 None,
@@ -2668,6 +2938,72 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         result["additional_damage"] = additional_damage
         result["rulings"] = normalized_rulings
         return result
+
+    def record_agent_attack_ruling_uses(
+        encounter: dict[str, Any],
+        *,
+        attacker_id: str,
+        plan: dict[str, Any],
+        result: dict[str, Any],
+    ) -> None:
+        """Record successful generic Agent rider use in the attacker's turn budget."""
+
+        if result.get("hit") is not True:
+            return
+        rulings = [
+            dict(item)
+            for item in plan.get("rulings") or []
+            if isinstance(item, dict)
+            and item.get("kind") == "source_conditional_extra_damage"
+        ]
+        limited = [
+            item
+            for item in rulings
+            if dict(item.get("trigger_facts") or {}).get(
+                "max_applications_per_turn"
+            )
+            is not None
+        ]
+        if not limited:
+            return
+        combatant = next(
+            (
+                item
+                for item in encounter.get("combatants", [])
+                if str(item.get("actor_id") or "") == attacker_id
+            ),
+            None,
+        )
+        if combatant is None:
+            raise CombatEngineError(
+                "source conditional extra-damage attacker is absent from combat"
+            )
+        flags = dict(combatant.get("turn_flags") or {})
+        usage = dict(flags.get("agent_extra_damage_applications") or {})
+        current = current_combatant(encounter)
+        if current is None:
+            raise CombatEngineError(
+                "source conditional extra-damage use has no active turn"
+            )
+        turn_token = (
+            f"{int(encounter.get('round', 1) or 1)}:"
+            f"{int(encounter.get('turn_index', 0) or 0)}:"
+            f"{str(current.get('actor_id') or '')}"
+        )
+        for ruling in limited:
+            feature_id = str(ruling.get("feature_id") or "")
+            previous = dict(usage.get(feature_id) or {})
+            count = (
+                int(previous.get("count", 0) or 0)
+                if previous.get("turn_token") == turn_token
+                else 0
+            )
+            usage[feature_id] = {
+                "turn_token": turn_token,
+                "count": count + 1,
+            }
+        flags["agent_extra_damage_applications"] = usage
+        combatant["turn_flags"] = flags
 
     def sync_combatant_conditions(
         encounter: dict[str, Any], actor_id: str, sheet: dict[str, Any]
@@ -3088,6 +3424,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 {
                     "id": "saving_throw_damage",
                     "name": "Resolve a saving throw and damage",
+                },
+                {
+                    "id": "direct_damage",
+                    "name": "Apply reviewed direct damage",
                 },
                 {
                     "id": "conditional_extra_damage",
@@ -7276,6 +7616,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 attacker,
                 plan,
                 action,
+                encounter=encounter,
                 authorized=access.require_campaign(campaign_id, principal_id).role
                 in CAMPAIGN_DM_ROLES,
             )
@@ -7433,6 +7774,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     attacker,
                     plan,
                     action_payload,
+                    encounter=encounter,
                     authorized=access.require_campaign(campaign_id, principal_id).role
                     in CAMPAIGN_DM_ROLES,
                 )
@@ -7625,6 +7967,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             flags = dict(current.get("turn_flags") or {})
             flags["sneak_attack_turn_token"] = sneak_attack["turn_token"]
             current["turn_flags"] = flags
+        record_agent_attack_ruling_uses(
+            next_encounter,
+            attacker_id=actor_id,
+            plan=plan,
+            result=result,
+        )
         if result.get("reveals_attacker"):
             reveal_attacker_to_target(next_encounter, actor_id, target_id)
         if plan.get("helped_by"):
@@ -7726,6 +8074,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     {
                         "id": "saving_throw_damage",
                         "name": "Resolve a saving throw and damage",
+                    },
+                    {
+                        "id": "direct_damage",
+                        "name": "Apply reviewed direct damage",
                     },
                     {
                         "id": "conditional_extra_damage",
@@ -7868,6 +8220,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "apply_condition",
             "saving_throw_condition",
             "saving_throw_damage",
+            "direct_damage",
             "conditional_extra_damage",
             "next_attack_advantage",
             "attachment",
@@ -7876,7 +8229,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         }:
             raise CombatEngineError(
                 "attack on-hit ruling must apply a condition, resolve a save-gated "
-                "condition or save damage, adjudicate conditional extra damage, "
+                "condition or save damage, apply reviewed direct damage, "
+                "adjudicate conditional extra damage, "
                 "grant reviewed next-attack advantage, apply an attachment, settle "
                 "a critical follow-up, or dismiss it"
             )
@@ -7912,6 +8266,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         has_explicit_conditional_damage = (
             re.search(r"(?i)\bdamage\b", effect) is not None
             and re.search(r"(?i)\b(?:if|when|while|unless)\b", effect) is not None
+            and re.search(r"(?i)(?<![A-Za-z0-9_])\d+d\d+", effect) is not None
+        )
+        has_explicit_direct_damage = (
+            not has_explicit_saving_throw
+            and not has_explicit_conditional_damage
+            and re.search(r"(?i)\bdamage\b", effect) is not None
             and re.search(r"(?i)(?<![A-Za-z0-9_])\d+d\d+", effect) is not None
         )
         if selection_id == "dismiss":
@@ -7950,6 +8310,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             if (
                 has_explicit_save_damage
                 or has_explicit_conditional_damage
+                or has_explicit_direct_damage
                 or states_structured_condition
                 or candidate_ids & {"attachment", "next_attack_advantage"}
             ):
@@ -8027,6 +8388,22 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     {
                         "id": "conditional_extra_damage",
                         "name": "Adjudicate source-conditional extra damage",
+                    },
+                ]
+        elif selection_id == "direct_damage":
+            if not has_explicit_direct_damage:
+                raise CombatEngineError("the reviewed attack does not state direct damage")
+            candidates = list(window.get("candidates") or [])
+            if not any(
+                str(item.get("id") or "") == "direct_damage"
+                for item in candidates
+                if isinstance(item, dict)
+            ):
+                window["candidates"] = [
+                    *candidates,
+                    {
+                        "id": "direct_damage",
+                        "name": "Apply reviewed direct damage",
                     },
                 ]
         next_encounter = resolve_choice_window(
@@ -8135,6 +8512,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "condition",
                 "escape_dc",
                 "escape_abilities",
+                "escape_checks",
                 "source_excerpt",
             }
             unknown_fields = set(normalized_selection) - allowed_fields
@@ -8149,6 +8527,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 for item in normalized_selection.get("escape_abilities") or []
                 if str(item).strip()
             ]
+            escape_checks = [
+                str(item).strip().casefold().replace(" ", "_")
+                for item in normalized_selection.get("escape_checks") or []
+                if str(item).strip()
+            ]
             source_excerpt = str(normalized_selection.get("source_excerpt") or "").strip()
             if condition not in STANDARD_BINARY_CONDITION_IDS:
                 raise CombatEngineError("on-hit ruling condition is unsupported")
@@ -8161,20 +8544,24 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 or not isinstance(escape_dc, int)
                 or escape_dc < 1
                 or escape_dc > 40
-                or not escape_abilities
+                or not (escape_abilities or escape_checks)
                 or len(escape_abilities) != len(set(escape_abilities))
-                or any(ability not in ABILITY_IDS for ability in escape_abilities)
+                or len(escape_checks) != len(set(escape_checks))
                 or not source_excerpt
                 or source_excerpt.casefold() not in effect.casefold()
             ):
                 raise CombatEngineError(
                     "on-hit condition requires exact reviewed escape terms and excerpt"
                 )
-            if re.search(rf"(?i)\bDC\s*{escape_dc}\b", effect) is None or any(
-                re.search(rf"(?i)\b{re.escape(ability)}\b", effect) is None
-                for ability in escape_abilities
-            ):
-                raise CombatEngineError("escape DC or ability is not stated by the reviewed attack")
+            if re.search(rf"(?i)\bDC\s*{escape_dc}\b", effect) is None:
+                raise CombatEngineError("escape DC is not stated by the reviewed attack")
+            normalized_escape_checks, escape_rule = reviewed_on_hit_escape_checks(
+                effect,
+                condition=condition,
+                escape_dc=escape_dc,
+                escape_abilities=escape_abilities,
+                escape_checks=escape_checks,
+            )
             apply_condition_change(updated_sheet, condition_id=condition, add=True)
             condition_applied = condition in condition_ids(updated_sheet.get("conditions"))
             if condition_applied:
@@ -8190,6 +8577,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "condition": condition,
                     "escape_dc": escape_dc,
                     "escape_abilities": escape_abilities,
+                    "escape_checks": normalized_escape_checks,
+                    "escape_rule": escape_rule,
                     "source_excerpt": source_excerpt,
                     "effect": effect,
                     "active": True,
@@ -8202,6 +8591,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "condition": condition,
                 "condition_applied": condition_applied,
                 "resisted_by_immunity": not condition_applied,
+                "escape_rule": escape_rule,
             }
         elif selection_id == "saving_throw_condition":
             allowed_fields = {
@@ -8360,6 +8750,176 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "condition_applied": condition_applied,
                 "resisted_by_immunity": not saved["success"] and not condition_applied,
                 "effect_id": effect_id,
+            }
+        elif selection_id == "direct_damage":
+            allowed_fields = {
+                "id",
+                "damage_formula",
+                "damage_type",
+                "trigger_facts",
+                "default_resolver",
+                "ruling_kind",
+                "decision",
+                "reason",
+                "source_excerpt",
+            }
+            unknown_fields = set(normalized_selection) - allowed_fields
+            if unknown_fields:
+                raise CombatEngineError(
+                    "unsupported direct-damage fields: "
+                    + ", ".join(sorted(unknown_fields))
+                )
+            damage_formula = (
+                str(normalized_selection.get("damage_formula") or "")
+                .strip()
+                .casefold()
+                .replace(" ", "")
+            )
+            damage_type = (
+                str(normalized_selection.get("damage_type") or "").strip().casefold()
+            )
+            trigger_facts = normalized_selection.get("trigger_facts")
+            decision = str(normalized_selection.get("decision") or "").strip()
+            reason = str(normalized_selection.get("reason") or "").strip()
+            source_excerpt = str(
+                normalized_selection.get("source_excerpt") or ""
+            ).strip()
+            if (
+                not has_explicit_direct_damage
+                or not damage_formula
+                or damage_type not in DAMAGE_TYPES
+                or not isinstance(trigger_facts, dict)
+                or not trigger_facts
+                or len(trigger_facts) > 32
+                or any(
+                    not isinstance(key, str) or not key.strip() or len(key) > 100
+                    for key in trigger_facts
+                )
+                or normalized_selection.get("default_resolver") != "agent"
+                or normalized_selection.get("ruling_kind")
+                != "agent_dm_adjudication"
+                or not decision
+                or len(decision) > 1000
+                or not reason
+                or len(reason) > 2000
+                or not source_excerpt
+                or source_excerpt.casefold() != effect.casefold()
+            ):
+                raise CombatEngineError(
+                    "direct damage requires an exact reviewed excerpt, printed "
+                    "damage formula, structured type-selection facts, and an "
+                    "explicit Agent-as-DM decision"
+                )
+            try:
+                encoded_trigger_facts = canonical_json(trigger_facts)
+            except (TypeError, ValueError) as exc:
+                raise CombatEngineError(
+                    "direct-damage trigger facts must be JSON values"
+                ) from exc
+            if len(encoded_trigger_facts) > 10000:
+                raise CombatEngineError("direct-damage trigger facts are too large")
+            if (
+                re.search(
+                    rf"(?i)(?<![A-Za-z0-9]){re.escape(damage_formula)}"
+                    rf"(?![A-Za-z0-9])",
+                    effect.replace(" ", ""),
+                )
+                is None
+            ):
+                raise CombatEngineError(
+                    "direct-damage formula is not stated by the reviewed attack"
+                )
+            variable_resistance_type = (
+                re.search(
+                    r"(?i)\btype\s+to\s+which\s+the\s+\w+\s+has\s+"
+                    r"damage\s+resistance\b",
+                    effect,
+                )
+                is not None
+            )
+            if variable_resistance_type:
+                selected_resistance = (
+                    str(trigger_facts.get("selected_damage_resistance") or "")
+                    .strip()
+                    .casefold()
+                )
+                attacker_record = require_campaign_actor(
+                    campaign_id,
+                    str(window.get("attacker_id") or ""),
+                )
+                attacker_resistances = {
+                    str(item).strip().casefold()
+                    for item in dict(attacker_record.sheet.get("traits") or {}).get(
+                        "resistances", []
+                    )
+                    if str(item).strip()
+                }
+                if (
+                    selected_resistance != damage_type
+                    or damage_type not in attacker_resistances
+                ):
+                    raise CombatEngineError(
+                        "direct-damage selected type does not match the attacker's "
+                        "recorded damage resistance"
+                    )
+            elif (
+                re.search(
+                    rf"(?i)\b{re.escape(damage_type)}\s+damage\b",
+                    effect,
+                )
+                is None
+            ):
+                raise CombatEngineError(
+                    "direct-damage type is not stated by the reviewed attack"
+                )
+            damage_roll = asdict(roll(damage_formula))
+            damage_amount = int(damage_roll["total"])
+            combatant = require_encounter_combatant(
+                next_encounter,
+                target_id,
+                role="attack on-hit target",
+            )
+            damaged = apply_damage_to_sheet(
+                updated_sheet,
+                amount=damage_amount,
+                damage_type=damage_type,
+                source=str(window.get("weapon_id") or "attack-on-hit"),
+                ruleset=str(next_encounter.get("ruleset") or "2014"),
+                death_saves=combatant_zero_hp_buffered(combatant),
+            )
+            updated_sheet = damaged["sheet"]
+            record_source_trait_damage(
+                next_encounter,
+                target_id=target_id,
+                damage=damaged,
+            )
+            reconcile_source_attachments(
+                next_encounter,
+                actor_id=target_id,
+                sheet=updated_sheet,
+            )
+            add_concentration_window(
+                next_encounter,
+                target_id,
+                damaged.get("concentration"),
+                next_revision=campaign.revision + 1,
+            )
+            sync_combatant_conditions(next_encounter, target_id, updated_sheet)
+            reconcile_readied_spells(next_encounter, target_id, updated_sheet)
+            settlement_result = {
+                "damage_roll": damage_roll,
+                "damage_amount": damage_amount,
+                "damage": {
+                    key: value for key, value in damaged.items() if key != "sheet"
+                },
+                "agent_ruling": {
+                    "trigger_facts": deepcopy(trigger_facts),
+                    "default_resolver": "agent",
+                    "ruling_kind": "agent_dm_adjudication",
+                    "decision": decision,
+                    "reason": reason,
+                    "source_excerpt": source_excerpt,
+                },
             }
         elif selection_id == "saving_throw_damage":
             allowed_fields = {
@@ -10186,6 +10746,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             flags = dict(attacker_combatant.get("turn_flags") or {})
             flags["sneak_attack_turn_token"] = sneak_attack["turn_token"]
             attacker_combatant["turn_flags"] = flags
+        record_agent_attack_ruling_uses(
+            next_encounter,
+            attacker_id=attacker_id,
+            plan=plan,
+            result=result,
+        )
         if result.get("reveals_attacker"):
             reveal_attacker_to_target(next_encounter, attacker_id, actor_id)
         sync_combatant_conditions(next_encounter, attacker_id, updated_attacker["sheet"])
@@ -13758,7 +14324,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     if (
                         condition not in acting_conditions
                         or normalized_ability
-                        not in set(escape_effect.get("escape_abilities") or [])
+                        not in set(
+                            escape_effect.get("escape_checks")
+                            or escape_effect.get("escape_abilities")
+                            or []
+                        )
                         or dc != int(escape_effect.get("escape_dc", 0) or 0)
                     ):
                         raise CombatEngineError(
@@ -18779,28 +19349,20 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "campaign revision conflict: "
                 f"expected {expected_revision}, found {campaign.revision}"
             )
-        _, combat = active_encounter(campaign_id)
+        retained_combat = dict(campaign.state or {}).get("combat")
+        if not isinstance(retained_combat, dict) or not retained_combat:
+            raise CombatEngineError("campaign has no retained combat")
+        combat = deepcopy(retained_combat)
+        encounter_rules_edition(campaign_id, combat)
+        recovering_postcombat = not combat.get("active", False)
+        retained_outcome = dict(combat.get("outcome") or {})
+        if recovering_postcombat and (
+            not retained_outcome or outcome_value != retained_outcome
+        ):
+            raise CombatEngineError(
+                "postcombat cleanup requires the exact retained combat outcome"
+            )
         require_no_blocking_pending(combat)
-        for combatant in combat.get("combatants", []):
-            if not combatant.get("death_saves", False):
-                continue
-            actor = characters.get(str(combatant["actor_id"]))
-            hp = int(actor.sheet.get("combat", {}).get("hp", {}).get("value", 0) or 0)
-            conditions = {str(item).casefold() for item in actor.sheet.get("conditions", [])}
-            if hp == 0 and not conditions & DEATH_SAVE_SETTLED_CONDITIONS:
-                raise CombatEngineError(
-                    f"cannot end combat while {actor.id} is still making death saves"
-                )
-        combat["active"] = False
-        if outcome_value:
-            combat["outcome"] = outcome_value
-        ending_readied = list(combat.get("readied", []))
-        combat["readied"] = []
-        updated_state = dict(campaign.state or {})
-        updated_state["combat"] = combat
-        updated_state["game_phase"] = PROFILE_PLAY
-        character_updates: list[CharacterStateUpdate] = []
-        expired_effects: set[str] = set()
         ending_actor_ids = list(
             dict.fromkeys(
                 str(item.get("actor_id") or "")
@@ -18811,38 +19373,100 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 if isinstance(item, dict) and str(item.get("actor_id") or "")
             )
         )
-        for actor_id_value in ending_actor_ids:
-            actor = characters.get(actor_id_value)
-            sheet = deepcopy(actor.sheet)
-            for source_condition in combat.get("source_conditions", []):
-                if str(
-                    source_condition.get("actor_id") or ""
-                ) != actor.id or not source_condition.get("added_by_encounter", False):
+        ending_actors = {
+            actor_id_value: characters.get(actor_id_value)
+            for actor_id_value in ending_actor_ids
+        }
+        if not recovering_postcombat:
+            for combatant in combat.get("combatants", []):
+                if not combatant.get("death_saves", False):
                     continue
-                condition = str(source_condition.get("condition") or "").casefold()
-                apply_condition_change(sheet, condition_id=condition, add=False)
-            holding_ids = {
-                str(item.get("holding_effect_id"))
-                for item in ending_readied
-                if item.get("kind") == "spell" and item.get("actor_id") == actor.id
-            }
-            for effect in sheet.get("effects", []):
-                if str(effect.get("id")) in holding_ids:
-                    effect["active"] = False
-            advanced = expire_combat_bound_effects(sheet)
-            expired_effects.update(advanced["expired"])
+                actor = ending_actors[str(combatant["actor_id"])]
+                hp = int(actor.sheet.get("combat", {}).get("hp", {}).get("value", 0) or 0)
+                conditions = condition_ids(actor.sheet.get("conditions", []))
+                if hp == 0 and not conditions & DEATH_SAVE_SETTLED_CONDITIONS:
+                    raise CombatEngineError(
+                        f"cannot end combat while {actor.id} is still making death saves"
+                    )
+            combat["active"] = False
+            if outcome_value:
+                combat["outcome"] = outcome_value
+        unavailable_source_ids = {
+            str(combatant.get("actor_id") or "")
+            for combatant in combat.get("combatants", [])
+            if isinstance(combatant, dict)
+            and (
+                combatant.get("departed") is not None
+                or condition_ids(
+                    ending_actors[str(combatant.get("actor_id") or "")].sheet.get(
+                        "conditions", []
+                    )
+                )
+                & INCAPACITATING_STATE_IDS
+            )
+        }
+        released_grapples = release_unavailable_source_grapples(
+            combat,
+            unavailable_source_ids,
+        )
+        if recovering_postcombat and not released_grapples:
+            raise CombatEngineError(
+                "retained combat has no unavailable-source grapple cleanup to recover"
+            )
+        ending_readied = list(combat.get("readied", []))
+        combat["readied"] = []
+        updated_state = dict(campaign.state or {})
+        updated_state["combat"] = combat
+        updated_state["game_phase"] = PROFILE_PLAY
+        character_updates: list[CharacterStateUpdate] = []
+        expired_effects: set[str] = set()
+        for actor_id_value in ending_actor_ids:
+            if recovering_postcombat and actor_id_value not in released_grapples:
+                continue
+            actor = ending_actors[actor_id_value]
+            sheet = deepcopy(actor.sheet)
+            if not recovering_postcombat:
+                for source_condition in combat.get("source_conditions", []):
+                    if str(
+                        source_condition.get("actor_id") or ""
+                    ) != actor.id or not source_condition.get("added_by_encounter", False):
+                        continue
+                    condition = str(source_condition.get("condition") or "").casefold()
+                    apply_condition_change(sheet, condition_id=condition, add=False)
+                holding_ids = {
+                    str(item.get("holding_effect_id"))
+                    for item in ending_readied
+                    if item.get("kind") == "spell" and item.get("actor_id") == actor.id
+                }
+                for effect in sheet.get("effects", []):
+                    if str(effect.get("id")) in holding_ids:
+                        effect["active"] = False
+                advanced = expire_combat_bound_effects(sheet)
+                expired_effects.update(advanced["expired"])
+                sheet = advanced["sheet"]
+            if actor_id_value in released_grapples and not has_active_owned_condition(
+                combat,
+                target_id=actor_id_value,
+                condition="grappled",
+            ):
+                apply_condition_change(sheet, condition_id="grappled", add=False)
+            normalized_sheet = validate_character_sheet(sheet)
+            sync_combatant_conditions(combat, actor_id_value, normalized_sheet)
             character_updates.append(
                 CharacterStateUpdate(
                     character_id=actor.id,
-                    sheet=validate_character_sheet(advanced["sheet"]),
+                    sheet=normalized_sheet,
                     notes=validate_character_notes(actor.notes),
                     expected_revision=actor.revision,
                 )
             )
+        updated_state["combat"] = combat
         response = commit_campaign_state(
             campaign,
             updated_state,
-            operation="combat.end",
+            operation=(
+                "combat.end.cleanup" if recovering_postcombat else "combat.end"
+            ),
             principal_id=principal_id,
             branch_id=resolved_branch_id,
             idempotency_key=idempotency_key,
@@ -18851,8 +19475,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             response_fields={
                 "ended": True,
                 "combat": combat,
-                "outcome": outcome_value or None,
+                "outcome": outcome_value or retained_outcome or None,
                 "tool_profile": PROFILE_PLAY,
+                "recovered_postcombat_cleanup": recovering_postcombat,
+                "released_grapples": {
+                    target_id: sorted(effect_ids)
+                    for target_id, effect_ids in released_grapples.items()
+                },
                 "effects_expired": sorted(expired_effects),
                 "readied_spells_expired": sorted(
                     str(item.get("id")) for item in ending_readied if item.get("kind") == "spell"
@@ -19728,6 +20357,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             parsed.sheet,
             agent_fill,
         )
+        agent_fill_evidence = reviewed_statblock_fill_evidence(
+            campaign_id,
+            agent_fill,
+            module_id=module_id,
+            page_number=page_number,
+        )
         metadata_value = deepcopy(dict(metadata or {}))
         if "agent_statblock_fill" in metadata_value:
             raise ValueError("metadata.agent_statblock_fill is reserved; use payload.agent_fill")
@@ -19738,6 +20373,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         if filled is not None:
             metadata_value["agent_statblock_fill"] = filled["fill"]
+            metadata_value["agent_statblock_fill_evidence"] = agent_fill_evidence
         resolved_warnings = set((filled or {}).get("resolved_warnings") or [])
         retained_warnings = [
             warning for warning in parsed.warnings if warning not in resolved_warnings
@@ -20855,6 +21491,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             parsed.sheet,
             agent_fill,
         )
+        agent_fill_evidence = reviewed_statblock_fill_evidence(
+            campaign_id,
+            agent_fill,
+            rule_source_id=str(job.source_id),
+            page_number=page_number,
+        )
         filled = (
             apply_reviewed_statblock_fill(parsed.sheet, agent_fill)
             if agent_fill is not None
@@ -20893,6 +21535,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "text_evidence": text_evidence,
             "evidence_exclusions": validated_evidence_exclusions,
             "agent_statblock_fill": (filled or {}).get("fill"),
+            "agent_statblock_fill_evidence": agent_fill_evidence,
             "derived_from_review_id": derived_from_review_id,
         }
         reviews = list(dict(job.result or {}).get("statblock_reviews") or [])
@@ -26388,11 +27031,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             if statblock_warnings:
                 provenance += "\nManual rulings: " + "; ".join(statblock_warnings) + "."
             if filled is not None:
+                fill_labels = reviewed_statblock_fill_labels(filled["fill"])
                 provenance += (
                     "\nAgent statblock fill: "
-                    + ", ".join(
-                        str(item["activity_id"]) for item in filled["fill"]["multiattack_options"]
-                    )
+                    + ", ".join(fill_labels)
                     + "."
                 )
             existing_dm_notes = str(profile.get("dm_notes") or "").strip()
@@ -26531,11 +27173,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             if statblock_warnings:
                 provenance += "\nManual rulings: " + "; ".join(statblock_warnings) + "."
             if filled is not None:
+                fill_labels = reviewed_statblock_fill_labels(filled["fill"])
                 provenance += (
                     "\nAgent statblock fill: "
-                    + ", ".join(
-                        str(item["activity_id"]) for item in filled["fill"]["multiattack_options"]
-                    )
+                    + ", ".join(fill_labels)
                     + "."
                 )
             existing_dm_notes = str(profile.get("dm_notes") or "").strip()
@@ -27245,6 +27886,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "currency_spend",
             "item_spend",
             "consumable_use",
+            "combat_cleanup",
         ] = "update",
         principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
@@ -27321,6 +27963,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "reason",
                 ),
             ),
+            "combat_cleanup": ({"outcome"}, ("outcome",)),
         }
         if action not in action_contracts:
             raise ValueError(f"unsupported campaign_change action: {action}")
@@ -27458,6 +28101,20 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 required(data, "target_character_id"),
                 required(data, "expected_character_revision"),
                 required(data, "reason"),
+                principal_id,
+                expected_revision,
+                branch_id,
+                idempotency_key,
+            )
+        elif action == "combat_cleanup":
+            require_facade_phase(
+                campaign_id,
+                "campaign_change(combat_cleanup)",
+                PROFILE_PLAY,
+            )
+            result = combat_end(
+                campaign_id,
+                required(data, "outcome"),
                 principal_id,
                 expected_revision,
                 branch_id,

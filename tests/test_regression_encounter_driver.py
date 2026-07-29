@@ -28,10 +28,12 @@ from scripts.regression_encounter import (
     _characters,
     _choose_destination,
     _choose_party_spell,
+    _completed_source_opening_weapon_actor_ids,
     _consume_agent_forced_target,
     _consume_agent_target_reaction,
     _defense_selection,
     _encounter_actor_groups,
+    _encounter_battle_map_request,
     _encounter_operation_scope,
     _encounter_start_operation_token,
     _has_action_budget,
@@ -47,6 +49,7 @@ from scripts.regression_encounter import (
     _party_loadouts,
     _pending_agent_forced_targets,
     _postcombat_stabilization_target,
+    _postcombat_unavailable_grapple_effect_ids,
     _preferred_hostile_weapon_id,
     _preferred_multiattack_option_id,
     _preflight_attack,
@@ -58,8 +61,11 @@ from scripts.regression_encounter import (
     _ready_linked_source_flee_actor_ids,
     _record_source_flee_damage,
     _reinforcement_config,
+    _require_committed_encounter_start,
+    _require_encounter_readiness,
     _require_live_active_party,
     _require_pending_on_hit_choice_id,
+    _required_source_opening_weapon,
     _resolve_pending,
     _roll_total,
     _selected_prepared_actor_ids,
@@ -78,6 +84,7 @@ from scripts.regression_encounter import (
     _source_extra_damage_action_rulings,
     _source_extra_damage_history,
     _source_extra_damage_rulings,
+    _source_extra_damage_turn_history,
     _source_flee_damage_history,
     _source_flee_ready,
     _source_on_hit_rulings,
@@ -114,6 +121,110 @@ PERYTON_DIVE_ATTACK = (
     "and then hits it with a melee weapon attack, the attack deals an extra 9 "
     "(2d8) damage to the target."
 )
+
+
+def test_postcombat_cleanup_detects_only_unavailable_source_grapples() -> None:
+    combat = {
+        "combatants": [
+            {"actor_id": "dead-source", "conditions": ["dead", "prone"]},
+            {
+                "actor_id": "departed-source",
+                "conditions": [],
+                "departed": {"reason": "The source fled."},
+            },
+            {"actor_id": "present-source", "conditions": []},
+        ],
+        "ongoing_effects": [
+            {
+                "id": "dead-grapple",
+                "kind": "on_hit_condition",
+                "condition": "grappled",
+                "source_actor_id": "dead-source",
+                "active": True,
+            },
+            {
+                "id": "departed-grapple",
+                "kind": "on_hit_condition",
+                "condition": "grappled",
+                "source_actor_id": "departed-source",
+                "active": True,
+            },
+            {
+                "id": "present-grapple",
+                "kind": "on_hit_condition",
+                "condition": "grappled",
+                "source_actor_id": "present-source",
+                "active": True,
+            },
+            {
+                "id": "independent-web",
+                "kind": "on_hit_condition",
+                "condition": "restrained",
+                "source_actor_id": "dead-source",
+                "active": True,
+            },
+        ],
+    }
+
+    assert _postcombat_unavailable_grapple_effect_ids(combat) == [
+        "dead-grapple",
+        "departed-grapple",
+    ]
+
+
+def test_encounter_readiness_rejects_source_participants_before_other_calls() -> None:
+    calls: list[tuple[str, dict]] = []
+    manifest = {
+        "schema_version": 1,
+        "groups": [
+            {
+                "key": "source-hostiles",
+                "label": "Three ettercaps",
+                "role": "combatant",
+                "required_count": 3,
+                "actor_ids": ["ettercap-1", "ettercap-2", "ettercap-3"],
+                "source_excerpt": "Three ettercaps attack with web garrotes.",
+            }
+        ],
+    }
+
+    class Client:
+        async def domain(self, tool_id: str, arguments: dict) -> dict:
+            calls.append((tool_id, arguments))
+            return {
+                "ready": False,
+                "groups": [
+                    {
+                        "key": "source-hostiles",
+                        "missing_count": 0,
+                        "issues": ["source excerpt was not found in the scene"],
+                    }
+                ],
+            }
+
+    with pytest.raises(RuntimeError, match="readiness failed before mutation"):
+        asyncio.run(
+            _require_encounter_readiness(
+                Client(),
+                campaign_id="campaign-1",
+                scene_id="scene-1",
+                participant_manifest=manifest,
+            )
+        )
+
+    assert calls == [
+        (
+            "module_query",
+            {
+                "campaign_id": "campaign-1",
+                "view": "readiness",
+                "payload": {
+                    "scene_id": "scene-1",
+                    "participant_manifest": manifest,
+                },
+            },
+        )
+    ]
 
 
 def test_agent_attack_contexts_bind_source_and_attack_mode() -> None:
@@ -703,6 +814,67 @@ def test_preflight_falls_back_from_illegal_multiattack_to_one_ordinary_attack() 
     assert any("multiattack_option_id" not in item for item in client.calls)
 
 
+def test_preflight_never_replaces_a_required_source_opening_weapon() -> None:
+    class Client:
+        def __init__(self) -> None:
+            self.calls: list[dict] = []
+
+        async def domain(self, tool_id: str, arguments: dict) -> dict:
+            assert tool_id == "combat_preflight_attack"
+            action = dict(arguments["action"])
+            self.calls.append(action)
+            if action["weapon_id"] == "web-garrote":
+                raise RuntimeError("recorded advantage requirement is not satisfied")
+            return {"status": "ready", **action}
+
+    actor = {
+        "id": "ettercap-1",
+        "derived": {
+            "inventory": {
+                "weapon_attacks": [
+                    {
+                        "item_id": "bite",
+                        "attack_type": "melee",
+                        "properties": [],
+                    },
+                    {
+                        "item_id": "web-garrote",
+                        "attack_type": "melee",
+                        "properties": [],
+                    },
+                ]
+            }
+        },
+    }
+    client = Client()
+    rejections: list[dict[str, str]] = []
+
+    plan = asyncio.run(
+        _preflight_attack(
+            client,
+            SimpleNamespace(campaign_id="campaign-1"),
+            actor,
+            ["pc-1"],
+            preferred_weapon_id="web-garrote",
+            multiattack_option_id="bite-and-web-garrote",
+            require_preferred_weapon=True,
+            preflight_rejections=rejections,
+        )
+    )
+
+    assert plan is None
+    assert [item["weapon_id"] for item in client.calls] == ["web-garrote"]
+    assert rejections == [
+        {
+            "actor_id": "ettercap-1",
+            "target_id": "pc-1",
+            "weapon_id": "web-garrote",
+            "attack_mode": "melee",
+            "error": "recorded advantage requirement is not satisfied",
+        }
+    ]
+
+
 def test_consume_agent_target_reaction_uses_public_choice_facade() -> None:
     class Client:
         def __init__(self) -> None:
@@ -1076,7 +1248,12 @@ def test_source_extra_damage_ruling_binds_exact_agent_passive_and_application() 
         "damage_expression": "2d8",
         "damage_type": "weapon",
         "source_excerpt": PERYTON_DIVE_ATTACK,
-        "trigger_facts": {"flying": True, "straight_dive_ft": 30},
+        "trigger_facts": {
+            "flying": True,
+            "straight_dive_ft": 30,
+            "requires_attack_advantage": True,
+            "max_applications_per_turn": 1,
+        },
         "decision": "The first round starts with the source-defined dive.",
         "reason": "The encounter starts the peryton high above the road.",
     }
@@ -1105,6 +1282,19 @@ def test_source_extra_damage_ruling_binds_exact_agent_passive_and_application() 
             weapon_id="gore",
             round_number=1,
             applications={(actor["id"], "dive-attack-passive"): 1},
+        )
+        == []
+    )
+    assert (
+        _source_extra_damage_action_rulings(
+            normalized,
+            actor_id=actor["id"],
+            weapon_id="gore",
+            round_number=1,
+            applications={},
+            turn_applications={
+                (actor["id"], "dive-attack-passive", 1): 1
+            },
         )
         == []
     )
@@ -1183,6 +1373,9 @@ def test_source_extra_damage_history_recovers_bounded_successes() -> None:
 
     assert _source_extra_damage_history(combat, declarations) == {
         ("peryton-1", "dive-attack-passive"): 1
+    }
+    assert _source_extra_damage_turn_history(combat, declarations) == {
+        ("peryton-1", "dive-attack-passive", 1): 1
     }
     with pytest.raises(RuntimeError, match="exceeds"):
         _source_extra_damage_history(
@@ -1449,6 +1642,41 @@ def test_precommit_attack_ruling_is_not_treated_as_owned_on_hit_window() -> None
     assert raised.value.requirement["ruling"]["ruling_kind"] == (
         "environmental_consequence"
     )
+
+
+def test_pending_combat_start_returns_to_agent_before_combat_exposure() -> None:
+    pending = {
+        "status": "pending_ruling",
+        "default_resolver": "agent",
+        "ruling_kind": "agent_dm_adjudication",
+        "reason": "battle-map location_key is not in scene spatial evidence",
+        "committed": False,
+        "missing": ["battle_map"],
+    }
+
+    with pytest.raises(EncounterRulingRequiredError) as raised:
+        _require_committed_encounter_start(pending)
+
+    requirement = raised.value.requirement
+    assert requirement["operation"] == "combat_start"
+    assert requirement["ruling"]["committed"] is False
+    assert "temporary-map ruling" in requirement["retry_hint"]
+
+
+def test_committed_combat_start_requires_an_active_encounter() -> None:
+    combat = _require_committed_encounter_start(
+        {"combat": {"id": "combat-1", "active": True}}
+    )
+
+    assert combat["id"] == "combat-1"
+    with pytest.raises(RuntimeError, match="without an active committed"):
+        _require_committed_encounter_start({"combat": {"active": False}})
+
+
+def test_encounter_battle_map_uses_canonical_default_without_indexed_location() -> None:
+    assert _encounter_battle_map_request(None) == {}
+    assert _encounter_battle_map_request("  ") == {}
+    assert _encounter_battle_map_request("area-5") == {"location_key": "area-5"}
 
 
 def test_status_uses_play_character_exposure_before_combat() -> None:
@@ -2358,6 +2586,88 @@ def test_party_spell_tactics_respect_preparation_and_upcast_when_needed() -> Non
         actors=actors,
         living_targets=["goblin"],
     ) == (MAGIC_MISSILE_ID, "goblin", 2)
+
+
+def test_party_spell_tactics_choose_safe_structured_area_damage() -> None:
+    fireball_id = "dnd5e.content.srd2014.spell.fireball"
+    wizard = _spell_actor(fireball_id, slots=0)
+    wizard["sheet"]["spellcasting"].update(
+        {
+            "preparation": {
+                "mode": "spellbook",
+                "selected_spell_ids": [fireball_id],
+            },
+            "spell_slots": {
+                "1": {"value": 0, "max": 4},
+                "2": {"value": 0, "max": 3},
+                "3": {"value": 1, "max": 3},
+            },
+        }
+    )
+    wizard["sheet"]["content"]["spells"][0].update(
+        {
+            "level": 3,
+            "access": {"prepared": True},
+            "definition": {"range": {"normal_ft": 150}},
+            "resolution": {
+                "kind": "saving_throw",
+                "targeting": {
+                    "mode": "area",
+                    "area": {"shape": "sphere", "radius_ft": 20},
+                },
+                "save": {
+                    "ability": "dexterity",
+                    "success": "half",
+                    "damage": {"base_dice": "8d6", "damage_type": "fire"},
+                },
+            },
+        }
+    )
+    actors = {
+        "wizard": wizard,
+        "ally": _spell_actor(slots=0),
+        "goblin-1": _spell_actor(slots=0),
+        "goblin-2": _spell_actor(slots=0),
+        "goblin-3": _spell_actor(slots=0),
+    }
+    positions = {
+        "wizard": {"x": 0, "y": 0},
+        "ally": {"x": 0, "y": 1},
+        "goblin-1": {"x": 2, "y": 0},
+        "goblin-2": {"x": 2, "y": 1},
+        "goblin-3": {"x": 2, "y": 2},
+    }
+    combat = {
+        "battle_map": {"bounds": {"width_cells": 12, "height_cells": 12}},
+        "combatants": [
+            {
+                "actor_id": actor_id,
+                "position": position,
+                "conditions": [],
+            }
+            for actor_id, position in positions.items()
+        ],
+    }
+
+    choice = _choose_party_spell(
+        "wizard",
+        party_ids=["wizard", "ally"],
+        actors=actors,
+        living_targets=["goblin-1", "goblin-2", "goblin-3"],
+        combat=combat,
+    )
+
+    assert choice is not None
+    assert choice[:3] == (fireball_id, "goblin-1", 3)
+    declaration = choice[3]
+    assert {item["target_id"] for item in declaration["target_contexts"]} == {
+        "goblin-1",
+        "goblin-2",
+        "goblin-3",
+    }
+    assert "ally" not in {
+        item["target_id"] for item in declaration["target_contexts"]
+    }
 
 
 def test_party_tactics_do_not_target_unobserved_hidden_combatants() -> None:
@@ -4001,6 +4311,17 @@ def test_source_authored_precombat_and_attack_tactics_are_structured() -> None:
                     "itself on a success."
                 ),
             },
+            {
+                "actor_id": "ettercap-1",
+                "weapon_id": "web-garrote",
+                "condition": "grappled",
+                "escape_dc": 12,
+                "escape_checks": ["athletics", "acrobatics"],
+                "source_excerpt": (
+                    "and the target is grappled (escape DC 12). Until this "
+                    "grapple ends, the target can't breathe."
+                ),
+            },
         ],
         participant_ids=[
             "nezznar",
@@ -4043,6 +4364,18 @@ def test_source_authored_precombat_and_attack_tactics_are_structured() -> None:
             "the end of each of its turns, ending the effect on itself on a success."
         ),
     }
+    assert rulings[("ettercap-1", "web-garrote")] == {
+        "actor_id": "ettercap-1",
+        "weapon_id": "web-garrote",
+        "id": "apply_condition",
+        "condition": "grappled",
+        "escape_dc": 12,
+        "escape_checks": ["athletics", "acrobatics"],
+        "source_excerpt": (
+            "and the target is grappled (escape DC 12). Until this grapple "
+            "ends, the target can't breathe."
+        ),
+    }
     assert rulings[("durnan", "grimvault")]["target_has_limbs"] is True
     assert rulings[("stirge", "blood-drain")]["id"] == "attachment"
     assert rulings[("duergar", "war-pick")] == {
@@ -4075,6 +4408,98 @@ def test_source_authored_precombat_and_attack_tactics_are_structured() -> None:
         ),
     }
     assert delayed["nezznar"]["until_round"] == 2
+
+
+def test_source_on_hit_ruling_accepts_agent_selected_direct_damage_type() -> None:
+    excerpt = (
+        "22 (5d8) damage of the type to which the dragonfang has damage resistance."
+    )
+
+    rulings = _source_on_hit_rulings(
+        [
+            {
+                "actor_id": "dragonfang",
+                "weapon_id": "orb",
+                "id": "direct_damage",
+                "damage_formula": "5d8",
+                "damage_type": "acid",
+                "trigger_facts": {"selected_damage_resistance": "acid"},
+                "default_resolver": "agent",
+                "ruling_kind": "agent_dm_adjudication",
+                "decision": "Apply the reviewed orb damage as acid.",
+                "reason": "The reviewed variant records acid resistance.",
+                "source_excerpt": excerpt,
+            }
+        ],
+        participant_ids=["dragonfang"],
+        actors={
+            "dragonfang": {
+                "derived": {
+                    "inventory": {
+                        "weapon_attacks": [
+                            {
+                                "item_id": "orb",
+                                "on_hit_effect": excerpt,
+                            }
+                        ]
+                    }
+                }
+            }
+        },
+    )
+
+    assert rulings[("dragonfang", "orb")] == {
+        "actor_id": "dragonfang",
+        "weapon_id": "orb",
+        "id": "direct_damage",
+        "damage_formula": "5d8",
+        "damage_type": "acid",
+        "trigger_facts": {"selected_damage_resistance": "acid"},
+        "default_resolver": "agent",
+        "ruling_kind": "agent_dm_adjudication",
+        "decision": "Apply the reviewed orb damage as acid.",
+        "reason": "The reviewed variant records acid resistance.",
+        "source_excerpt": excerpt,
+    }
+
+
+def test_source_on_hit_ruling_rejects_nonexact_actor_card_effect() -> None:
+    excerpt = (
+        "22 (5d8) damage of the type to which the dragonfang has damage resistance."
+    )
+    declaration = {
+        "actor_id": "dragonfang",
+        "weapon_id": "orb",
+        "id": "direct_damage",
+        "damage_formula": "5d8",
+        "damage_type": "acid",
+        "trigger_facts": {"selected_damage_resistance": "acid"},
+        "default_resolver": "agent",
+        "ruling_kind": "agent_dm_adjudication",
+        "decision": "Apply the reviewed orb damage as acid.",
+        "reason": "The reviewed variant records acid resistance.",
+        "source_excerpt": f"Hit: {excerpt}",
+    }
+
+    with pytest.raises(ValueError, match="exactly match"):
+        _source_on_hit_rulings(
+            [declaration],
+            participant_ids=["dragonfang"],
+            actors={
+                "dragonfang": {
+                    "derived": {
+                        "inventory": {
+                            "weapon_attacks": [
+                                {
+                                    "item_id": "orb",
+                                    "on_hit_effect": excerpt,
+                                }
+                            ]
+                        }
+                    }
+                }
+            },
+        )
 
 
 def test_source_ammunition_selection_requires_owned_source_stack() -> None:
@@ -5135,6 +5560,61 @@ def test_hostile_multiattack_selection_follows_the_preferred_weapon() -> None:
         _preferred_multiattack_option_id(actor, preferred_weapon_id="claws")
         == "mixed-special-action"
     )
+
+
+def test_completed_source_opening_weapons_are_rebuilt_from_public_combat_log() -> None:
+    combat = {
+        "log": [
+            {
+                "type": "attack",
+                "result": {
+                    "attacker_id": "ettercap-1",
+                    "weapon_id": "web-garrote",
+                    "attack_mode": "melee",
+                    "hit": False,
+                },
+            },
+            {
+                "type": "attack",
+                "result": {
+                    "attacker_id": "ettercap-2",
+                    "weapon_id": "bite",
+                    "attack_mode": "melee",
+                    "hit": True,
+                },
+            },
+            {
+                "type": "attack",
+                "result": {
+                    "attacker_id": "unrelated",
+                    "weapon_id": "web-garrote",
+                    "attack_mode": "melee",
+                    "hit": True,
+                },
+            },
+        ]
+    }
+    openings = {
+        "ettercap-1": {"weapon_id": "web-garrote"},
+        "ettercap-2": {"weapon_id": "web-garrote"},
+    }
+
+    assert _completed_source_opening_weapon_actor_ids(combat, openings) == {
+        "ettercap-1"
+    }
+    assert (
+        _required_source_opening_weapon(
+            openings,
+            actor_id="ettercap-1",
+            completed_actor_ids={"ettercap-1"},
+        )
+        is None
+    )
+    assert _required_source_opening_weapon(
+        openings,
+        actor_id="ettercap-2",
+        completed_actor_ids={"ettercap-1"},
+    ) == {"weapon_id": "web-garrote"}
 
 
 def test_conscious_party_member_stabilizes_after_all_hostiles_are_resolved() -> None:

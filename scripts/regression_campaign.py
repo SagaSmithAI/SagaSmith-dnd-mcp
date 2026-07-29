@@ -514,6 +514,15 @@ def _phase_transition_key(token: str, action: str, campaign: dict[str, Any]) -> 
     return f"{token}-{action}-r{campaign['revision']}"
 
 
+def _candidate_review_idempotency_key(token: str, candidate_id: str) -> str:
+    """Keep review replay identity stable without aliasing distinct candidates."""
+
+    identity = str(candidate_id).strip().split(":")[-1]
+    if not identity:
+        raise ValueError("candidate id is required for review idempotency")
+    return f"{token}-review-candidate-{identity}"
+
+
 class CampaignMcp:
     def __init__(self, session: ClientSession, campaign_id: str) -> None:
         self.session = session
@@ -2037,6 +2046,10 @@ async def _prepare_statblock(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError("prepare-statblock requires exactly one of --review-id or --candidate-id")
     if args.defer_checkpoint and args.isolate_branch:
         raise ValueError("prepare-statblock cannot defer the checkpoint on an isolated branch")
+    if args.actor_count < 1:
+        raise ValueError("--actor-count must be positive")
+    if args.replace_actor_id and args.actor_count != 1:
+        raise ValueError("--replace-actor-id requires --actor-count 1")
     variant = None
     variant_path = None
     if args.statblock_variant is not None:
@@ -2263,7 +2276,10 @@ async def _prepare_statblock(args: argparse.Namespace) -> dict[str, Any]:
                                 "metadata": review_metadata,
                                 "agent_fill": agent_fill,
                             },
-                            "idempotency_key": f"{token}-review-candidate",
+                            "idempotency_key": _candidate_review_idempotency_key(
+                                token,
+                                str(candidate["id"]),
+                            ),
                         },
                     )
                 )
@@ -2281,46 +2297,69 @@ async def _prepare_statblock(args: argparse.Namespace) -> dict[str, Any]:
                 )
             if review.get("content_kind") != "dnd5e_2014_statblock":
                 raise RuntimeError("review is not a D&D 2014 statblock")
-            creation_payload = {
-                "campaign_id": args.campaign_id,
-                "review_id": review["id"],
-                "name": args.actor_name,
-                "character_type": args.actor_type,
-                "variant": variant,
-                **await _statblock_replacement_fields(
-                    client,
-                    args.replace_actor_id,
-                ),
-            }
-            created = _facade_value(
-                await client.domain(
-                    "character_create_from",
-                    {
-                        "mode": "module_statblock",
-                        "payload": creation_payload,
-                        "idempotency_key": _statblock_creation_key(
-                            run_id=args.run_id,
-                            review_id=str(review["id"]),
-                            actor_name=args.actor_name,
-                            actor_type=args.actor_type,
-                            variant=variant,
-                        ),
-                    },
+            created_results: list[dict[str, Any]] = []
+            actors: list[dict[str, Any]] = []
+            spell_cards_by_actor: dict[str, list[dict[str, Any]]] = {}
+            for index in range(1, args.actor_count + 1):
+                actor_name = (
+                    args.actor_name
+                    if args.actor_count == 1
+                    else f"{args.actor_name} {index}"
                 )
-            )
-            actor_id = str(created["character"]["id"])
-            actor = _facade_value(
-                await client.domain(
-                    "character_query",
-                    {"view": "get", "payload": {"character_id": actor_id}},
+                creation_payload = {
+                    "campaign_id": args.campaign_id,
+                    "review_id": review["id"],
+                    "name": actor_name,
+                    "character_type": args.actor_type,
+                    "variant": variant,
+                    **await _statblock_replacement_fields(
+                        client,
+                        args.replace_actor_id,
+                    ),
+                }
+                created = _facade_value(
+                    await client.domain(
+                        "character_create_from",
+                        {
+                            "mode": "module_statblock",
+                            "payload": creation_payload,
+                            "idempotency_key": _statblock_creation_key(
+                                run_id=args.run_id,
+                                review_id=str(review["id"]),
+                                actor_name=actor_name,
+                                actor_type=args.actor_type,
+                                variant=variant,
+                            ),
+                        },
+                    )
                 )
-            )
-            spell_cards = [
-                _spell_card_summary(card)
-                for card in (actor.get("sheet", {}).get("content", {}).get("spells") or [])
-            ]
-            if not all(item["display_settlement_range_consistent"] for item in spell_cards):
-                raise RuntimeError("source-bound spell display and settlement ranges disagree")
+                actor_id = str(created["character"]["id"])
+                actor = _facade_value(
+                    await client.domain(
+                        "character_query",
+                        {"view": "get", "payload": {"character_id": actor_id}},
+                    )
+                )
+                spell_cards = [
+                    _spell_card_summary(card)
+                    for card in (
+                        actor.get("sheet", {}).get("content", {}).get("spells")
+                        or []
+                    )
+                ]
+                if not all(
+                    item["display_settlement_range_consistent"]
+                    for item in spell_cards
+                ):
+                    raise RuntimeError(
+                        "source-bound spell display and settlement ranges disagree"
+                    )
+                created_results.append(dict(created))
+                actors.append(_character_summary(actor))
+                spell_cards_by_actor[actor_id] = spell_cards
+            created = created_results[0]
+            actor_ids = [str(actor["id"]) for actor in actors]
+            spell_cards = spell_cards_by_actor[actor_ids[0]]
 
             campaign_in_lobby = _facade_value(
                 await client.core(
@@ -2361,7 +2400,14 @@ async def _prepare_statblock(args: argparse.Namespace) -> dict[str, Any]:
             snapshot: dict[str, Any] | None = None
             verified: dict[str, Any] | None = None
             if not args.defer_checkpoint:
-                snapshot_label = f"Prepared source-bound actor: {args.actor_name}"
+                snapshot_label = (
+                    f"Prepared source-bound actor: {args.actor_name}"
+                    if args.actor_count == 1
+                    else (
+                        "Prepared source-bound actor batch: "
+                        f"{args.actor_name} x{args.actor_count}"
+                    )
+                )
                 snapshots = _facade_value(
                     await client.domain(
                         "snapshot_query",
@@ -2488,11 +2534,12 @@ async def _prepare_statblock(args: argparse.Namespace) -> dict[str, Any]:
                         {"view": "list", "payload": {"campaign_id": args.campaign_id}},
                     )
                 )
-                actor_absent = actor_id not in {
+                source_actor_ids = {
                     str(item.get("id")) for item in source_characters or []
                 }
-                if not actor_absent:
-                    raise RuntimeError("isolated reviewed actor leaked into the source branch")
+                actors_absent = not set(actor_ids) & source_actor_ids
+                if not actors_absent:
+                    raise RuntimeError("isolated reviewed actors leaked into the source branch")
                 source_campaign = _facade_value(
                     await client.core(
                         "campaign_query",
@@ -2525,7 +2572,8 @@ async def _prepare_statblock(args: argparse.Namespace) -> dict[str, Any]:
                     "source_checkpoint": source_checkpoint,
                     "branch_snapshot": branch_snapshot,
                     "checkout": checkout,
-                    "actor_absent_from_source": actor_absent,
+                    "actors_absent_from_source": actors_absent,
+                    "actor_absent_from_source": actors_absent,
                     "source_snapshot": source_snapshot,
                     "source_snapshot_verification": source_verified,
                 }
@@ -2557,7 +2605,7 @@ async def _prepare_statblock(args: argparse.Namespace) -> dict[str, Any]:
                 "created": {
                     "statblock": created.get("statblock"),
                     "spell_warnings": created.get("spell_warnings"),
-                    "character": _character_summary(actor),
+                    "character": actors[0],
                     "spell_display_consistent": True,
                     "spell_cards": spell_cards,
                     "variant": created.get("variant"),
@@ -2567,6 +2615,8 @@ async def _prepare_statblock(args: argparse.Namespace) -> dict[str, Any]:
                         str(agent_fill_path) if agent_fill_path is not None else None
                     ),
                 },
+                "actors": actors,
+                "spell_cards_by_actor": spell_cards_by_actor,
                 "snapshot": snapshot,
                 "snapshot_verification": verified,
                 "isolation": isolation,

@@ -24,6 +24,82 @@ def _config(tmp_path: Path) -> McpConfig:
     )
 
 
+def test_reviewed_grapple_escape_combines_attack_dc_with_core_checks() -> None:
+    effect = (
+        "and the target is grappled (escape DC 12). Until this grapple ends, "
+        "the target can't breathe."
+    )
+
+    checks, rule = server_module.reviewed_on_hit_escape_checks(
+        effect,
+        condition="grappled",
+        escape_dc=12,
+        escape_abilities=[],
+        escape_checks=["athletics", "acrobatics"],
+    )
+
+    assert checks == ["athletics", "acrobatics"]
+    assert rule == "core_2014_grapple"
+    with pytest.raises(Exception, match="Athletics/Acrobatics"):
+        server_module.reviewed_on_hit_escape_checks(
+            effect,
+            condition="grappled",
+            escape_dc=12,
+            escape_abilities=[],
+            escape_checks=["strength"],
+        )
+
+
+def test_unavailable_sources_release_only_their_owned_grapples() -> None:
+    encounter = {
+        "ongoing_effects": [
+            {
+                "id": "ended-grapple",
+                "kind": "on_hit_condition",
+                "condition": "grappled",
+                "source_actor_id": "departed-source",
+                "target_id": "target",
+                "active": True,
+            },
+            {
+                "id": "remaining-grapple",
+                "kind": "on_hit_condition",
+                "condition": "grappled",
+                "source_actor_id": "present-source",
+                "target_id": "target",
+                "active": True,
+            },
+            {
+                "id": "independent-web",
+                "kind": "on_hit_condition",
+                "condition": "restrained",
+                "source_actor_id": "departed-source",
+                "target_id": "target",
+                "active": True,
+            },
+        ]
+    }
+
+    released = server_module.release_unavailable_source_grapples(
+        encounter,
+        {"departed-source"},
+    )
+
+    assert released == {"target": ["ended-grapple"]}
+    assert encounter["ongoing_effects"][0]["active"] is False
+    assert encounter["ongoing_effects"][0]["resolution"] == {
+        "kind": "source_unavailable",
+        "source_actor_id": "departed-source",
+    }
+    assert encounter["ongoing_effects"][1]["active"] is True
+    assert encounter["ongoing_effects"][2]["active"] is True
+    assert server_module.has_active_owned_condition(
+        encounter,
+        target_id="target",
+        condition="grappled",
+    )
+
+
 def test_public_on_hit_ruling_applies_and_escapes_web_condition(
     tmp_path: Path,
     monkeypatch,
@@ -92,6 +168,10 @@ def test_public_on_hit_ruling_applies_and_escapes_web_condition(
             "The target is restrained by webbing. As an action, the restrained "
             "target can make a DC 12 Strength check, bursting the webbing on a success."
         )
+        garrote_effect = (
+            "and the target is grappled (escape DC 12). Until this grapple ends, "
+            "the target can't breathe."
+        )
         spider_sheet = default_character_sheet()
         spider_sheet["combat"]["hp"] = {"value": 26, "max": 26, "temp": 0}
         spider_sheet["inventory"]["items"] = [
@@ -112,9 +192,27 @@ def test_public_on_hit_ruling_applies_and_escapes_web_condition(
                     "attack_bonus_override": 5,
                     "always_available": True,
                 },
-            }
+            },
+            {
+                "id": "garrote",
+                "name": "Web Garrote",
+                "kind": "weapon",
+                "equipped": True,
+                "equipped_slot": "off_hand",
+                "mechanics": {
+                    "attack_type": "melee",
+                    "attack_ability": "dexterity",
+                    "damage_formula": "",
+                    "damage_type": "",
+                    "on_hit_effect": garrote_effect,
+                    "reach_ft": 5,
+                    "attack_bonus_override": 5,
+                    "always_available": True,
+                },
+            },
         ]
         spider_sheet["inventory"]["equipment_slots"]["main_hand"] = "web"
+        spider_sheet["inventory"]["equipment_slots"]["off_hand"] = "garrote"
         target_sheet = default_character_sheet()
         target_sheet["combat"]["hp"] = {"value": 20, "max": 20, "temp": 0}
         for actor, sheet, key in (
@@ -142,12 +240,12 @@ def test_public_on_hit_ruling_applies_and_escapes_web_condition(
                         "initiative": 20,
                         "position": {"x": 0, "y": 0},
                     },
-                    {
-                        "actor_id": target["id"],
-                        "initiative": 10,
-                        "position": {"x": 2, "y": 0},
-                        "death_saves": True,
-                    },
+                        {
+                            "actor_id": target["id"],
+                            "initiative": 10,
+                            "position": {"x": 1, "y": 0},
+                            "death_saves": True,
+                        },
                 ],
                 "expected_revision": campaign["revision"],
                 "idempotency_key": "start",
@@ -247,6 +345,78 @@ def test_public_on_hit_ruling_applies_and_escapes_web_condition(
         )
         assert target_combatant["turn_budget"]["main_action"] == 0
         assert escaped["combat"]["ongoing_effects"][0]["active"] is False
+        round_two = await raw(
+            "combat_end_turn",
+            {
+                "campaign_id": campaign["id"],
+                "actor_id": target["id"],
+                "expected_revision": escaped["campaign_revision"],
+                "idempotency_key": "end-target",
+            },
+        )
+        garroted = await raw(
+            "combat_resolve_attack",
+            {
+                "campaign_id": campaign["id"],
+                "actor_id": spider["id"],
+                "target_id": target["id"],
+                "action": {"weapon_id": "garrote", "attack_mode": "melee"},
+                "expected_revision": round_two["campaign_revision"],
+                "idempotency_key": "garrote",
+            },
+        )
+        grappled = await call(
+            "combat_choice",
+            {
+                "campaign_id": campaign["id"],
+                "action": "on_hit_ruling",
+                "actor_id": target["id"],
+                "payload": {
+                    "choice_id": garroted["result"]["pending_on_hit_ruling_id"],
+                    "selection": {
+                        "id": "apply_condition",
+                        "condition": "grappled",
+                        "escape_dc": 12,
+                        "escape_checks": ["athletics", "acrobatics"],
+                        "source_excerpt": garrote_effect,
+                    },
+                },
+                "expected_revision": garroted["campaign_revision"],
+                "idempotency_key": "rule-garrote",
+            },
+        )
+        assert grappled["ongoing_effect"]["escape_rule"] == "core_2014_grapple"
+        killed = await call(
+            "combat_hp_change",
+            {
+                "campaign_id": campaign["id"],
+                "target_id": spider["id"],
+                "action": "damage",
+                "payload": {
+                    "parts": [{"amount": 100, "damage_type": "bludgeoning"}],
+                },
+                "expected_revision": grappled["campaign_revision"],
+                "idempotency_key": "kill-spider",
+            },
+        )
+        closed = await raw(
+            "combat_end",
+            {
+                "campaign_id": campaign["id"],
+                "outcome": {"status": "victory", "summary": "The spider was defeated."},
+                "expected_revision": killed["campaign_revision"],
+                "idempotency_key": "end-combat",
+            },
+        )
+        target_after_end = await call(
+            "character_get",
+            {"character_id": target["id"]},
+        )
+        assert target_after_end["sheet"]["conditions"] == []
+        assert closed["released_grapples"] == {
+            target["id"]: [garroted["result"]["pending_on_hit_ruling_id"]]
+        }
+        assert closed["recovered_postcombat_cleanup"] is False
 
     asyncio.run(exercise())
 
@@ -478,6 +648,193 @@ def test_public_guiding_bolt_effect_grants_and_consumes_next_attack_advantage(
     asyncio.run(exercise())
 
 
+def test_public_on_hit_ruling_applies_agent_selected_direct_damage(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    original_attack_roll = server_module.roll_attack_action
+
+    def forced_hit(*, plan, rng=None):
+        result = original_attack_roll(plan=plan, rng=rng)
+        result.update(
+            natural=10,
+            total=max(int(plan["target_ac"]), int(result.get("total", 0) or 0)),
+            armor_class=int(plan["target_ac"]),
+            hit=True,
+            critical=False,
+            fumble=False,
+        )
+        return result
+
+    monkeypatch.setattr(server_module, "roll_attack_action", forced_hit)
+
+    async def exercise() -> None:
+        server = create_server(_config(tmp_path))
+
+        async def raw(name: str, arguments: dict):
+            _, result = await server.call_tool(name, arguments)
+            return result
+
+        async def call(name: str, arguments: dict):
+            result = await raw(name, arguments)
+            return result.get("result", result)
+
+        campaign = await call(
+            "campaign_create",
+            {
+                "name": "Variable direct damage",
+                "edition": "2014",
+                "random_seed": "variable-direct-damage",
+                "idempotency_key": "campaign",
+            },
+        )
+        attacker = await call(
+            "character_create",
+            {
+                "campaign_id": campaign["id"],
+                "name": "Acid dragonfang",
+                "character_type": "monster",
+                "idempotency_key": "attacker",
+            },
+        )
+        target = await call(
+            "character_create",
+            {
+                "campaign_id": campaign["id"],
+                "name": "Target",
+                "character_type": "pc",
+                "idempotency_key": "target",
+            },
+        )
+        effect = (
+            "22 (5d8) damage of the type to which the dragonfang has "
+            "damage resistance."
+        )
+        attacker_sheet = default_character_sheet()
+        attacker_sheet["combat"]["hp"] = {"value": 40, "max": 40, "temp": 0}
+        attacker_sheet["traits"]["resistances"] = ["acid"]
+        attacker_sheet["inventory"]["items"] = [
+            {
+                "id": "orb",
+                "name": "Orb of Dragon's Breath",
+                "kind": "weapon",
+                "mechanics": {
+                    "attack_type": "ranged",
+                    "attack_ability": "spell",
+                    "damage_formula": "",
+                    "damage_type": "",
+                    "on_hit_effect": effect,
+                    "normal_range_ft": 90,
+                    "long_range_ft": 90,
+                    "attack_bonus_override": 5,
+                    "always_available": True,
+                },
+            }
+        ]
+        target_sheet = default_character_sheet()
+        target_sheet["combat"]["hp"] = {"value": 100, "max": 100, "temp": 0}
+        for actor, sheet, key in (
+            (attacker, attacker_sheet, "attacker-sheet"),
+            (target, target_sheet, "target-sheet"),
+        ):
+            await call(
+                "character_sheet_replace",
+                {
+                    "character_id": actor["id"],
+                    "sheet": sheet,
+                    "expected_revision": actor["revision"],
+                    "idempotency_key": key,
+                },
+            )
+        campaign = await call("campaign_get", {"campaign_id": campaign["id"]})
+        started = await raw(
+            "combat_start",
+            {
+                "campaign_id": campaign["id"],
+                "participant_ids": [attacker["id"], target["id"]],
+                "participant_config": [
+                    {
+                        "actor_id": attacker["id"],
+                        "initiative": 20,
+                        "position": {"x": 0, "y": 0},
+                    },
+                    {
+                        "actor_id": target["id"],
+                        "initiative": 10,
+                        "position": {"x": 4, "y": 0},
+                    },
+                ],
+                "expected_revision": campaign["revision"],
+                "idempotency_key": "start",
+            },
+        )
+        attacked = await raw(
+            "combat_resolve_attack",
+            {
+                "campaign_id": campaign["id"],
+                "actor_id": attacker["id"],
+                "target_id": target["id"],
+                "action": {"weapon_id": "orb", "attack_mode": "ranged"},
+                "expected_revision": started["campaign_revision"],
+                "idempotency_key": "attack",
+            },
+        )
+        choice_id = attacked["result"]["pending_on_hit_ruling_id"]
+        pending = next(
+            item for item in attacked["combat"]["pending"] if item["id"] == choice_id
+        )
+        assert any(
+            candidate["id"] == "direct_damage"
+            for candidate in pending["candidates"]
+        )
+        base_selection = {
+            "id": "direct_damage",
+            "damage_formula": "5d8",
+            "trigger_facts": {"selected_damage_resistance": "acid"},
+            "default_resolver": "agent",
+            "ruling_kind": "agent_dm_adjudication",
+            "decision": "Apply the variable damage as acid.",
+            "reason": "The reviewed attacker card records acid resistance.",
+            "source_excerpt": effect,
+        }
+        with pytest.raises(Exception, match="does not match"):
+            await call(
+                "combat_choice",
+                {
+                    "campaign_id": campaign["id"],
+                    "action": "on_hit_ruling",
+                    "actor_id": target["id"],
+                    "payload": {
+                        "choice_id": choice_id,
+                        "selection": {**base_selection, "damage_type": "fire"},
+                    },
+                    "expected_revision": attacked["campaign_revision"],
+                    "idempotency_key": "wrong-type",
+                },
+            )
+        ruled = await call(
+            "combat_choice",
+            {
+                "campaign_id": campaign["id"],
+                "action": "on_hit_ruling",
+                "actor_id": target["id"],
+                "payload": {
+                    "choice_id": choice_id,
+                    "selection": {**base_selection, "damage_type": "acid"},
+                },
+                "expected_revision": attacked["campaign_revision"],
+                "idempotency_key": "direct-damage",
+            },
+        )
+        settlement = ruled["result"]
+        assert settlement["damage_roll"]["expression"] == "5d8"
+        assert settlement["damage"]["damage_type"] == "acid"
+        assert settlement["damage"]["after_hp"] == 100 - settlement["damage_amount"]
+        assert ruled["combat"]["pending"] == []
+
+    asyncio.run(exercise())
+
+
 @pytest.mark.parametrize(
     ("target_size", "applies"),
     [("medium", True), ("small", False)],
@@ -565,7 +922,7 @@ def test_public_on_hit_ruling_records_agent_conditional_extra_damage(
                     "attack_bonus_override": 5,
                     "always_available": True,
                 },
-            }
+            },
         ]
         attacker_sheet["inventory"]["equipment_slots"]["main_hand"] = "shortsword"
         target_sheet = default_character_sheet()

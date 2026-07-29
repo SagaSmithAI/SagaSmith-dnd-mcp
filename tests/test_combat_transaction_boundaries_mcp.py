@@ -142,6 +142,44 @@ def test_agent_source_damage_is_authorized_and_settled_in_one_attack(
                 },
             }
         ]
+        attacker_sheet["content"]["activities"] = [
+            {
+                "id": "peryton-multiattack",
+                "name": "Multiattack",
+                "source_key": "Peryton",
+                "activation": {"type": "action"},
+                "choices": {
+                    "multiattack_options": [
+                        {
+                            "id": "two-strikes",
+                            "attacks": [
+                                {
+                                    "weapon_id": "gore",
+                                    "attack_mode": "melee",
+                                    "count": 2,
+                                }
+                            ],
+                        }
+                    ]
+                },
+            }
+        ]
+        attacker_sheet["inventory"]["items"] = [
+            {
+                "id": "gore",
+                "name": "Gore",
+                "kind": "weapon",
+                "equipped": True,
+                "equipped_slot": "main_hand",
+                "mechanics": {
+                    "attack_type": "melee",
+                    "attack_ability": "strength",
+                    "damage_formula": "1d6",
+                    "damage_type": "piercing",
+                },
+            }
+        ]
+        attacker_sheet["inventory"]["equipment_slots"]["main_hand"] = "gore"
         target_sheet = default_character_sheet()
         target_sheet["combat"]["hp"] = {"value": 100, "max": 100, "temp": 0}
         attacker = await _call(
@@ -199,17 +237,38 @@ def test_agent_source_damage_is_authorized_and_settled_in_one_attack(
             "damage_expression": "2d8",
             "damage_type": "weapon",
             "condition_satisfied": True,
-            "trigger_facts": {"flying": True, "straight_dive_ft": 30},
+            "trigger_facts": {
+                "flying": True,
+                "straight_dive_ft": 30,
+                "requires_attack_advantage": True,
+                "max_applications_per_turn": 1,
+            },
             "default_resolver": "agent",
             "ruling_kind": "agent_dm_adjudication",
             "decision": "Apply Dive Attack to this qualifying hit.",
             "reason": "The peryton completed the printed 30-foot straight dive.",
         }
         action = {
-            "weapon_id": "unarmed-strike",
+            "weapon_id": "gore",
             "attack_mode": "melee",
+            "multiattack_option_id": "two-strikes",
+            "context": {"advantage": True},
             "rulings": [ruling],
         }
+        with pytest.raises(Exception, match="requires this attack to have advantage"):
+            await _call(
+                server,
+                "combat_preflight_attack",
+                {
+                    "campaign_id": campaign["id"],
+                    "actor_id": attacker["id"],
+                    "target_id": target["id"],
+                    "action": {
+                        **action,
+                        "context": {},
+                    },
+                },
+            )
         plan = await _call(
             server,
             "combat_preflight_attack",
@@ -223,7 +282,7 @@ def test_agent_source_damage_is_authorized_and_settled_in_one_attack(
         assert plan["additional_damage"] == [
             {
                 "damage_expression": "2d8",
-                "damage_type": "bludgeoning",
+                "damage_type": "piercing",
                 "source": "agent-ruling:peryton:dive:round-1",
             }
         ]
@@ -329,6 +388,38 @@ def test_agent_source_damage_is_authorized_and_settled_in_one_attack(
             "character",
         ]
         assert resolved["revisions"][1]["entity_id"] == target["id"]
+
+        followup_action = {
+            key: value for key, value in action.items() if key != "multiattack_option_id"
+        }
+        with pytest.raises(Exception, match="reached its per-turn limit"):
+            await _call(
+                server,
+                "combat_preflight_attack",
+                {
+                    "campaign_id": campaign["id"],
+                    "actor_id": attacker["id"],
+                    "target_id": target["id"],
+                    "action": followup_action,
+                },
+            )
+        followup = await _call_raw(
+            server,
+            "combat_resolve_attack",
+            {
+                "campaign_id": campaign["id"],
+                "actor_id": attacker["id"],
+                "target_id": target["id"],
+                "action": {
+                    key: value
+                    for key, value in followup_action.items()
+                    if key != "rulings"
+                },
+                "expected_revision": resolved["campaign_revision"],
+                "idempotency_key": "attack-followup",
+            },
+        )
+        assert len(followup["result"]["damage"]["roll_parts"]) == 1
 
     asyncio.run(exercise())
 
