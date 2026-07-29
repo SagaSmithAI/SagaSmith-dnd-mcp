@@ -2575,6 +2575,14 @@ def _agent_turn_rulings(
 
     normalized: dict[tuple[str, int], dict[str, Any]] = {}
     compact_encounter = _normalized_source_text(encounter_source_excerpt)
+    save_ability_labels = {
+        "strength": ("strength", "str"),
+        "dexterity": ("dexterity", "dex"),
+        "constitution": ("constitution", "con"),
+        "intelligence": ("intelligence", "int"),
+        "wisdom": ("wisdom", "wis"),
+        "charisma": ("charisma", "cha"),
+    }
     allowed = {
         "actor_id",
         "feature_id",
@@ -2587,6 +2595,7 @@ def _agent_turn_rulings(
         "decision",
         "ruling_reason",
         "target_id",
+        "target_ids",
         "save_ability",
         "save_dc",
         "save_advantage",
@@ -2595,6 +2604,9 @@ def _agent_turn_rulings(
         "failure_outcome",
         "forced_target_id",
         "ends_if_source_incapacitated",
+        "damage_expression",
+        "damage_type",
+        "half_on_success",
     }
     participant_set = set(participant_ids)
     for index, raw in enumerate(values):
@@ -2619,6 +2631,12 @@ def _agent_turn_rulings(
         decision = " ".join(str(raw.get("decision") or "").split())
         ruling_reason = " ".join(str(raw.get("ruling_reason") or "").split())
         target_id = str(raw.get("target_id") or "").strip()
+        raw_target_ids = raw.get("target_ids")
+        target_ids = (
+            [str(item).strip() for item in raw_target_ids]
+            if isinstance(raw_target_ids, list)
+            else []
+        )
         save_ability = str(raw.get("save_ability") or "").strip().casefold()
         save_dc = int(raw.get("save_dc", 0) or 0)
         save_advantage = raw.get("save_advantage", False)
@@ -2629,8 +2647,19 @@ def _agent_turn_rulings(
         ends_if_source_incapacitated = raw.get(
             "ends_if_source_incapacitated", False
         )
+        damage_expression = "".join(
+            str(raw.get("damage_expression") or "").split()
+        ).casefold()
+        damage_type = str(raw.get("damage_type") or "").strip().casefold()
+        half_on_success = raw.get("half_on_success")
         identity = (actor_id, round_number)
-        has_save = bool(target_id or save_ability or save_dc)
+        save_target_ids = target_ids or ([target_id] if target_id else [])
+        has_save = bool(save_target_ids or save_ability or save_dc)
+        has_damage = bool(
+            damage_expression
+            or damage_type
+            or half_on_success is not None
+        )
         if (
             actor_id not in participant_set
             or round_number <= 0
@@ -2651,12 +2680,20 @@ def _agent_turn_rulings(
             or not isinstance(save_disadvantage, bool)
             or not isinstance(ends_if_source_incapacitated, bool)
             or (save_advantage and save_disadvantage)
+            or (raw_target_ids is not None and not isinstance(raw_target_ids, list))
+            or (bool(target_id) and bool(target_ids))
+            or any(
+                not item or item not in participant_set or item == actor_id
+                for item in target_ids
+            )
+            or len(target_ids) != len(set(target_ids))
             or (
                 has_save
                 and (
-                    target_id not in participant_set
-                    or not save_ability
-                    or save_dc <= 0
+                    not save_target_ids
+                    or any(item not in participant_set for item in save_target_ids)
+                    or save_ability not in save_ability_labels
+                    or not 1 <= save_dc <= 40
                     or not success_outcome
                     or not failure_outcome
                 )
@@ -2664,6 +2701,20 @@ def _agent_turn_rulings(
             or (not has_save and (success_outcome or failure_outcome or forced_target_id))
             or (forced_target_id and forced_target_id not in participant_set)
             or (forced_target_id and forced_target_id == target_id)
+            or (
+                has_damage
+                and (
+                    not target_ids
+                    or not has_save
+                    or not re.fullmatch(
+                        r"[1-9]\d*d[1-9]\d*(?:[+-]\d+)?",
+                        damage_expression,
+                    )
+                    or not damage_type
+                    or not isinstance(half_on_success, bool)
+                    or bool(forced_target_id)
+                )
+            )
         ):
             raise ValueError(
                 f"Agent turn ruling {index} requires one reviewed descriptive card, "
@@ -2743,6 +2794,41 @@ def _agent_turn_rulings(
                 f"Agent turn ruling {index} must match a reviewed Agent-owned "
                 "descriptive card or an unstructured innate spell on the actor card"
             )
+        if feature_id:
+            raise ValueError(
+                f"Agent turn ruling {index} cannot activate a descriptive passive "
+                "as a combat action; use its trigger-specific Agent ruling boundary"
+            )
+        if has_damage:
+            ability_pattern = "|".join(
+                re.escape(item) for item in save_ability_labels[save_ability]
+            )
+            printed_save = re.search(
+                rf"(?i)\bDC\s*{save_dc}\s+(?:{ability_pattern})\s+saving throw\b",
+                actor_excerpt,
+            )
+            printed_half_damage = re.search(
+                r"(?i)\bhalf\s+(?:as\s+much|the)\s+damage\b.*"
+                r"\b(?:successful|success)\b",
+                actor_excerpt,
+            )
+            if printed_save is None or bool(printed_half_damage) != half_on_success:
+                raise ValueError(
+                    f"Agent turn ruling {index} save DC, ability, and success "
+                    "damage must match the reviewed descriptive card"
+                )
+        if has_damage and (
+            damage_expression not in "".join(actor_excerpt.split()).casefold()
+            or re.search(
+                rf"\b{re.escape(damage_type)}\b",
+                actor_excerpt.casefold(),
+            )
+            is None
+        ):
+            raise ValueError(
+                f"Agent turn ruling {index} damage must match the printed "
+                "expression and damage type on the reviewed descriptive card"
+            )
         application_id = (
             "turn-ruling-"
             + _token(
@@ -2756,6 +2842,10 @@ def _agent_turn_rulings(
                         "encounter_source_excerpt": encounter_excerpt,
                         "decision": decision,
                         "target_id": target_id,
+                        "target_ids": target_ids,
+                        "damage_expression": damage_expression,
+                        "damage_type": damage_type,
+                        "half_on_success": half_on_success,
                     },
                     ensure_ascii=False,
                     separators=(",", ":"),
@@ -2789,6 +2879,7 @@ def _agent_turn_rulings(
             ),
             "round": round_number,
             "target_id": target_id,
+            "target_ids": target_ids,
             "save": (
                 {
                     "ability": save_ability,
@@ -2799,6 +2890,15 @@ def _agent_turn_rulings(
                     "failure_outcome": failure_outcome,
                     "forced_target_id": forced_target_id,
                     "ends_if_source_incapacitated": ends_if_source_incapacitated,
+                    "damage": (
+                        {
+                            "expression": damage_expression,
+                            "damage_type": damage_type,
+                            "half_on_success": half_on_success,
+                        }
+                        if has_damage
+                        else None
+                    ),
                 }
                 if has_save
                 else None
@@ -6577,6 +6677,10 @@ async def _settle_agent_turn_ruling(
 
     actor_id = str(ruling["actor_id"])
     target_id = str(ruling.get("target_id") or "")
+    target_ids = [
+        str(item)
+        for item in ruling.get("target_ids") or ([target_id] if target_id else [])
+    ]
     campaign = await _campaign(client, args.campaign_id)
     if ruling.get("activity_id"):
         action_result = await client.domain(
@@ -6638,7 +6742,7 @@ async def _settle_agent_turn_ruling(
                 "campaign_id": args.campaign_id,
                 "actor_id": actor_id,
                 "action": "improvise",
-                "target_id": target_id or None,
+                "target_id": target_id or (target_ids[0] if target_ids else None),
                 "payload": {
                     "kind": "agent_dm_adjudication",
                     "feature_id": str(ruling["feature_id"]),
@@ -6657,39 +6761,127 @@ async def _settle_agent_turn_ruling(
             raise RuntimeError("Agent-adjudicated feature did not pay its combat action")
 
     save_result = None
+    save_results: list[dict[str, Any]] = []
     save_contract = dict(ruling.get("save") or {})
     save_success = None
     outcome = str(ruling["agent_ruling"]["decision"])
+    damage_roll = None
+    damage_results: list[dict[str, Any]] = []
     if save_contract:
-        campaign = await _campaign(client, args.campaign_id)
-        save_result = await client.domain(
-            "combat_check",
-            {
-                "campaign_id": args.campaign_id,
-                "actor_id": target_id,
-                "kind": "save",
-                "ability": str(save_contract["ability"]),
-                "dc": int(save_contract["dc"]),
-                "advantage": bool(save_contract["advantage"]),
-                "disadvantage": bool(save_contract["disadvantage"]),
-                "rule_facts": {
-                    "source_ref": deepcopy(ruling["agent_ruling"]["source_ref"]),
-                    "agent_ruling_id": str(ruling["application_id"]),
+        damage_contract = dict(save_contract.get("damage") or {})
+        if damage_contract:
+            campaign = await _campaign(client, args.campaign_id)
+            damage_roll = await client.domain(
+                "dnd_dice_roll",
+                {
+                    "campaign_id": args.campaign_id,
+                    "expression": str(damage_contract["expression"]),
+                    "branch_id": branch_id,
+                    "expected_campaign_revision": campaign["revision"],
+                    "idempotency_key": (
+                        "encounter-agent-turn-damage-roll-"
+                        + _operation_token(args, ruling["application_id"])
+                    ),
                 },
-                "branch_id": branch_id,
-                "expected_revision": campaign["revision"],
-                "idempotency_key": (
-                    "encounter-agent-turn-save-"
-                    + _operation_token(args, ruling["application_id"], target_id)
-                ),
-            },
-        )
-        save_success = bool(dict(save_result.get("result") or {}).get("success"))
-        outcome = str(
-            save_contract["success_outcome"]
-            if save_success
-            else save_contract["failure_outcome"]
-        )
+            )
+        for save_target_id in target_ids:
+            campaign = await _campaign(client, args.campaign_id)
+            current_save = await client.domain(
+                "combat_check",
+                {
+                    "campaign_id": args.campaign_id,
+                    "actor_id": save_target_id,
+                    "kind": "save",
+                    "ability": str(save_contract["ability"]),
+                    "dc": int(save_contract["dc"]),
+                    "advantage": bool(save_contract["advantage"]),
+                    "disadvantage": bool(save_contract["disadvantage"]),
+                    "rule_facts": {
+                        "source_ref": deepcopy(ruling["agent_ruling"]["source_ref"]),
+                        "agent_ruling_id": str(ruling["application_id"]),
+                    },
+                    "branch_id": branch_id,
+                    "expected_revision": campaign["revision"],
+                    "idempotency_key": (
+                        "encounter-agent-turn-save-"
+                        + _operation_token(
+                            args,
+                            ruling["application_id"],
+                            save_target_id,
+                        )
+                    ),
+                },
+            )
+            current_success = bool(
+                dict(current_save.get("result") or {}).get("success")
+            )
+            current_outcome = str(
+                save_contract["success_outcome"]
+                if current_success
+                else save_contract["failure_outcome"]
+            )
+            save_results.append(
+                {
+                    "target_id": save_target_id,
+                    "result": current_save,
+                    "success": current_success,
+                    "outcome": current_outcome,
+                }
+            )
+            if damage_contract:
+                rolled_damage = _roll_total(dict(damage_roll or {}))
+                amount = (
+                    rolled_damage // 2
+                    if current_success and damage_contract["half_on_success"]
+                    else 0
+                    if current_success
+                    else rolled_damage
+                )
+                applied = None
+                if amount:
+                    campaign = await _campaign(client, args.campaign_id)
+                    applied = await client.domain(
+                        "combat_apply_damage",
+                        {
+                            "campaign_id": args.campaign_id,
+                            "target_id": save_target_id,
+                            "parts": [
+                                {
+                                    "amount": amount,
+                                    "damage_type": str(
+                                        damage_contract["damage_type"]
+                                    ),
+                                }
+                            ],
+                            "branch_id": branch_id,
+                            "expected_revision": campaign["revision"],
+                            "idempotency_key": (
+                                "encounter-agent-turn-damage-"
+                                + _operation_token(
+                                    args,
+                                    ruling["application_id"],
+                                    save_target_id,
+                                )
+                            ),
+                        },
+                    )
+                damage_results.append(
+                    {
+                        "target_id": save_target_id,
+                        "rolled": rolled_damage,
+                        "applied_amount": amount,
+                        "result": applied,
+                    }
+                )
+        if len(save_results) == 1:
+            save_result = save_results[0]["result"]
+            save_success = bool(save_results[0]["success"])
+            outcome = str(save_results[0]["outcome"])
+        elif save_results:
+            outcome = "; ".join(
+                f"{item['target_id']}: {item['outcome']}"
+                for item in save_results
+            )
 
     receipt = {
         "kind": "agent_turn_ruling",
@@ -6700,11 +6892,15 @@ async def _settle_agent_turn_ruling(
         "spell_id": str(ruling.get("spell_id") or ""),
         "round": int(ruling["round"]),
         "target_id": target_id,
+        "target_ids": target_ids,
         "agent_ruling": deepcopy(ruling["agent_ruling"]),
         "action_result": action_result,
         "save_result": save_result,
+        "save_results": save_results,
         "save_success": save_success,
         "outcome": outcome,
+        "damage_roll": damage_roll,
+        "damage_results": damage_results,
         "forced_target_id": (
             str(save_contract.get("forced_target_id") or "")
             if save_contract and save_success is False
@@ -6725,7 +6921,15 @@ async def _settle_agent_turn_ruling(
                     "value": {
                         key: deepcopy(value)
                         for key, value in receipt.items()
-                        if key not in {"action_result", "save_result", "world_patch"}
+                        if key
+                        not in {
+                            "action_result",
+                            "save_result",
+                            "save_results",
+                            "damage_roll",
+                            "damage_results",
+                            "world_patch",
+                        }
                     },
                 }
             ],

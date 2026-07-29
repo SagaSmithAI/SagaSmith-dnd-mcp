@@ -332,7 +332,7 @@ def test_agent_target_reaction_contexts_bind_source_and_target() -> None:
     assert ruling["agent_ruling"]["source_ref"] == source_ref
 
 
-def test_agent_turn_rulings_bind_reviewed_feature_and_server_save() -> None:
+def test_agent_turn_rulings_reject_descriptive_passive_as_combat_action() -> None:
     actor_excerpt = (
         "The creature can innately cast suggestion (save DC 13), requiring no "
         "material components."
@@ -369,37 +369,183 @@ def test_agent_turn_rulings_bind_reviewed_feature_and_server_save() -> None:
         }
     }
 
+    with pytest.raises(ValueError, match="cannot activate a descriptive passive"):
+        _agent_turn_rulings(
+            [
+                {
+                    "actor_id": "caster",
+                    "feature_id": "innate-spellcasting",
+                    "round": 1,
+                    "source_ref": source_ref,
+                    "actor_source_excerpt": actor_excerpt,
+                    "encounter_source_excerpt": encounter_excerpt,
+                    "decision": "The caster uses the reviewed feature on the scout.",
+                    "ruling_reason": "The cited encounter explicitly selects this tactic.",
+                    "target_id": "scout",
+                    "save_ability": "wisdom",
+                    "save_dc": 13,
+                    "success_outcome": "The scout recognizes and rejects the compulsion.",
+                    "failure_outcome": "The scout attacks the named ally once.",
+                    "forced_target_id": "ally",
+                    "ends_if_source_incapacitated": True,
+                }
+            ],
+            participant_ids=["caster", "scout", "ally"],
+            actors=actors,
+            scene_id="scene-1",
+            encounter_source_excerpt=encounter_excerpt,
+        )
+
+
+def test_agent_turn_rulings_bind_reviewed_area_save_damage() -> None:
+    actor_excerpt = (
+        "The dragon exhales poisonous gas in a 60-foot cone. Each creature in "
+        "that area must make a DC 18 Constitution saving throw, taking 56 "
+        "(16d6) poison damage on a failed save, or half as much damage on a "
+        "successful one."
+    )
+    encounter_excerpt = (
+        "If Chuth is encountered here, he uses his breath weapon, legendary "
+        "actions, and lair actions indiscriminately."
+    )
+    source_ref = {
+        "module_id": "module-1",
+        "scene_id": "scene-1",
+        "chunk_id": "chunk-1",
+        "content_sha256": "a" * 64,
+    }
+    actors = {
+        "dragon": {
+            "sheet": {
+                "content": {
+                    "activities": [
+                        {
+                            "id": "poison-breath-activity",
+                            "description": actor_excerpt,
+                            "choices": {
+                                "manual_ruling": {
+                                    "kind": "descriptive_activity",
+                                    "default_resolver": "agent",
+                                    "source_excerpt": actor_excerpt,
+                                }
+                            },
+                        }
+                    ]
+                }
+            }
+        }
+    }
+
     rulings = _agent_turn_rulings(
         [
             {
-                "actor_id": "caster",
-                "feature_id": "innate-spellcasting",
+                "actor_id": "dragon",
+                "activity_id": "poison-breath-activity",
                 "round": 1,
                 "source_ref": source_ref,
                 "actor_source_excerpt": actor_excerpt,
                 "encounter_source_excerpt": encounter_excerpt,
-                "decision": "The caster uses the reviewed feature on the scout.",
-                "ruling_reason": "The cited encounter explicitly selects this tactic.",
-                "target_id": "scout",
-                "save_ability": "wisdom",
-                "save_dc": 13,
-                "success_outcome": "The scout recognizes and rejects the compulsion.",
-                "failure_outcome": "The scout attacks the named ally once.",
-                "forced_target_id": "ally",
-                "ends_if_source_incapacitated": True,
+                "decision": "Chuth catches both clustered intruders in the cone.",
+                "ruling_reason": "The cited lair tactic directs indiscriminate breath use.",
+                "target_ids": ["pc-1", "pc-2"],
+                "save_ability": "constitution",
+                "save_dc": 18,
+                "success_outcome": "The target takes half of the shared damage roll.",
+                "failure_outcome": "The target takes the full shared damage roll.",
+                "damage_expression": "16d6",
+                "damage_type": "poison",
+                "half_on_success": True,
             }
         ],
-        participant_ids=["caster", "scout", "ally"],
+        participant_ids=["dragon", "pc-1", "pc-2"],
         actors=actors,
         scene_id="scene-1",
         encounter_source_excerpt=encounter_excerpt,
     )
 
-    ruling = rulings[("caster", 1)]
-    assert ruling["feature_id"] == "innate-spellcasting"
-    assert ruling["save"]["dc"] == 13
-    assert ruling["save"]["forced_target_id"] == "ally"
-    assert ruling["agent_ruling"]["default_resolver"] == "agent"
+    ruling = rulings[("dragon", 1)]
+    assert ruling["target_ids"] == ["pc-1", "pc-2"]
+    assert ruling["save"]["damage"] == {
+        "expression": "16d6",
+        "damage_type": "poison",
+        "half_on_success": True,
+    }
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("save_ability", "wisdom"),
+        ("save_dc", 17),
+        ("half_on_success", False),
+    ],
+)
+def test_agent_turn_rulings_reject_area_save_damage_not_matching_source(
+    field: str,
+    value: object,
+) -> None:
+    actor_excerpt = (
+        "The dragon exhales poisonous gas in a 60-foot cone. Each creature in "
+        "that area must make a DC 18 Constitution saving throw, taking 56 "
+        "(16d6) poison damage on a failed save, or half as much damage on a "
+        "successful one."
+    )
+    encounter_excerpt = "The dragon uses its breath weapon."
+    source_ref = {
+        "module_id": "module-1",
+        "scene_id": "scene-1",
+        "chunk_id": "chunk-1",
+        "content_sha256": "a" * 64,
+    }
+    actors = {
+        "dragon": {
+            "sheet": {
+                "content": {
+                    "activities": [
+                        {
+                            "id": "poison-breath-activity",
+                            "description": actor_excerpt,
+                            "choices": {
+                                "manual_ruling": {
+                                    "kind": "descriptive_activity",
+                                    "default_resolver": "agent",
+                                    "source_excerpt": actor_excerpt,
+                                }
+                            },
+                        }
+                    ]
+                }
+            }
+        }
+    }
+    declaration: dict[str, object] = {
+        "actor_id": "dragon",
+        "activity_id": "poison-breath-activity",
+        "round": 1,
+        "source_ref": source_ref,
+        "actor_source_excerpt": actor_excerpt,
+        "encounter_source_excerpt": encounter_excerpt,
+        "decision": "The dragon catches both clustered intruders in the cone.",
+        "ruling_reason": "The cited encounter directs this breath attack.",
+        "target_ids": ["pc-1", "pc-2"],
+        "save_ability": "constitution",
+        "save_dc": 18,
+        "success_outcome": "Half damage.",
+        "failure_outcome": "Full damage.",
+        "damage_expression": "16d6",
+        "damage_type": "poison",
+        "half_on_success": True,
+    }
+    declaration[field] = value
+
+    with pytest.raises(ValueError, match="must match the reviewed descriptive card"):
+        _agent_turn_rulings(
+            [declaration],
+            participant_ids=["dragon", "pc-1", "pc-2"],
+            actors=actors,
+            scene_id="scene-1",
+            encounter_source_excerpt=encounter_excerpt,
+        )
 
 
 def test_agent_turn_rulings_bind_innate_spell_resource_and_concentration() -> None:
@@ -556,6 +702,102 @@ def test_agent_turn_ruling_pays_action_rolls_save_and_persists_world_patch() -> 
     patch_value = client.calls[-1][1]["patches"][0]["value"]
     assert patch_value["application_id"] == "turn-ruling-1"
     assert patch_value["ends_if_source_incapacitated"] is True
+
+
+def test_agent_turn_ruling_rolls_area_damage_once_and_applies_each_save() -> None:
+    class Client:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict]] = []
+
+        async def domain(self, tool_id: str, arguments: dict) -> dict:
+            self.calls.append((tool_id, arguments))
+            if tool_id == "combat_use_activity":
+                return {
+                    "status": "pending_ruling",
+                    "result": {"requires_ruling": True},
+                }
+            if tool_id == "dnd_dice_roll":
+                return {"status": "committed", "result": {"total": 56}}
+            if tool_id == "combat_check":
+                return {
+                    "status": "committed",
+                    "result": {"success": arguments["actor_id"] == "pc-1"},
+                }
+            if tool_id == "combat_apply_damage":
+                return {
+                    "status": "committed",
+                    "applied_amount": arguments["parts"][0]["amount"],
+                }
+            if tool_id == "combat_map_patch":
+                return {"status": "committed", "world_patches": arguments["patches"]}
+            raise AssertionError(tool_id)
+
+    ruling = {
+        "application_id": "turn-ruling-breath-1",
+        "actor_id": "dragon",
+        "feature_id": "",
+        "activity_id": "poison-breath-activity",
+        "spell_id": "",
+        "round": 1,
+        "target_id": "",
+        "target_ids": ["pc-1", "pc-2"],
+        "save": {
+            "ability": "constitution",
+            "dc": 18,
+            "advantage": False,
+            "disadvantage": False,
+            "success_outcome": "Half damage.",
+            "failure_outcome": "Full damage.",
+            "forced_target_id": "",
+            "ends_if_source_incapacitated": False,
+            "damage": {
+                "expression": "16d6",
+                "damage_type": "poison",
+                "half_on_success": True,
+            },
+        },
+        "agent_ruling": {
+            "default_resolver": "agent",
+            "ruling_kind": "agent_dm_adjudication",
+            "decision": "The dragon catches both targets in its breath.",
+            "reason": "The cited encounter directs this breath attack.",
+            "source_ref": {
+                "module_id": "module-1",
+                "scene_id": "scene-1",
+                "chunk_id": "chunk-1",
+                "content_sha256": "a" * 64,
+            },
+        },
+    }
+    client = Client()
+    with patch(
+        "scripts.regression_encounter.campaign_view",
+        new=AsyncMock(
+            side_effect=[{"revision": revision} for revision in range(10, 17)]
+        ),
+    ):
+        result = asyncio.run(
+            _settle_agent_turn_ruling(
+                client,
+                SimpleNamespace(campaign_id="campaign-1", run_id="run-1"),
+                branch_id="branch-1",
+                ruling=ruling,
+                sequence=4,
+            )
+        )
+
+    assert [name for name, _arguments in client.calls] == [
+        "combat_use_activity",
+        "dnd_dice_roll",
+        "combat_check",
+        "combat_apply_damage",
+        "combat_check",
+        "combat_apply_damage",
+        "combat_map_patch",
+    ]
+    assert [item["applied_amount"] for item in result["damage_results"]] == [28, 56]
+    assert result["save_results"][0]["success"] is True
+    assert result["save_results"][1]["success"] is False
 
 
 def test_agent_turn_innate_spell_pays_daily_use_and_starts_concentration() -> None:
