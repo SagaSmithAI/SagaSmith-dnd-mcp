@@ -2019,7 +2019,8 @@ def test_source_item_transfer_driver_uses_atomic_character_to_character_public_t
         "id": "stone-of-golorr",
         "name": "Stone of Golorr",
         "kind": "magic_item",
-        "quantity": 1,
+        "quantity": 2,
+        "source_key": "module-chunk:gazer-chunk",
     }
 
     class Client:
@@ -2158,7 +2159,12 @@ def test_party_item_claim_driver_uses_atomic_party_to_character_public_tool(
                 return deepcopy(self.actor)
             if tool_id == "inventory_transfer":
                 self.transfer_arguments = deepcopy(arguments)
-                moved = self.party["inventory"]["items"].pop()
+                self.party["inventory"]["items"][0]["quantity"] = 1
+                moved = {
+                    **deepcopy(stone),
+                    "id": "claimed-stone-fragment",
+                    "quantity": 1,
+                }
                 self.actor["sheet"]["inventory"]["items"].append(deepcopy(moved))
                 self.actor["revision"] += 1
                 return {
@@ -2189,7 +2195,7 @@ def test_party_item_claim_driver_uses_atomic_party_to_character_public_tool(
             source_ref=source_ref,
             character_id="pip",
             item_id="stone-of-golorr",
-            quantity=None,
+            quantity=1,
             reason="The party entrusts the recovered Stone to Pip.",
             checkpoint_label="Pip carries the Stone",
             defer_checkpoint=defer_checkpoint,
@@ -2200,12 +2206,14 @@ def test_party_item_claim_driver_uses_atomic_party_to_character_public_tool(
     assert client.transfer_arguments["mode"] == "party_to_character"
     assert client.transfer_arguments["payload"]["expected_campaign_revision"] == 21
     assert client.transfer_arguments["payload"]["expected_character_revision"] == 7
+    assert client.transfer_arguments["payload"]["quantity"] == 1
     assert client.transfer_arguments["idempotency_key"] == _mutation_key(
         "run-1",
         "party-item-claim",
         _occurrence_identity("stone-bearer-1", "claim-party-item"),
     )
-    assert result["transfer"]["item"]["id"] == "stone-of-golorr"
+    assert result["item_id"] == "stone-of-golorr"
+    assert result["claimed_item_id"] == "claimed-stone-fragment"
     assert checkpoint_calls == (0 if defer_checkpoint else 1)
     if defer_checkpoint:
         assert result["checkpoint"] is None

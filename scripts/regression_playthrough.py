@@ -8316,7 +8316,19 @@ async def _claim_party_item_for_character(
                 )
             )
         )
-        if str(dict(transferred.get("item") or {}).get("id") or "") != normalized_item_id:
+        claimed_item = dict(transferred.get("item") or {})
+        expected_quantity = (
+            quantity if quantity is not None else int(party_item.get("quantity", 0) or 0)
+        )
+        if (
+            not str(claimed_item.get("id") or "")
+            or int(claimed_item.get("quantity", 0) or 0) != expected_quantity
+            or any(
+                claimed_item.get(field) != party_item.get(field)
+                for field in ("name", "kind", "source_key")
+                if field in party_item
+            )
+        ):
             raise RuntimeError("party item claim returned a different item")
 
     checkpoint = (
@@ -8336,6 +8348,7 @@ async def _claim_party_item_for_character(
     return {
         "character_id": normalized_character_id,
         "item_id": normalized_item_id,
+        "claimed_item_id": str(dict(transferred.get("item") or {}).get("id") or ""),
         "quantity": quantity,
         "occurrence_id": claim_identity,
         "reason": normalized_reason,
