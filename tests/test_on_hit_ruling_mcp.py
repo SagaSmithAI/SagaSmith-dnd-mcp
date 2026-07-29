@@ -421,6 +421,248 @@ def test_public_on_hit_ruling_applies_and_escapes_web_condition(
     asyncio.run(exercise())
 
 
+def test_public_on_hit_ruling_applies_and_ends_source_ongoing_damage(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    original_attack_roll = server_module.roll_attack_action
+
+    def forced_hit(*, plan, rng=None):
+        result = original_attack_roll(plan=plan, rng=rng)
+        result.update(
+            natural=10,
+            total=max(int(plan["target_ac"]), int(result.get("total", 0) or 0)),
+            armor_class=int(plan["target_ac"]),
+            hit=True,
+            critical=False,
+            fumble=False,
+        )
+        return result
+
+    monkeypatch.setattr(server_module, "roll_attack_action", forced_hit)
+
+    async def exercise() -> None:
+        server = create_server(_config(tmp_path))
+
+        async def raw(name: str, arguments: dict):
+            _, result = await server.call_tool(name, arguments)
+            return result
+
+        async def call(name: str, arguments: dict):
+            result = await raw(name, arguments)
+            return result.get("result", result)
+
+        campaign = await call(
+            "campaign_create",
+            {
+                "name": "Source ongoing damage",
+                "edition": "2014",
+                "idempotency_key": "campaign",
+            },
+        )
+        elemental = await call(
+            "character_create",
+            {
+                "campaign_id": campaign["id"],
+                "name": "Fire Elemental",
+                "character_type": "monster",
+                "idempotency_key": "elemental",
+            },
+        )
+        target = await call(
+            "character_create",
+            {
+                "campaign_id": campaign["id"],
+                "name": "Target",
+                "character_type": "pc",
+                "idempotency_key": "target",
+            },
+        )
+        effect = (
+            "If the target is a creature or a flammable object, it ignites. "
+            "Until a creature takes an action to douse the fire, the target "
+            "takes 5 (1d10) fire damage at the start of each of its turns."
+        )
+        elemental_sheet = default_character_sheet()
+        elemental_sheet["combat"]["hp"] = {"value": 102, "max": 102, "temp": 0}
+        elemental_sheet["inventory"]["items"] = [
+            {
+                "id": "touch",
+                "name": "Touch",
+                "kind": "weapon",
+                "equipped": True,
+                "equipped_slot": "main_hand",
+                "mechanics": {
+                    "attack_type": "melee",
+                    "attack_ability": "dexterity",
+                    "damage_formula": "1d2",
+                    "damage_type": "fire",
+                    "on_hit_effect": effect,
+                    "reach_ft": 5,
+                    "attack_bonus_override": 6,
+                    "always_available": True,
+                },
+            }
+        ]
+        elemental_sheet["inventory"]["equipment_slots"]["main_hand"] = "touch"
+        target_sheet = default_character_sheet()
+        target_sheet["combat"]["hp"] = {"value": 30, "max": 30, "temp": 0}
+        for actor, sheet, key in (
+            (elemental, elemental_sheet, "elemental-sheet"),
+            (target, target_sheet, "target-sheet"),
+        ):
+            await call(
+                "character_sheet_replace",
+                {
+                    "character_id": actor["id"],
+                    "sheet": sheet,
+                    "expected_revision": actor["revision"],
+                    "idempotency_key": key,
+                },
+            )
+        campaign = await call("campaign_get", {"campaign_id": campaign["id"]})
+        started = await raw(
+            "combat_start",
+            {
+                "campaign_id": campaign["id"],
+                "participant_ids": [elemental["id"], target["id"]],
+                "participant_config": [
+                    {
+                        "actor_id": elemental["id"],
+                        "initiative": 20,
+                        "position": {"x": 0, "y": 0},
+                    },
+                    {
+                        "actor_id": target["id"],
+                        "initiative": 10,
+                        "position": {"x": 1, "y": 0},
+                        "death_saves": True,
+                    },
+                ],
+                "expected_revision": campaign["revision"],
+                "idempotency_key": "start",
+            },
+        )
+        attacked = await raw(
+            "combat_resolve_attack",
+            {
+                "campaign_id": campaign["id"],
+                "actor_id": elemental["id"],
+                "target_id": target["id"],
+                "action": {"weapon_id": "touch", "attack_mode": "melee"},
+                "expected_revision": started["campaign_revision"],
+                "idempotency_key": "touch",
+            },
+        )
+        ruled = await call(
+            "combat_choice",
+            {
+                "campaign_id": campaign["id"],
+                "action": "on_hit_ruling",
+                "actor_id": target["id"],
+                "payload": {
+                    "choice_id": attacked["result"]["pending_on_hit_ruling_id"],
+                    "selection": {
+                        "id": "ongoing_damage",
+                        "applies": True,
+                        "damage_formula": "1d10",
+                        "damage_type": "fire",
+                        "trigger_timing": "turn_start",
+                        "end_action": "improvise",
+                        "end_action_description": "douse the fire",
+                        "trigger_facts": {
+                            "target_id": target["id"],
+                            "target_is_creature": True,
+                        },
+                        "default_resolver": "agent",
+                        "ruling_kind": "agent_dm_adjudication",
+                        "decision": "The creature target ignites.",
+                        "reason": "The target is a creature in the pending attack.",
+                        "source_excerpt": effect,
+                    },
+                },
+                "expected_revision": attacked["campaign_revision"],
+                "idempotency_key": "rule-ongoing",
+            },
+        )
+        assert ruled["status"] == "committed"
+        assert ruled["ongoing_effect"]["kind"] == "source_ongoing_damage"
+        started_target_turn = await raw(
+            "combat_end_turn",
+            {
+                "campaign_id": campaign["id"],
+                "actor_id": elemental["id"],
+                "expected_revision": ruled["campaign_revision"],
+                "idempotency_key": "end-elemental",
+            },
+        )
+        assert started_target_turn["source_turn_start"][0]["kind"] == (
+            "source_ongoing_damage"
+        )
+        target_after_damage = await call(
+            "character_get",
+            {"character_id": target["id"]},
+        )
+        hp_after_damage = target_after_damage["sheet"]["combat"]["hp"]["value"]
+        assert hp_after_damage < 29
+
+        ended = await raw(
+            "combat_common_action",
+            {
+                "campaign_id": campaign["id"],
+                "actor_id": target["id"],
+                "action": "improvise",
+                "target_id": target["id"],
+                "payload": {
+                    "end_ongoing_effect_id": ruled["ongoing_effect"]["id"],
+                    "end_action_description": "douse the fire",
+                    "source_excerpt": effect,
+                },
+                "expected_revision": started_target_turn["campaign_revision"],
+                "idempotency_key": "douse",
+            },
+        )
+        ongoing = next(
+            item
+            for item in ended["combat"]["ongoing_effects"]
+            if item["id"] == ruled["ongoing_effect"]["id"]
+        )
+        assert ongoing["active"] is False
+        target_combatant = next(
+            item
+            for item in ended["combat"]["combatants"]
+            if item["actor_id"] == target["id"]
+        )
+        assert target_combatant["turn_budget"]["main_action"] == 0
+
+        next_round = await raw(
+            "combat_end_turn",
+            {
+                "campaign_id": campaign["id"],
+                "actor_id": target["id"],
+                "expected_revision": ended["campaign_revision"],
+                "idempotency_key": "end-target",
+            },
+        )
+        target_turn_again = await raw(
+            "combat_end_turn",
+            {
+                "campaign_id": campaign["id"],
+                "actor_id": elemental["id"],
+                "expected_revision": next_round["campaign_revision"],
+                "idempotency_key": "end-elemental-round-two",
+            },
+        )
+        assert target_turn_again["source_turn_start"] == []
+        target_after_douse = await call(
+            "character_get",
+            {"character_id": target["id"]},
+        )
+        assert target_after_douse["sheet"]["combat"]["hp"]["value"] == hp_after_damage
+
+    asyncio.run(exercise())
+
+
 def test_public_guiding_bolt_effect_grants_and_consumes_next_attack_advantage(
     tmp_path: Path,
     monkeypatch,

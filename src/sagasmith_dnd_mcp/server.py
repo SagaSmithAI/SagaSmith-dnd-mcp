@@ -3531,6 +3531,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         *,
         actor_id: str,
         sheets: dict[str, dict[str, Any]],
+        next_revision: int,
     ) -> list[dict[str, Any]]:
         settlements: list[dict[str, Any]] = []
         for trait in encounter.get("source_traits", []):
@@ -3573,6 +3574,65 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 actor_id=actor_id,
                 sheet=sheets[actor_id],
             )
+
+        for effect in encounter.get("ongoing_effects", []):
+            if (
+                not isinstance(effect, dict)
+                or not effect.get("active", True)
+                or effect.get("kind") != "source_ongoing_damage"
+                or str(effect.get("target_id") or "") != actor_id
+                or effect.get("trigger_timing") != "turn_start"
+            ):
+                continue
+            damage_roll = asdict(roll(str(effect["damage_formula"])))
+            combatant = require_encounter_combatant(
+                encounter,
+                actor_id,
+                role="source ongoing-damage target",
+            )
+            damaged = apply_damage_to_sheet(
+                sheets[actor_id],
+                amount=int(damage_roll["total"]),
+                damage_type=str(effect["damage_type"]),
+                source=str(effect.get("weapon_id") or "source-ongoing-damage"),
+                ruleset=str(encounter.get("ruleset") or "2014"),
+                death_saves=combatant_zero_hp_buffered(combatant),
+            )
+            sheets[actor_id] = damaged["sheet"]
+            record_source_trait_damage(
+                encounter,
+                target_id=actor_id,
+                damage=damaged,
+            )
+            add_concentration_window(
+                encounter,
+                actor_id,
+                damaged.get("concentration"),
+                next_revision=next_revision,
+            )
+            sync_combatant_conditions(encounter, actor_id, sheets[actor_id])
+            reconcile_readied_spells(encounter, actor_id, sheets[actor_id])
+            reconcile_source_attachments(
+                encounter,
+                actor_id=actor_id,
+                sheet=sheets[actor_id],
+            )
+            settlement = {
+                "kind": "source_ongoing_damage",
+                "effect_id": str(effect.get("id") or ""),
+                "source_actor_id": str(effect.get("source_actor_id") or ""),
+                "target_id": actor_id,
+                "source_excerpt": str(effect.get("source_excerpt") or ""),
+                "roll": damage_roll,
+                "result": {
+                    key: value for key, value in damaged.items() if key != "sheet"
+                },
+            }
+            settlements.append(settlement)
+            encounter["log"] = [
+                *list(encounter.get("log") or []),
+                settlement,
+            ][-100:]
 
         for effect in encounter.get("ongoing_effects", []):
             if (
@@ -7272,6 +7332,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 encounter,
                 actor_id=str(first_combatant.get("actor_id") or ""),
                 sheets=initial_sheets,
+                next_revision=campaign.revision + 1,
             )
             if first_combatant is not None
             else []
@@ -8223,6 +8284,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "saving_throw_damage",
             "direct_damage",
             "conditional_extra_damage",
+            "ongoing_damage",
             "next_attack_advantage",
             "attachment",
             "critical_followup",
@@ -8231,7 +8293,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             raise CombatEngineError(
                 "attack on-hit ruling must apply a condition, resolve a save-gated "
                 "condition or save damage, apply reviewed direct damage, "
-                "adjudicate conditional extra damage, "
+                "adjudicate conditional or ongoing damage, "
                 "grant reviewed next-attack advantage, apply an attachment, settle "
                 "a critical follow-up, or dismiss it"
             )
@@ -8264,14 +8326,25 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         has_explicit_save_damage = (
             has_explicit_saving_throw and re.search(r"(?i)\bdamage\b", effect) is not None
         )
+        has_explicit_ongoing_damage = (
+            re.search(
+                r"(?i)\bdamage\s+at\s+the\s+start\s+of\s+each\s+of\s+"
+                r"(?:its|his|her|their)\s+turns?\b",
+                effect,
+            )
+            is not None
+            and re.search(r"(?i)(?<![A-Za-z0-9_])\d+d\d+", effect) is not None
+        )
         has_explicit_conditional_damage = (
-            re.search(r"(?i)\bdamage\b", effect) is not None
+            not has_explicit_ongoing_damage
+            and re.search(r"(?i)\bdamage\b", effect) is not None
             and re.search(r"(?i)\b(?:if|when|while|unless)\b", effect) is not None
             and re.search(r"(?i)(?<![A-Za-z0-9_])\d+d\d+", effect) is not None
         )
         has_explicit_direct_damage = (
             not has_explicit_saving_throw
             and not has_explicit_conditional_damage
+            and not has_explicit_ongoing_damage
             and re.search(r"(?i)\bdamage\b", effect) is not None
             and re.search(r"(?i)(?<![A-Za-z0-9_])\d+d\d+", effect) is not None
         )
@@ -8312,6 +8385,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 has_explicit_save_damage
                 or has_explicit_conditional_damage
                 or has_explicit_direct_damage
+                or has_explicit_ongoing_damage
                 or states_structured_condition
                 or candidate_ids & {"attachment", "next_attack_advantage"}
             ):
@@ -8389,6 +8463,24 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     {
                         "id": "conditional_extra_damage",
                         "name": "Adjudicate source-conditional extra damage",
+                    },
+                ]
+        elif selection_id == "ongoing_damage":
+            if not has_explicit_ongoing_damage:
+                raise CombatEngineError(
+                    "the reviewed attack does not state start-of-turn ongoing damage"
+                )
+            candidates = list(window.get("candidates") or [])
+            if not any(
+                str(item.get("id") or "") == "ongoing_damage"
+                for item in candidates
+                if isinstance(item, dict)
+            ):
+                window["candidates"] = [
+                    *candidates,
+                    {
+                        "id": "ongoing_damage",
+                        "name": "Apply reviewed ongoing damage",
                     },
                 ]
         elif selection_id == "direct_damage":
@@ -8751,6 +8843,173 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "condition_applied": condition_applied,
                 "resisted_by_immunity": not saved["success"] and not condition_applied,
                 "effect_id": effect_id,
+            }
+        elif selection_id == "ongoing_damage":
+            allowed_fields = {
+                "id",
+                "applies",
+                "damage_formula",
+                "damage_type",
+                "trigger_timing",
+                "end_action",
+                "end_action_description",
+                "trigger_facts",
+                "default_resolver",
+                "ruling_kind",
+                "decision",
+                "reason",
+                "source_excerpt",
+            }
+            unknown_fields = set(normalized_selection) - allowed_fields
+            if unknown_fields:
+                raise CombatEngineError(
+                    "unsupported ongoing-damage fields: "
+                    + ", ".join(sorted(unknown_fields))
+                )
+            applies = normalized_selection.get("applies")
+            damage_formula = (
+                str(normalized_selection.get("damage_formula") or "")
+                .strip()
+                .casefold()
+                .replace(" ", "")
+            )
+            damage_type = (
+                str(normalized_selection.get("damage_type") or "").strip().casefold()
+            )
+            trigger_timing = (
+                str(normalized_selection.get("trigger_timing") or "")
+                .strip()
+                .casefold()
+            )
+            end_action = (
+                str(normalized_selection.get("end_action") or "")
+                .strip()
+                .casefold()
+                .replace("-", "_")
+            )
+            end_action_description = str(
+                normalized_selection.get("end_action_description") or ""
+            ).strip()
+            trigger_facts = normalized_selection.get("trigger_facts")
+            decision = str(normalized_selection.get("decision") or "").strip()
+            reason = str(normalized_selection.get("reason") or "").strip()
+            source_excerpt = str(
+                normalized_selection.get("source_excerpt") or ""
+            ).strip()
+            if (
+                applies is not True
+                or re.fullmatch(r"\d+d\d+(?:[+\-]\d+)?", damage_formula) is None
+                or damage_type not in DAMAGE_TYPES
+                or trigger_timing != "turn_start"
+                or end_action not in {"improvise", "use_object"}
+                or not end_action_description
+                or len(end_action_description) > 300
+                or not isinstance(trigger_facts, dict)
+                or trigger_facts.get("target_is_creature") is not True
+                or len(trigger_facts) > 32
+                or normalized_selection.get("default_resolver") != "agent"
+                or normalized_selection.get("ruling_kind")
+                != "agent_dm_adjudication"
+                or not decision
+                or len(decision) > 1000
+                or not reason
+                or len(reason) > 2000
+                or not source_excerpt
+                or source_excerpt.casefold() != effect.casefold()
+            ):
+                raise CombatEngineError(
+                    "ongoing damage requires an exact reviewed excerpt, a "
+                    "start-of-turn formula, a source-authored ending action, "
+                    "and an explicit Agent-as-DM applicability decision"
+                )
+            try:
+                encoded_trigger_facts = canonical_json(trigger_facts)
+            except (TypeError, ValueError) as exc:
+                raise CombatEngineError(
+                    "ongoing-damage trigger facts must be JSON values"
+                ) from exc
+            if len(encoded_trigger_facts) > 10000:
+                raise CombatEngineError("ongoing-damage trigger facts are too large")
+            compact_effect = " ".join(effect.split())
+            compact_end_description = " ".join(end_action_description.split())
+            if (
+                re.search(
+                    rf"(?i)(?<![A-Za-z0-9]){re.escape(damage_formula)}"
+                    rf"(?![A-Za-z0-9])",
+                    effect.replace(" ", ""),
+                )
+                is None
+                or re.search(
+                    rf"(?i)\b{re.escape(damage_type)}\s+damage\b",
+                    effect,
+                )
+                is None
+                or re.search(
+                    r"(?i)\bdamage\s+at\s+the\s+start\s+of\s+each\s+of\s+"
+                    r"(?:its|his|her|their)\s+turns?\b",
+                    effect,
+                )
+                is None
+                or compact_end_description.casefold()
+                not in compact_effect.casefold()
+                or re.search(
+                    rf"(?i)\b(?:takes?|use)\s+an?\s+action\s+to\s+"
+                    rf"{re.escape(compact_end_description)}\b",
+                    compact_effect,
+                )
+                is None
+            ):
+                raise CombatEngineError(
+                    "ongoing-damage formula, type, timing, or ending action "
+                    "is not stated by the reviewed attack"
+                )
+            existing_ongoing = next(
+                (
+                    item
+                    for item in next_encounter.get("ongoing_effects", [])
+                    if isinstance(item, dict)
+                    and item.get("active", True)
+                    and item.get("kind") == "source_ongoing_damage"
+                    and str(item.get("target_id") or "") == target_id
+                    and str(item.get("weapon_id") or "")
+                    == str(window.get("weapon_id") or "")
+                    and str(item.get("source_excerpt") or "").casefold()
+                    == source_excerpt.casefold()
+                ),
+                None,
+            )
+            ongoing_effect = existing_ongoing or {
+                "id": str(choice_id),
+                "kind": "source_ongoing_damage",
+                "source_actor_id": str(window.get("attacker_id") or ""),
+                "target_id": target_id,
+                "weapon_id": str(window.get("weapon_id") or ""),
+                "damage_formula": damage_formula,
+                "damage_type": damage_type,
+                "trigger_timing": trigger_timing,
+                "end_action": end_action,
+                "end_action_description": compact_end_description,
+                "source_excerpt": source_excerpt,
+                "agent_ruling": {
+                    "trigger_facts": deepcopy(trigger_facts),
+                    "default_resolver": "agent",
+                    "ruling_kind": "agent_dm_adjudication",
+                    "decision": decision,
+                    "reason": reason,
+                },
+                "active": True,
+            }
+            if existing_ongoing is None:
+                next_encounter["ongoing_effects"] = [
+                    *list(next_encounter.get("ongoing_effects") or []),
+                    ongoing_effect,
+                ]
+            settlement_result = {
+                "ongoing_damage": True,
+                "effect_id": str(ongoing_effect["id"]),
+                "trigger_timing": trigger_timing,
+                "end_action": end_action,
+                "reapplied_without_stacking": existing_ongoing is not None,
             }
         elif selection_id == "direct_damage":
             allowed_fields = {
@@ -9663,6 +9922,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 next_state["combat"],
                 actor_id=next_actor_id,
                 sheets=source_sheets,
+                next_revision=campaign.revision + 1,
             )
         else:
             source_turn_start = []
@@ -11085,6 +11345,59 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 trigger=trigger,
                 payload=payload,
             )
+        end_effect_id = str(
+            dict(payload or {}).get("end_ongoing_effect_id") or ""
+        ).strip()
+        if end_effect_id:
+            end_payload = dict(payload or {})
+            allowed_end_fields = {
+                "end_ongoing_effect_id",
+                "end_action_description",
+                "source_excerpt",
+            }
+            effect = next(
+                (
+                    item
+                    for item in next_encounter.get("ongoing_effects", [])
+                    if isinstance(item, dict)
+                    and str(item.get("id") or "") == end_effect_id
+                    and item.get("active", True)
+                    and item.get("kind") == "source_ongoing_damage"
+                ),
+                None,
+            )
+            if (
+                set(end_payload) - allowed_end_fields
+                or effect is None
+                or normalized_action != str(effect.get("end_action") or "")
+                or str(target_id or "") != str(effect.get("target_id") or "")
+                or str(end_payload.get("end_action_description") or "").strip().casefold()
+                != str(effect.get("end_action_description") or "").strip().casefold()
+                or str(end_payload.get("source_excerpt") or "").strip().casefold()
+                != str(effect.get("source_excerpt") or "").strip().casefold()
+            ):
+                raise CombatEngineError(
+                    "ending source ongoing damage requires its active effect, "
+                    "recorded common action, target, description, and exact excerpt"
+                )
+            effect["active"] = False
+            effect["ended_reason"] = "source_end_action"
+            effect["ended_by_actor_id"] = actor_id
+            effect["ended_round"] = int(next_encounter.get("round", 1) or 1)
+            next_encounter["log"] = [
+                *list(next_encounter.get("log") or []),
+                {
+                    "type": "source_ongoing_damage_ended",
+                    "effect_id": end_effect_id,
+                    "actor_id": actor_id,
+                    "target_id": str(target_id or ""),
+                    "action": normalized_action,
+                    "end_action_description": str(
+                        effect["end_action_description"]
+                    ),
+                    "source_excerpt": str(effect["source_excerpt"]),
+                },
+            ][-100:]
         boundary_ids: list[str] = []
         if normalized_action == "ready":
             boundary_ids.append("dnd5e.core.ready.action")

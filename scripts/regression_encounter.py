@@ -3059,6 +3059,9 @@ def _source_on_hit_rulings(
         "duration",
         "damage_formula",
         "damage_type",
+        "trigger_timing",
+        "end_action",
+        "end_action_description",
         "half_on_success",
         "zero_hp_effect",
         "target_has_limbs",
@@ -3098,6 +3101,7 @@ def _source_on_hit_rulings(
             "saving_throw_damage",
             "direct_damage",
             "conditional_extra_damage",
+            "ongoing_damage",
             "attachment",
             "critical_followup",
             "dismiss",
@@ -3154,6 +3158,9 @@ def _source_on_hit_rulings(
                 "duration",
                 "damage_formula",
                 "damage_type",
+                "trigger_timing",
+                "end_action",
+                "end_action_description",
                 "half_on_success",
                 "zero_hp_effect",
                 "applies",
@@ -3181,6 +3188,18 @@ def _source_on_hit_rulings(
         if raw.get("target_has_limbs") is not None:
             raise ValueError(
                 f"source on-hit ruling {index} target_has_limbs is only valid for critical_followup"
+            )
+        if selection_id != "ongoing_damage" and any(
+            raw.get(field) is not None
+            for field in (
+                "trigger_timing",
+                "end_action",
+                "end_action_description",
+            )
+        ):
+            raise ValueError(
+                f"source on-hit ruling {index} ongoing timing and ending fields "
+                "are only valid for ongoing_damage"
             )
         if selection_id == "direct_damage":
             incompatible_fields = {
@@ -3223,6 +3242,76 @@ def _source_on_hit_rulings(
                 "id": selection_id,
                 "damage_formula": damage_formula,
                 "damage_type": damage_type,
+                "trigger_facts": deepcopy(trigger_facts),
+                "default_resolver": "agent",
+                "ruling_kind": "agent_dm_adjudication",
+                "decision": decision,
+                "reason": reason,
+                "source_excerpt": source_excerpt,
+            }
+            continue
+        if selection_id == "ongoing_damage":
+            incompatible_fields = {
+                "condition",
+                "escape_dc",
+                "escape_abilities",
+                "escape_checks",
+                "save_ability",
+                "save_dc",
+                "repeat_save_timing",
+                "duration",
+                "half_on_success",
+                "zero_hp_effect",
+                "target_has_limbs",
+            }
+            applies = raw.get("applies")
+            damage_formula = str(raw.get("damage_formula") or "").strip()
+            damage_type = str(raw.get("damage_type") or "").strip().casefold()
+            trigger_timing = (
+                str(raw.get("trigger_timing") or "").strip().casefold()
+            )
+            end_action = (
+                str(raw.get("end_action") or "")
+                .strip()
+                .casefold()
+                .replace("-", "_")
+            )
+            end_action_description = str(
+                raw.get("end_action_description") or ""
+            ).strip()
+            trigger_facts = raw.get("trigger_facts")
+            decision = str(raw.get("decision") or "").strip()
+            reason = str(raw.get("reason") or "").strip()
+            if (
+                any(raw.get(field) is not None for field in incompatible_fields)
+                or applies is not True
+                or not damage_formula
+                or not damage_type
+                or trigger_timing != "turn_start"
+                or end_action not in {"improvise", "use_object"}
+                or not end_action_description
+                or not isinstance(trigger_facts, dict)
+                or trigger_facts.get("target_is_creature") is not True
+                or raw.get("default_resolver") != "agent"
+                or raw.get("ruling_kind") != "agent_dm_adjudication"
+                or not decision
+                or not reason
+            ):
+                raise ValueError(
+                    f"source on-hit ruling {index} ongoing_damage requires "
+                    "reviewed timing, ending action, target facts, and an "
+                    "explicit Agent decision"
+                )
+            normalized[identity] = {
+                "actor_id": actor_id,
+                "weapon_id": weapon_id,
+                "id": selection_id,
+                "applies": True,
+                "damage_formula": damage_formula,
+                "damage_type": damage_type,
+                "trigger_timing": trigger_timing,
+                "end_action": end_action,
+                "end_action_description": end_action_description,
                 "trigger_facts": deepcopy(trigger_facts),
                 "default_resolver": "agent",
                 "ruling_kind": "agent_dm_adjudication",
@@ -3550,6 +3639,66 @@ def _source_on_hit_rulings(
             "source_excerpt": source_excerpt,
         }
     return normalized
+
+
+def _agent_source_on_hit_ruling(
+    pending: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Translate a fully explicit reviewed effect into one typed Agent ruling."""
+
+    effect = str(pending.get("effect") or "").strip()
+    damage = re.search(
+        r"(?i)(?:\d+\s*\(\s*)?"
+        r"(?P<formula>\d+d\d+(?:\s*[+\-]\s*\d+)?)\s*\)?\s+"
+        r"(?P<damage_type>[a-z]+)\s+damage\s+at\s+the\s+start\s+"
+        r"of\s+each\s+of\s+(?:its|his|her|their)\s+turns?\b",
+        effect,
+    )
+    ending = re.search(
+        r"(?i)\b(?:takes?|use)\s+an?\s+action\s+to\s+"
+        r"(?P<description>[^.;,]+)",
+        effect,
+    )
+    actor_id = str(pending.get("attacker_id") or "").strip()
+    target_id = str(pending.get("target_id") or pending.get("actor_id") or "").strip()
+    weapon_id = str(pending.get("weapon_id") or "").strip()
+    if (
+        damage is None
+        or ending is None
+        or not actor_id
+        or not target_id
+        or not weapon_id
+    ):
+        return None
+    damage_formula = re.sub(r"\s+", "", damage.group("formula")).casefold()
+    damage_type = damage.group("damage_type").casefold()
+    end_action_description = " ".join(ending.group("description").split())
+    return {
+        "actor_id": actor_id,
+        "weapon_id": weapon_id,
+        "id": "ongoing_damage",
+        "applies": True,
+        "damage_formula": damage_formula,
+        "damage_type": damage_type,
+        "trigger_timing": "turn_start",
+        "end_action": "improvise",
+        "end_action_description": end_action_description,
+        "trigger_facts": {
+            "target_id": target_id,
+            "target_is_creature": True,
+        },
+        "default_resolver": "agent",
+        "ruling_kind": "agent_dm_adjudication",
+        "decision": (
+            f"Apply the reviewed {damage_formula} {damage_type} damage at the "
+            "start of the target's turns until the recorded ending action."
+        ),
+        "reason": (
+            "The pending target is an encounter creature and the reviewed "
+            "effect states both the periodic damage and its ending action."
+        ),
+        "source_excerpt": effect,
+    }
 
 
 def _source_extra_damage_rulings(
@@ -6580,7 +6729,7 @@ async def _resolve_pending(
         "attack_on_hit_effect",
         "critical_body_part_loss",
     }:
-        declarations = list(args.source_on_hit_ruling_json or [])
+        declarations = list(getattr(args, "source_on_hit_ruling_json", None) or [])
         declared_actor_ids = sorted(
             {
                 str(item.get("actor_id") or "").strip()
@@ -6598,6 +6747,18 @@ async def _resolve_pending(
                 str(pending.get("weapon_id") or ""),
             )
         )
+        if ruling is None:
+            agent_ruling = _agent_source_on_hit_ruling(pending)
+            if agent_ruling is not None:
+                ruling = _source_on_hit_rulings(
+                    [agent_ruling],
+                    participant_ids=[str(agent_ruling["actor_id"])],
+                )[
+                    (
+                        str(agent_ruling["actor_id"]),
+                        str(agent_ruling["weapon_id"]),
+                    )
+                ]
         if ruling is None:
             raise EncounterRulingRequiredError(
                 {
@@ -9125,6 +9286,71 @@ async def _auto_run(
                 sequence,
             )
             continue
+        ongoing_damage_effect = next(
+            (
+                item
+                for item in combat.get("ongoing_effects", [])
+                if isinstance(item, dict)
+                and item.get("active", True)
+                and item.get("kind") == "source_ongoing_damage"
+                and str(item.get("target_id") or "") == actor_id
+                and str(item.get("end_action") or "") in available_actions
+            ),
+            None,
+        )
+        if ongoing_damage_effect is not None:
+            end_action = str(ongoing_damage_effect["end_action"])
+            campaign = await _campaign(client, args.campaign_id)
+            ended_effect = await client.domain(
+                "combat_common_action",
+                {
+                    "campaign_id": args.campaign_id,
+                    "actor_id": actor_id,
+                    "action": end_action,
+                    "target_id": actor_id,
+                    "payload": {
+                        "end_ongoing_effect_id": str(
+                            ongoing_damage_effect["id"]
+                        ),
+                        "end_action_description": str(
+                            ongoing_damage_effect["end_action_description"]
+                        ),
+                        "source_excerpt": str(
+                            ongoing_damage_effect["source_excerpt"]
+                        ),
+                    },
+                    "branch_id": branch["id"],
+                    "expected_revision": campaign["revision"],
+                    "idempotency_key": (
+                        "encounter-end-source-ongoing-effect-"
+                        + _operation_token(
+                            args,
+                            sequence,
+                            actor_id,
+                            ongoing_damage_effect["id"],
+                        )
+                    ),
+                },
+            )
+            ended_turn = await _end_turn(
+                client,
+                args,
+                str(branch["id"]),
+                actor_id,
+                sequence,
+            )
+            turns.append(
+                {
+                    "sequence": sequence,
+                    "kind": "end_source_ongoing_damage",
+                    "actor_id": actor_id,
+                    "ongoing_effect_id": str(ongoing_damage_effect["id"]),
+                    "action": end_action,
+                    "result": ended_effect,
+                    "turn_end": ended_turn,
+                }
+            )
+            continue
         escape_effect = next(
             (
                 item
@@ -9900,6 +10126,25 @@ async def _auto_run(
                     ),
                 )
                 ruling = on_hit_rulings.get((actor_id, selected_weapon_id))
+                if ruling is None:
+                    pending_window = next(
+                        (
+                            dict(item)
+                            for item in dict(resolved.get("combat") or {}).get(
+                                "pending", []
+                            )
+                            if isinstance(item, dict)
+                            and str(item.get("id") or "") == choice_id
+                        ),
+                        {},
+                    )
+                    agent_ruling = _agent_source_on_hit_ruling(pending_window)
+                    if agent_ruling is not None:
+                        ruling = _source_on_hit_rulings(
+                            [agent_ruling],
+                            participant_ids=[actor_id],
+                            actors=actors,
+                        )[(actor_id, selected_weapon_id)]
                 if ruling is None:
                     raise EncounterRulingRequiredError(
                         resolved,

@@ -15,6 +15,7 @@ from scripts.regression_encounter import (
     _agent_casting_perception_ruling,
     _agent_party_absences,
     _agent_positions,
+    _agent_source_on_hit_ruling,
     _agent_target_priorities,
     _agent_target_reaction_contexts,
     _agent_turn_rulings,
@@ -5165,6 +5166,39 @@ def test_source_on_hit_ruling_accepts_agent_selected_direct_damage_type() -> Non
     }
 
 
+def test_agent_source_on_hit_ruling_structures_reviewed_periodic_damage() -> None:
+    excerpt = (
+        "If the target is a creature or a flammable object, it ignites. Until "
+        "a creature takes an action to douse the fire, the target takes 5 "
+        "(1d10) fire damage at the start of each of its turns."
+    )
+
+    ruling = _agent_source_on_hit_ruling(
+        {
+            "attacker_id": "fire-elemental",
+            "target_id": "hero",
+            "weapon_id": "touch",
+            "effect": excerpt,
+        }
+    )
+
+    assert ruling is not None
+    assert ruling["id"] == "ongoing_damage"
+    assert ruling["damage_formula"] == "1d10"
+    assert ruling["damage_type"] == "fire"
+    assert ruling["trigger_timing"] == "turn_start"
+    assert ruling["end_action"] == "improvise"
+    assert ruling["end_action_description"] == "douse the fire"
+    assert ruling["trigger_facts"] == {
+        "target_id": "hero",
+        "target_is_creature": True,
+    }
+    assert _source_on_hit_rulings(
+        [ruling],
+        participant_ids=["fire-elemental"],
+    )[("fire-elemental", "touch")]["source_excerpt"] == excerpt
+
+
 def test_source_on_hit_ruling_rejects_nonexact_actor_card_effect() -> None:
     excerpt = (
         "22 (5d8) damage of the type to which the dragonfang has damage resistance."
@@ -5388,6 +5422,55 @@ def test_interrupted_guiding_bolt_ruling_resumes_with_exact_effect() -> None:
         "id": "next_attack_advantage",
         "source_excerpt": GUIDING_BOLT_ON_HIT,
     }
+
+
+def test_interrupted_periodic_damage_resumes_with_agent_structured_ruling() -> None:
+    calls: list[tuple[str, dict]] = []
+    excerpt = (
+        "If the target is a creature or a flammable object, it ignites. Until "
+        "a creature takes an action to douse the fire, the target takes 5 "
+        "(1d10) fire damage at the start of each of its turns."
+    )
+
+    class Client:
+        async def core(self, tool_id: str, arguments: dict) -> dict:
+            assert tool_id == "campaign_query"
+            return {"revision": 22}
+
+        async def domain(self, tool_id: str, arguments: dict) -> dict:
+            calls.append((tool_id, arguments))
+            return {"status": "committed"}
+
+    result = asyncio.run(
+        _resolve_pending(
+            Client(),
+            SimpleNamespace(campaign_id="campaign-1"),
+            "branch-1",
+            {
+                "pending": [
+                    {
+                        "id": "choice-fire",
+                        "kind": "ruling",
+                        "actor_id": "hero",
+                        "attacker_id": "fire-elemental",
+                        "target_id": "hero",
+                        "weapon_id": "touch",
+                        "trigger": "attack_on_hit_effect",
+                        "effect": excerpt,
+                        "status": "pending",
+                    }
+                ]
+            },
+        )
+    )
+
+    assert result == {"status": "committed"}
+    selection = calls[0][1]["payload"]["selection"]
+    assert selection["id"] == "ongoing_damage"
+    assert selection["damage_formula"] == "1d10"
+    assert selection["trigger_timing"] == "turn_start"
+    assert selection["end_action_description"] == "douse the fire"
+    assert calls[0][1]["actor_id"] == "hero"
 
 
 def test_interrupted_source_attachment_resumes_with_declared_settlement() -> None:
