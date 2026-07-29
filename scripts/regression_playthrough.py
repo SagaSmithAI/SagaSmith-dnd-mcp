@@ -3306,6 +3306,33 @@ async def _branch_from_snapshot(
         )
     if core_conversion_reason.strip() and not conversion_required:
         raise RuntimeError("snapshot Core conversion was requested but is not required")
+
+    async def restored_branch_checkpoint() -> dict[str, Any]:
+        try:
+            return await _checkpoint(
+                client,
+                campaign_id=campaign_id,
+                run_id=run_id,
+                label=(
+                    checkpoint_label.strip()
+                    or (
+                        f"Branch {branch_name.strip()} restored from "
+                        f"snapshot slot {snapshot_slot}"
+                    )
+                ),
+                checkpoint_id=(
+                    f"branch-restored:{snapshot_slot}:{branch_name.strip()}"
+                ),
+            )
+        except Exception as error:
+            if "campaign has no full-playthrough manifest" not in str(error):
+                raise
+            return {
+                "skipped": True,
+                "reason": "The verified target snapshot predates manifest initialization.",
+                "required_action": "initialize-manifest",
+            }
+
     branches = await client.domain(
         "branch_query",
         {"campaign_id": campaign_id, "view": "list"},
@@ -3351,16 +3378,7 @@ async def _branch_from_snapshot(
         restored_phase = _campaign_phase(restored_campaign)
         await client.open(campaign_id)
         await client.load(*_phase_groups(restored_phase))
-        checkpoint = await _checkpoint(
-            client,
-            campaign_id=campaign_id,
-            run_id=run_id,
-            label=(
-                checkpoint_label.strip()
-                or f"Branch {branch_name.strip()} restored from snapshot slot {snapshot_slot}"
-            ),
-            checkpoint_id=f"branch-restored:{snapshot_slot}:{branch_name.strip()}",
-        )
+        checkpoint = await restored_branch_checkpoint()
         source_head_snapshot = next(
             (
                 item
@@ -3465,16 +3483,7 @@ async def _branch_from_snapshot(
         raise RuntimeError("selected snapshot unexpectedly restored active combat")
     await client.open(campaign_id)
     await client.load(*_phase_groups(restored_phase))
-    checkpoint = await _checkpoint(
-        client,
-        campaign_id=campaign_id,
-        run_id=run_id,
-        label=(
-            checkpoint_label.strip()
-            or f"Branch {branch_name.strip()} restored from snapshot slot {snapshot_slot}"
-        ),
-        checkpoint_id=f"branch-restored:{snapshot_slot}:{branch_name.strip()}",
-    )
+    checkpoint = await restored_branch_checkpoint()
     return {
         "source_branch": source_branch,
         "source_head_snapshot_id": source_branch.get("head_snapshot_id"),

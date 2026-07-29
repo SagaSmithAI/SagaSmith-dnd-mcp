@@ -6185,6 +6185,93 @@ def test_branch_from_snapshot_recovers_after_branch_create_interruption() -> Non
     assert ("lobby.campaign",) in client.loads
 
 
+def test_branch_from_snapshot_recovers_when_target_predates_manifest() -> None:
+    class Client:
+        async def open(self, campaign_id: str):
+            assert campaign_id == "campaign-1"
+            return {"exposure_id": "exposure"}
+
+        async def load(self, *group_ids: str):
+            return None
+
+        async def core(self, tool_id: str, arguments: dict):
+            assert tool_id == "campaign_query"
+            return {
+                "result": {
+                    "id": "campaign-1",
+                    "revision": 31,
+                    "effective_game_phase": "lobby",
+                    "state": {"game_phase": "lobby"},
+                }
+            }
+
+        async def domain(self, tool_id: str, arguments: dict):
+            if tool_id == "snapshot_query" and arguments["view"] == "list":
+                return [
+                    {
+                        "id": "snapshot-3",
+                        "slot": 3,
+                        "branch_id": "main-branch",
+                    }
+                ]
+            if tool_id == "snapshot_query" and arguments["view"] == "verify":
+                return {"valid": True}
+            if tool_id == "snapshot_query" and arguments["view"] == "core":
+                return {
+                    "core_pack": {"fingerprint": "current"},
+                    "available_core_pack": {"fingerprint": "current"},
+                    "conversion_required": False,
+                }
+            if tool_id == "branch_query":
+                return [
+                    {
+                        "id": "main-branch",
+                        "name": "main",
+                        "head_snapshot_id": "snapshot-4",
+                        "is_current": False,
+                    },
+                    {
+                        "id": "recovery-branch",
+                        "name": "manifest-recovery",
+                        "base_snapshot_id": "snapshot-3",
+                        "head_snapshot_id": "snapshot-3",
+                        "is_current": True,
+                    },
+                ]
+            if tool_id == "state_revision":
+                return {
+                    "response": {
+                        "id": "recovery-branch",
+                        "name": "manifest-recovery",
+                        "base_snapshot_id": "snapshot-3",
+                        "head_snapshot_id": "snapshot-3",
+                        "is_current": True,
+                    }
+                }
+            if tool_id == "playthrough_manifest":
+                raise RuntimeError("campaign has no full-playthrough manifest")
+            raise AssertionError((tool_id, arguments))
+
+    result = asyncio.run(
+        _branch_from_snapshot(
+            Client(),
+            campaign_id="campaign-1",
+            run_id="run-1",
+            initial_phase="lobby",
+            snapshot_slot=3,
+            branch_name="manifest-recovery",
+            checkpoint_label="Recover from pre-manifest snapshot",
+        )
+    )
+
+    assert result["recovered_after_branch_create_interruption"] is True
+    assert result["checkpoint"] == {
+        "skipped": True,
+        "reason": "The verified target snapshot predates manifest initialization.",
+        "required_action": "initialize-manifest",
+    }
+
+
 @pytest.mark.parametrize("defer_checkpoint", [False, True])
 @pytest.mark.parametrize("cross_scene", [False, True])
 def test_source_cited_check_persists_result_and_explicit_knowledge(
