@@ -54,7 +54,11 @@ def test_public_chase_uses_exact_module_source_and_no_combat_map(
     import_root.mkdir()
     source_excerpt = (
         "A kenku has the Stone of Golorr and is 60 feet away at the start of the "
-        "chase, and when the characters are close, the kenku ducks into an old tower."
+        "chase. The kenku drags a heavy sack and suffers a 10-foot reduction to "
+        "its speed, and when the characters are close, the kenku ducks into an old tower."
+    )
+    speed_excerpt = (
+        "The kenku drags a heavy sack and suffers a 10-foot reduction to its speed"
     )
     source = import_root / "chase.md"
     source.write_text(
@@ -232,7 +236,13 @@ def test_public_chase_uses_exact_module_source_and_no_combat_map(
                     "source_excerpt": source_excerpt,
                     "participant_config": [
                         {"actor_id": pursuer["id"], "initiative": 20, "tie_breaker": 0},
-                        {"actor_id": quarry["id"], "initiative": 10, "tie_breaker": 1},
+                        {
+                            "actor_id": quarry["id"],
+                            "initiative": 10,
+                            "tie_breaker": 1,
+                            "speed_adjustment_ft": -10,
+                            "source_excerpt": speed_excerpt,
+                        },
                     ],
                     "close_transition": {
                         "distance_ft": 0,
@@ -254,6 +264,15 @@ def test_public_chase_uses_exact_module_source_and_no_combat_map(
             started["chase"]["close_transition"]["source_ref"]["chunk_id"]
             == transition_expanded["chunk_id"]
         )
+        quarry_state = next(
+            item
+            for item in started["chase"]["participants"]
+            if item["actor_id"] == quarry["id"]
+        )
+        assert quarry_state["base_speed_ft"] == 30
+        assert quarry_state["speed_adjustment_ft"] == -10
+        assert quarry_state["speed_ft"] == 20
+        assert quarry_state["speed_source_excerpt"] == speed_excerpt
         assert all(
             receipt["mechanic_id"].startswith("dnd5e.core.chase.")
             or receipt["mechanic_id"] == "dnd5e.core.check.jack_of_all_trades"
@@ -261,6 +280,22 @@ def test_public_chase_uses_exact_module_source_and_no_combat_map(
         )
 
         current_pursuer = await _call(server, "character_get", {"character_id": pursuer["id"]})
+        with pytest.raises(Exception, match="is required"):
+            await _call(
+                server,
+                "chase",
+                {
+                    "campaign_id": campaign["id"],
+                    "action": "take_turn",
+                    "payload": {
+                        "actor_id": pursuer["id"],
+                        "turn_action": "dash",
+                        "expected_actor_revision": current_pursuer["revision"],
+                    },
+                    "expected_revision": started["campaign_revision"],
+                    "idempotency_key": "implicit-pursuer-turn",
+                },
+            )
         turn = await _call(
             server,
             "chase",
@@ -270,6 +305,9 @@ def test_public_chase_uses_exact_module_source_and_no_combat_map(
                 "payload": {
                     "actor_id": pursuer["id"],
                     "turn_action": "dash",
+                    "complication_choice": "",
+                    "stand_from_prone": True,
+                    "quarry_visibility": {quarry["id"]: True},
                     "expected_actor_revision": current_pursuer["revision"],
                 },
                 "expected_revision": started["campaign_revision"],

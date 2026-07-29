@@ -7048,13 +7048,64 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         for raw in participant_config or []:
             if not isinstance(raw, dict) or not raw.get("actor_id"):
                 raise ValueError("each chase participant_config entry needs actor_id")
-            unknown = set(raw) - {"actor_id", "initiative", "tie_breaker"}
+            unknown = set(raw) - {
+                "actor_id",
+                "initiative",
+                "tie_breaker",
+                "speed_adjustment_ft",
+                "source_excerpt",
+            }
             if unknown:
                 raise ValueError(f"unsupported chase participant_config fields: {sorted(unknown)}")
             identifier = str(raw["actor_id"])
             if identifier not in participant_ids or identifier in config_by_actor:
                 raise ValueError("chase participant_config actor_id is invalid or duplicated")
-            config_by_actor[identifier] = dict(raw)
+            has_speed_adjustment = "speed_adjustment_ft" in raw
+            has_speed_source = "source_excerpt" in raw
+            if has_speed_adjustment != has_speed_source:
+                raise ValueError(
+                    "chase participant speed adjustment requires both "
+                    "speed_adjustment_ft and source_excerpt"
+                )
+            normalized = {
+                key: deepcopy(raw[key])
+                for key in ("actor_id", "initiative", "tie_breaker")
+                if key in raw
+            }
+            if has_speed_adjustment:
+                adjustment = raw["speed_adjustment_ft"]
+                speed_excerpt = " ".join(
+                    str(raw["source_excerpt"] or "").split()
+                ).strip()
+                if (
+                    isinstance(adjustment, bool)
+                    or not isinstance(adjustment, (int, float))
+                    or not float(adjustment).is_integer()
+                    or int(adjustment) == 0
+                    or not -100 <= int(adjustment) <= 100
+                ):
+                    raise ValueError(
+                        "chase participant speed adjustment must be a nonzero "
+                        "integer from -100 to 100"
+                    )
+                if (
+                    not speed_excerpt
+                    or _normalize_source_evidence_text(speed_excerpt)
+                    not in _normalize_source_evidence_text(
+                        evidence["source_excerpt"]
+                    )
+                ):
+                    raise ValueError(
+                        "chase participant speed adjustment requires exact "
+                        "chase-source evidence"
+                    )
+                normalized["speed_adjustment_ft"] = int(adjustment)
+                normalized["source_excerpt"] = speed_excerpt
+            config_by_actor[identifier] = normalized
+        normalized_participant_config = [
+            deepcopy(config_by_actor[str(raw["actor_id"])])
+            for raw in participant_config or []
+        ]
         payload = {
             "participant_ids": list(participant_ids),
             "quarry_ids": list(quarry_ids),
@@ -7062,7 +7113,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "scene_id": scene_id,
             "source_ref": evidence,
             "name": name,
-            "participant_config": participant_config or [],
+            "participant_config": normalized_participant_config,
             "close_transition": resolved_close_transition,
             "branch_id": resolved_branch_id,
         }
@@ -7093,7 +7144,21 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             if int(dict(record.sheet.get("combat") or {}).get("hp", {}).get("value", 0) or 0) <= 0:
                 raise CombatEngineError("incapacitated actors cannot start a chase")
             snapshot = character_view(record, rules_context=rules_context)
-            snapshot.update(config_by_actor.get(identifier, {}))
+            participant_overrides = config_by_actor.get(identifier, {})
+            snapshot.update(
+                {
+                    key: deepcopy(participant_overrides[key])
+                    for key in ("initiative", "tie_breaker")
+                    if key in participant_overrides
+                }
+            )
+            if "speed_adjustment_ft" in participant_overrides:
+                snapshot["chase_speed_adjustment_ft"] = int(
+                    participant_overrides["speed_adjustment_ft"]
+                )
+                snapshot["chase_speed_source_excerpt"] = str(
+                    participant_overrides["source_excerpt"]
+                )
             actor_snapshots.append(snapshot)
         chase = start_chase(
             actor_snapshots,
@@ -7208,6 +7273,26 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         chase = deepcopy(dict(campaign.state.get("chase") or {}))
         if not chase.get("active", False):
             raise CombatEngineError("chase is not active")
+        normalized_quarry_visibility = (
+            {
+                str(identifier): visible
+                for identifier, visible in quarry_visibility.items()
+            }
+            if isinstance(quarry_visibility, dict)
+            else {}
+        )
+        if (
+            set(normalized_quarry_visibility)
+            != {str(identifier) for identifier in chase.get("quarry_ids", [])}
+            or any(
+                not isinstance(visible, bool)
+                for visible in normalized_quarry_visibility.values()
+            )
+        ):
+            raise CombatEngineError(
+                "each chase turn requires an explicit boolean visibility fact "
+                "for every quarry"
+            )
         current_actor = require_campaign_actor(campaign_id, actor_id)
         if current_actor.revision != expected_actor_revision:
             raise ValueError(
@@ -7230,7 +7315,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             action=action,
             complication_choice=complication_choice,
             stand_from_prone=stand_from_prone,
-            quarry_visibility=quarry_visibility,
+            quarry_visibility=normalized_quarry_visibility,
             quarry_actors={
                 str(identifier): character_view(
                     require_campaign_actor(campaign_id, str(identifier)),
@@ -27283,8 +27368,16 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "quarry_visibility",
                     "expected_actor_revision",
                 },
-                required_names=("actor_id",),
+                required_names=(
+                    "actor_id",
+                    "turn_action",
+                    "stand_from_prone",
+                    "quarry_visibility",
+                    "expected_actor_revision",
+                ),
             )
+            if "complication_choice" not in data:
+                raise ValueError("payload.complication_choice is required")
             turn_action = data.get("turn_action", "dash")
             if turn_action not in {"dash", "move", "drop_out"}:
                 raise ValueError("payload.turn_action must be dash, move, or drop_out")
