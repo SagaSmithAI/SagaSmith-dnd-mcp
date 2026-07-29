@@ -44,6 +44,7 @@ from scripts.regression_encounter import (
     _has_multiattack_followup,
     _knockout_objective,
     _missing_source_reinforcement_ids,
+    _movement_operation_token,
     _observable_target_ids,
     _operation_token,
     _participant_config,
@@ -6092,6 +6093,35 @@ def test_source_eleven_hostile_layout_keeps_every_actor_on_a_unique_space() -> N
     assert next(
         item["position"] for item in config if item["actor_id"] == "ritual-hostile-11"
     ) == {"x": 10, "y": 6}
+
+
+def test_movement_idempotency_distinguishes_replanned_destinations() -> None:
+    args = SimpleNamespace(operation_scope="encounter-scope", run_id="run-1")
+    first = ({"x": 3, "y": 2}, 10, [{"x": 2, "y": 2}, {"x": 3, "y": 2}])
+    replanned = ({"x": 4, "y": 2}, 15, [*first[2], {"x": 4, "y": 2}])
+
+    first_token = _movement_operation_token(
+        args,
+        sequence=17,
+        actor_id="mage",
+        target_id="hero",
+        destination=first,
+    )
+
+    assert first_token == _movement_operation_token(
+        args,
+        sequence=17,
+        actor_id="mage",
+        target_id="hero",
+        destination=first,
+    )
+    assert first_token != _movement_operation_token(
+        args,
+        sequence=17,
+        actor_id="mage",
+        target_id="hero",
+        destination=replanned,
+    )
 
 
 def test_no_surprise_layout_marks_neither_side_surprised() -> None:

@@ -182,6 +182,37 @@ def _operation_token(
     return _token(identity, length=length)
 
 
+def _movement_operation_token(
+    args: argparse.Namespace,
+    *,
+    sequence: int,
+    actor_id: str,
+    target_id: str,
+    destination: tuple[dict[str, int], int, list[dict[str, int]]],
+) -> str:
+    """Identify one semantic movement request across process recovery."""
+
+    position, distance, path = destination
+    identity = {
+        "operation_scope": _operation_scope(args),
+        "sequence": sequence,
+        "actor_id": actor_id,
+        "target_id": target_id,
+        "distance": distance,
+        "destination": position,
+        "path": path,
+    }
+    return _token(
+        json.dumps(
+            identity,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ),
+        length=24,
+    )
+
+
 def _agent_turn_transaction_token(
     args: argparse.Namespace,
     *,
@@ -10080,7 +10111,16 @@ async def _auto_run(
                         },
                         "branch_id": branch["id"],
                         "expected_revision": campaign["revision"],
-                        "idempotency_key": (f"encounter-move-{_operation_token(args, sequence)}"),
+                        "idempotency_key": (
+                            "encounter-move-"
+                            + _movement_operation_token(
+                                args,
+                                sequence=sequence,
+                                actor_id=actor_id,
+                                target_id=living_targets[0],
+                                destination=destination,
+                            )
+                        ),
                     },
                 )
                 turns.append(
