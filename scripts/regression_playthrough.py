@@ -292,6 +292,12 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--check-ability", default="")
     parser.add_argument("--check-dc", type=int)
     parser.add_argument(
+        "--check-bonus",
+        type=int,
+        default=0,
+        help="Source-authored external bonus or penalty applied by character_check",
+    )
+    parser.add_argument(
         "--check-proficient",
         action="store_true",
         help=(
@@ -1732,6 +1738,7 @@ def _matching_check_progress(
     ability: str,
     dc: int,
     proficient: bool,
+    bonus: int,
     advantage: bool,
     disadvantage: bool,
     source_ref: dict[str, Any],
@@ -1749,6 +1756,7 @@ def _matching_check_progress(
         and check.get("ability") == ability
         and check.get("dc") == dc
         and bool(check.get("proficient", False)) == proficient
+        and int(check.get("bonus", 0) or 0) == bonus
         and bool(check.get("advantage", False)) == advantage
         and bool(check.get("disadvantage", False)) == disadvantage
         and check.get("source_ref") == source_ref
@@ -3271,6 +3279,7 @@ async def _resolve_check(
     ability: str,
     dc: int | None,
     proficient: bool,
+    bonus: int = 0,
     advantage: bool = False,
     disadvantage: bool = False,
     knowledge_actor_ids: list[str],
@@ -3347,6 +3356,7 @@ async def _resolve_check(
         ability=ability,
         dc=dc,
         proficient=proficient,
+        bonus=bonus,
         advantage=advantage,
         disadvantage=disadvantage,
         source_ref=exact_ref,
@@ -3371,6 +3381,7 @@ async def _resolve_check(
                         "ability": ability,
                         "dc": dc,
                         "proficient": proficient,
+                        "bonus": bonus,
                         "advantage": advantage,
                         "disadvantage": disadvantage,
                         "source_ref": exact_ref,
@@ -3412,6 +3423,7 @@ async def _resolve_check(
                     "ability": ability,
                     "dc": dc,
                     "proficient": proficient,
+                    "bonus": bonus,
                     "advantage": advantage,
                     "disadvantage": disadvantage,
                 },
@@ -3449,6 +3461,7 @@ async def _resolve_check(
                 "kind": kind,
                 "ability": ability,
                 "dc": dc,
+                "bonus": bonus,
                 "advantage": advantage,
                 "disadvantage": disadvantage,
                 "success": success,
@@ -3501,6 +3514,7 @@ async def _resolve_check(
             "ability": ability,
             "dc": dc,
             "proficient": proficient,
+            "bonus": bonus,
             "advantage": advantage,
             "disadvantage": disadvantage,
         },
@@ -11948,6 +11962,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     ability=args.check_ability,
                     dc=args.check_dc,
                     proficient=args.check_proficient,
+                    bonus=args.check_bonus,
                     advantage=args.check_advantage,
                     disadvantage=args.check_disadvantage,
                     knowledge_actor_ids=args.knowledge_actor_id,

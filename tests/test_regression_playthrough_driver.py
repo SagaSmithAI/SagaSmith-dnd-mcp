@@ -6013,6 +6013,7 @@ def test_source_cited_check_persists_result_and_explicit_knowledge(
                 assert arguments["action"] == "check"
                 assert arguments["payload"]["kind"] == "ability"
                 assert arguments["payload"]["ability"] == "survival"
+                assert arguments["payload"]["bonus"] == -2
                 assert arguments["payload"]["advantage"] is False
                 assert arguments["payload"]["disadvantage"] is True
                 assert arguments["idempotency_key"] == _mutation_key(
@@ -6072,6 +6073,7 @@ def test_source_cited_check_persists_result_and_explicit_knowledge(
             ability="survival",
             dc=10,
             proficient=False,
+            bonus=-2,
             disadvantage=True,
             knowledge_actor_ids=["actor-2"],
             success_knowledge="The trail shows twelve goblins and two captives.",
@@ -6087,6 +6089,7 @@ def test_source_cited_check_persists_result_and_explicit_knowledge(
         "ability": "survival",
         "dc": 10,
         "proficient": False,
+        "bonus": -2,
         "advantage": False,
         "disadvantage": True,
     }
@@ -6207,6 +6210,7 @@ def test_check_recovery_identity_includes_actor_and_roll_mode() -> None:
                 "ability": "stealth",
                 "dc": 9,
                 "proficient": True,
+                "bonus": 0,
                 "advantage": False,
                 "disadvantage": True,
                 "source_ref": source_ref,
@@ -6224,6 +6228,7 @@ def test_check_recovery_identity_includes_actor_and_roll_mode() -> None:
         ability="stealth",
         dc=9,
         proficient=True,
+        bonus=0,
         advantage=False,
         disadvantage=True,
         source_ref=source_ref,
@@ -6238,6 +6243,7 @@ def test_check_recovery_identity_includes_actor_and_roll_mode() -> None:
         ability="stealth",
         dc=9,
         proficient=True,
+        bonus=0,
         advantage=False,
         disadvantage=True,
         source_ref=source_ref,
@@ -6252,6 +6258,7 @@ def test_check_recovery_identity_includes_actor_and_roll_mode() -> None:
         ability="stealth",
         dc=9,
         proficient=True,
+        bonus=0,
         advantage=False,
         disadvantage=True,
         source_ref=source_ref,
@@ -6266,8 +6273,24 @@ def test_check_recovery_identity_includes_actor_and_roll_mode() -> None:
         ability="stealth",
         dc=9,
         proficient=True,
+        bonus=0,
         advantage=False,
         disadvantage=False,
+        source_ref=source_ref,
+    )
+    assert not _matching_check_progress(
+        progress,
+        run_id="run-1",
+        occurrence_id="bridge-stealth-1",
+        location_key="bridge",
+        actor_id="fighter",
+        kind="ability",
+        ability="stealth",
+        dc=9,
+        proficient=True,
+        bonus=2,
+        advantage=False,
+        disadvantage=True,
         source_ref=source_ref,
     )
 
