@@ -11759,6 +11759,26 @@ async def _start_or_resume_auto_run(
     started: dict[str, Any] | None = None
     recovered_reinforcement_queue: list[dict[str, Any]] = []
     if phase == "play":
+        campaign = await _campaign(client, args.campaign_id)
+        retained_combat = dict(
+            dict(campaign.get("state") or {}).get("combat") or {}
+        )
+        retained_outcome = dict(retained_combat.get("outcome") or {})
+        if (
+            retained_combat
+            and retained_combat.get("active") is False
+            and retained_outcome.get("status") in COMBAT_OUTCOME_STATUSES
+        ):
+            return await _finalize_ended_encounter(
+                client,
+                args,
+                [
+                    *party_ids,
+                    *hostile_ids,
+                    *additional_hostile_ids,
+                    *reinforcement_hostile_ids,
+                ],
+            )
         started = await _start(
             client,
             args,

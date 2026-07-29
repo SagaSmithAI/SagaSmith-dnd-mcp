@@ -6008,6 +6008,10 @@ def test_auto_run_starts_from_play_before_loading_combat_tools() -> None:
             calls.append(("open", campaign_id))
             return {"phase": "play"}
 
+        async def core(self, tool_id: str, arguments: dict) -> dict:
+            calls.append((tool_id, arguments))
+            return {"state": {}}
+
     async def start(
         client: object,
         args: object,
@@ -6055,6 +6059,14 @@ def test_auto_run_starts_from_play_before_loading_combat_tools() -> None:
 
     assert calls == [
         ("open", "campaign-1"),
+        (
+            "campaign_query",
+            {
+                "view": "get",
+                "payload": {"campaign_id": "campaign-1"},
+                "principal_id": "system:local",
+            },
+        ),
         ("start", (["pc-1"], ["hostile-1"], ["hostile-2"], ["hostile-3"])),
         ("auto_run", (["pc-1"], ["hostile-1", "hostile-2", "hostile-3"])),
     ]
@@ -6062,6 +6074,74 @@ def test_auto_run_starts_from_play_before_loading_combat_tools() -> None:
         "completed": True,
         "auto_start": {"started": True},
     }
+
+
+def test_auto_run_finalizes_retained_completed_combat_before_readiness() -> None:
+    calls: list[tuple[str, object]] = []
+
+    class Client:
+        async def open(self, campaign_id: str) -> dict[str, str]:
+            calls.append(("open", campaign_id))
+            return {"phase": "play"}
+
+        async def core(self, tool_id: str, arguments: dict) -> dict:
+            calls.append((tool_id, arguments))
+            return {
+                "state": {
+                    "combat": {
+                        "id": "combat-1",
+                        "active": False,
+                        "outcome": {
+                            "status": "victory",
+                            "summary": "Source hostiles defeated.",
+                        },
+                    }
+                }
+            }
+
+    async def finalize(
+        client: object,
+        args: object,
+        actor_ids: list[str],
+    ) -> dict[str, object]:
+        calls.append(("finalize", actor_ids))
+        return {"recovered_after_postcombat_interruption": True}
+
+    async def fail_if_started(*args: object, **kwargs: object) -> dict[str, object]:
+        raise AssertionError("a retained completed combat must not start a new encounter")
+
+    with (
+        patch("scripts.regression_encounter._finalize_ended_encounter", finalize),
+        patch("scripts.regression_encounter._start", fail_if_started),
+        patch("scripts.regression_encounter._auto_run", fail_if_started),
+    ):
+        result = asyncio.run(
+            _start_or_resume_auto_run(
+                Client(),
+                SimpleNamespace(campaign_id="campaign-1"),
+                ["pc-1"],
+                ["hostile-1"],
+                ["hostile-2"],
+                ["hostile-3"],
+            )
+        )
+
+    assert calls == [
+        ("open", "campaign-1"),
+        (
+            "campaign_query",
+            {
+                "view": "get",
+                "payload": {"campaign_id": "campaign-1"},
+                "principal_id": "system:local",
+            },
+        ),
+        (
+            "finalize",
+            ["pc-1", "hostile-1", "hostile-2", "hostile-3"],
+        ),
+    ]
+    assert result == {"recovered_after_postcombat_interruption": True}
 
 
 def test_interrupted_guiding_bolt_ruling_resumes_with_exact_effect() -> None:
