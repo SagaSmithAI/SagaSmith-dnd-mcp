@@ -254,6 +254,7 @@ from sagasmith_dnd.resolution_plan import (
     bind_resolution_plan,
     compile_resolution_plan,
     execute_resolution_plan,
+    require_resolution_plan_trigger,
     resolution_plan_contract,
 )
 from sagasmith_dnd.resources import mutate_bounded_resource
@@ -1402,6 +1403,111 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         effective = rule_packs.effective_ruleset(campaign_id, branch_id=branch_id)
         return effective_ruleset_view_from(effective, rule_profiles.get(campaign_id))
 
+    def bind_native_mechanic_contract(
+        manifest: dict[str, Any],
+        artifacts: list[dict[str, Any]],
+        mechanics: list[dict[str, Any]],
+    ) -> tuple[dict[str, Any], list[str]]:
+        """Bind hard-implemented mechanic refs to exact built-in core versions."""
+
+        value = deepcopy(manifest)
+        local_mechanics = {
+            str(mechanic.get("id") or "")
+            for mechanic in mechanics
+            if str(mechanic.get("id") or "")
+        }
+        embedded_mechanics = {
+            str(mechanic_ref)
+            for artifact in artifacts
+            for mechanic_ref in artifact.get("embedded_mechanic_refs", [])
+            if str(mechanic_ref)
+        }
+        referenced_mechanics = {
+            str(mechanic_ref)
+            for artifact in artifacts
+            for mechanic_ref in artifact.get("mechanic_refs", [])
+            if str(mechanic_ref)
+        }
+        native_mechanics = sorted(
+            referenced_mechanics - local_mechanics - embedded_mechanics
+        )
+        errors: list[str] = []
+        supplied = value.get("native_mechanic_refs")
+        if supplied is not None and (
+            not isinstance(supplied, list)
+            or {str(item) for item in supplied} != set(native_mechanics)
+        ):
+            errors.append(
+                "manifest.native_mechanic_refs must exactly match hard-implemented "
+                "mechanics referenced by its artifacts"
+            )
+        value["native_mechanic_refs"] = native_mechanics
+        locks: list[dict[str, Any]] = []
+        editions = [str(item) for item in value.get("editions", [])]
+        for edition in editions:
+            try:
+                core_pack = get_core_rule_pack(edition)
+            except ValueError as error:
+                errors.append(str(error))
+                continue
+            available = {
+                boundary.id for boundary in core_pack.boundaries
+            }
+            missing = sorted(set(native_mechanics) - available)
+            if missing:
+                errors.append(
+                    f"built-in core {edition} does not provide native mechanics: "
+                    + ", ".join(missing)
+                )
+            locks.append(
+                {
+                    "id": core_pack.id,
+                    "version": core_pack.version,
+                    "edition": core_pack.edition,
+                    "fingerprint": core_pack.fingerprint,
+                    "mechanic_refs": native_mechanics,
+                }
+            )
+        value["native_provider_locks"] = locks
+        return value, errors
+
+    def validate_active_native_mechanic_contract(
+        manifest: dict[str, Any],
+        *,
+        edition: str,
+    ) -> None:
+        native_mechanics = {
+            str(item)
+            for item in manifest.get("native_mechanic_refs", [])
+        }
+        if not native_mechanics:
+            return
+        core_pack = get_core_rule_pack(edition)
+        expected = {
+            "id": core_pack.id,
+            "version": core_pack.version,
+            "edition": core_pack.edition,
+            "fingerprint": core_pack.fingerprint,
+            "mechanic_refs": sorted(native_mechanics),
+        }
+        matching = [
+            dict(item)
+            for item in manifest.get("native_provider_locks", [])
+            if isinstance(item, dict)
+            and str(item.get("edition") or "") == edition
+        ]
+        if len(matching) != 1 or matching[0] != expected:
+            raise RulesetUnavailableError(
+                "rule pack native mechanic lock does not match the campaign core"
+            )
+        available = {boundary.id for boundary in core_pack.boundaries}
+        missing = sorted(native_mechanics - available)
+        if missing:
+            raise RulesetUnavailableError(
+                "rule pack requires unavailable hard-implemented mechanics: "
+                + ", ".join(missing)
+            )
+
     def save_rule_pack_draft(
         *,
         manifest: dict[str, Any],
@@ -1409,12 +1515,22 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         mechanics: list[dict[str, Any]] | None,
         provenance: dict[str, Any] | None,
     ) -> dict[str, Any]:
-        compiler_errors = validate_selection_ready_artifacts(artifacts or [])
+        artifact_values = list(artifacts or [])
+        mechanic_values = list(mechanics or [])
+        manifest_value, native_errors = bind_native_mechanic_contract(
+            manifest,
+            artifact_values,
+            mechanic_values,
+        )
+        compiler_errors = [
+            *validate_selection_ready_artifacts(artifact_values),
+            *native_errors,
+        ]
         try:
-            compile_mechanics(mechanics or [])
+            compile_mechanics(mechanic_values)
         except RuleCompilationError as error:
             compiler_errors.append(str(error))
-        declared_tests = list(manifest.get("tests") or [])
+        declared_tests = list(manifest_value.get("tests") or [])
         if mechanics and not declared_tests:
             compiler_errors.append("executable rule packs require declarative tests")
         elif mechanics and not compiler_errors:
@@ -1432,9 +1548,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         + ", ".join(report["mechanics_uncovered"])
                     )
         result = rule_packs.save_draft(
-            manifest=manifest,
-            artifacts=artifacts,
-            mechanics=mechanics,
+            manifest=manifest_value,
+            artifacts=artifact_values,
+            mechanics=mechanic_values,
             provenance=provenance,
             additional_errors=compiler_errors,
         )
@@ -1453,10 +1569,16 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         manifest, artifacts = build_srd2014_content(config.dnd_skills_dir)
         if not artifacts:
             return
+        manifest, native_errors = bind_native_mechanic_contract(
+            manifest,
+            artifacts,
+            [],
+        )
         result = rule_packs.save_draft(
             manifest=manifest,
             artifacts=artifacts,
             provenance={"source": "bundled-srd2014", "structured": True},
+            additional_errors=native_errors,
         )
         if result.status == "validated":
             rule_packs.install(CORE_CONTENT_PACK_ID, CORE_CONTENT_PACK_VERSION)
@@ -3099,6 +3221,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     def require_agent_resolution_payment(
         encounter: dict[str, Any],
         *,
+        campaign_id: str,
+        branch_id: str,
         source_actor_id: str,
         source_card_id: str,
         source_card_kind: str,
@@ -3137,37 +3261,62 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "item semantic plan requires its exact pending on-hit event"
                 )
             target_id = str(window.get("target_id") or "")
-            target_validations = [
-                dict(step.get("args") or {})
-                for step in bound_plan.steps
-                if step.get("op") == "target.validate"
-            ]
-            if not target_validations or any(
-                {
-                    str(target)
-                    for target in validation.get("target_ids", [])
-                }
-                != {target_id}
-                for validation in target_validations
-            ):
-                raise CombatEngineError(
-                    "item on-hit plan must validate only the triggering attack target"
+            trigger_event = {
+                "trigger": "attack.after_hit",
+                "application_id": str(window["id"]),
+                "attack_ref": str(window.get("attack_ref") or ""),
+                "branch_id": str(window.get("branch_id") or branch_id),
+                "campaign_id": str(window.get("campaign_id") or campaign_id),
+                "critical": bool(window.get("critical", False)),
+                "hit": True,
+                "round": current_round,
+                "source_actor_id": source_actor_id,
+                "target_actor_id": target_id,
+                "turn": current_turn_index,
+                "weapon_id": source_card_id,
+            }
+            try:
+                require_resolution_plan_trigger(
+                    bound_plan,
+                    trigger_event,
                 )
-            for step in bound_plan.steps:
-                arguments = dict(step.get("args") or {})
-                if "target_ids" in arguments and {
-                    str(target) for target in arguments["target_ids"]
-                } != {target_id}:
-                    raise CombatEngineError(
-                        "item on-hit plan cannot affect a different attack target"
-                    )
-                if (
-                    "target_actor_id" in arguments
-                    and str(arguments["target_actor_id"]) != target_id
+            except ResolutionPlanExecutionError as error:
+                raise CombatEngineError(str(error)) from error
+            if bound_plan.compiled.schema_version == 1:
+                target_validations = [
+                    dict(step.get("args") or {})
+                    for step in bound_plan.steps
+                    if step.get("op") == "target.validate"
+                ]
+                if not target_validations or any(
+                    {
+                        str(target)
+                        for target in validation.get("target_ids", [])
+                    }
+                    != {target_id}
+                    for validation in target_validations
                 ):
                     raise CombatEngineError(
-                        "item on-hit plan cannot affect a different attack target"
+                        "legacy item on-hit plan must validate only the "
+                        "triggering attack target"
                     )
+                for step in bound_plan.steps:
+                    arguments = dict(step.get("args") or {})
+                    if "target_ids" in arguments and {
+                        str(target) for target in arguments["target_ids"]
+                    } != {target_id}:
+                        raise CombatEngineError(
+                            "legacy item on-hit plan cannot affect a "
+                            "different attack target"
+                        )
+                    if (
+                        "target_actor_id" in arguments
+                        and str(arguments["target_actor_id"]) != target_id
+                    ):
+                        raise CombatEngineError(
+                            "legacy item on-hit plan cannot affect a "
+                            "different attack target"
+                        )
             return {
                 "type": "attack_after_hit",
                 "application_id": str(window["id"]),
@@ -3176,6 +3325,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "weapon_id": source_card_id,
                 "round": current_round,
                 "turn_index": current_turn_index,
+                "trigger_event": trigger_event,
             }
         for entry in reversed(list(encounter.get("log") or [])):
             if not isinstance(entry, dict):
@@ -3218,7 +3368,31 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "agent_resolution_commitment"
                 )
             if declaration == commitment:
-                return deepcopy(entry)
+                payment = deepcopy(entry)
+                if bound_plan.compiled.schema_version >= 2:
+                    trigger_event = {
+                        "trigger": "action",
+                        "action_kind": (
+                            str(entry.get("activity_id") or "")
+                            if entry.get("type") == "activity"
+                            else str(entry.get("action") or "")
+                        ),
+                        "action_ref": source_card_id,
+                        "actor_id": source_actor_id,
+                        "branch_id": branch_id,
+                        "campaign_id": campaign_id,
+                        "round": current_round,
+                        "turn": current_turn_index,
+                    }
+                    try:
+                        require_resolution_plan_trigger(
+                            bound_plan,
+                            trigger_event,
+                        )
+                    except ResolutionPlanExecutionError as error:
+                        raise CombatEngineError(str(error)) from error
+                    payment["trigger_event"] = trigger_event
+                return payment
         raise CombatEngineError(
             "semantic plan requires its exact current-turn commitment to be "
             "paid by the source activity, item hit, spell, or scene procedure"
@@ -6308,6 +6482,121 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         return {"job": import_job_view(updated), "source": source, **asdict(result)}
 
+    def validate_rule_candidate_execution_evidence(
+        job: Any,
+        decisions: list[dict[str, Any]],
+    ) -> None:
+        """Prove reviewed plans and clauses quote their exact indexed chunks."""
+
+        if job.kind != "rulebook" or not job.source_id:
+            return
+        candidates = {
+            str(candidate.get("id") or ""): dict(candidate)
+            for candidate in job.candidates
+        }
+        chunks = {
+            str(chunk.get("id") or ""): dict(chunk)
+            for chunk in rules.source_chunks(job.source_id)
+        }
+        for decision in decisions:
+            if decision.get("review_status") != "accepted":
+                continue
+            candidate_id = str(decision.get("id") or "")
+            candidate = candidates.get(candidate_id)
+            if candidate is None:
+                continue
+            artifact = dict(
+                decision.get("artifact")
+                if "artifact" in decision
+                else candidate.get("artifact") or {}
+            )
+            card = dict(artifact.get("card") or {})
+            raw_plan = artifact.get(
+                "resolution_plan",
+                card.get("resolution_plan"),
+            )
+            raw_plans = artifact.get(
+                "resolution_plans",
+                card.get("resolution_plans"),
+            )
+            plans = (
+                [raw_plan]
+                if raw_plan is not None
+                else list(raw_plans or [])
+            )
+            citations: list[tuple[str, Any]] = [
+                (
+                    f"candidate {candidate_id} resolution plan",
+                    citation,
+                )
+                for plan in plans
+                if isinstance(plan, dict)
+                for citation in list(plan.get("citations") or [])
+            ]
+            raw_clauses = artifact.get(
+                "rule_clauses",
+                card.get("rule_clauses"),
+            )
+            citations.extend(
+                (
+                    f"candidate {candidate_id} rule clause "
+                    f"{str(clause.get('id') or '')}",
+                    citation,
+                )
+                for clause in list(raw_clauses or [])
+                if isinstance(clause, dict)
+                for citation in list(clause.get("source_citations") or [])
+            )
+            allowed_chunks = {
+                str(chunk_id)
+                for chunk_id in candidate.get("source_chunk_ids") or []
+            }
+            for field, citation in citations:
+                if not isinstance(citation, dict):
+                    raise ValueError(f"{field} citation must be an object")
+                source_ref = citation.get("source_ref")
+                if not isinstance(source_ref, dict):
+                    raise ValueError(f"{field} citation needs source_ref")
+                chunk_id = str(source_ref.get("chunk_id") or "")
+                if chunk_id not in allowed_chunks or chunk_id not in chunks:
+                    raise ValueError(
+                        f"{field} citation must use one of the candidate's "
+                        "indexed chunks"
+                    )
+                canonical = rules.citation(
+                    chunk_id,
+                    source_id=job.source_id,
+                )
+                if str(citation.get("source") or "") != str(
+                    canonical["source"]
+                ):
+                    raise ValueError(
+                        f"{field} citation source does not match its indexed chunk"
+                    )
+                for key in (
+                    "source_id",
+                    "source_key",
+                    "source_checksum",
+                ):
+                    if key in source_ref and str(source_ref[key]) != str(
+                        canonical[key]
+                    ):
+                        raise ValueError(
+                            f"{field} citation {key} does not match its "
+                            "indexed chunk"
+                        )
+                excerpt = _normalize_source_evidence_text(
+                    citation.get("source_excerpt")
+                )
+                content = _normalize_source_evidence_text(
+                    chunks[chunk_id].get("content")
+                )
+                if len(excerpt) < 10 or excerpt not in content:
+                    raise ValueError(
+                        f"{field} source_excerpt is not exact text from "
+                        "its indexed chunk"
+                    )
+
     @mcp.tool()
     def rule_content_candidates_extract(
         campaign_id: str,
@@ -6372,6 +6661,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         replay = replay_idempotent(scope, idempotency_key, payload)
         if replay is not None:
             return replay
+        validate_rule_candidate_execution_evidence(job, decisions)
         updated = import_jobs.review_candidates(
             job_id,
             decisions,
@@ -9024,7 +9314,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             pending_on_hit_ruling = next_encounter["pending"][-1]
             pending_on_hit_ruling.update(
                 trigger="attack_semantic_plan",
+                attack_ref=str(plan.get("attack_id") or plan.get("weapon_id") or ""),
                 attacker_id=actor_id,
+                branch_id=resolved_branch_id,
+                campaign_id=campaign_id,
+                critical=bool(attack_roll.get("critical", False)),
                 target_id=target_id,
                 weapon_id=str(plan.get("weapon_id") or ""),
                 plan_id=compiled_item_plan.id,
@@ -16498,6 +16792,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         payment_entry = require_agent_resolution_payment(
             encounter,
+            campaign_id=campaign_id,
+            branch_id=resolved_branch_id,
             source_actor_id=source_actor_id,
             source_card_id=source_card_id,
             source_card_kind=source_card_kind,
@@ -25504,6 +25800,16 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if replay is not None:
             return replay
         profile = rule_profiles.get(campaign_id)
+        if enabled:
+            if profile is None:
+                raise RulesetUnavailableError(
+                    "campaign must lock an edition before enabling a rule pack"
+                )
+            installed_pack = rule_packs.get_version(pack_id, version)
+            validate_active_native_mechanic_contract(
+                installed_pack.manifest,
+                edition=profile.edition,
+            )
 
         def activation_response(result: dict[str, Any]) -> dict[str, Any]:
             return {

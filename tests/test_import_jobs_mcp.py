@@ -1100,12 +1100,27 @@ def test_rule_and_module_import_jobs_are_reviewable_and_activation_safe(
                             "review_status": "accepted",
                             "artifact": {
                                 "kind": "spell",
-                                "application_state": "catalog_only",
+                                "application_state": "selection_ready",
                                 "card": {
                                     "name": "Spark",
                                     "level": 1,
                                     "classes": ["wizard"],
                                     "definition": {},
+                                    "resolution": {
+                                        "kind": "saving_throw",
+                                        "targeting": {
+                                            "mode": "creature",
+                                            "requires_sight": True,
+                                        },
+                                        "save": {
+                                            "ability": "dexterity",
+                                            "success": "none",
+                                            "damage": {
+                                                "base_dice": "1d6",
+                                                "damage_type": "fire",
+                                            },
+                                        },
+                                    },
                                 },
                             },
                         }
@@ -1134,6 +1149,12 @@ def test_rule_and_module_import_jobs_are_reviewable_and_activation_safe(
             compile_arguments,
         )
         assert compiled["draft"]["status"] == "validated"
+        assert compiled["draft"]["manifest"]["native_mechanic_refs"] == [
+            "dnd5e.core.spell.structured_resolution"
+        ]
+        assert compiled["draft"]["manifest"]["native_provider_locks"][0][
+            "mechanic_refs"
+        ] == ["dnd5e.core.spell.structured_resolution"]
         install_arguments = {
             "campaign_id": campaign["id"],
             "job_id": rule_job_id,
@@ -1198,7 +1219,7 @@ def test_rule_and_module_import_jobs_are_reviewable_and_activation_safe(
             "content_catalog_list",
             {"campaign_id": campaign["id"], "query": "Spark"},
         )
-        assert catalog[0]["application_state"] == "catalog_only"
+        assert catalog[0]["application_state"] == "selection_ready"
         assert catalog[0]["source_citations"][0]["source_key"] == "xgte-pilot"
 
         artifact = await call(
@@ -1440,6 +1461,160 @@ def test_rule_and_module_import_jobs_are_reviewable_and_activation_safe(
         assert current_scene["module_id"] == revision_imported["module_id"]
         assert current_scene["scene_id"] == finale["scene_id"]
         assert current_scene["progress"]["percent"] == 25
+
+    asyncio.run(exercise())
+
+
+def test_rule_review_rejects_clause_excerpts_not_in_the_cited_chunk(
+    tmp_path: Path,
+) -> None:
+    import_root = tmp_path / "imports"
+    import_root.mkdir()
+    rulebook = import_root / "ward.md"
+    exact_excerpt = "The silver ward glows when a dragon enters the chamber."
+    rulebook.write_text(
+        (
+            "# Optional Spells\n\n## Spark\n\n"
+            "1st-level evocation spell\nCasting Time: 1 action\n"
+            f"{exact_excerpt}\n"
+        ),
+        encoding="utf-8",
+    )
+    config = McpConfig(
+        home=tmp_path / "home",
+        database_url=None,
+        chroma_url=None,
+        chroma_path_override=None,
+        dnd_skills_dir=tmp_path / "dnd",
+        modulegen_skills_dir=tmp_path / "modulegen",
+        rule_import_roots=(import_root,),
+    )
+
+    async def call(server, name: str, arguments: dict):
+        _, result = await server.call_tool(name, arguments)
+        return result.get("result", result) if isinstance(result, dict) else result
+
+    async def exercise() -> None:
+        server = create_server(config)
+        campaign = await call(
+            server,
+            "campaign_create",
+            {"name": "Exact evidence", "idempotency_key": "campaign"},
+        )
+        staged = await call(
+            server,
+            "rule_document_stage",
+            {"campaign_id": campaign["id"], "source_path": str(rulebook)},
+        )
+        job = await call(
+            server,
+            "rule_import_job_create",
+            {
+                "campaign_id": campaign["id"],
+                "artifact": staged["artifact"],
+                "source_key": "silver-ward",
+                "title": "Silver Ward",
+                "edition": "2014",
+                "idempotency_key": "job",
+            },
+        )
+        job_id = job["job"]["id"]
+        await call(
+            server,
+            "rule_import_job_inspect",
+            {
+                "campaign_id": campaign["id"],
+                "job_id": job_id,
+                "idempotency_key": "inspect",
+            },
+        )
+        await call(
+            server,
+            "rule_import_job_ingest",
+            {
+                "campaign_id": campaign["id"],
+                "job_id": job_id,
+                "idempotency_key": "ingest",
+            },
+        )
+        extracted = await call(
+            server,
+            "rule_import",
+            {
+                "campaign_id": campaign["id"],
+                "action": "extract_candidates",
+                "payload": {"job_id": job_id},
+                "idempotency_key": "extract",
+            },
+        )
+        candidate = next(
+            item
+            for item in extracted["candidates"]
+            if item["name"] == "Spark"
+        )
+        artifact = {
+            "kind": candidate["kind"],
+            "application_state": "catalog_only",
+            "card": {"name": candidate["name"]},
+            "rule_clauses": [
+                {
+                    "schema_version": 1,
+                    "id": "ward-lore",
+                    "title": "Ward Lore",
+                    "scope": "descriptive",
+                    "source_citations": [
+                        {
+                            "source": candidate["source_citations"][0][
+                                "source"
+                            ],
+                            "source_ref": {
+                                "chunk_id": candidate["source_chunk_ids"][0]
+                            },
+                            "source_excerpt": (
+                                "The gold ward flashes when a giant enters."
+                            ),
+                        }
+                    ],
+                    "settlement": {"mode": "descriptive"},
+                }
+            ],
+        }
+        decision = {
+            "id": candidate["id"],
+            "review_status": "accepted",
+            "artifact": artifact,
+        }
+        with pytest.raises(Exception, match="not exact text"):
+            await call(
+                server,
+                "rule_import",
+                {
+                    "campaign_id": campaign["id"],
+                    "action": "review",
+                    "payload": {
+                        "job_id": job_id,
+                        "decisions": [decision],
+                    },
+                    "idempotency_key": "review-inexact",
+                },
+            )
+        decision["artifact"]["rule_clauses"][0]["source_citations"][0][
+            "source_excerpt"
+        ] = exact_excerpt
+        reviewed = await call(
+            server,
+            "rule_import",
+            {
+                "campaign_id": campaign["id"],
+                "action": "review",
+                "payload": {
+                    "job_id": job_id,
+                    "decisions": [decision],
+                },
+                "idempotency_key": "review-exact",
+            },
+        )
+        assert reviewed["job"]["state"] == "reviewed"
 
     asyncio.run(exercise())
 

@@ -847,11 +847,17 @@ def test_item_on_hit_plan_uses_the_attack_event_as_payment(
                     "always_available": True,
                 },
                 "resolution_plan": {
-                    "schema_version": 1,
+                    "schema_version": 2,
                     "id": plan_id,
                     "source_card_id": "binding-blade",
                     "source_card_kind": "item",
                     "trigger": "attack.after_hit",
+                    "trigger_filter": {
+                        "source_actor_id": {"$slot": "source_actor"},
+                        "target_actor_id": {"$slot": "target"},
+                        "weapon_id": "binding-blade",
+                        "hit": True,
+                    },
                     "slots": {
                         "source_actor": {
                             "kind": "actor_id",
@@ -985,6 +991,7 @@ def test_item_on_hit_plan_uses_the_attack_event_as_payment(
         assert attacked["status"] == "pending_ruling"
         assert semantic["application_id"]
         assert contract["plan_id"] == plan_id
+        assert contract["trigger_filter"]["weapon_id"] == "binding-blade"
         assert "on_hit_ruling" not in attacked["result"]
         agent_ruling = {
             "application_id": semantic["application_id"],
@@ -1010,6 +1017,23 @@ def test_item_on_hit_plan_uses_the_attack_event_as_payment(
             },
             "agent_ruling": agent_ruling,
         }
+        wrong_target_commitment = deepcopy(commitment)
+        wrong_target_commitment["bindings"]["target"] = wielder["id"]
+        with pytest.raises(Exception, match="paid engine event"):
+            await _call(
+                server,
+                "combat_choice",
+                {
+                    "campaign_id": campaign["id"],
+                    "actor_id": wielder["id"],
+                    "action": "execute_plan",
+                    "payload": {
+                        "commitment": wrong_target_commitment,
+                    },
+                    "expected_revision": attacked["campaign_revision"],
+                    "idempotency_key": "wrong-target-settle",
+                },
+            )
         settled = await _call(
             server,
             "combat_choice",
