@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 from sagasmith_dnd.character_schema import default_character_sheet
+from sagasmith_dnd.statblocks import _compile_gazer_eye_ray_spec
 
 import sagasmith_dnd_mcp.server as server_module
 from sagasmith_dnd_mcp.config import McpConfig
@@ -104,6 +105,19 @@ def _gazer_sheet() -> dict:
             ),
             "activation": {"type": "action", "cost": 1, "trigger": ""},
         },
+    ]
+    reviewed = _compile_gazer_eye_ray_spec(sheet)
+    assert reviewed is not None
+    sheet["content"]["activities"][0]["choices"] = {
+        "random_save_effects": reviewed
+    }
+    component_ids = {
+        str(item["source_activity_id"]) for item in reviewed["effects"]
+    }
+    sheet["content"]["activities"] = [
+        item
+        for item in sheet["content"]["activities"]
+        if str(item["id"]) not in component_ids
     ]
     return sheet
 

@@ -3067,6 +3067,18 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     str(target_id),
                     role=f"semantic plan slot {slot_name}",
                 )
+        for step in bound.steps:
+            step_source_actor_id = dict(step.get("args") or {}).get(
+                "source_actor_id"
+            )
+            if (
+                step_source_actor_id is not None
+                and str(step_source_actor_id) != source_actor_id
+            ):
+                raise CombatEngineError(
+                    "semantic plan source_actor_id must match the actor "
+                    "paying for the source card"
+                )
         require_campaign_actor(campaign_id, source_actor_id)
         require_encounter_combatant(
             encounter,
@@ -16405,7 +16417,16 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             ) -> dict[str, Any]:
                 del prior_results
                 if opcode == "roll.table":
-                    table = list(arguments["table"])
+                    excluded = list(arguments.get("exclude") or [])
+                    table = [
+                        entry
+                        for entry in arguments["table"]
+                        if entry["value"] not in excluded
+                    ]
+                    if not table:
+                        raise CombatEngineError(
+                            "semantic roll table has no entries after exclusions"
+                        )
                     total_weight = sum(int(item["weight"]) for item in table)
                     selected_roll = asdict(roll(f"1d{total_weight}"))
                     cursor = int(selected_roll["total"])
@@ -16419,6 +16440,131 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         "roll": selected_roll,
                         "value": selected,
                     }
+                if opcode == "target.validate":
+                    source_id = str(arguments["source_actor_id"])
+                    source = require_encounter_combatant(
+                        self.encounter,
+                        source_id,
+                        role="semantic plan targeting source",
+                    )
+                    source_conditions = {
+                        str(item).strip().casefold()
+                        for item in source.get("conditions", [])
+                    }
+                    if (
+                        arguments.get("require_visible")
+                        and "blinded" in source_conditions
+                    ):
+                        raise CombatEngineError(
+                            "a blinded semantic-plan source cannot validate "
+                            "visible targets"
+                        )
+                    source_position = dict(source.get("position") or {})
+                    maximum_range = arguments.get("maximum_range_ft")
+                    if maximum_range is not None and set(source_position) != {
+                        "x",
+                        "y",
+                    }:
+                        raise NeedsRulingError(
+                            "semantic target range requires the source position",
+                            missing=(f"semantic_target_position:{source_id}",),
+                            ruling_kind="source_or_scene_fact",
+                        )
+                    required_conditions = {
+                        str(item).strip().casefold()
+                        for item in arguments.get("require_conditions", [])
+                    }
+                    forbidden_conditions = {
+                        str(item).strip().casefold()
+                        for item in arguments.get("forbid_conditions", [])
+                    }
+                    validated_targets: list[dict[str, Any]] = []
+                    for raw_target_id in arguments["target_ids"]:
+                        target_id = str(raw_target_id)
+                        if (
+                            arguments.get("exclude_self", False)
+                            and target_id == source_id
+                        ):
+                            raise CombatEngineError(
+                                "semantic target cannot be the source actor"
+                            )
+                        target = require_encounter_combatant(
+                            self.encounter,
+                            target_id,
+                            role="semantic plan target",
+                        )
+                        target_conditions = {
+                            str(item).strip().casefold()
+                            for item in target.get("conditions", [])
+                        }
+                        if not required_conditions.issubset(
+                            target_conditions
+                        ):
+                            raise CombatEngineError(
+                                "semantic target lacks a source-required "
+                                "condition"
+                            )
+                        if target_conditions & forbidden_conditions:
+                            raise CombatEngineError(
+                                "semantic target has a source-forbidden condition"
+                            )
+                        if arguments.get("require_visible"):
+                            visible_to = target.get("visible_to_actor_ids")
+                            if (
+                                target.get("hidden", False)
+                                or "invisible" in target_conditions
+                                or (
+                                    isinstance(visible_to, list)
+                                    and source_id
+                                    not in {
+                                        str(item)
+                                        for item in visible_to
+                                    }
+                                )
+                            ):
+                                raise CombatEngineError(
+                                    "semantic target must be visible to the source"
+                                )
+                        distance_ft = None
+                        if maximum_range is not None:
+                            target_position = dict(target.get("position") or {})
+                            if set(target_position) != {"x", "y"}:
+                                raise NeedsRulingError(
+                                    "semantic target range requires the target "
+                                    "position",
+                                    missing=(
+                                        f"semantic_target_position:{target_id}",
+                                    ),
+                                    ruling_kind="source_or_scene_fact",
+                                )
+                            distance_ft = (
+                                max(
+                                    abs(
+                                        int(source_position["x"])
+                                        - int(target_position["x"])
+                                    ),
+                                    abs(
+                                        int(source_position["y"])
+                                        - int(target_position["y"])
+                                    ),
+                                )
+                                * 5
+                            )
+                            if distance_ft > int(maximum_range):
+                                raise CombatEngineError(
+                                    "semantic target is outside the "
+                                    "source-recorded range"
+                                )
+                        validated_targets.append(
+                            {
+                                "target_id": target_id,
+                                "distance_ft": distance_ft,
+                                "visible": bool(
+                                    arguments.get("require_visible")
+                                ),
+                            }
+                        )
+                    return {"targets": validated_targets}
                 if opcode == "check.save":
                     ability = str(arguments["ability"])
                     dc = int(arguments["dc"])
@@ -16464,6 +16610,16 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         )
                     return {
                         "targets": target_results,
+                        "all_failed": bool(target_results)
+                        and all(
+                            not bool(item["success"])
+                            for item in target_results
+                        ),
+                        "all_succeeded": bool(target_results)
+                        and all(
+                            bool(item["success"])
+                            for item in target_results
+                        ),
                         "success_by_actor_id": {
                             item["target_id"]: bool(item["success"])
                             for item in target_results
@@ -16702,11 +16858,72 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     for target_id_value in arguments["target_ids"]:
                         target_id = str(target_id_value)
                         sheet = deepcopy(self.sheet(target_id))
-                        apply_condition_change(
-                            sheet,
-                            condition_id=str(arguments["condition_id"]),
-                            add=add,
-                        )
+                        effect_id = None
+                        duration = arguments.get("duration")
+                        if add and isinstance(duration, dict):
+                            duration_kind = str(duration["kind"])
+                            duration_clock = {
+                                "encounter": ("encounter", 1),
+                                "rounds": (
+                                    "round",
+                                    int(duration.get("amount", 1) or 1),
+                                ),
+                                "source_turn_start": (
+                                    "source_turn_start",
+                                    1,
+                                ),
+                                "target_turn_start": ("turn_start", 1),
+                                "target_turn_end": ("turn_end", 1),
+                            }.get(duration_kind)
+                            if duration_clock is None:
+                                raise CombatEngineError(
+                                    "semantic condition duration is unsupported"
+                                )
+                            period, remaining = duration_clock
+                            effect_id = str(
+                                arguments.get("effect_id")
+                                or (
+                                    f"semantic-{bound_plan.fingerprint[:12]}-"
+                                    f"{step_id}-{target_id}"
+                                )
+                            )
+                            sheet, effect_id = add_effect(
+                                sheet,
+                                {
+                                    "id": effect_id,
+                                    "name": str(
+                                        arguments["condition_id"]
+                                    ).replace("_", " ").title(),
+                                    "kind": "timed_conditions",
+                                    "source": str(
+                                        arguments.get("source_actor_id")
+                                        or arguments.get("source")
+                                        or compiled_plan.source_card_id
+                                    ),
+                                    "active": True,
+                                    "duration": {
+                                        "period": period,
+                                        "remaining": remaining,
+                                    },
+                                    "changes": [
+                                        {
+                                            "path": "conditions",
+                                            "mode": "add",
+                                            "value": str(
+                                                arguments["condition_id"]
+                                            ),
+                                        }
+                                    ],
+                                },
+                            )
+                        else:
+                            apply_condition_change(
+                                sheet,
+                                condition_id=str(
+                                    arguments["condition_id"]
+                                ),
+                                add=add,
+                            )
                         self.set_sheet(target_id, sheet)
                         target_results.append(
                             {
@@ -16715,6 +16932,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                                     arguments["condition_id"]
                                 ),
                                 "active": add,
+                                "effect_id": effect_id,
                             }
                         )
                     return {"targets": target_results}

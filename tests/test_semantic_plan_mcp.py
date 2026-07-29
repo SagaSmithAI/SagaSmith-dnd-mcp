@@ -37,11 +37,15 @@ def test_custom_monster_plan_pays_executes_replays_and_rejects_mutation(
         "throw, taking 3d8 radiant damage on a failed save, or no damage on a "
         "successful one."
     )
+    spell_excerpt = (
+        "Chromatic Spark. One visible creature within 30 feet takes 1d4 radiant "
+        "damage and is frightened until the start of the prism beast's next turn."
+    )
     source = module_root / "prism.md"
     source.write_text(
         "# Prism Chamber\n\n"
         "## Encounter\n\n"
-        f"{encounter_excerpt}\n\n{mechanic_excerpt}\n",
+        f"{encounter_excerpt}\n\n{mechanic_excerpt}\n\n{spell_excerpt}\n",
         encoding="utf-8",
     )
     config = McpConfig(
@@ -171,6 +175,11 @@ def test_custom_monster_plan_pays_executes_replays_and_rejects_mutation(
                     "source_card_kind": "monster_action",
                     "trigger": "action",
                     "slots": {
+                        "source_actor": {
+                            "kind": "actor_id",
+                            "owner": "agent",
+                            "description": "The prism beast using this source action.",
+                        },
                         "targets": {
                             "kind": "actor_ids",
                             "owner": "agent",
@@ -182,6 +191,18 @@ def test_custom_monster_plan_pays_executes_replays_and_rejects_mutation(
                         }
                     },
                     "steps": [
+                        {
+                            "id": "targets",
+                            "op": "target.validate",
+                            "args": {
+                                "source_actor_id": {"$slot": "source_actor"},
+                                "target_ids": {"$slot": "targets"},
+                                "exclude_self": True,
+                                "require_visible": True,
+                                "maximum_range_ft": 30,
+                                "source": "Prismatic Pulse",
+                            },
+                        },
                         {
                             "id": "save",
                             "op": "check.save",
@@ -239,7 +260,7 @@ def test_custom_monster_plan_pays_executes_replays_and_rejects_mutation(
                         "unit": "round",
                         "concentration": False,
                     },
-                    "effect": mechanic_excerpt,
+                    "effect": spell_excerpt,
                 },
                 "resolution_plan": {
                     "schema_version": 1,
@@ -248,6 +269,11 @@ def test_custom_monster_plan_pays_executes_replays_and_rejects_mutation(
                     "source_card_kind": "spell",
                     "trigger": "action",
                     "slots": {
+                        "source_actor": {
+                            "kind": "actor_id",
+                            "owner": "agent",
+                            "description": "The prism beast casting this source spell.",
+                        },
                         "target": {
                             "kind": "actor_ids",
                             "owner": "agent",
@@ -258,6 +284,18 @@ def test_custom_monster_plan_pays_executes_replays_and_rejects_mutation(
                     },
                     "steps": [
                         {
+                            "id": "target",
+                            "op": "target.validate",
+                            "args": {
+                                "source_actor_id": {"$slot": "source_actor"},
+                                "target_ids": {"$slot": "target"},
+                                "exclude_self": True,
+                                "require_visible": True,
+                                "maximum_range_ft": 30,
+                                "source": "Chromatic Spark",
+                            },
+                        },
+                        {
                             "id": "damage",
                             "op": "damage.apply",
                             "args": {
@@ -266,13 +304,24 @@ def test_custom_monster_plan_pays_executes_replays_and_rejects_mutation(
                                 "damage_type": "radiant",
                                 "source": "Chromatic Spark",
                             },
-                        }
+                        },
+                        {
+                            "id": "frightened",
+                            "op": "condition.apply",
+                            "args": {
+                                "source_actor_id": {"$slot": "source_actor"},
+                                "target_ids": {"$slot": "target"},
+                                "condition_id": "frightened",
+                                "duration": {"kind": "source_turn_start"},
+                                "source": "Chromatic Spark",
+                            },
+                        },
                     ],
                     "citations": [
                         {
                             "source": "module:prism-chamber",
                             "source_ref": deepcopy(expanded["source_ref"]),
-                            "source_excerpt": mechanic_excerpt,
+                            "source_excerpt": spell_excerpt,
                         }
                     ],
                 },
@@ -334,20 +383,26 @@ def test_custom_monster_plan_pays_executes_replays_and_rejects_mutation(
                     {
                         "actor_id": beast["id"],
                         "initiative": 20,
+                        "position": {"x": 0, "y": 0},
                         "disposition": "hostile",
                     },
                     {
                         "actor_id": hero_one["id"],
                         "initiative": 10,
+                        "position": {"x": 3, "y": 0},
                         "disposition": "friendly",
                     },
                     {
                         "actor_id": hero_two["id"],
                         "initiative": 5,
+                        "position": {"x": 6, "y": 0},
                         "disposition": "friendly",
                     },
                 ],
                 "scene_id": expanded["scene"]["id"],
+                "battle_map": {
+                    "bounds": {"width_cells": 12, "height_cells": 12}
+                },
                 "ruleset": "2014",
                 "expected_revision": play["campaign_revision"],
                 "idempotency_key": "start",
@@ -383,9 +438,29 @@ def test_custom_monster_plan_pays_executes_replays_and_rejects_mutation(
             "plan_fingerprint": contract["plan_fingerprint"],
             "source_card_id": "prismatic-pulse",
             "source_card_kind": "monster_action",
-            "bindings": {"targets": [hero_one["id"], hero_two["id"]]},
+            "bindings": {
+                "source_actor": beast["id"],
+                "targets": [hero_one["id"], hero_two["id"]],
+            },
             "agent_ruling": agent_ruling,
         }
+        wrong_source = deepcopy(commitment)
+        wrong_source["bindings"]["source_actor"] = hero_one["id"]
+        with pytest.raises(Exception, match="source_actor_id must match"):
+            await _call(
+                server,
+                "combat_use_activity",
+                {
+                    "campaign_id": campaign["id"],
+                    "actor_id": beast["id"],
+                    "activity_id": "prismatic-pulse",
+                    "declaration": {
+                        "agent_resolution_commitment": wrong_source,
+                    },
+                    "expected_revision": started["campaign_revision"],
+                    "idempotency_key": "wrong-source",
+                },
+            )
         paid = await _raw(
             server,
             "combat_use_activity",
@@ -523,7 +598,10 @@ def test_custom_monster_plan_pays_executes_replays_and_rejects_mutation(
             "plan_fingerprint": spell_contract["plan_fingerprint"],
             "source_card_id": "chromatic-spark",
             "source_card_kind": "spell",
-            "bindings": {"target": [hero_one["id"]]},
+            "bindings": {
+                "source_actor": beast["id"],
+                "target": [hero_one["id"]],
+            },
             "agent_ruling": spell_ruling,
         }
         spell_paid = await _raw(
@@ -574,5 +652,45 @@ def test_custom_monster_plan_pays_executes_replays_and_rejects_mutation(
             == before_spell["sheet"]["combat"]["hp"]["value"]
             - applied_spell_damage
         )
+        assert "frightened" in after_spell["sheet"]["conditions"]
+        frightened_result = spell_settled["result"]["results"]["frightened"]
+        frightened_effect_id = frightened_result["targets"][0]["effect_id"]
+        assert frightened_effect_id
+        active_effect = next(
+            item
+            for item in after_spell["sheet"]["effects"]
+            if item["id"] == frightened_effect_id
+        )
+        assert active_effect["source"] == beast["id"]
+        assert active_effect["duration"] == {
+            "period": "source_turn_start",
+            "remaining": 1,
+        }
+
+        revision = spell_settled["campaign_revision"]
+        for index, actor in enumerate((beast, hero_one, hero_two)):
+            ended = await _call(
+                server,
+                "combat_end_turn",
+                {
+                    "campaign_id": campaign["id"],
+                    "actor_id": actor["id"],
+                    "expected_revision": revision,
+                    "idempotency_key": f"expire-frightened-{index}",
+                },
+            )
+            revision = ended["campaign_revision"]
+        after_expiry = await _call(
+            server,
+            "character_get",
+            {"character_id": hero_one["id"]},
+        )
+        assert "frightened" not in after_expiry["sheet"]["conditions"]
+        expired_effect = next(
+            item
+            for item in after_expiry["sheet"]["effects"]
+            if item["id"] == frightened_effect_id
+        )
+        assert expired_effect["active"] is False
 
     asyncio.run(exercise())
