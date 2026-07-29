@@ -712,7 +712,7 @@ def test_public_stirge_attachment_drains_hit_points_at_source_turn_start(
     asyncio.run(exercise())
 
 
-def test_public_grimvault_only_opens_dm_boundary_after_both_natural_twenty_rolls(
+def test_lookalike_grimvault_text_stays_at_the_agent_ruling_boundary(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -731,7 +731,7 @@ def test_public_grimvault_only_opens_dm_boundary_after_both_natural_twenty_rolls
         )
         return result
 
-    def forced_damage_and_followup(expression: str, **kwargs):
+    def forced_damage(expression: str, **kwargs):
         normalized = expression.replace(" ", "").casefold()
         if normalized == "4d6+4":
             return DiceResult(
@@ -740,24 +740,10 @@ def test_public_grimvault_only_opens_dm_boundary_after_both_natural_twenty_rolls
                 expression=expression,
                 detail="4d6[3, 4, 3, 4] + 4",
             )
-        if normalized == "14":
-            return DiceResult(
-                total=14,
-                rolls=(),
-                expression=expression,
-                detail="14",
-            )
-        if normalized == "1d20":
-            return DiceResult(
-                total=20,
-                rolls=(20,),
-                expression=expression,
-                detail="1d20[20]",
-            )
         return original_engine_roll(expression, **kwargs)
 
     monkeypatch.setattr(server_module, "roll_attack_action", forced_critical)
-    monkeypatch.setattr(combat_engine_module, "roll", forced_damage_and_followup)
+    monkeypatch.setattr(combat_engine_module, "roll", forced_damage)
     grimvault_effect = (
         "If the target is an object, the hit instead deals 16 slashing damage. "
         "If the target is a creature and Durnan rolls a 20 on the d20 for the "
@@ -877,39 +863,9 @@ def test_public_grimvault_only_opens_dm_boundary_after_both_natural_twenty_rolls
             },
         )
         assert attacked["status"] == "pending_ruling"
-        assert attacked["result"]["damage"]["input_amount"] == 32
-        assert attacked["result"]["critical_followup"]["triggered"] is True
-        assert attacked["result"]["critical_followup"]["anatomical_loss_triggered"] is True
-        ruled = await _call(
-            server,
-            "combat_choice",
-            {
-                "campaign_id": campaign["id"],
-                "action": "on_hit_ruling",
-                "actor_id": troll["id"],
-                "payload": {
-                    "choice_id": attacked["result"]["pending_on_hit_ruling_id"],
-                    "selection": {
-                        "id": "critical_followup",
-                        "target_has_limbs": True,
-                        "source_excerpt": grimvault_effect,
-                    },
-                },
-                "expected_revision": attacked["campaign_revision"],
-                "idempotency_key": "record-loss",
-            },
-        )
-        troll_after = await _call(
-            server,
-            "character_get",
-            {"character_id": troll["id"]},
-        )
-
-        assert ruled["result"]["part_category"] == "limb"
-        assert ruled["result"]["mechanical_effect"] == "dm_unspecified"
-        assert any(
-            effect.get("kind") == "anatomical_loss" and effect.get("active")
-            for effect in troll_after["sheet"]["effects"]
-        )
+        assert attacked["result"]["damage"]["input_amount"] == 18
+        assert attacked["result"].get("critical_followup") is None
+        assert attacked["result"]["on_hit_ruling"]["effect"] == grimvault_effect
+        assert attacked["result"]["pending_on_hit_ruling_id"]
 
     asyncio.run(exercise())

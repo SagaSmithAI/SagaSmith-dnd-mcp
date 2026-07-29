@@ -1000,7 +1000,13 @@ def test_rule_and_module_import_jobs_are_reviewable_and_activation_safe(
     import_root.mkdir()
     rulebook = import_root / "supplement.md"
     rulebook.write_text(
-        "# Optional Spells\n\n## Spark\n\n1st-level evocation spell\nCasting Time: 1 action\n",
+        (
+            "# Optional Spells\n\n## Spark\n\n"
+            "1st-level evocation spell\n"
+            "Casting Time: 1 action\n"
+            "One creature you can see must make a Dexterity saving throw, "
+            "taking 1d6 fire damage on a failed save and no damage on a success.\n"
+        ),
         encoding="utf-8",
     )
     config = McpConfig(
@@ -1094,7 +1100,7 @@ def test_rule_and_module_import_jobs_are_reviewable_and_activation_safe(
                             "review_status": "accepted",
                             "artifact": {
                                 "kind": "spell",
-                                "application_state": "selection_ready",
+                                "application_state": "catalog_only",
                                 "card": {
                                     "name": "Spark",
                                     "level": 1,
@@ -1192,7 +1198,7 @@ def test_rule_and_module_import_jobs_are_reviewable_and_activation_safe(
             "content_catalog_list",
             {"campaign_id": campaign["id"], "query": "Spark"},
         )
-        assert catalog[0]["application_state"] == "selection_ready"
+        assert catalog[0]["application_state"] == "catalog_only"
         assert catalog[0]["source_citations"][0]["source_key"] == "xgte-pilot"
 
         artifact = await call(

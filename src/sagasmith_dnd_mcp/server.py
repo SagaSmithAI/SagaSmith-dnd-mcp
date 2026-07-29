@@ -2883,19 +2883,28 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "spell": ("spells",),
             "trait": ("features",),
         }.get(source_card_kind)
-        if collections is None:
+        if source_card_kind == "item":
+            matches = [
+                item
+                for item in dict(sheet.get("inventory") or {}).get("items", [])
+                if isinstance(item, dict)
+                and str(item.get("id") or "") == source_card_id
+                and isinstance(item.get("resolution_plan"), dict)
+            ]
+        elif collections is None:
             raise CombatEngineError(
                 "character-bound resolution plans require an activity, feature, "
-                "monster action, spell, or trait source card"
+                "item, monster action, spell, or trait source card"
             )
-        matches = [
-            item
-            for collection in collections
-            for item in dict(sheet.get("content") or {}).get(collection, [])
-            if isinstance(item, dict)
-            and str(item.get("id") or "") == source_card_id
-            and isinstance(item.get("resolution_plan"), dict)
-        ]
+        else:
+            matches = [
+                item
+                for collection in collections
+                for item in dict(sheet.get("content") or {}).get(collection, [])
+                if isinstance(item, dict)
+                and str(item.get("id") or "") == source_card_id
+                and isinstance(item.get("resolution_plan"), dict)
+            ]
         if len(matches) != 1:
             raise CombatEngineError(
                 "source card must resolve to exactly one recorded resolution plan"
@@ -3094,6 +3103,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         source_card_id: str,
         source_card_kind: str,
         commitment: dict[str, Any],
+        bound_plan: BoundResolutionPlan,
     ) -> dict[str, Any]:
         """Require the exact paid current-turn declaration before plan execution."""
 
@@ -3104,6 +3114,69 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             raise CombatEngineError(
                 "semantic plan must settle during its source actor's paid turn"
             )
+        if source_card_kind == "item":
+            window = next(
+                (
+                    item
+                    for item in encounter.get("pending", [])
+                    if isinstance(item, dict)
+                    and str(item.get("id") or "")
+                    == str(commitment.get("application_id") or "")
+                ),
+                None,
+            )
+            if (
+                not isinstance(window, dict)
+                or window.get("trigger") != "attack_semantic_plan"
+                or str(window.get("attacker_id") or "") != source_actor_id
+                or str(window.get("weapon_id") or "") != source_card_id
+                or str(window.get("plan_fingerprint") or "")
+                != bound_plan.compiled.fingerprint
+            ):
+                raise CombatEngineError(
+                    "item semantic plan requires its exact pending on-hit event"
+                )
+            target_id = str(window.get("target_id") or "")
+            target_validations = [
+                dict(step.get("args") or {})
+                for step in bound_plan.steps
+                if step.get("op") == "target.validate"
+            ]
+            if not target_validations or any(
+                {
+                    str(target)
+                    for target in validation.get("target_ids", [])
+                }
+                != {target_id}
+                for validation in target_validations
+            ):
+                raise CombatEngineError(
+                    "item on-hit plan must validate only the triggering attack target"
+                )
+            for step in bound_plan.steps:
+                arguments = dict(step.get("args") or {})
+                if "target_ids" in arguments and {
+                    str(target) for target in arguments["target_ids"]
+                } != {target_id}:
+                    raise CombatEngineError(
+                        "item on-hit plan cannot affect a different attack target"
+                    )
+                if (
+                    "target_actor_id" in arguments
+                    and str(arguments["target_actor_id"]) != target_id
+                ):
+                    raise CombatEngineError(
+                        "item on-hit plan cannot affect a different attack target"
+                    )
+            return {
+                "type": "attack_after_hit",
+                "application_id": str(window["id"]),
+                "actor_id": source_actor_id,
+                "target_id": target_id,
+                "weapon_id": source_card_id,
+                "round": current_round,
+                "turn_index": current_turn_index,
+            }
         for entry in reversed(list(encounter.get("log") or [])):
             if not isinstance(entry, dict):
                 continue
@@ -3148,7 +3221,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 return deepcopy(entry)
         raise CombatEngineError(
             "semantic plan requires its exact current-turn commitment to be "
-            "paid by the source activity, spell, or scene procedure"
+            "paid by the source activity, item hit, spell, or scene procedure"
         )
 
     def agent_save_damage_commitment(
@@ -8630,6 +8703,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         target_record = require_campaign_actor(campaign_id, target_id)
         attacker = character_view(attacker_record, rules_context=rule_context)
         target = character_view(target_record, rules_context=rule_context)
+        compiled_item_plan = None
         try:
             if spell_resolution is not None:
                 plan = preflight_spell_attack(
@@ -8657,6 +8731,39 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     authorized=access.require_campaign(campaign_id, principal_id).role
                     in CAMPAIGN_DM_ROLES,
                 )
+                weapon_id = str(plan.get("weapon_id") or "")
+                item_card = next(
+                    (
+                        item
+                        for item in dict(
+                            attacker_record.sheet.get("inventory") or {}
+                        ).get("items", [])
+                        if isinstance(item, dict)
+                        and str(item.get("id") or "") == weapon_id
+                    ),
+                    None,
+                )
+                if isinstance(item_card, dict) and isinstance(
+                    item_card.get("resolution_plan"),
+                    dict,
+                ):
+                    try:
+                        compiled_item_plan = compile_resolution_plan(
+                            item_card["resolution_plan"]
+                        )
+                    except ResolutionPlanCompilationError as error:
+                        raise CombatEngineError(
+                            f"recorded item resolution plan is invalid: {error}"
+                        ) from error
+                    if (
+                        compiled_item_plan.source_card_id != weapon_id
+                        or compiled_item_plan.source_card_kind != "item"
+                        or compiled_item_plan.trigger != "attack.after_hit"
+                    ):
+                        raise CombatEngineError(
+                            "recorded weapon plan must be an item "
+                            "attack.after_hit contract"
+                        )
         except NeedsRulingError:
             if access.require_campaign(campaign_id, principal_id).role not in CAMPAIGN_DM_ROLES:
                 raise CombatEngineError("attack requires Agent-as-DM adjudication") from None
@@ -8900,7 +9007,41 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             )
         on_hit_ruling = dict(result.get("on_hit_ruling") or {})
         pending_on_hit_ruling: dict[str, Any] | None = None
-        if attack_roll.get("hit") and str(on_hit_ruling.get("effect") or "").strip():
+        if attack_roll.get("hit") and compiled_item_plan is not None:
+            result.pop("on_hit_ruling", None)
+            next_encounter = add_choice_window(
+                next_encounter,
+                kind="ruling",
+                actor_id_value=target_id,
+                event="attack.on_hit.semantic_plan",
+                candidates=[
+                    {
+                        "id": "execute_plan",
+                        "name": "Execute the reviewed item plan",
+                    }
+                ],
+            )
+            pending_on_hit_ruling = next_encounter["pending"][-1]
+            pending_on_hit_ruling.update(
+                trigger="attack_semantic_plan",
+                attacker_id=actor_id,
+                target_id=target_id,
+                weapon_id=str(plan.get("weapon_id") or ""),
+                plan_id=compiled_item_plan.id,
+                plan_fingerprint=compiled_item_plan.fingerprint,
+                resolution_plan_contract=resolution_plan_contract(
+                    compiled_item_plan
+                ),
+            )
+            result["semantic_plan"] = {
+                "status": "payment_recorded",
+                "application_id": pending_on_hit_ruling["id"],
+                "contract": resolution_plan_contract(compiled_item_plan),
+            }
+            result["pending_on_hit_ruling_id"] = pending_on_hit_ruling["id"]
+        elif attack_roll.get("hit") and str(
+            on_hit_ruling.get("effect") or ""
+        ).strip():
             next_attack_advantage = (
                 re.search(
                     r"(?i)\bthe next attack against the target before the end of "
@@ -8988,7 +9129,17 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             pending_on_hit_ruling = critical_followup_window
         next_encounter["log"] = [
             *list(next_encounter.get("log") or []),
-            {"type": "attack", "result": result},
+            {
+                "type": "attack",
+                "actor_id": actor_id,
+                "target_id": target_id,
+                "weapon_id": str(plan.get("weapon_id") or ""),
+                "result": result,
+                "round": int(next_encounter.get("round", 1) or 1),
+                "turn_index": int(
+                    next_encounter.get("turn_index", 0) or 0
+                ),
+            },
         ][-100:]
         next_state = dict(campaign.state or {})
         next_state["combat"] = next_encounter
@@ -9014,7 +9165,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             response = {
                 **_ruling_status(
                     "pending_ruling" if pending_on_hit_ruling else "committed",
-                    "source_or_scene_fact",
+                    (
+                        "module_specific_procedure"
+                        if compiled_item_plan is not None
+                        else "source_or_scene_fact"
+                    ),
                 ),
                 "result": result,
                 "combat": next_encounter,
@@ -16347,10 +16502,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             source_card_id=source_card_id,
             source_card_kind=source_card_kind,
             commitment=normalized_commitment,
+            bound_plan=bound_plan,
         )
         if any(
             item.get("type") == "semantic_plan"
-            and item.get("bound_plan_fingerprint") == bound_plan.fingerprint
+            and str(item.get("application_id") or "")
+            == str(normalized_commitment.get("application_id") or "")
             for item in encounter.get("log", [])
         ):
             raise CombatEngineError(
@@ -17207,10 +17364,20 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         ) as error:
             raise CombatEngineError(str(error)) from error
         next_encounter = runtime.encounter
+        application_id = str(
+            normalized_commitment.get("application_id") or ""
+        )
+        if source_card_kind == "item":
+            next_encounter["pending"] = [
+                item
+                for item in next_encounter.get("pending", [])
+                if str(item.get("id") or "") != application_id
+            ]
         next_encounter["log"] = [
             *list(next_encounter.get("log") or []),
             {
                 "type": "semantic_plan",
+                "application_id": application_id,
                 "actor_id": source_actor_id,
                 "source_card_id": source_card_id,
                 "source_card_kind": source_card_kind,

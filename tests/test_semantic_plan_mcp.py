@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 from sagasmith_dnd.character_schema import default_character_sheet
 
+from sagasmith_dnd_mcp import server as server_module
 from sagasmith_dnd_mcp.config import McpConfig
 from sagasmith_dnd_mcp.server import create_server
 
@@ -692,5 +693,346 @@ def test_custom_monster_plan_pays_executes_replays_and_rejects_mutation(
             if item["id"] == frightened_effect_id
         )
         assert expired_effect["active"] is False
+
+    asyncio.run(exercise())
+
+
+def test_item_on_hit_plan_uses_the_attack_event_as_payment(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    module_root = tmp_path / "modules"
+    module_root.mkdir()
+    encounter_excerpt = (
+        "The binding blade restrains the creature it strikes in the warded room."
+    )
+    mechanic_excerpt = "On a hit, the binding blade restrains the target."
+    source = module_root / "binding-blade.md"
+    source.write_text(
+        "# Warded Room\n\n## Encounter\n\n"
+        f"{encounter_excerpt}\n\n{mechanic_excerpt}\n",
+        encoding="utf-8",
+    )
+    config = McpConfig(
+        home=tmp_path / "home",
+        database_url=None,
+        chroma_url=None,
+        chroma_path_override=None,
+        dnd_skills_dir=tmp_path / "dnd",
+        modulegen_skills_dir=tmp_path / "modulegen",
+        module_import_roots=(module_root,),
+        auto_seed_rules=False,
+    )
+    original_attack_roll = server_module.roll_attack_action
+
+    def forced_hit(*, plan, rng=None):
+        result = original_attack_roll(plan=plan, rng=rng)
+        result.update(
+            natural=15,
+            total=15 + int(plan["attack_bonus"]),
+            armor_class=int(plan["target_ac"]),
+            hit=True,
+            critical=False,
+            fumble=False,
+        )
+        return result
+
+    monkeypatch.setattr(server_module, "roll_attack_action", forced_hit)
+
+    async def exercise() -> None:
+        server = create_server(config)
+        campaign = await _call(
+            server,
+            "campaign_create",
+            {
+                "name": "Item semantic plan",
+                "edition": "2014",
+                "idempotency_key": "campaign",
+            },
+        )
+        staged = await _call(
+            server,
+            "module_import",
+            {
+                "campaign_id": campaign["id"],
+                "action": "stage",
+                "payload": {
+                    "source_path": str(source),
+                    "source_key": "binding-blade-room",
+                    "title": "Warded Room",
+                },
+                "idempotency_key": "stage",
+            },
+        )
+        job_id = staged["job"]["id"]
+        for action in ("inspect", "validate", "ingest"):
+            await _call(
+                server,
+                "module_import",
+                {
+                    "campaign_id": campaign["id"],
+                    "action": action,
+                    "payload": {"job_id": job_id},
+                    "idempotency_key": action,
+                },
+            )
+        current = await _call(
+            server,
+            "campaign_query",
+            {"view": "get", "payload": {"campaign_id": campaign["id"]}},
+        )
+        await _call(
+            server,
+            "module_import",
+            {
+                "campaign_id": campaign["id"],
+                "action": "activate",
+                "payload": {"job_id": job_id},
+                "expected_revision": current["revision"],
+                "idempotency_key": "activate",
+            },
+        )
+        search = await _call(
+            server,
+            "module_search",
+            {
+                "campaign_id": campaign["id"],
+                "query": "binding blade restrains creature warded room",
+                "top_k": 3,
+            },
+        )
+        expanded = await _call(
+            server,
+            "module_expand",
+            {"chunk_id": search[0]["id"]},
+        )
+        wielder = await _call(
+            server,
+            "character_create",
+            {
+                "campaign_id": campaign["id"],
+                "name": "Blade Wielder",
+                "character_type": "npc",
+                "idempotency_key": "wielder",
+            },
+        )
+        target = await _call(
+            server,
+            "character_create",
+            {
+                "campaign_id": campaign["id"],
+                "name": "Target",
+                "character_type": "monster",
+                "idempotency_key": "target",
+            },
+        )
+        plan_id = "module.binding-blade.on-hit"
+        wielder_sheet = default_character_sheet()
+        wielder_sheet["inventory"]["items"] = [
+            {
+                "id": "binding-blade",
+                "name": "Binding Blade",
+                "kind": "weapon",
+                "equipped": True,
+                "equipped_slot": "main_hand",
+                "description": mechanic_excerpt,
+                "mechanics": {
+                    "attack_type": "melee",
+                    "attack_ability": "strength",
+                    "damage_formula": "1d6",
+                    "damage_type": "slashing",
+                    "on_hit_effect": mechanic_excerpt,
+                    "reach_ft": 5,
+                    "attack_bonus_override": 8,
+                    "always_available": True,
+                },
+                "resolution_plan": {
+                    "schema_version": 1,
+                    "id": plan_id,
+                    "source_card_id": "binding-blade",
+                    "source_card_kind": "item",
+                    "trigger": "attack.after_hit",
+                    "slots": {
+                        "source_actor": {
+                            "kind": "actor_id",
+                            "owner": "agent",
+                            "description": (
+                                "The wielder that made the triggering attack."
+                            ),
+                        },
+                        "target": {
+                            "kind": "actor_id",
+                            "owner": "agent",
+                            "description": (
+                                "The creature hit by the triggering attack."
+                            ),
+                        },
+                    },
+                    "steps": [
+                        {
+                            "id": "targets",
+                            "op": "target.validate",
+                            "args": {
+                                "source_actor_id": {
+                                    "$slot": "source_actor"
+                                },
+                                "target_ids": [{"$slot": "target"}],
+                                "exclude_self": True,
+                                "maximum_range_ft": 5,
+                                "require_visible": True,
+                                "source": "Binding Blade",
+                            },
+                        },
+                        {
+                            "id": "restrain",
+                            "op": "condition.apply",
+                            "args": {
+                                "target_ids": [{"$slot": "target"}],
+                                "condition_id": "restrained",
+                                "source": "Binding Blade",
+                            },
+                        },
+                    ],
+                    "citations": [
+                        {
+                            "source": "module:binding-blade-room",
+                            "source_ref": deepcopy(expanded["source_ref"]),
+                            "source_excerpt": mechanic_excerpt,
+                        }
+                    ],
+                },
+            }
+        ]
+        wielder_sheet["inventory"]["equipment_slots"]["main_hand"] = (
+            "binding-blade"
+        )
+        for actor, sheet, key in (
+            (wielder, wielder_sheet, "wielder-sheet"),
+            (target, default_character_sheet(), "target-sheet"),
+        ):
+            await _call(
+                server,
+                "character_sheet_replace",
+                {
+                    "character_id": actor["id"],
+                    "sheet": sheet,
+                    "expected_revision": actor["revision"],
+                    "idempotency_key": key,
+                },
+            )
+        current = await _call(
+            server,
+            "campaign_query",
+            {"view": "get", "payload": {"campaign_id": campaign["id"]}},
+        )
+        play = await _call(
+            server,
+            "game_phase",
+            {
+                "campaign_id": campaign["id"],
+                "action": "set",
+                "tool_profile": "play",
+                "expected_revision": current["revision"],
+                "idempotency_key": "play",
+            },
+        )
+        started = await _call(
+            server,
+            "combat_start",
+            {
+                "campaign_id": campaign["id"],
+                "participant_ids": [wielder["id"], target["id"]],
+                "participant_config": [
+                    {
+                        "actor_id": wielder["id"],
+                        "initiative": 20,
+                        "position": {"x": 0, "y": 0},
+                        "disposition": "friendly",
+                    },
+                    {
+                        "actor_id": target["id"],
+                        "initiative": 10,
+                        "position": {"x": 1, "y": 0},
+                        "disposition": "hostile",
+                    },
+                ],
+                "scene_id": expanded["scene"]["id"],
+                "battle_map": {
+                    "bounds": {"width_cells": 8, "height_cells": 8}
+                },
+                "ruleset": "2014",
+                "expected_revision": play["campaign_revision"],
+                "idempotency_key": "start",
+            },
+        )
+        attacked = await _raw(
+            server,
+            "combat_resolve_attack",
+            {
+                "campaign_id": campaign["id"],
+                "actor_id": wielder["id"],
+                "target_id": target["id"],
+                "action": {
+                    "weapon_id": "binding-blade",
+                    "attack_mode": "melee",
+                },
+                "expected_revision": started["campaign_revision"],
+                "idempotency_key": "attack",
+            },
+        )
+        semantic = attacked["result"]["semantic_plan"]
+        contract = semantic["contract"]
+        assert attacked["status"] == "pending_ruling"
+        assert semantic["application_id"]
+        assert contract["plan_id"] == plan_id
+        assert "on_hit_ruling" not in attacked["result"]
+        agent_ruling = {
+            "application_id": semantic["application_id"],
+            "default_resolver": "agent",
+            "ruling_kind": "source_or_scene_fact",
+            "decision": "The reviewed blade hit this adjacent target.",
+            "reason": (
+                "The server-recorded attack and current positions satisfy the "
+                "source trigger."
+            ),
+            "source_ref": deepcopy(expanded["source_ref"]),
+            "source_excerpt": encounter_excerpt,
+        }
+        commitment = {
+            "application_id": semantic["application_id"],
+            "plan_id": plan_id,
+            "plan_fingerprint": contract["plan_fingerprint"],
+            "source_card_id": "binding-blade",
+            "source_card_kind": "item",
+            "bindings": {
+                "source_actor": wielder["id"],
+                "target": target["id"],
+            },
+            "agent_ruling": agent_ruling,
+        }
+        settled = await _call(
+            server,
+            "combat_choice",
+            {
+                "campaign_id": campaign["id"],
+                "actor_id": wielder["id"],
+                "action": "execute_plan",
+                "payload": {"commitment": commitment},
+                "expected_revision": attacked["campaign_revision"],
+                "idempotency_key": "settle",
+            },
+        )
+        target_after = await _call(
+            server,
+            "character_get",
+            {"character_id": target["id"]},
+        )
+
+        assert settled["status"] == "committed"
+        assert "restrained" in target_after["sheet"]["conditions"]
+        assert all(
+            item.get("id") != semantic["application_id"]
+            for item in settled["combat"].get("pending", [])
+        )
 
     asyncio.run(exercise())
