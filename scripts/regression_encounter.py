@@ -611,12 +611,13 @@ def _arguments() -> argparse.Namespace:
         type=json.loads,
         default=[],
         help=(
-            "Agent-as-DM settlement for one reviewed descriptive feature/activity "
-            "or hydrated unstructured innate spell: actor_id, exactly one "
-            "feature_id/activity_id/spell_id, round, source_ref, exact "
-            "actor_source_excerpt, exact encounter_source_excerpt, decision, and "
-            "ruling_reason. Innate spells pay their structured daily use and "
-            "concentration first. Optional target_id plus save_ability/save_dc settle "
+            "Agent-as-DM settlement for one reviewed descriptive activity, "
+            "hydrated unstructured spell, or source-cited scene procedure: actor_id, "
+            "exactly one feature_id/activity_id/spell_id/procedure_id, round, "
+            "source_ref, exact card or procedure source excerpt, exact "
+            "encounter_source_excerpt, decision, and ruling_reason. Spells pay their "
+            "structured use and concentration first; scene procedures pay a normal "
+            "improvised action. Optional target_id plus save_ability/save_dc settle "
             "a server-rolled save; success_outcome/failure_outcome record its meaning. "
             "A failed save may include forced_target_id to direct the target's next "
             "attack without inventing a creature-specific rule."
@@ -2642,9 +2643,11 @@ def _agent_turn_rulings(
         "feature_id",
         "activity_id",
         "spell_id",
+        "procedure_id",
         "round",
         "source_ref",
         "actor_source_excerpt",
+        "procedure_source_excerpt",
         "encounter_source_excerpt",
         "decision",
         "ruling_reason",
@@ -2676,9 +2679,13 @@ def _agent_turn_rulings(
         feature_id = str(raw.get("feature_id") or "").strip()
         activity_id = str(raw.get("activity_id") or "").strip()
         spell_id = str(raw.get("spell_id") or "").strip()
+        procedure_id = str(raw.get("procedure_id") or "").strip()
         round_number = int(raw.get("round", 0) or 0)
         source_ref = raw.get("source_ref")
         actor_excerpt = " ".join(str(raw.get("actor_source_excerpt") or "").split())
+        procedure_excerpt = " ".join(
+            str(raw.get("procedure_source_excerpt") or "").split()
+        )
         encounter_excerpt = " ".join(
             str(raw.get("encounter_source_excerpt") or "").split()
         )
@@ -2718,14 +2725,28 @@ def _agent_turn_rulings(
             actor_id not in participant_set
             or round_number <= 0
             or identity in normalized
-            or sum(bool(item) for item in (feature_id, activity_id, spell_id)) != 1
+            or sum(
+                bool(item)
+                for item in (feature_id, activity_id, spell_id, procedure_id)
+            )
+            != 1
             or not isinstance(source_ref, dict)
             or any(
                 not str(source_ref.get(key) or "").strip()
                 for key in ("module_id", "scene_id", "chunk_id", "content_sha256")
             )
             or str(source_ref.get("scene_id")) != scene_id
-            or not actor_excerpt
+            or (not procedure_id and not actor_excerpt)
+            or (
+                bool(procedure_id)
+                and (
+                    not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,127}", procedure_id)
+                    or not procedure_excerpt
+                    or _normalized_source_text(procedure_excerpt)
+                    not in _normalized_source_text(encounter_excerpt)
+                )
+            )
+            or (not procedure_id and bool(procedure_excerpt))
             or not encounter_excerpt
             or _normalized_source_text(encounter_excerpt) not in compact_encounter
             or len(decision) < 10
@@ -2771,9 +2792,10 @@ def _agent_turn_rulings(
             )
         ):
             raise ValueError(
-                f"Agent turn ruling {index} requires one reviewed descriptive card, "
-                "a current-scene source_ref and exact excerpts, concrete Agent "
-                "reasoning, and a complete optional server save contract"
+                f"Agent turn ruling {index} requires one reviewed descriptive card "
+                "or source-cited scene procedure, a current-scene source_ref and "
+                "exact excerpts, concrete Agent reasoning, and a complete optional "
+                "server save contract"
             )
         actor = actors.get(actor_id)
         content = dict(dict(actor or {}).get("sheet") or {}).get("content", {})
@@ -2782,16 +2804,20 @@ def _agent_turn_rulings(
             if feature_id
             else "activities"
             if activity_id
-            else "spells"
+            else "spells" if spell_id else ""
         )
-        card_id = feature_id or activity_id or spell_id
-        card = next(
-            (
-                item
-                for item in dict(content).get(collection_name, [])
-                if isinstance(item, dict) and str(item.get("id") or "") == card_id
-            ),
-            None,
+        card_id = feature_id or activity_id or spell_id or procedure_id
+        card = (
+            next(
+                (
+                    item
+                    for item in dict(content).get(collection_name, [])
+                    if isinstance(item, dict) and str(item.get("id") or "") == card_id
+                ),
+                None,
+            )
+            if collection_name
+            else None
         )
         manual_ruling = dict(
             dict(dict(card or {}).get("choices") or {}).get("manual_ruling") or {}
@@ -2825,8 +2851,20 @@ def _agent_turn_rulings(
                 ),
                 None,
             )
+        spell_definition = dict(dict(card or {}).get("definition") or {})
+        spell_effect = _normalized_source_text(
+            str(
+                spell_definition.get("effect")
+                or dict(card or {}).get("description")
+                or ""
+            )
+        )
+        spell_grant_method = str(
+            dict(dict(card or {}).get("grant") or {}).get("method") or ""
+        )
         invalid_descriptive_card = (
             not spell_id
+            and not procedure_id
             and (
                 manual_ruling.get("kind") != expected_kind
                 or str(manual_ruling.get("default_resolver") or "agent") != "agent"
@@ -2837,34 +2875,40 @@ def _agent_turn_rulings(
         invalid_innate_spell = (
             bool(spell_id)
             and (
-                str(dict(dict(card or {}).get("grant") or {}).get("method") or "")
-                != "innate"
-                or innate_feature is None
+                (spell_grant_method == "innate" and innate_feature is None)
+                or (
+                    spell_grant_method != "innate"
+                    and _normalized_source_text(actor_excerpt) not in spell_effect
+                )
                 or isinstance(dict(card or {}).get("resolution"), dict)
             )
         )
-        if card is None or invalid_descriptive_card or invalid_innate_spell:
+        if (
+            not procedure_id
+            and (card is None or invalid_descriptive_card or invalid_innate_spell)
+        ):
             raise ValueError(
                 f"Agent turn ruling {index} must match a reviewed Agent-owned "
-                "descriptive card or an unstructured innate spell on the actor card"
+                "descriptive card or an unstructured spell on the actor card"
             )
         if feature_id:
             raise ValueError(
                 f"Agent turn ruling {index} cannot activate a descriptive passive "
                 "as a combat action; use its trigger-specific Agent ruling boundary"
             )
+        ruling_source_excerpt = procedure_excerpt or actor_excerpt
         if has_damage:
             ability_pattern = "|".join(
                 re.escape(item) for item in save_ability_labels[save_ability]
             )
             printed_save = re.search(
                 rf"(?i)\bDC\s*{save_dc}\s+(?:{ability_pattern})\s+saving throw\b",
-                actor_excerpt,
+                ruling_source_excerpt,
             )
             printed_half_damage = re.search(
                 r"(?i)\bhalf\s+(?:as\s+much|the)\s+damage\b.*"
                 r"\b(?:successful|success)\b",
-                actor_excerpt,
+                ruling_source_excerpt,
             )
             if printed_save is None or bool(printed_half_damage) != half_on_success:
                 raise ValueError(
@@ -2872,10 +2916,11 @@ def _agent_turn_rulings(
                     "damage must match the reviewed descriptive card"
                 )
         if has_damage and (
-            damage_expression not in "".join(actor_excerpt.split()).casefold()
+            damage_expression
+            not in "".join(ruling_source_excerpt.split()).casefold()
             or re.search(
                 rf"\b{re.escape(damage_type)}\b",
-                actor_excerpt.casefold(),
+                ruling_source_excerpt.casefold(),
             )
             is None
         ):
@@ -2890,9 +2935,11 @@ def _agent_turn_rulings(
                     {
                         "actor_id": actor_id,
                         "card_id": card_id,
+                        "procedure_id": procedure_id,
                         "round": round_number,
                         "source_ref": source_ref,
                         "actor_source_excerpt": actor_excerpt,
+                        "procedure_source_excerpt": procedure_excerpt,
                         "encounter_source_excerpt": encounter_excerpt,
                         "decision": decision,
                         "target_id": target_id,
@@ -2914,13 +2961,22 @@ def _agent_turn_rulings(
             "feature_id": feature_id,
             "activity_id": activity_id,
             "spell_id": spell_id,
-            "innate_payment_economy": (
-                "none"
+            "procedure_id": procedure_id,
+            "spell_payment_economies": (
+                ["none"]
                 if spell_id
-                and bool(dict(dict(card or {}).get("access") or {}).get("at_will"))
-                else "innate_spell"
+                and (
+                    bool(dict(dict(card or {}).get("access") or {}).get("at_will"))
+                    or (
+                        "level" in dict(card or {})
+                        and int(dict(card or {}).get("level", 0) or 0) == 0
+                    )
+                )
+                else ["innate_spell"]
+                if spell_id and spell_grant_method == "innate"
+                else ["slots", "pact_magic"]
                 if spell_id
-                else ""
+                else []
             ),
             "concentration_required": bool(
                 spell_id
@@ -2964,6 +3020,7 @@ def _agent_turn_rulings(
                 "reason": ruling_reason,
                 "source_ref": deepcopy(source_ref),
                 "actor_source_excerpt": actor_excerpt,
+                "procedure_source_excerpt": procedure_excerpt,
                 "encounter_source_excerpt": encounter_excerpt,
             },
         }
@@ -7191,7 +7248,7 @@ async def _settle_agent_turn_ruling(
         if (
             action_result.get("status") != "pending_ruling"
             or action_result.get("default_resolver") != "agent"
-            or payment.get("economy") != ruling["innate_payment_economy"]
+            or payment.get("economy") not in ruling["spell_payment_economies"]
             or bool(
                 dict(action_result.get("result") or {}).get(
                     "concentration_started"
@@ -7214,6 +7271,7 @@ async def _settle_agent_turn_ruling(
                 "payload": {
                     "kind": "agent_dm_adjudication",
                     "feature_id": str(ruling["feature_id"]),
+                    "procedure_id": str(ruling.get("procedure_id") or ""),
                     "application_id": str(ruling["application_id"]),
                     "decision": str(ruling["agent_ruling"]["decision"]),
                 },
