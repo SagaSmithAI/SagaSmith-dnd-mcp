@@ -5796,6 +5796,128 @@ def test_failed_route_is_preserved_when_branching_from_verified_snapshot(
     assert (("lobby.campaign",) in result_client.loads) is (initial_phase == "play")
 
 
+def test_branch_from_snapshot_recovers_after_branch_create_interruption() -> None:
+    class Client:
+        def __init__(self) -> None:
+            self.revision = 30
+            self.loads: list[tuple[str, ...]] = []
+            self.domain_calls: list[str] = []
+
+        async def open(self, campaign_id: str):
+            assert campaign_id == "campaign-1"
+            return {"exposure_id": "exposure"}
+
+        async def load(self, *group_ids: str):
+            self.loads.append(group_ids)
+
+        async def core(self, tool_id: str, arguments: dict):
+            assert tool_id == "campaign_query"
+            return {
+                "result": {
+                    "id": "campaign-1",
+                    "revision": self.revision,
+                    "effective_game_phase": "lobby",
+                    "state": {"game_phase": "lobby"},
+                }
+            }
+
+        async def domain(self, tool_id: str, arguments: dict):
+            self.domain_calls.append(tool_id)
+            if tool_id == "snapshot_query" and arguments["view"] == "list":
+                return [
+                    {
+                        "id": "snapshot-58",
+                        "slot": 58,
+                        "branch_id": "failed-branch",
+                    },
+                    {
+                        "id": "snapshot-60",
+                        "slot": 60,
+                        "branch_id": "failed-branch",
+                    },
+                ]
+            if tool_id == "snapshot_query" and arguments["view"] == "verify":
+                return {"valid": True}
+            if tool_id == "snapshot_query" and arguments["view"] == "core":
+                return {
+                    "core_pack": {"fingerprint": "current"},
+                    "available_core_pack": {"fingerprint": "current"},
+                    "conversion_required": False,
+                }
+            if tool_id == "branch_query":
+                return [
+                    {
+                        "id": "failed-branch",
+                        "name": "failed-route",
+                        "head_snapshot_id": "snapshot-60",
+                        "is_current": False,
+                    },
+                    {
+                        "id": "recovery-branch",
+                        "name": "main-after-klarg-defeat",
+                        "base_snapshot_id": "snapshot-58",
+                        "head_snapshot_id": "snapshot-58",
+                        "is_current": True,
+                    },
+                ]
+            if tool_id == "state_revision":
+                assert arguments["action"] == "receipt"
+                return {
+                    "response": {
+                        "id": "recovery-branch",
+                        "name": "main-after-klarg-defeat",
+                        "base_snapshot_id": "snapshot-58",
+                        "head_snapshot_id": "snapshot-58",
+                        "is_current": True,
+                    }
+                }
+            if tool_id == "playthrough_manifest" and arguments["action"] == "sync":
+                self.revision += 1
+                return {
+                    "manifest": {"status": "in_progress"},
+                    "campaign_revision": self.revision,
+                }
+            if tool_id == "snapshot_create":
+                assert arguments["expected_head_snapshot_id"] == "snapshot-58"
+                return {
+                    "id": "snapshot-61",
+                    "slot": 61,
+                    "branch_id": "recovery-branch",
+                }
+            if tool_id == "playthrough_manifest" and arguments["action"] == "get":
+                return {"manifest": {"status": "in_progress"}}
+            if tool_id == "branch_change":
+                raise AssertionError("committed branch creation must not be repeated")
+            raise AssertionError((tool_id, arguments))
+
+    client = Client()
+    result = asyncio.run(
+        _branch_from_snapshot(
+            client,
+            campaign_id="campaign-1",
+            run_id="run-1",
+            initial_phase="lobby",
+            snapshot_slot=58,
+            branch_name="main-after-klarg-defeat",
+            checkpoint_label="Continue from pre-combat state",
+        )
+    )
+
+    assert result["recovered_after_branch_create_interruption"] is True
+    assert result["source_branch"]["id"] == "failed-branch"
+    assert result["source_checkpoint"] == {
+        "snapshot": {
+            "id": "snapshot-60",
+            "slot": 60,
+            "branch_id": "failed-branch",
+        },
+        "recovered_existing": True,
+    }
+    assert result["checkpoint"]["snapshot"]["id"] == "snapshot-61"
+    assert "branch_change" not in client.domain_calls
+    assert ("lobby.campaign",) in client.loads
+
+
 @pytest.mark.parametrize("defer_checkpoint", [False, True])
 @pytest.mark.parametrize("cross_scene", [False, True])
 def test_source_cited_check_persists_result_and_explicit_knowledge(

@@ -3071,6 +3071,84 @@ async def _branch_from_snapshot(
     source_branch = next((item for item in branches if item.get("is_current")), None)
     if source_branch is None:
         raise RuntimeError("campaign has no current branch")
+    branch_identity = f"{snapshot_slot}:{branch_name.strip()}"
+    branch_key = _mutation_key(run_id, "branch-from-snapshot", branch_identity)
+    if (
+        str(source_branch.get("name") or "") == branch_name.strip()
+        and str(source_branch.get("base_snapshot_id") or "") == str(target["id"])
+    ):
+        receipt = await client.domain(
+            "state_revision",
+            {
+                "campaign_id": campaign_id,
+                "action": "receipt",
+                "payload": {"idempotency_key": branch_key},
+            },
+        )
+        recovered_branch = dict(receipt.get("response") or {})
+        if (
+            str(recovered_branch.get("id") or "") != str(source_branch["id"])
+            or str(recovered_branch.get("name") or "") != branch_name.strip()
+            or str(recovered_branch.get("base_snapshot_id") or "")
+            != str(target["id"])
+            or not bool(recovered_branch.get("is_current"))
+        ):
+            raise RuntimeError(
+                "branch-from-snapshot recovery receipt does not match the "
+                "current restored branch"
+            )
+        original_source_branch = next(
+            (
+                item
+                for item in branches
+                if str(item.get("id") or "") == str(target.get("branch_id") or "")
+            ),
+            None,
+        )
+        restored_campaign = await _campaign(client, campaign_id)
+        restored_phase = _campaign_phase(restored_campaign)
+        await client.open(campaign_id)
+        await client.load(*_phase_groups(restored_phase))
+        checkpoint = await _checkpoint(
+            client,
+            campaign_id=campaign_id,
+            run_id=run_id,
+            label=(
+                checkpoint_label.strip()
+                or f"Branch {branch_name.strip()} restored from snapshot slot {snapshot_slot}"
+            ),
+            checkpoint_id=f"branch-restored:{snapshot_slot}:{branch_name.strip()}",
+        )
+        source_head_snapshot = next(
+            (
+                item
+                for item in snapshots
+                if original_source_branch is not None
+                and str(item.get("id") or "")
+                == str(original_source_branch.get("head_snapshot_id") or "")
+            ),
+            None,
+        )
+        return {
+            "source_branch": original_source_branch,
+            "source_head_snapshot_id": (
+                original_source_branch.get("head_snapshot_id")
+                if original_source_branch is not None
+                else None
+            ),
+            "source_checkpoint": {
+                "snapshot": source_head_snapshot,
+                "recovered_existing": True,
+            },
+            "target_snapshot": target,
+            "target_verification": verification,
+            "target_core_lock": core_lock,
+            "created_branch": recovered_branch,
+            "phase_changes": [],
+            "restored_phase": restored_phase,
+            "checkpoint": checkpoint,
+            "recovered_after_branch_create_interruption": True,
+        }
     phase_changes = []
     campaign = await _campaign(client, campaign_id)
     if initial_phase not in {"lobby", "combat"}:
@@ -3135,7 +3213,7 @@ async def _branch_from_snapshot(
             "expected_revision": campaign["revision"],
             "expected_branch_id": str(source_branch["id"]),
             "idempotency_key": _mutation_key(
-                run_id, "branch-from-snapshot", f"{snapshot_slot}:{branch_name.strip()}"
+                run_id, "branch-from-snapshot", branch_identity
             ),
         },
     )
