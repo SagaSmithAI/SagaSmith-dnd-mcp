@@ -111,6 +111,9 @@ def _gazer_sheet() -> dict:
     sheet["content"]["activities"][0]["choices"] = {
         "random_save_effects": reviewed
     }
+    sheet["content"]["activities"][0]["mechanic_refs"] = [
+        "dnd5e.core.activity.random_save_effects"
+    ]
     component_ids = {
         str(item["source_activity_id"]) for item in reviewed["effects"]
     }

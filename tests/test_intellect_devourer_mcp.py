@@ -124,6 +124,9 @@ def _devourer_sheet() -> dict:
             "name": "Devour Intellect",
             "description": source_excerpt,
             "activation": {"type": "action"},
+            "mechanic_refs": [
+                "dnd5e.core.activity.source_save_effect"
+            ],
             "choices": {
                 "source_save_effect": {
                     "kind": "intellect_devourer_devour_intellect_2014",
@@ -152,6 +155,9 @@ def _devourer_sheet() -> dict:
             "name": "Body Thief",
             "description": body_thief_excerpt,
             "activation": {"type": "action"},
+            "mechanic_refs": [
+                "dnd5e.core.activity.source_contest_effect"
+            ],
             "choices": {
                 "source_contest_effect": {
                     "kind": "intellect_devourer_body_thief_2014",

@@ -191,26 +191,6 @@ def test_agent_save_damage_requires_one_paid_immutable_action_and_replays(
         )
         dragon_sheet = default_character_sheet()
         dragon_sheet["combat"]["hp"] = {"value": 100, "max": 100, "temp": 0}
-        dragon_sheet["content"]["activities"] = [
-            {
-                "id": "poison-breath",
-                "name": "Poison Breath",
-                "description": mechanic_excerpt,
-                "activation": {"type": "action", "cost": 1},
-                "uses": {
-                    "value": 0,
-                    "max": 0,
-                    "unlimited": True,
-                },
-                "choices": {
-                    "manual_ruling": {
-                        "kind": "descriptive_activity",
-                        "default_resolver": "agent",
-                        "source_excerpt": mechanic_excerpt,
-                    },
-                },
-            }
-        ]
         dragon = await _call(
             server,
             "character_sheet_replace",
@@ -300,8 +280,8 @@ def test_agent_save_damage_requires_one_paid_immutable_action_and_replays(
         payload = {
             "target_ids": [agile["id"], clumsy["id"]],
             "source_actor_id": dragon["id"],
-            "source_card_id": "poison-breath",
-            "source_card_kind": "activity",
+            "source_card_id": "scene-poison-cloud",
+            "source_card_kind": "scene_procedure",
             "save_ability": "constitution",
             "save_dc": 18,
             "save_advantage": False,
@@ -354,8 +334,8 @@ def test_agent_save_damage_requires_one_paid_immutable_action_and_replays(
             )
         commitment = {
             "application_id": agent_ruling["application_id"],
-            "source_card_id": "poison-breath",
-            "source_card_kind": "activity",
+            "source_card_id": "scene-poison-cloud",
+            "source_card_kind": "scene_procedure",
             "target_ids": [agile["id"], clumsy["id"]],
             "save_ability": "constitution",
             "save_dc": 18,
@@ -369,19 +349,20 @@ def test_agent_save_damage_requires_one_paid_immutable_action_and_replays(
         }
         paid = await _raw(
             server,
-            "combat_use_activity",
+            "combat_common_action",
             {
                 "campaign_id": campaign["id"],
                 "actor_id": dragon["id"],
-                "activity_id": "poison-breath",
-                "declaration": {
+                "action": "improvise",
+                "payload": {
+                    "procedure_id": "scene-poison-cloud",
                     "agent_ruling_commitment": commitment,
                 },
                 "expected_revision": started["campaign_revision"],
                 "idempotency_key": "pay",
             },
         )
-        assert paid["status"] == "pending_ruling"
+        assert paid["status"] == "committed"
         with pytest.raises(Exception, match="exact current-turn.*commitment"):
             await _call(
                 server,

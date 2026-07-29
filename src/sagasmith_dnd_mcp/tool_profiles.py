@@ -160,6 +160,7 @@ TOOL_GROUPS = (
         "rule_search",
         "rule_expand",
         "campaign_rules",
+        "content_solution",
         roles=CAMPAIGN_DM_ROLE_ORDER,
     ),
     _group(
@@ -238,6 +239,7 @@ TOOL_GROUPS = (
         "state_revision",
         "campaign_rules",
         "playthrough_manifest",
+        "content_solution",
         roles=CAMPAIGN_DM_ROLE_ORDER,
     ),
     _group(
@@ -319,6 +321,7 @@ TOOL_GROUPS = (
         "write",
         "combat_join",
         "combat_end",
+        "content_solution",
         roles=CAMPAIGN_DM_ROLE_ORDER,
     ),
     _group(

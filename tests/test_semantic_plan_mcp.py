@@ -239,6 +239,12 @@ def test_custom_monster_plan_pays_executes_replays_and_rejects_mutation(
                 },
             }
         ]
+        first_use_activity_plan = beast_sheet["content"]["activities"][0].pop(
+            "resolution_plan"
+        )
+        first_use_activity_plan["schema_version"] = 2
+        first_use_activity_plan["trigger_filter"] = {}
+        beast_sheet["content"]["activities"][0].pop("choices")
         spell_plan_id = "module.prism-chamber.chromatic-spark"
         beast_sheet["content"]["spells"] = [
             {
@@ -328,6 +334,11 @@ def test_custom_monster_plan_pays_executes_replays_and_rejects_mutation(
                 },
             }
         ]
+        first_use_spell_plan = beast_sheet["content"]["spells"][0].pop(
+            "resolution_plan"
+        )
+        first_use_spell_plan["schema_version"] = 2
+        first_use_spell_plan["trigger_filter"] = {}
         beast = await _call(
             server,
             "character_sheet_replace",
@@ -409,6 +420,55 @@ def test_custom_monster_plan_pays_executes_replays_and_rejects_mutation(
                 "idempotency_key": "start",
             },
         )
+        needs_compilation = await _raw(
+            server,
+            "combat_use_activity",
+            {
+                "campaign_id": campaign["id"],
+                "actor_id": beast["id"],
+                "activity_id": "prismatic-pulse",
+                "expected_revision": started["campaign_revision"],
+                "idempotency_key": "needs-compilation",
+            },
+        )
+        assert needs_compilation["result"]["payment_required"] is False
+        assert needs_compilation["result"]["semantic_solution"] == {
+            "status": "compilation_required",
+            "source_card_id": "prismatic-pulse",
+            "source_card_kind": "monster_action",
+            "required_action": "content_solution(compile)",
+            "character_revision": beast["revision"],
+        }
+        compiled_activity = await _call(
+            server,
+            "content_solution",
+            {
+                "campaign_id": campaign["id"],
+                "actor_id": beast["id"],
+                "action": "compile",
+                "source_card_id": "prismatic-pulse",
+                "source_card_kind": "monster_action",
+                "payload": {
+                    "resolution_plan": first_use_activity_plan,
+                    "agent_ruling": {
+                        "default_resolver": "agent",
+                        "ruling_kind": "module_specific_procedure",
+                        "decision": (
+                            "Store the quoted pulse as this monster action's "
+                            "reusable solution."
+                        ),
+                        "reason": (
+                            "The exact module clause defines its save, damage, "
+                            "and success treatment."
+                        ),
+                    },
+                },
+                "expected_revision": beast["revision"],
+                "idempotency_key": "compile-pulse",
+            },
+        )
+        beast = compiled_activity["character"]
+        assert compiled_activity["solution"]["source_card_fingerprint"]
         pending = await _raw(
             server,
             "combat_use_activity",
@@ -574,6 +634,55 @@ def test_custom_monster_plan_pays_executes_replays_and_rejects_mutation(
                 },
             )
             revision = ended["campaign_revision"]
+        spell_needs_compilation = await _raw(
+            server,
+            "combat_cast_spell",
+            {
+                "campaign_id": campaign["id"],
+                "actor_id": beast["id"],
+                "spell_id": "chromatic-spark",
+                "expected_revision": revision,
+                "idempotency_key": "spell-needs-compilation",
+            },
+        )
+        assert spell_needs_compilation["result"]["payment_required"] is False
+        assert spell_needs_compilation["result"]["semantic_solution"][
+            "status"
+        ] == "compilation_required"
+        beast_before_spell = await _call(
+            server,
+            "character_get",
+            {"character_id": beast["id"]},
+        )
+        compiled_spell = await _call(
+            server,
+            "content_solution",
+            {
+                "campaign_id": campaign["id"],
+                "actor_id": beast["id"],
+                "action": "compile",
+                "source_card_id": "chromatic-spark",
+                "source_card_kind": "spell",
+                "payload": {
+                    "resolution_plan": first_use_spell_plan,
+                    "agent_ruling": {
+                        "default_resolver": "agent",
+                        "ruling_kind": "generic_spell_effect",
+                        "decision": (
+                            "Store the quoted Chromatic Spark effect as its "
+                            "reusable solution."
+                        ),
+                        "reason": (
+                            "The exact module text defines its damage and "
+                            "condition duration."
+                        ),
+                    },
+                },
+                "expected_revision": beast_before_spell["revision"],
+                "idempotency_key": "compile-spell",
+            },
+        )
+        assert compiled_spell["solution"]["source_card_fingerprint"]
         spell_pending = await _raw(
             server,
             "combat_cast_spell",
@@ -697,6 +806,178 @@ def test_custom_monster_plan_pays_executes_replays_and_rejects_mutation(
     asyncio.run(exercise())
 
 
+def test_content_solution_accepts_only_exact_active_rule_chunk_evidence(
+    tmp_path: Path,
+) -> None:
+    import_root = tmp_path / "rules"
+    import_root.mkdir()
+    effect = (
+        "Moon Ribbon marks one creature until the start of the caster's next turn."
+    )
+    source = import_root / "moon-lore.md"
+    source.write_text(
+        f"# Moon Lore\n\n## Moon Ribbon\n\n{effect}\n",
+        encoding="utf-8",
+    )
+    config = McpConfig(
+        home=tmp_path / "home",
+        database_url=None,
+        chroma_url=None,
+        chroma_path_override=None,
+        dnd_skills_dir=tmp_path / "dnd",
+        modulegen_skills_dir=tmp_path / "modulegen",
+        rule_import_roots=(import_root,),
+        auto_seed_rules=False,
+    )
+
+    async def exercise() -> None:
+        server = create_server(config)
+        campaign = await _call(
+            server,
+            "campaign_create",
+            {
+                "name": "Rule evidence compilation",
+                "edition": "2014",
+                "idempotency_key": "campaign",
+            },
+        )
+        staged = await _call(
+            server,
+            "rule_document_stage",
+            {
+                "campaign_id": campaign["id"],
+                "source_path": str(source),
+            },
+        )
+        await _call(
+            server,
+            "rule_document_import",
+            {
+                "campaign_id": campaign["id"],
+                "artifact": staged["artifact"],
+                "source_key": "moon-lore",
+                "title": "Moon Lore",
+                "edition": "2014",
+                "idempotency_key": "import",
+            },
+        )
+        hits = await _call(
+            server,
+            "rule_search",
+            {
+                "query": "Moon Ribbon marks one creature",
+                "edition": "2014",
+                "top_k": 1,
+            },
+        )
+        chunk_id = hits[0]["id"]
+        sheet = default_character_sheet()
+        sheet["content"]["features"] = [
+            {
+                "id": "moon-ribbon-feature",
+                "name": "Moon Ribbon",
+                "description": effect,
+                "activation": {"type": "special", "cost": 0},
+            },
+            {
+                "id": "dnd5e.content.srd2014.feature.fighter-action-surge",
+                "name": "Action Surge",
+                "description": "Take one additional action on your turn.",
+                "activation": {"type": "special", "cost": 0},
+            },
+        ]
+        actor = await _call(
+            server,
+            "character_create",
+            {
+                "campaign_id": campaign["id"],
+                "name": "Moon Keeper",
+                "sheet": sheet,
+                "idempotency_key": "actor",
+            },
+        )
+        plan = {
+            "schema_version": 2,
+            "id": "custom.moon-ribbon.mark",
+            "source_card_id": "moon-ribbon-feature",
+            "source_card_kind": "feature",
+            "trigger": "scene",
+            "trigger_filter": {},
+            "slots": {
+                "target": {
+                    "kind": "actor_id",
+                    "owner": "agent",
+                    "description": "The creature selected by the caster.",
+                }
+            },
+            "steps": [
+                {
+                    "id": "mark",
+                    "op": "condition.apply",
+                    "args": {
+                        "target_ids": [{"$slot": "target"}],
+                        "condition_id": "marked",
+                        "source": "Moon Ribbon",
+                    },
+                }
+            ],
+            "citations": [
+                {
+                    "source": "rule-source:not-moon-lore",
+                    "source_ref": {"chunk_id": chunk_id},
+                    "source_excerpt": effect,
+                }
+            ],
+        }
+        arguments = {
+            "campaign_id": campaign["id"],
+            "actor_id": actor["id"],
+            "action": "compile",
+            "source_card_id": "moon-ribbon-feature",
+            "source_card_kind": "feature",
+            "payload": {
+                "resolution_plan": plan,
+                "agent_ruling": {
+                    "default_resolver": "agent",
+                    "ruling_kind": "module_specific_procedure",
+                    "decision": "Store the exact Moon Ribbon procedure.",
+                    "reason": "The active rule chunk supplies the source wording.",
+                },
+            },
+            "expected_revision": actor["revision"],
+            "idempotency_key": "compile",
+        }
+        standard_arguments = deepcopy(arguments)
+        standard_arguments.update(
+            {
+                "source_card_id": (
+                    "dnd5e.content.srd2014.feature.fighter-action-surge"
+                ),
+                "idempotency_key": "reject-standard",
+            }
+        )
+        with pytest.raises(Exception, match="locked engine implementation"):
+            await _call(server, "content_solution", standard_arguments)
+        with pytest.raises(
+            Exception,
+            match="does not match the active campaign rules",
+        ):
+            await _call(server, "content_solution", arguments)
+
+        plan["citations"][0]["source"] = "rule-source:moon-lore"
+        compiled = await _call(
+            server,
+            "content_solution",
+            arguments,
+        )
+
+        assert compiled["status"] == "compiled"
+        assert compiled["solution"]["source_fingerprint"]
+        assert compiled["solution"]["source_card_fingerprint"]
+
+    asyncio.run(exercise())
+
+
 def test_item_on_hit_plan_uses_the_attack_event_as_payment(
     tmp_path: Path,
     monkeypatch,
@@ -707,10 +988,13 @@ def test_item_on_hit_plan_uses_the_attack_event_as_payment(
         "The binding blade restrains the creature it strikes in the warded room."
     )
     mechanic_excerpt = "On a hit, the binding blade restrains the target."
+    feature_excerpt = (
+        "The ward lore can mark a creature chosen by the blade's keeper."
+    )
     source = module_root / "binding-blade.md"
     source.write_text(
         "# Warded Room\n\n## Encounter\n\n"
-        f"{encounter_excerpt}\n\n{mechanic_excerpt}\n",
+        f"{encounter_excerpt}\n\n{mechanic_excerpt}\n\n{feature_excerpt}\n",
         encoding="utf-8",
     )
     config = McpConfig(
@@ -915,6 +1199,14 @@ def test_item_on_hit_plan_uses_the_attack_event_as_payment(
         first_use_plan = wielder_sheet["inventory"]["items"][0].pop(
             "resolution_plan"
         )
+        wielder_sheet["content"]["features"] = [
+            {
+                "id": "ward-lore",
+                "name": "Ward Lore",
+                "description": feature_excerpt,
+                "activation": {"type": "special", "cost": 0},
+            }
+        ]
         target_sheet = default_character_sheet()
         target_sheet["combat"]["hp"] = {
             "value": 50,
@@ -935,6 +1227,90 @@ def test_item_on_hit_plan_uses_the_attack_event_as_payment(
                     "idempotency_key": key,
                 },
             )
+        wielder_current = await _call(
+            server,
+            "character_get",
+            {"character_id": wielder["id"]},
+        )
+        feature_plan = {
+            "schema_version": 2,
+            "id": "module.ward-lore.mark",
+            "source_card_id": "ward-lore",
+            "source_card_kind": "feature",
+            "trigger": "scene",
+            "trigger_filter": {},
+            "slots": {
+                "target": {
+                    "kind": "actor_id",
+                    "owner": "agent",
+                    "description": "The creature chosen by the keeper.",
+                }
+            },
+            "steps": [
+                {
+                    "id": "mark",
+                    "op": "condition.apply",
+                    "args": {
+                        "target_ids": [{"$slot": "target"}],
+                        "condition_id": "marked",
+                        "source": "Ward Lore",
+                    },
+                }
+            ],
+            "citations": [
+                {
+                    "source": "module:binding-blade-room",
+                    "source_ref": deepcopy(expanded["source_ref"]),
+                    "source_excerpt": feature_excerpt,
+                }
+            ],
+        }
+        feature_compile_arguments = {
+            "campaign_id": campaign["id"],
+            "actor_id": wielder["id"],
+            "action": "compile",
+            "source_card_id": "ward-lore",
+            "source_card_kind": "feature",
+            "payload": {
+                "resolution_plan": feature_plan,
+                "agent_ruling": {
+                    "default_resolver": "agent",
+                    "ruling_kind": "module_specific_procedure",
+                    "decision": (
+                        "Store the quoted mark as a reusable feature solution."
+                    ),
+                    "reason": (
+                        "The exact feature text identifies the chosen creature."
+                    ),
+                },
+            },
+            "expected_revision": wielder_current["revision"],
+            "idempotency_key": "compile-feature",
+        }
+        feature_compiled = await _call(
+            server,
+            "content_solution",
+            feature_compile_arguments,
+        )
+        assert feature_compiled["status"] == "compiled"
+        assert await _call(
+            server,
+            "content_solution",
+            feature_compile_arguments,
+        ) == feature_compiled
+        feature_query = await _call(
+            server,
+            "content_solution",
+            {
+                "campaign_id": campaign["id"],
+                "actor_id": wielder["id"],
+                "action": "query",
+                "source_card_id": "ward-lore",
+                "source_card_kind": "feature",
+            },
+        )
+        assert feature_query["status"] == "compiled"
+        assert feature_query["resolution_solution"]["plan_fingerprint"]
         current = await _call(
             server,
             "campaign_query",
@@ -1130,6 +1506,7 @@ def test_item_on_hit_plan_uses_the_attack_event_as_payment(
         assert stored_item["resolution_solution"]["plan_fingerprint"] == (
             contract["plan_fingerprint"]
         )
+        assert stored_item["resolution_solution"]["source_card_fingerprint"]
         assert all(
             item.get("id") != semantic["application_id"]
             for item in settled["combat"].get("pending", [])

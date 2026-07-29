@@ -372,6 +372,35 @@ from sagasmith_dnd_mcp.tool_profiles import (
 )
 
 CORE_GRAPPLE_ESCAPE_CHECKS = frozenset({"athletics", "acrobatics"})
+ENGINE_OWNED_STANDARD_ACTIVITY_IDS = frozenset(
+    {
+        "dnd5e.content.srd2014.feature.cleric-channel-divinity",
+        "dnd5e.content.srd2014.feature.fighter-action-surge",
+        "dnd5e.content.srd2014.feature.fighter-second-wind",
+        "dnd5e.content.srd2014.feature.life-domain-channel-divinity-preserve-life",
+        "dnd5e.content.srd2014.feature.rogue-cunning-action",
+    }
+)
+ENGINE_SETTLED_CARD_MECHANIC_IDS = frozenset(
+    {
+        "dnd5e.core.action.multiattack_choice",
+        "dnd5e.core.activity.action_surge",
+        "dnd5e.core.activity.cunning_action",
+        "dnd5e.core.activity.preserve_life",
+        "dnd5e.core.activity.random_save_effects",
+        "dnd5e.core.activity.second_wind",
+        "dnd5e.core.activity.source_contest_effect",
+        "dnd5e.core.activity.source_save_effect",
+        "dnd5e.core.activity.turn_undead",
+        "dnd5e.core.item.healing_potion",
+        "dnd5e.core.magic_ammunition.slaying",
+        "dnd5e.core.spell.mage_armor",
+        "dnd5e.core.spell.magic_missile",
+        "dnd5e.core.spell.raise_dead",
+        "dnd5e.core.spell.shield",
+        "dnd5e.core.spell.structured_resolution",
+    }
+)
 
 
 def reviewed_on_hit_escape_checks(
@@ -3067,14 +3096,137 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             )
         return card, compiled
 
-    def validate_first_use_item_plan(
+    def character_activity_source_card(
+        sheet: dict[str, Any],
+        activity_id: str,
+        *,
+        character_type: str,
+    ) -> tuple[dict[str, Any], str]:
+        """Resolve an activatable card across every canonical sheet section."""
+
+        matches: list[tuple[dict[str, Any], str]] = []
+        content = dict(sheet.get("content") or {})
+        for item in content.get("activities", []):
+            if isinstance(item, dict) and str(item.get("id") or "") == activity_id:
+                matches.append(
+                    (
+                        item,
+                        (
+                            "monster_action"
+                            if character_type in NON_PLAYER_CHARACTER_TYPES
+                            else "activity"
+                        ),
+                    )
+                )
+        for section in ("features", "feats"):
+            for item in content.get(section, []):
+                if isinstance(item, dict) and str(item.get("id") or "") == activity_id:
+                    matches.append((item, "feature"))
+        if len(matches) != 1:
+            raise CombatEngineError(
+                "activity source card must resolve exactly once across "
+                "activities, features, and feats"
+            )
+        card, source_card_kind = matches[0]
+        return deepcopy(card), source_card_kind
+
+    def source_card_evidence_texts(source_card: dict[str, Any]) -> tuple[str, ...]:
+        """Collect normalized original wording without treating it as executable."""
+
+        values: list[str] = []
+
+        def collect(value: Any, key: str = "") -> None:
+            if isinstance(value, dict):
+                for child_key, child in value.items():
+                    if child_key in {
+                        "resolution_plan",
+                        "resolution_solution",
+                    }:
+                        continue
+                    collect(child, child_key)
+                return
+            if isinstance(value, list):
+                for child in value:
+                    collect(child, key)
+                return
+            if key in {
+                "description",
+                "effect",
+                "on_hit_effect",
+                "source_excerpt",
+                "text",
+            }:
+                normalized = _normalize_source_evidence_text(value)
+                if len(normalized) >= 10:
+                    values.append(normalized)
+
+        collect(source_card)
+        return tuple(dict.fromkeys(values))
+
+    def source_card_has_executable_mechanic(
+        campaign_id: str,
+        source_card: dict[str, Any],
+    ) -> bool:
+        """Accept only mechanic ids present in the campaign's exact rule lock."""
+
+        mechanic_refs = {
+            str(item)
+            for item in source_card.get("mechanic_refs", [])
+            if str(item)
+        }
+        if (
+            str(source_card.get("id") or "")
+            in ENGINE_OWNED_STANDARD_ACTIVITY_IDS
+        ):
+            return True
+        if not mechanic_refs:
+            return False
+        context = effective_rule_context(campaign_id)
+        executable = {
+            *(boundary.id for boundary in context.core_pack.boundaries),
+            *(mechanic.id for mechanic in context.mechanics),
+        }
+        registered = mechanic_refs & executable
+        return any(
+            not mechanic_ref.startswith("dnd5e.core.")
+            or mechanic_ref in ENGINE_SETTLED_CARD_MECHANIC_IDS
+            for mechanic_ref in registered
+        )
+
+    def unresolved_content_solution(
+        source_card: dict[str, Any],
+        *,
+        source_card_id: str,
+        source_card_kind: str,
+        character_revision: int,
+    ) -> dict[str, Any]:
+        """Route standard gaps to engine work and custom gaps to Agent compilation."""
+
+        if str(source_card.get("pack_id") or "") == CORE_CONTENT_PACK_ID:
+            return {
+                "status": "engine_implementation_required",
+                "source_card_id": source_card_id,
+                "source_card_kind": source_card_kind,
+                "required_action": "implement_standard_mechanic",
+                "character_revision": character_revision,
+            }
+        return {
+            "status": "compilation_required",
+            "source_card_id": source_card_id,
+            "source_card_kind": source_card_kind,
+            "required_action": "content_solution(compile)",
+            "character_revision": character_revision,
+        }
+
+    def validate_first_use_content_plan(
         campaign_id: str,
         raw_plan: Any,
         *,
-        source_actor_id: str,
         source_card: dict[str, Any],
+        source_card_id: str,
+        source_card_kind: str,
     ) -> Any:
-        """Compile one reusable custom item recipe against exact module evidence."""
+        """Compile one reusable custom recipe against exact managed evidence."""
 
         try:
             compiled = compile_resolution_plan(raw_plan)
@@ -3082,16 +3234,114 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             raise CombatEngineError(
                 f"first-use resolution plan is invalid: {error}"
             ) from error
-        source_card_id = str(source_card.get("id") or "")
         if (
             compiled.schema_version != 2
             or compiled.source_card_id != source_card_id
-            or compiled.source_card_kind != "item"
-            or compiled.trigger != "attack.after_hit"
+            or compiled.source_card_kind != source_card_kind
         ):
             raise CombatEngineError(
-                "first-use item solutions require a schema v2 item "
-                "attack.after_hit plan for the exact source card"
+                "first-use solutions require a schema v2 plan for the exact "
+                "source card"
+            )
+        evidence_texts = source_card_evidence_texts(source_card)
+        if not evidence_texts:
+            raise CombatEngineError(
+                "first-use solution requires recorded original effect text"
+            )
+        relevant_citation = False
+        for index, citation in enumerate(compiled.citations):
+            source_ref = citation["source_ref"]
+            try:
+                if set(source_ref) == {"chunk_id"}:
+                    chunk_id = str(source_ref["chunk_id"] or "")
+                    canonical_citation = rules.citation(chunk_id)
+                    expanded = rules.expand(chunk_id)
+                    rule_source = rules.source(
+                        str(dict(expanded.get("source") or {}).get("id") or "")
+                    )
+                    if (
+                        citation["source"] != canonical_citation["source"]
+                        or str(rule_source.get("system_id") or "") != DND5E.id
+                        or str(rule_source.get("edition") or "")
+                        != campaign_rules_edition(campaign_id)
+                        or rule_source.get("active") is not True
+                    ):
+                        raise ValueError(
+                            "resolution plan rule citation does not match "
+                            "the active campaign rules"
+                        )
+                    excerpt = clean_source_evidence_text(
+                        citation["source_excerpt"]
+                    )
+                    chunk_content = _normalize_source_evidence_text(
+                        dict(expanded.get("chunk") or {}).get("content")
+                    )
+                    if (
+                        not 10 <= len(excerpt) <= 4000
+                        or excerpt.casefold() not in chunk_content
+                    ):
+                        raise ValueError(
+                            "resolution plan source_excerpt is not present "
+                            "in its cited rule chunk"
+                        )
+                elif MANAGED_MODULE_SOURCE_FIELDS & set(source_ref):
+                    _normalized, _source, expanded = managed_module_source_ref(
+                        campaign_id,
+                        source_ref,
+                        require_exact=True,
+                        require_active_module=True,
+                    )
+                    assert expanded is not None
+                    excerpt = managed_module_source_excerpt(
+                        expanded,
+                        citation["source_excerpt"],
+                        field=(
+                            f"resolution_plan.citations[{index}]."
+                            "source_excerpt"
+                        ),
+                        minimum_length=10,
+                        maximum_length=4000,
+                    )
+                else:
+                    raise ValueError(
+                        "resolution plan citation must identify one exact "
+                        "module or rule chunk"
+                    )
+            except (LookupError, ValueError) as error:
+                raise CombatEngineError(str(error)) from error
+            normalized_excerpt = _normalize_source_evidence_text(excerpt)
+            if any(
+                normalized_excerpt in evidence
+                or evidence in normalized_excerpt
+                for evidence in evidence_texts
+            ):
+                relevant_citation = True
+        if not relevant_citation:
+            raise CombatEngineError(
+                "first-use resolution plan must cite the exact recorded card effect"
+            )
+        return compiled
+
+    def validate_first_use_item_plan(
+        campaign_id: str,
+        raw_plan: Any,
+        *,
+        source_actor_id: str,
+        source_card: dict[str, Any],
+    ) -> Any:
+        """Compile a reusable on-hit item recipe and lock its payment filter."""
+
+        source_card_id = str(source_card.get("id") or "")
+        compiled = validate_first_use_content_plan(
+            campaign_id,
+            raw_plan,
+            source_card=source_card,
+            source_card_id=source_card_id,
+            source_card_kind="item",
+        )
+        if compiled.trigger != "attack.after_hit":
+            raise CombatEngineError(
+                "first-use item solutions require attack.after_hit"
             )
         trigger_filter = compiled.trigger_filter
         source_actor_filter = trigger_filter.get("source_actor_id")
@@ -3127,62 +3377,55 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 raise CombatEngineError(
                     "first-use item trigger actors require Agent-owned actor_id slots"
                 )
-        effect = _normalize_source_evidence_text(
-            dict(source_card.get("mechanics") or {}).get("on_hit_effect")
-            or source_card.get("description")
-        )
-        if not effect:
-            raise CombatEngineError(
-                "first-use item solution requires recorded source effect text"
-            )
-        relevant_citation = False
-        for index, citation in enumerate(compiled.citations):
-            try:
-                _normalized, _source, expanded = managed_module_source_ref(
-                    campaign_id,
-                    citation["source_ref"],
-                    require_exact=True,
-                    require_active_module=True,
-                )
-                assert expanded is not None
-                excerpt = managed_module_source_excerpt(
-                    expanded,
-                    citation["source_excerpt"],
-                    field=f"resolution_plan.citations[{index}].source_excerpt",
-                    minimum_length=10,
-                    maximum_length=4000,
-                )
-            except (LookupError, ValueError) as error:
-                raise CombatEngineError(str(error)) from error
-            normalized_excerpt = _normalize_source_evidence_text(excerpt)
-            if normalized_excerpt in effect or effect in normalized_excerpt:
-                relevant_citation = True
-        if not relevant_citation:
-            raise CombatEngineError(
-                "first-use resolution plan must cite the exact recorded item effect"
-            )
         require_campaign_actor(campaign_id, source_actor_id)
         return compiled
 
-    def sheet_with_item_solution(
+    def sheet_with_content_solution(
         sheet: dict[str, Any],
         *,
         source_card_id: str,
+        source_card_kind: str,
         compiled_plan: Any,
         solution: dict[str, Any],
     ) -> dict[str, Any]:
-        """Attach one compiled recipe to exactly one source item."""
+        """Attach one compiled recipe to exactly one durable source card."""
 
         updated = deepcopy(sheet)
-        matches = [
-            item
-            for item in dict(updated.get("inventory") or {}).get("items", [])
-            if isinstance(item, dict)
-            and str(item.get("id") or "") == source_card_id
-        ]
+        collections = {
+            "activity": ("activities",),
+            "feature": ("features", "feats"),
+            "monster_action": ("activities",),
+            "spell": ("spells",),
+            "trait": ("features",),
+        }.get(source_card_kind)
+        if source_card_kind == "item":
+            matches = [
+                item
+                for item in dict(updated.get("inventory") or {}).get(
+                    "items",
+                    [],
+                )
+                if isinstance(item, dict)
+                and str(item.get("id") or "") == source_card_id
+            ]
+        elif collections is not None:
+            matches = [
+                item
+                for collection in collections
+                for item in dict(updated.get("content") or {}).get(
+                    collection,
+                    [],
+                )
+                if isinstance(item, dict)
+                and str(item.get("id") or "") == source_card_id
+            ]
+        else:
+            raise CombatEngineError(
+                "unsupported character source card kind"
+            )
         if len(matches) != 1:
             raise CombatEngineError(
-                "source item must resolve exactly once before solution storage"
+                "source card must resolve exactly once before solution storage"
             )
         matches[0]["resolution_plan"] = resolution_plan_template(compiled_plan)
         matches[0]["resolution_solution"] = deepcopy(solution)
@@ -3479,7 +3722,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 continue
             declaration: Any = None
             if (
-                source_card_kind in {"activity", "monster_action"}
+                source_card_kind
+                in {"activity", "feature", "monster_action", "trait"}
                 and entry.get("type") == "activity"
                 and str(entry.get("activity_id") or "") == source_card_id
             ):
@@ -6057,7 +6301,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     def server_capabilities() -> dict[str, Any]:
         """Describe the MCP contract and the automatic-vs-ruling combat boundary."""
         return {
-            "contract_version": "2026-07-session-exposure-v4",
+            "contract_version": "2026-07-content-solutions-v5",
             "transport": "stdio",
             "state_owner": "sagasmith-dnd-mcp",
             "features": {
@@ -6104,6 +6348,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "source_bound_rule_packs": True,
                 "structured_content_catalog": True,
                 "structured_content_selection_requirements": True,
+                "source_bound_first_use_content_solutions": True,
                 "module_import_idempotency": True,
                 "managed_module_document_staging": True,
                 "core_pdf_module_normalization": True,
@@ -9135,6 +9380,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         attacker = character_view(attacker_record, rules_context=rule_context)
         target = character_view(target_record, rules_context=rule_context)
         compiled_item_plan = None
+        item_card: dict[str, Any] | None = None
         try:
             if spell_resolution is not None:
                 plan = preflight_spell_attack(
@@ -9477,6 +9723,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         elif attack_roll.get("hit") and str(
             on_hit_ruling.get("effect") or ""
         ).strip():
+            custom_item_solution = bool(
+                isinstance(item_card, dict)
+                and str(item_card.get("pack_id") or "")
+                != CORE_CONTENT_PACK_ID
+                and not source_card_has_executable_mechanic(
+                    campaign_id,
+                    item_card,
+                )
+            )
             next_attack_advantage = (
                 re.search(
                     r"(?i)\bthe next attack against the target before the end of "
@@ -9498,12 +9753,19 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 actor_id_value=target_id,
                 event="attack.on_hit.effect",
                 candidates=[
-                    {
-                        "id": "compile_solution",
-                        "name": (
-                            "Compile and store a source-bound solution for reuse"
-                        ),
-                    },
+                    *(
+                        [
+                            {
+                                "id": "compile_solution",
+                                "name": (
+                                    "Compile and store a source-bound solution "
+                                    "for reuse"
+                                ),
+                            }
+                        ]
+                        if custom_item_solution
+                        else []
+                    ),
                     *(
                         [
                             {
@@ -9564,13 +9826,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 weapon_id=str(plan.get("weapon_id") or ""),
                 effect=str(on_hit_ruling["effect"]).strip(),
             )
-            result["semantic_solution"] = {
-                "status": "compilation_required",
-                "application_id": pending_on_hit_ruling["id"],
-                "source_card_id": str(plan.get("weapon_id") or ""),
-                "source_card_kind": "item",
-                "required_action": "combat_choice(compile_solution)",
-            }
+            if custom_item_solution:
+                result["semantic_solution"] = {
+                    "status": "compilation_required",
+                    "application_id": pending_on_hit_ruling["id"],
+                    "source_card_id": str(plan.get("weapon_id") or ""),
+                    "source_card_kind": "item",
+                    "required_action": "combat_choice(compile_solution)",
+                }
             result["pending_on_hit_ruling_id"] = pending_on_hit_ruling["id"]
         critical_followup_window = add_critical_followup_window(
             next_encounter,
@@ -13455,6 +13718,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "a spell card cannot combine a semantic plan with another "
                     "effect-settlement path"
                 )
+            if compiled_spell_plan.trigger != "action":
+                raise CombatEngineError(
+                    "a combat-cast spell resolution plan must use the action trigger"
+                )
         if magic_missile and target_allocations is None:
             raise CombatEngineError("Magic Missile requires target_allocations at cast time")
         if not magic_missile and target_allocations is not None:
@@ -13540,6 +13807,37 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     source_card_kind="spell",
                 )
             )
+        if (
+            source_item_id is None
+            and structured_resolution is None
+            and compiled_spell_plan is None
+            and str(
+                spell_entry.get("effect")
+                or dict(spell_entry.get("definition") or {}).get("effect")
+                or ""
+            ).strip()
+            and not source_card_has_executable_mechanic(
+                campaign_id,
+                spell_entry,
+            )
+        ):
+            return {
+                **_ruling_status(
+                    "pending_ruling",
+                    "generic_spell_effect",
+                ),
+                "result": {
+                    "spell_id": spell_id,
+                    "semantic_solution": unresolved_content_solution(
+                        spell_entry,
+                        source_card_id=spell_id,
+                        source_card_kind="spell",
+                        character_revision=current.revision,
+                    ),
+                    "payment_required": False,
+                },
+                "campaign_revision": campaign.revision,
+            }
         structured_target: dict[str, Any] | None = None
         if structured_resolution is not None:
             kind = str(structured_resolution.get("kind") or "")
@@ -14755,19 +15053,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 f"expected {expected_revision}, found {campaign.revision}"
             )
         current = characters.get(actor_id)
-        activity_card = next(
-            (
-                item
-                for item in dict(current.sheet.get("content") or {}).get(
-                    "activities",
-                    [],
-                )
-                if str(item.get("id") or "") == activity_id
-            ),
-            None,
+        activity_card, activity_source_card_kind = (
+            character_activity_source_card(
+                current.sheet,
+                activity_id,
+                character_type=current.character_type,
+            )
         )
         compiled_activity_plan = None
-        if isinstance(activity_card, dict) and isinstance(
+        if isinstance(
             activity_card.get("resolution_plan"),
             dict,
         ):
@@ -14782,10 +15076,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             if (
                 compiled_activity_plan.source_card_id != activity_id
                 or compiled_activity_plan.source_card_kind
-                not in {"activity", "monster_action"}
+                != activity_source_card_kind
             ):
                 raise CombatEngineError(
                     "recorded activity resolution plan does not match its card"
+                )
+            if compiled_activity_plan.trigger != "action":
+                raise CombatEngineError(
+                    "a combat-used activity resolution plan must use the action trigger"
                 )
             if "agent_resolution_commitment" not in dict(declaration or {}):
                 return {
@@ -14822,14 +15120,36 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     encounter=encounter,
                     source_actor_id=actor_id,
                     source_card_id=activity_id,
-                    source_card_kind=(
-                        compiled_activity_plan.source_card_kind
-                    ),
+                    source_card_kind=activity_source_card_kind,
                     compiled_plan=compiled_activity_plan,
                 )
             )
             declaration = {
                 "agent_resolution_commitment": normalized_commitment
+            }
+        elif (
+            str(activity_card.get("description") or "").strip()
+            and not source_card_has_executable_mechanic(
+                campaign_id,
+                activity_card,
+            )
+        ):
+            return {
+                **_ruling_status(
+                    "pending_ruling",
+                    "module_specific_procedure",
+                ),
+                "result": {
+                    "activity_id": activity_id,
+                    "semantic_solution": unresolved_content_solution(
+                        activity_card,
+                        source_card_id=activity_id,
+                        source_card_kind=activity_source_card_kind,
+                        character_revision=current.revision,
+                    ),
+                    "payment_required": False,
+                },
+                "campaign_revision": campaign.revision,
             }
         elif "agent_ruling_commitment" in dict(declaration or {}):
             if set(dict(declaration or {})) != {
@@ -16961,6 +17281,17 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "item",
         )
         if (
+            str(source_card.get("pack_id") or "") == CORE_CONTENT_PACK_ID
+            or source_card_has_executable_mechanic(
+                campaign_id,
+                source_card,
+            )
+        ):
+            raise CombatEngineError(
+                "standard or already executable item content must use its "
+                "locked engine implementation"
+            )
+        if (
             isinstance(source_card.get("resolution_plan"), dict)
             or isinstance(source_card.get("resolution_solution"), dict)
         ):
@@ -16976,6 +17307,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         try:
             solution = build_content_solution(
                 compiled_plan,
+                source_card=source_card,
                 application_id=application_id,
                 agent_ruling=agent_ruling,
             )
@@ -16983,9 +17315,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             raise CombatEngineError(
                 f"first-use Agent compilation is invalid: {error}"
             ) from error
-        next_sheet = sheet_with_item_solution(
+        next_sheet = sheet_with_content_solution(
             source_record.sheet,
             source_card_id=source_card_id,
+            source_card_kind="item",
             compiled_plan=compiled_plan,
             solution=solution,
         )
@@ -18429,11 +18762,18 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 for target_id in normalized_target_ids
             ],
             rule_receipts=[
-                receipt
-                for target_result in result["targets"]
-                for receipt in dict(target_result.get("save") or {}).get(
-                    "rule_receipts", []
-                )
+                *core_receipts(
+                    rule_context,
+                    ["dnd5e.core.mcp.save_damage_atomicity"],
+                    "combat.save_damage",
+                ),
+                *[
+                    receipt
+                    for target_result in result["targets"]
+                    for receipt in dict(
+                        target_result.get("save") or {}
+                    ).get("rule_receipts", [])
+                ],
             ],
         )
         return combat_response(campaign_id, principal_id, response)
@@ -20714,6 +21054,46 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 if item.get("id") == spell_id
             )
         )
+        compiled_spell_plan = None
+        if (
+            source_item_id is None
+            and isinstance(spell_entry.get("resolution_plan"), dict)
+        ):
+            _spell_card, compiled_spell_plan = character_resolution_plan(
+                current.sheet,
+                spell_id,
+                "spell",
+            )
+        elif (
+            source_item_id is None
+            and str(
+                spell_entry.get("effect")
+                or dict(spell_entry.get("definition") or {}).get("effect")
+                or ""
+            ).strip()
+            and not source_card_has_executable_mechanic(
+                current.campaign_id,
+                spell_entry,
+            )
+        ):
+            return {
+                **_ruling_status(
+                    "pending_ruling",
+                    "generic_spell_effect",
+                ),
+                "result": {
+                    "spell_id": spell_id,
+                    "semantic_solution": unresolved_content_solution(
+                        spell_entry,
+                        source_card_id=spell_id,
+                        source_card_kind="spell",
+                        character_revision=current.revision,
+                    ),
+                    "payment_required": False,
+                },
+                "character": character_view(current),
+                "campaign_revision": campaign.revision,
+            }
         elapsed_ticks = completed_spell_cast_ticks(spell_entry, ritual=ritual)
         next_state, time_transition = advance_state_game_time(
             next_state,
@@ -20802,12 +21182,19 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             rules=rules,
         )
         if applied.get("status") in PENDING_RULE_RESULT_STATUSES:
+            pending_result = {
+                key: value for key, value in applied.items() if key != "sheet"
+            }
+            if compiled_spell_plan is not None:
+                pending_result["resolution_plan_contract"] = (
+                    resolution_plan_contract(compiled_spell_plan)
+                )
             return {
                 **_ruling_status(
                     applied["status"],
                     _pending_result_ruling_kind(applied),
                 ),
-                "result": {key: value for key, value in applied.items() if key != "sheet"},
+                "result": pending_result,
                 "character": character_view(current),
             }
         timed_sheets[current.id] = applied["sheet"]
@@ -20832,13 +21219,25 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         current_after_view = character_view(current_after)
 
+        applied_result = {
+            key: value for key, value in applied.items() if key != "sheet"
+        }
+        if compiled_spell_plan is not None:
+            applied_result["resolution_plan_contract"] = (
+                resolution_plan_contract(compiled_spell_plan)
+            )
+            applied_result["semantic_solution"] = {
+                "status": "compiled",
+                "payment_recorded": True,
+            }
+
         def cast_response(revisions: list[Any]) -> dict[str, Any]:
             return {
                 **_ruling_status(
                     "committed" if applied.get("automatic_effect") else "pending_ruling",
                     "generic_spell_effect",
                 ),
-                "result": {key: value for key, value in applied.items() if key != "sheet"},
+                "result": deepcopy(applied_result),
                 "character": current_after_view,
                 "game_time": time_transition["after"],
                 "world_time": time_transition["world_time_after"],
@@ -21367,7 +21766,53 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         replay = replay_idempotent(scope, idempotency_key, payload)
         if replay is not None:
             return replay
+        if current.revision != expected_revision:
+            raise ValueError(
+                f"character revision conflict: expected {expected_revision}, "
+                f"found {current.revision}"
+            )
         campaign = campaigns.get(current.campaign_id)
+        activity_card, activity_source_card_kind = (
+            character_activity_source_card(
+                current.sheet,
+                activity_id,
+                character_type=current.character_type,
+            )
+        )
+        compiled_activity_plan = None
+        if isinstance(activity_card.get("resolution_plan"), dict):
+            _activity_card, compiled_activity_plan = (
+                character_resolution_plan(
+                    current.sheet,
+                    activity_id,
+                    activity_source_card_kind,
+                )
+            )
+        elif (
+            str(activity_card.get("description") or "").strip()
+            and not source_card_has_executable_mechanic(
+                current.campaign_id,
+                activity_card,
+            )
+        ):
+            return {
+                **_ruling_status(
+                    "pending_ruling",
+                    "module_specific_procedure",
+                ),
+                "result": {
+                    "activity_id": activity_id,
+                    "semantic_solution": unresolved_content_solution(
+                        activity_card,
+                        source_card_id=activity_id,
+                        source_card_kind=activity_source_card_kind,
+                        character_revision=current.revision,
+                    ),
+                    "payment_required": False,
+                },
+                "character": character_view(current),
+                "campaign_revision": campaign.revision,
+            }
         preserve_life = str(activity_id).endswith("life-domain-channel-divinity-preserve-life")
         if preserve_life:
             if not is_dm(current.campaign_id, principal_id):
@@ -21577,6 +22022,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             revision=current.revision + 1,
         )
         result = {key: value for key, value in applied.items() if key != "sheet"}
+        if compiled_activity_plan is not None:
+            result["resolution_plan_contract"] = resolution_plan_contract(
+                compiled_activity_plan
+            )
+            result["semantic_solution"] = {
+                "status": "compiled",
+                "payment_recorded": True,
+            }
         result["declaration"] = declaration or {}
         response = commit_campaign_state(
             campaign,
@@ -33293,6 +33746,183 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 idempotency_key=idempotency_key,
             )
         return facade_result(action, result)
+
+    @mcp.tool()
+    def content_solution(
+        campaign_id: str,
+        action: Literal["query", "compile"],
+        actor_id: str,
+        source_card_id: str,
+        source_card_kind: Literal[
+            "activity",
+            "feature",
+            "item",
+            "monster_action",
+            "spell",
+            "trait",
+        ],
+        payload: dict[str, Any] | None = None,
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
+        expected_revision: int | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Inspect or persist one source-bound Agent solution for custom content."""
+
+        access.require_campaign(
+            campaign_id,
+            principal_id,
+            roles=CAMPAIGN_DM_ROLES,
+        )
+        actor = require_campaign_actor(campaign_id, actor_id)
+        source_card = character_source_card(
+            actor.sheet,
+            source_card_id,
+            source_card_kind,
+        )
+        if action == "query":
+            strict_facade_payload(
+                payload,
+                action="content_solution(query)",
+                allowed=set(),
+            )
+            return {
+                "status": (
+                    "compiled"
+                    if isinstance(source_card.get("resolution_solution"), dict)
+                    else "missing"
+                ),
+                "actor_id": actor_id,
+                "source_card_id": source_card_id,
+                "source_card_kind": source_card_kind,
+                "resolution_plan": deepcopy(
+                    source_card.get("resolution_plan")
+                ),
+                "resolution_solution": deepcopy(
+                    source_card.get("resolution_solution")
+                ),
+            }
+        data = strict_facade_payload(
+            payload,
+            action="content_solution(compile)",
+            allowed={"resolution_plan", "agent_ruling"},
+            required_names=("resolution_plan", "agent_ruling"),
+        )
+        if expected_revision is None or not idempotency_key:
+            raise ValueError(
+                "expected_revision and idempotency_key are required "
+                "for content solution compilation"
+            )
+        write_payload = {
+            "source_card_id": source_card_id,
+            "source_card_kind": source_card_kind,
+            "resolution_plan": deepcopy(data["resolution_plan"]),
+            "agent_ruling": deepcopy(data["agent_ruling"]),
+        }
+        current_branch_id = require_current_branch(campaign_id, None)
+        write_scope = (
+            f"character-write:{campaign_id}:{current_branch_id}:"
+            f"{principal_id}:{actor.id}"
+        )
+        replay = replay_idempotent(
+            write_scope,
+            idempotency_key,
+            {
+                "operation": "character.content_solution.compile",
+                "character_id": actor.id,
+                **write_payload,
+            },
+        )
+        if replay is not None:
+            return facade_result(action, replay)
+        if (
+            str(source_card.get("pack_id") or "") == CORE_CONTENT_PACK_ID
+            or source_card_has_executable_mechanic(
+                campaign_id,
+                source_card,
+            )
+        ):
+            raise CombatEngineError(
+                "standard or already executable rule content must use its "
+                "locked engine implementation, not an Agent-compiled solution"
+            )
+        if (
+            isinstance(source_card.get("resolution_plan"), dict)
+            or isinstance(source_card.get("resolution_solution"), dict)
+        ):
+            raise CombatEngineError(
+                "source card already has a compiled solution"
+            )
+        encounter = dict(campaigns.get(campaign_id).state or {}).get("combat")
+        if (
+            source_card_kind == "item"
+            and isinstance(encounter, dict)
+            and encounter.get("active")
+            and any(
+                isinstance(item, dict)
+                and item.get("trigger") == "attack_on_hit_effect"
+                and str(item.get("attacker_id") or "") == actor_id
+                and str(item.get("weapon_id") or "") == source_card_id
+                for item in encounter.get("pending", [])
+            )
+        ):
+            raise CombatEngineError(
+                "a paid item hit must use combat_choice(compile_solution) "
+                "so card storage and payment-window upgrade stay atomic"
+            )
+        compiled_plan = validate_first_use_content_plan(
+            campaign_id,
+            required(data, "resolution_plan"),
+            source_card=source_card,
+            source_card_id=source_card_id,
+            source_card_kind=source_card_kind,
+        )
+        application_seed = canonical_json(
+            {
+                "actor_id": actor_id,
+                "source_card_id": source_card_id,
+                "source_card_kind": source_card_kind,
+                "character_revision": actor.revision,
+            }
+        )
+        application_id = (
+            f"content:{source_card_kind}:"
+            f"{hashlib.sha256(application_seed.encode()).hexdigest()[:24]}"
+        )
+        try:
+            solution = build_content_solution(
+                compiled_plan,
+                source_card=source_card,
+                application_id=application_id,
+                agent_ruling=required(data, "agent_ruling"),
+            )
+        except ContentSolutionError as error:
+            raise CombatEngineError(
+                f"first-use Agent compilation is invalid: {error}"
+            ) from error
+        next_sheet = sheet_with_content_solution(
+            actor.sheet,
+            source_card_id=source_card_id,
+            source_card_kind=source_card_kind,
+            compiled_plan=compiled_plan,
+            solution=solution,
+        )
+        response = update_character(
+            actor,
+            operation="character.content_solution.compile",
+            sheet=next_sheet,
+            principal_id=principal_id,
+            expected_revision=expected_revision,
+            idempotency_key=idempotency_key,
+            payload=write_payload,
+            response_extra={
+                "status": "compiled",
+                "solution": solution,
+                "resolution_plan_contract": resolution_plan_contract(
+                    compiled_plan
+                ),
+            },
+        )
+        return facade_result(action, response)
 
     @mcp.tool()
     def combat_choice(

@@ -261,17 +261,17 @@ def test_compact_public_tool_and_schema_budgets_are_locked(tmp_path: Path) -> No
         assert BASELINE_PUBLIC_TOOL_COUNT == 92
         assert BASELINE_INPUT_SCHEMA_BYTES == 56_611
         assert len(CORE_TOOLS) == TARGET_CORE_TOOL_COUNT == 12
-        assert len(tools) == TARGET_PUBLIC_TOOL_COUNT == 82
+        assert len(tools) == TARGET_PUBLIC_TOOL_COUNT == 83
         assert (
             {phase: len(names) for phase, names in profile_catalog().items()}
             == PROFILE_TOOL_LIMITS
             == {
-                "lobby": 61,
-                "play": 46,
-                "combat": 44,
+                "lobby": 62,
+                "play": 47,
+                "combat": 45,
             }
         )
-        assert schema_bytes == TARGET_INPUT_SCHEMA_BYTES == 47_990
+        assert schema_bytes == TARGET_INPUT_SCHEMA_BYTES == 48_921
         assert schema_bytes < BASELINE_INPUT_SCHEMA_BYTES
         by_name = {tool.name: tool for tool in tools}
         assert by_name["chase"].inputSchema["properties"]["action"]["enum"] == [
@@ -408,7 +408,10 @@ def test_server_capabilities_publish_the_rulebook_import_contract(tmp_path: Path
         assert capabilities["features"]["validated_module_runtime_manifest"] is True
         assert capabilities["features"]["shared_continuity_budget"] is True
         assert capabilities["features"]["continuity_diagnostics"] is True
-        assert capabilities["contract_version"] == "2026-07-session-exposure-v4"
+        assert capabilities["contract_version"] == "2026-07-content-solutions-v5"
+        assert capabilities["features"][
+            "source_bound_first_use_content_solutions"
+        ] is True
         assert capabilities["ruling_policy"] == {
             "default_dm_resolver": "agent",
             "agent_adjudicates": [

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import random
+from copy import deepcopy
 from pathlib import Path
 
 import pytest
@@ -815,7 +816,7 @@ def test_action_surge_is_settled_without_a_manual_ruling(tmp_path: Path) -> None
     asyncio.run(exercise())
 
 
-def test_descriptive_activity_pays_action_and_enters_agent_ruling(
+def test_descriptive_activity_requires_compilation_before_payment(
     tmp_path: Path,
 ) -> None:
     async def exercise() -> None:
@@ -834,7 +835,7 @@ def test_descriptive_activity_pays_action_and_enters_agent_ruling(
             "mission procedure to determine casualties."
         )
         sheet = default_character_sheet()
-        sheet["content"]["activities"] = [
+        sheet["content"]["features"] = [
             {
                 "id": "lightning-breath-action",
                 "name": "Lightning Breath",
@@ -859,6 +860,20 @@ def test_descriptive_activity_pays_action_and_enters_agent_ruling(
                 "idempotency_key": "actor",
             },
         )
+        outside = await _call_raw(
+            server,
+            "character_use_activity",
+            {
+                "character_id": actor["id"],
+                "activity_id": "lightning-breath-action",
+                "expected_revision": actor["revision"],
+                "idempotency_key": "outside-breath",
+            },
+        )
+        assert outside["result"]["payment_required"] is False
+        assert outside["result"]["semantic_solution"][
+            "source_card_kind"
+        ] == "feature"
         campaign = await _call(server, "campaign_get", {"campaign_id": campaign["id"]})
         started = await _call_raw(
             server,
@@ -885,15 +900,195 @@ def test_descriptive_activity_pays_action_and_enters_agent_ruling(
         )
 
         assert ruled["status"] == "pending_ruling"
-        assert ruled["result"]["requires_ruling"] is True
-        assert ruled["result"]["choices"]["manual_ruling"] == {
-            "kind": "descriptive_activity",
-            "source_excerpt": source_excerpt,
+        assert ruled["result"]["payment_required"] is False
+        assert ruled["result"]["semantic_solution"] == {
+            "status": "compilation_required",
+            "source_card_id": "lightning-breath-action",
+            "source_card_kind": "feature",
+            "required_action": "content_solution(compile)",
+            "character_revision": actor["revision"],
         }
-        current = ruled["combat"]["combatants"][ruled["combat"]["turn_index"]]
-        assert current["turn_budget"]["main_action"] == 0
+        current = started["combat"]["combatants"][
+            started["combat"]["turn_index"]
+        ]
+        assert current["turn_budget"]["main_action"] == 1
         actor_after = await _call(server, "character_get", {"character_id": actor["id"]})
-        assert actor_after["revision"] == actor["revision"] + 1
+        assert actor_after["revision"] == actor["revision"]
+
+    asyncio.run(exercise())
+
+
+def test_custom_spell_requires_compilation_before_action_or_slot_payment(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        server = create_server(_config(tmp_path))
+        campaign = await _call(
+            server,
+            "campaign_create",
+            {
+                "name": "Custom spell compilation",
+                "edition": "2014",
+                "idempotency_key": "campaign",
+            },
+        )
+        effect = (
+            "A ribbon of moonlight circles one creature and leaves a silver "
+            "brand until the caster's next turn."
+        )
+        sheet = default_character_sheet()
+        sheet["spellcasting"]["spell_slots"] = {
+            "1": {
+                "label": "Level 1",
+                "value": 1,
+                "max": 1,
+                "recovers_on": "long_rest",
+                "source_key": "custom",
+            }
+        }
+        sheet["content"]["spells"] = [
+            {
+                "id": "moon-ribbon",
+                "name": "Moon Ribbon",
+                "level": 1,
+                "grant": {
+                    "source_type": "module",
+                    "source_key": "moon-vault",
+                    "method": "known",
+                },
+                "access": {
+                    "known": True,
+                    "prepared": True,
+                    "always_prepared": False,
+                    "ritual_available": False,
+                    "at_will": False,
+                    "at_will_sources": [],
+                },
+                "definition": {
+                    "casting_time": "1 action",
+                    "duration": {
+                        "kind": "timed",
+                        "value": 1,
+                        "unit": "round",
+                        "concentration": False,
+                    },
+                    "effect": effect,
+                },
+                # A registered accounting mechanic is not an implementation
+                # of this card's authored outcome.
+                "mechanic_refs": [
+                    "dnd5e.core.activity.resource_accounting"
+                ],
+            }
+        ]
+        standard_gap = deepcopy(sheet["content"]["spells"][0])
+        standard_gap.update(
+            {
+                "id": "locked-standard-gap",
+                "name": "Locked Standard Gap",
+                "pack_id": "dnd5e.content.srd2014",
+                "pack_version": "1.44.0",
+            }
+        )
+        sheet["content"]["spells"].append(standard_gap)
+        caster = await _call(
+            server,
+            "character_create",
+            {
+                "campaign_id": campaign["id"],
+                "name": "Moon Mage",
+                "sheet": sheet,
+                "idempotency_key": "caster",
+            },
+        )
+        standard_pending = await _call_raw(
+            server,
+            "character_cast_spell",
+            {
+                "character_id": caster["id"],
+                "spell_id": "locked-standard-gap",
+                "cast_level": 1,
+                "expected_revision": caster["revision"],
+                "idempotency_key": "standard-gap",
+            },
+        )
+        assert standard_pending["result"]["semantic_solution"] == {
+            "status": "engine_implementation_required",
+            "source_card_id": "locked-standard-gap",
+            "source_card_kind": "spell",
+            "required_action": "implement_standard_mechanic",
+            "character_revision": caster["revision"],
+        }
+        outside = await _call_raw(
+            server,
+            "character_cast_spell",
+            {
+                "character_id": caster["id"],
+                "spell_id": "moon-ribbon",
+                "cast_level": 1,
+                "expected_revision": caster["revision"],
+                "idempotency_key": "outside-cast",
+            },
+        )
+        assert outside["result"]["payment_required"] is False
+        assert outside["result"]["semantic_solution"][
+            "source_card_kind"
+        ] == "spell"
+        campaign = await _call(
+            server,
+            "campaign_get",
+            {"campaign_id": campaign["id"]},
+        )
+        started = await _call_raw(
+            server,
+            "combat_start",
+            {
+                "campaign_id": campaign["id"],
+                "participant_ids": [caster["id"]],
+                "participant_config": [
+                    {"actor_id": caster["id"], "initiative": 10}
+                ],
+                "expected_revision": campaign["revision"],
+                "idempotency_key": "start",
+            },
+        )
+
+        pending = await _call_raw(
+            server,
+            "combat_cast_spell",
+            {
+                "campaign_id": campaign["id"],
+                "actor_id": caster["id"],
+                "spell_id": "moon-ribbon",
+                "cast_level": 1,
+                "expected_revision": started["campaign_revision"],
+                "idempotency_key": "cast",
+            },
+        )
+
+        assert pending["status"] == "pending_ruling"
+        assert pending["result"]["payment_required"] is False
+        assert pending["result"]["semantic_solution"] == {
+            "status": "compilation_required",
+            "source_card_id": "moon-ribbon",
+            "source_card_kind": "spell",
+            "required_action": "content_solution(compile)",
+            "character_revision": caster["revision"],
+        }
+        current = started["combat"]["combatants"][
+            started["combat"]["turn_index"]
+        ]
+        assert current["turn_budget"]["main_action"] == 1
+        caster_after = await _call(
+            server,
+            "character_get",
+            {"character_id": caster["id"]},
+        )
+        assert caster_after["revision"] == caster["revision"]
+        assert (
+            caster_after["sheet"]["spellcasting"]["spell_slots"]["1"]["value"]
+            == 1
+        )
 
     asyncio.run(exercise())
 

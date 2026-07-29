@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-TOOL_BUDGET_VERSION = "2026-07-compact-facades-v8"
+TOOL_BUDGET_VERSION = "2026-07-content-solutions-v9"
 
 # Captured before the conservative facade consolidation.  Keep this historical
 # baseline so a lower tool count cannot conceal a larger aggregate input schema.
 BASELINE_PUBLIC_TOOL_COUNT = 92
 BASELINE_INPUT_SCHEMA_BYTES = 56_611
 
-TARGET_PUBLIC_TOOL_COUNT = 82
+TARGET_PUBLIC_TOOL_COUNT = 83
 TARGET_CORE_TOOL_COUNT = 12
 # Combat transaction-history and receipt views make interrupted multi-call Agent
 # rulings publicly recoverable without another tool or direct storage access.
@@ -20,10 +20,13 @@ TARGET_CORE_TOOL_COUNT = 12
 # source-bound combat_choice(execute_plan) action without another public tool.
 # Version 8 adds the first-use combat_choice(compile_solution) action while
 # keeping the same public and core tool counts.
+# Version 9 deliberately adds one DM-only, cross-phase content_solution tool.
+# This keeps reusable recipe compilation separate from character replacement
+# and from paid combat settlement.
 # The aggregate remains well below the captured 92-tool baseline.
-TARGET_INPUT_SCHEMA_BYTES = 47_990
+TARGET_INPUT_SCHEMA_BYTES = 48_921
 PROFILE_TOOL_LIMITS = {
-    "lobby": 61,
-    "play": 46,
-    "combat": 44,
+    "lobby": 62,
+    "play": 47,
+    "combat": 45,
 }
