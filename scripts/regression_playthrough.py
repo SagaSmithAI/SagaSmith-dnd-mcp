@@ -76,6 +76,7 @@ from scripts.regression_modules import (
 )
 from scripts.regression_rulings import (
     RegressionRulingRequiredError,
+    normalize_pending_ruling,
     raise_for_pending_ruling,
     ruling_failure_fields,
 )
@@ -6612,6 +6613,27 @@ async def _cast_healing_spell(
         )
     if cast.get("status") not in {"committed", "pending_ruling"}:
         raise RuntimeError("healing spell did not consume its canonical resource")
+    agent_ruling = None
+    if cast.get("status") == "pending_ruling":
+        normalized_ruling = normalize_pending_ruling(cast)
+        if normalized_ruling["ruling_kind"] != "generic_spell_effect":
+            raise RuntimeError(
+                "a paid healing spell returned an unsupported post-commit ruling kind"
+            )
+        agent_ruling = _settled_agent_ruling(
+            {
+                "default_resolver": "agent",
+                "ruling_kind": "generic_spell_effect",
+                "decision": (
+                    f"The Agent selects {normalized_target_id} as the target of "
+                    f"{normalized_spell_id} and executes the spell card's structured "
+                    "healing resolution through public dice and character-state tools."
+                ),
+                "reason": normalized_reason,
+            },
+            label="healing spell",
+            ruling_kinds=frozenset({"generic_spell_effect"}),
+        )
     branches = await client.domain(
         "branch_query",
         {"campaign_id": campaign_id, "view": "list"},
@@ -6679,6 +6701,7 @@ async def _cast_healing_spell(
                 "healing_roll": roll_result,
                 "source_excerpt": source_excerpt,
                 "source_ref": exact_ref,
+                **({"agent_ruling": agent_ruling} if agent_ruling is not None else {}),
             },
         },
         "actor_knowledge": [
@@ -6729,6 +6752,7 @@ async def _cast_healing_spell(
         "spell_id": normalized_spell_id,
         "cast_level": paid_level,
         "cast": cast,
+        "agent_ruling": agent_ruling,
         "healing_expression": healing_expression,
         "roll": roll_result,
         "healing": healed,

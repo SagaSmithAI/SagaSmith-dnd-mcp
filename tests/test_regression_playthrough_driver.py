@@ -2654,6 +2654,7 @@ def test_healing_spell_driver_pays_rolls_and_applies_public_healing(
             self.cast_arguments: dict | None = None
             self.roll_arguments: dict | None = None
             self.heal_arguments: dict | None = None
+            self.continuity_payload: dict | None = None
 
         async def core(self, tool_id: str, arguments: dict):
             assert tool_id == "campaign_query"
@@ -2686,7 +2687,12 @@ def test_healing_spell_driver_pays_rolls_and_applies_public_healing(
                 }
             if tool_id == "character_action":
                 self.cast_arguments = deepcopy(arguments)
-                return {"status": "pending_ruling", "result": {"payment": {"cost": 1}}}
+                return {
+                    "status": "pending_ruling",
+                    "default_resolver": "agent",
+                    "ruling_kind": "generic_spell_effect",
+                    "result": {"payment": {"cost": 1}},
+                }
             if tool_id == "branch_query":
                 return [{"id": "branch-1", "is_current": True}]
             if tool_id == "dnd_dice_roll":
@@ -2710,6 +2716,7 @@ def test_healing_spell_driver_pays_rolls_and_applies_public_healing(
                     }
                 }
             if tool_id == "memory_change":
+                self.continuity_payload = deepcopy(arguments["payload"])
                 return {"event": {"id": "event-1"}}
             raise AssertionError((tool_id, arguments))
 
@@ -2752,6 +2759,22 @@ def test_healing_spell_driver_pays_rolls_and_applies_public_healing(
         "spell_level": 1,
     }
     assert result["roll"]["total"] == 7
+    expected_ruling = {
+        "default_resolver": "agent",
+        "ruling_kind": "generic_spell_effect",
+        "decision": (
+            "The Agent selects fallen as the target of healing-word and executes "
+            "the spell card's structured healing resolution through public dice "
+            "and character-state tools."
+        ),
+        "reason": "The cleric restored the fallen ally.",
+        "committed": True,
+    }
+    assert result["agent_ruling"] == expected_ruling
+    assert (
+        client.continuity_payload["event"]["payload"]["agent_ruling"]
+        == expected_ruling
+    )
 
 
 def test_healing_spell_driver_returns_precommit_ruling_before_rolling() -> None:
