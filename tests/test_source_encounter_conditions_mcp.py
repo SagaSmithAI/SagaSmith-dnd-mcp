@@ -4,6 +4,7 @@ import asyncio
 from pathlib import Path
 
 import pytest
+from sagasmith_dnd.character_schema import default_character_sheet
 
 from sagasmith_dnd_mcp.config import McpConfig
 from sagasmith_dnd_mcp.server import create_server
@@ -138,6 +139,18 @@ def test_source_condition_is_validated_persisted_and_cleared_with_encounter(
                 "name": "Hero",
                 "character_type": "pc",
                 "idempotency_key": "hero",
+            },
+        )
+        hero_sheet = default_character_sheet()
+        hero_sheet["combat"]["hp"] = {"value": 20, "max": 20, "temp": 0}
+        hero = await _call(
+            server,
+            "character_sheet_replace",
+            {
+                "character_id": hero["id"],
+                "sheet": hero_sheet,
+                "expected_revision": hero["revision"],
+                "idempotency_key": "hero-sheet",
             },
         )
         late_ruffian = await _call(

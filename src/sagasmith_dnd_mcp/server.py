@@ -153,6 +153,7 @@ from sagasmith_dnd.combat_engine import (
     resolve_random_save_effects,
     resolve_readied_action_window,
     resolve_readied_spell_window,
+    resolve_save_damage_to_sheets,
     resolve_second_wind_to_sheet,
     resolve_source_contest_effect,
     resolve_source_save_effect,
@@ -2778,6 +2779,315 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             ]
         return value
 
+    def validate_current_scene_agent_ruling(
+        campaign_id: str,
+        raw_ruling: Any,
+        *,
+        encounter: dict[str, Any],
+        field: str,
+        allowed_ruling_kinds: set[str] | frozenset[str],
+    ) -> dict[str, Any]:
+        """Validate one immutable source-bound Agent decision for this scene."""
+
+        if not isinstance(raw_ruling, dict):
+            raise CombatEngineError(f"{field} agent_ruling must be an object")
+        allowed = {
+            "application_id",
+            "default_resolver",
+            "ruling_kind",
+            "decision",
+            "reason",
+            "source_ref",
+            "source_excerpt",
+        }
+        unknown = set(raw_ruling) - allowed
+        application_id = str(raw_ruling.get("application_id") or "").strip()
+        decision = " ".join(str(raw_ruling.get("decision") or "").split())
+        reason = " ".join(str(raw_ruling.get("reason") or "").split())
+        source_ref = raw_ruling.get("source_ref")
+        source_excerpt = str(raw_ruling.get("source_excerpt") or "")
+        scene_id = str(encounter.get("scene_id") or "").strip()
+        if (
+            unknown
+            or not application_id
+            or raw_ruling.get("default_resolver") != "agent"
+            or raw_ruling.get("ruling_kind") not in allowed_ruling_kinds
+            or not 10 <= len(decision) <= 1000
+            or not 10 <= len(reason) <= 500
+            or not isinstance(source_ref, dict)
+            or not scene_id
+        ):
+            raise CombatEngineError(
+                f"{field} requires a bounded source-bound Agent ruling "
+                "for the active encounter scene"
+            )
+        try:
+            _normalized, _source, expanded = managed_module_source_ref(
+                campaign_id,
+                source_ref,
+                require_exact=True,
+                expected_scene_id=scene_id,
+                require_active_module=True,
+            )
+            assert expanded is not None
+            managed_module_source_excerpt(
+                expanded,
+                source_excerpt,
+                field=f"{field} source_excerpt",
+                minimum_length=10,
+            )
+        except (LookupError, ValueError) as error:
+            raise CombatEngineError(str(error)) from error
+        return {
+            "application_id": application_id,
+            "default_resolver": "agent",
+            "ruling_kind": str(raw_ruling["ruling_kind"]),
+            "decision": decision,
+            "reason": reason,
+            "source_ref": deepcopy(source_ref),
+            "source_excerpt": source_excerpt,
+        }
+
+    def agent_save_damage_commitment(
+        *,
+        application_id: str,
+        source_card_id: str,
+        source_card_kind: str,
+        target_ids: list[str],
+        save_ability: str,
+        save_dc: int,
+        save_advantage: bool,
+        save_disadvantage: bool,
+        damage_expression: str,
+        damage_type: str,
+        half_on_success: bool,
+        mechanic_source_excerpt: str,
+        agent_ruling: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Build the immutable semantic contract paid by a descriptive action."""
+
+        return {
+            "application_id": application_id,
+            "source_card_id": source_card_id,
+            "source_card_kind": source_card_kind,
+            "target_ids": list(target_ids),
+            "save_ability": save_ability,
+            "save_dc": save_dc,
+            "save_advantage": save_advantage,
+            "save_disadvantage": save_disadvantage,
+            "damage_expression": damage_expression,
+            "damage_type": damage_type,
+            "half_on_success": half_on_success,
+            "mechanic_source_excerpt": mechanic_source_excerpt,
+            "agent_ruling": deepcopy(agent_ruling),
+        }
+
+    def validate_agent_save_damage_commitment(
+        campaign_id: str,
+        raw_commitment: Any,
+        *,
+        encounter: dict[str, Any],
+        source_actor_id: str,
+        source_card_id: str,
+        source_card_kind: str,
+    ) -> dict[str, Any]:
+        """Validate a commitment before its action economy is consumed."""
+
+        if not isinstance(raw_commitment, dict):
+            raise CombatEngineError(
+                "agent_ruling_commitment must be an object"
+            )
+        required_fields = {
+            "application_id",
+            "source_card_id",
+            "source_card_kind",
+            "target_ids",
+            "save_ability",
+            "save_dc",
+            "save_advantage",
+            "save_disadvantage",
+            "damage_expression",
+            "damage_type",
+            "half_on_success",
+            "mechanic_source_excerpt",
+            "agent_ruling",
+        }
+        target_ids = raw_commitment.get("target_ids")
+        if (
+            set(raw_commitment) != required_fields
+            or not isinstance(target_ids, list)
+        ):
+            raise CombatEngineError(
+                "agent_ruling_commitment requires the exact save-damage contract"
+            )
+        normalized_target_ids = [
+            str(target_id or "").strip() for target_id in target_ids
+        ]
+        normalized_ruling = validate_current_scene_agent_ruling(
+            campaign_id,
+            raw_commitment.get("agent_ruling"),
+            encounter=encounter,
+            field="save-damage commitment",
+            allowed_ruling_kinds={"agent_dm_adjudication"},
+        )
+        normalized = agent_save_damage_commitment(
+            application_id=str(
+                raw_commitment.get("application_id") or ""
+            ).strip(),
+            source_card_id=str(
+                raw_commitment.get("source_card_id") or ""
+            ).strip(),
+            source_card_kind=str(
+                raw_commitment.get("source_card_kind") or ""
+            ).strip().casefold().replace("-", "_"),
+            target_ids=normalized_target_ids,
+            save_ability=str(
+                raw_commitment.get("save_ability") or ""
+            ).strip().casefold(),
+            save_dc=raw_commitment.get("save_dc"),
+            save_advantage=raw_commitment.get("save_advantage"),
+            save_disadvantage=raw_commitment.get("save_disadvantage"),
+            damage_expression="".join(
+                str(raw_commitment.get("damage_expression") or "").split()
+            ).casefold(),
+            damage_type=str(
+                raw_commitment.get("damage_type") or ""
+            ).strip().casefold(),
+            half_on_success=raw_commitment.get("half_on_success"),
+            mechanic_source_excerpt=" ".join(
+                str(
+                    raw_commitment.get("mechanic_source_excerpt") or ""
+                ).split()
+            ),
+            agent_ruling=normalized_ruling,
+        )
+        if (
+            normalized != raw_commitment
+            or not normalized["application_id"]
+            or not normalized["source_card_id"]
+            or normalized["source_card_kind"]
+            not in {"activity", "spell", "scene_procedure"}
+            or normalized["application_id"]
+            != normalized_ruling["application_id"]
+            or normalized["source_card_id"] != source_card_id
+            or normalized["source_card_kind"] != source_card_kind
+            or not normalized_target_ids
+            or source_actor_id in normalized_target_ids
+            or any(not target_id for target_id in normalized_target_ids)
+            or len(normalized_target_ids) != len(set(normalized_target_ids))
+            or normalized["save_ability"]
+            not in {
+                "strength",
+                "dexterity",
+                "constitution",
+                "intelligence",
+                "wisdom",
+                "charisma",
+            }
+            or isinstance(normalized["save_dc"], bool)
+            or not isinstance(normalized["save_dc"], int)
+            or not 1 <= normalized["save_dc"] <= 40
+            or not isinstance(normalized["save_advantage"], bool)
+            or not isinstance(normalized["save_disadvantage"], bool)
+            or (
+                normalized["save_advantage"]
+                and normalized["save_disadvantage"]
+            )
+            or re.fullmatch(
+                r"[1-9]\d*d[1-9]\d*(?:[+-]\d+)?",
+                normalized["damage_expression"],
+            )
+            is None
+            or not normalized["damage_type"]
+            or not isinstance(normalized["half_on_success"], bool)
+            or not normalized["mechanic_source_excerpt"]
+        ):
+            raise CombatEngineError(
+                "agent_ruling_commitment is not a canonical source-bound "
+                "save-damage contract"
+            )
+        for target_id in normalized_target_ids:
+            require_campaign_actor(campaign_id, target_id)
+            require_encounter_combatant(
+                encounter,
+                target_id,
+                role="committed save-damage target",
+            )
+        return normalized
+
+    def require_agent_save_damage_payment(
+        encounter: dict[str, Any],
+        *,
+        source_actor_id: str,
+        source_card_id: str,
+        source_card_kind: str,
+        commitment: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Require the exact current-turn action commitment before settlement."""
+
+        current = current_combatant(encounter)
+        current_round = int(encounter.get("round", 1) or 1)
+        current_turn_index = int(encounter.get("turn_index", 0) or 0)
+        if current is None or str(current.get("actor_id") or "") != source_actor_id:
+            raise CombatEngineError(
+                "save damage must settle during the source actor's paid action"
+            )
+        for entry in reversed(list(encounter.get("log") or [])):
+            if not isinstance(entry, dict):
+                continue
+            entry_round = entry.get("round")
+            entry_turn_index = entry.get("turn_index")
+            if (
+                int(entry_round if entry_round is not None else -1)
+                != current_round
+                or int(
+                    entry_turn_index
+                    if entry_turn_index is not None
+                    else -1
+                )
+                != current_turn_index
+                or str(entry.get("actor_id") or "") != source_actor_id
+            ):
+                continue
+            paid_commitment: Any = None
+            if (
+                source_card_kind == "activity"
+                and entry.get("type") == "activity"
+                and str(entry.get("activity_id") or "") == source_card_id
+                and entry.get("requires_ruling") is True
+            ):
+                paid_commitment = dict(entry.get("declaration") or {}).get(
+                    "agent_ruling_commitment"
+                )
+            elif (
+                source_card_kind == "spell"
+                and entry.get("type") == "common_action"
+                and entry.get("action") == "cast"
+                and str(dict(entry.get("payload") or {}).get("spell_id") or "")
+                == source_card_id
+            ):
+                paid_commitment = dict(entry.get("payload") or {}).get(
+                    "agent_ruling_commitment"
+                )
+            elif (
+                source_card_kind == "scene_procedure"
+                and entry.get("type") == "common_action"
+                and entry.get("action") == "improvise"
+                and str(
+                    dict(entry.get("payload") or {}).get("procedure_id") or ""
+                )
+                == source_card_id
+            ):
+                paid_commitment = dict(entry.get("payload") or {}).get(
+                    "agent_ruling_commitment"
+                )
+            if paid_commitment == commitment:
+                return deepcopy(entry)
+        raise CombatEngineError(
+            "save damage requires the exact current-turn Agent ruling commitment "
+            "to be paid by its activity, spell, or scene procedure"
+        )
+
     def validate_agent_attack_context(
         campaign_id: str,
         action: dict[str, Any],
@@ -2809,56 +3119,16 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         raw_ruling = context.get("agent_ruling")
         if raw_ruling is None:
             return
-        if not isinstance(raw_ruling, dict):
-            raise CombatEngineError("attack context agent_ruling must be an object")
-        allowed = {
-            "application_id",
-            "default_resolver",
-            "ruling_kind",
-            "decision",
-            "reason",
-            "source_ref",
-            "source_excerpt",
-        }
-        unknown = set(raw_ruling) - allowed
-        application_id = str(raw_ruling.get("application_id") or "").strip()
-        decision = " ".join(str(raw_ruling.get("decision") or "").split())
-        reason = " ".join(str(raw_ruling.get("reason") or "").split())
-        source_ref = raw_ruling.get("source_ref")
-        source_excerpt = str(raw_ruling.get("source_excerpt") or "")
-        scene_id = str(encounter.get("scene_id") or "").strip()
-        if (
-            unknown
-            or not application_id
-            or raw_ruling.get("default_resolver") != "agent"
-            or raw_ruling.get("ruling_kind")
-            not in {"agent_dm_adjudication", "source_or_scene_fact"}
-            or not 10 <= len(decision) <= 1000
-            or not 10 <= len(reason) <= 500
-            or not isinstance(source_ref, dict)
-            or not scene_id
-        ):
-            raise CombatEngineError(
-                "attack context requires a bounded source-bound Agent ruling "
-                "for the active encounter scene"
-            )
-        try:
-            _normalized, _source, expanded = managed_module_source_ref(
-                campaign_id,
-                source_ref,
-                require_exact=True,
-                expected_scene_id=scene_id,
-                require_active_module=True,
-            )
-            assert expanded is not None
-            managed_module_source_excerpt(
-                expanded,
-                source_excerpt,
-                field="attack context source_excerpt",
-                minimum_length=10,
-            )
-        except (LookupError, ValueError) as error:
-            raise CombatEngineError(str(error)) from error
+        validate_current_scene_agent_ruling(
+            campaign_id,
+            raw_ruling,
+            encounter=encounter,
+            field="attack context",
+            allowed_ruling_kinds={
+                "agent_dm_adjudication",
+                "source_or_scene_fact",
+            },
+        )
 
     def apply_agent_attack_rulings(
         attacker: dict[str, Any],
@@ -11526,6 +11796,31 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         source_condition_record = None
         source_condition = ""
         source_condition_ruling = None
+        if "agent_ruling_commitment" in dict(payload or {}):
+            if normalized_action != "improvise":
+                raise CombatEngineError(
+                    "a scene-procedure Agent ruling commitment must pay "
+                    "the Improvise action"
+                )
+            access.require_campaign(
+                campaign_id,
+                principal_id,
+                roles=CAMPAIGN_DM_ROLES,
+            )
+            committed_payload = dict(payload or {})
+            committed_payload["agent_ruling_commitment"] = (
+                validate_agent_save_damage_commitment(
+                    campaign_id,
+                    committed_payload["agent_ruling_commitment"],
+                    encounter=encounter,
+                    source_actor_id=actor_id,
+                    source_card_id=str(
+                        committed_payload.get("procedure_id") or ""
+                    ),
+                    source_card_kind="scene_procedure",
+                )
+            )
+            engine_payload = committed_payload
         if normalized_action == "interact_object":
             interaction_payload = dict(payload or {})
             allowed_fields = {
@@ -12146,8 +12441,35 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             )
         if magic_missile and declaration:
             raise CombatEngineError("Magic Missile uses target_allocations, not declaration")
+        agent_ruling_commitment: dict[str, Any] | None = None
         if structured_resolution is None and declaration:
-            raise CombatEngineError("unstructured spells do not accept an effect declaration")
+            declared = dict(declaration)
+            if (
+                set(declared) != {"agent_ruling_commitment"}
+                or not isinstance(
+                    declared.get("agent_ruling_commitment"),
+                    dict,
+                )
+            ):
+                raise CombatEngineError(
+                    "an unstructured spell accepts only one "
+                    "agent_ruling_commitment for its pending Agent settlement"
+                )
+            access.require_campaign(
+                campaign_id,
+                principal_id,
+                roles=CAMPAIGN_DM_ROLES,
+            )
+            agent_ruling_commitment = (
+                validate_agent_save_damage_commitment(
+                    campaign_id,
+                    declared["agent_ruling_commitment"],
+                    encounter=encounter,
+                    source_actor_id=actor_id,
+                    source_card_id=spell_id,
+                    source_card_kind="spell",
+                )
+            )
         structured_target: dict[str, Any] | None = None
         if structured_resolution is not None:
             kind = str(structured_resolution.get("kind") or "")
@@ -12238,6 +12560,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "result": {key: value for key, value in applied.items() if key != "sheet"},
                 "campaign_revision": campaign.revision,
             }
+        if (
+            agent_ruling_commitment is not None
+            and applied.get("automatic_effect") is not None
+        ):
+            raise CombatEngineError(
+                "an automatically settled spell cannot open an Agent ruling commitment"
+            )
         casting_time = str(spell_entry.get("definition", {}).get("casting_time") or "1 action")
         normalized_casting_time = casting_time.casefold().strip()
         if ritual:
@@ -12306,6 +12635,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "cast_level": cast_level,
                 "ritual": ritual,
                 "source_item_id": source_item_id,
+                **(
+                    {"agent_ruling_commitment": agent_ruling_commitment}
+                    if agent_ruling_commitment is not None
+                    else {}
+                ),
             },
             payment=payment,
         )
@@ -13329,6 +13663,33 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "campaign revision conflict: "
                 f"expected {expected_revision}, found {campaign.revision}"
             )
+        if "agent_ruling_commitment" in dict(declaration or {}):
+            if set(dict(declaration or {})) != {
+                "agent_ruling_commitment"
+            }:
+                raise CombatEngineError(
+                    "a descriptive activity save-damage settlement accepts "
+                    "only agent_ruling_commitment"
+                )
+            access.require_campaign(
+                campaign_id,
+                principal_id,
+                roles=CAMPAIGN_DM_ROLES,
+            )
+            declaration = {
+                "agent_ruling_commitment": (
+                    validate_agent_save_damage_commitment(
+                        campaign_id,
+                        dict(declaration or {}).get(
+                            "agent_ruling_commitment"
+                        ),
+                        encounter=encounter,
+                        source_actor_id=actor_id,
+                        source_card_id=activity_id,
+                        source_card_kind="activity",
+                    )
+                )
+            }
         current = characters.get(actor_id)
         rule_context = effective_rule_context(
             campaign_id,
@@ -14104,6 +14465,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "activity_id": activity_id,
                 "declaration": declaration or {},
                 "requires_ruling": applied["requires_ruling"],
+                "round": int(next_encounter.get("round", 1) or 1),
+                "turn_index": int(next_encounter.get("turn_index", 0) or 0),
             },
         ][-100:]
         next_state = {**dict(campaign.state or {}), "combat": next_encounter}
@@ -15332,6 +15695,375 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 ["dnd5e.core.damage.zero_hp"],
                 "combat.source.stabilize",
             ),
+        )
+        return combat_response(campaign_id, principal_id, response)
+
+    def combat_save_damage(
+        campaign_id: str,
+        target_ids: list[str],
+        *,
+        source_actor_id: str,
+        source_card_id: str,
+        source_card_kind: str,
+        save_ability: str,
+        save_dc: int,
+        damage_expression: str,
+        damage_type: str,
+        half_on_success: bool,
+        save_advantage: bool,
+        save_disadvantage: bool,
+        mechanic_source_excerpt: str,
+        agent_ruling: dict[str, Any],
+        principal_id: str,
+        expected_revision: int | None,
+        branch_id: str | None,
+        idempotency_key: str | None,
+    ) -> dict[str, Any]:
+        """Resolve Agent-selected save damage through one generic Core mutation."""
+
+        access.require_campaign(
+            campaign_id,
+            principal_id,
+            roles=CAMPAIGN_DM_ROLES,
+        )
+        require_write_contract(expected_revision, idempotency_key)
+        resolved_branch_id = require_current_branch(campaign_id, branch_id)
+        normalized_target_ids = [
+            str(target_id or "").strip() for target_id in target_ids
+        ]
+        if (
+            not normalized_target_ids
+            or any(not target_id for target_id in normalized_target_ids)
+            or len(normalized_target_ids) != len(set(normalized_target_ids))
+        ):
+            raise CombatEngineError(
+                "save damage requires one or more unique target_ids"
+            )
+        request_payload = {
+            "target_ids": normalized_target_ids,
+            "source_actor_id": source_actor_id,
+            "source_card_id": source_card_id,
+            "source_card_kind": source_card_kind,
+            "save_ability": save_ability,
+            "save_dc": save_dc,
+            "damage_expression": damage_expression,
+            "damage_type": damage_type,
+            "half_on_success": half_on_success,
+            "save_advantage": save_advantage,
+            "save_disadvantage": save_disadvantage,
+            "mechanic_source_excerpt": mechanic_source_excerpt,
+            "agent_ruling": deepcopy(agent_ruling),
+            "branch_id": resolved_branch_id,
+        }
+        scope = (
+            f"combat-save-damage:{campaign_id}:{resolved_branch_id}:"
+            f"{principal_id}"
+        )
+        replay = replay_idempotent(scope, idempotency_key, request_payload)
+        if replay is not None:
+            return combat_response(campaign_id, principal_id, replay)
+        require_campaign_actor(campaign_id, source_actor_id)
+        for target_id in normalized_target_ids:
+            require_campaign_actor(campaign_id, target_id)
+        campaign, encounter = active_encounter(campaign_id)
+        if campaign.revision != expected_revision:
+            raise ValueError(
+                "campaign revision conflict: "
+                f"expected {expected_revision}, found {campaign.revision}"
+            )
+        require_no_blocking_pending(encounter)
+        require_encounter_combatant(
+            encounter,
+            source_actor_id,
+            role="save-damage source",
+        )
+        target_combatants = {
+            target_id: require_encounter_combatant(
+                encounter,
+                target_id,
+                role="save-damage target",
+            )
+            for target_id in normalized_target_ids
+        }
+        normalized_ruling = validate_current_scene_agent_ruling(
+            campaign_id,
+            agent_ruling,
+            encounter=encounter,
+            field="save damage",
+            allowed_ruling_kinds={"agent_dm_adjudication"},
+        )
+        normalized_card_kind = (
+            str(source_card_kind or "").strip().casefold().replace("-", "_")
+        )
+        normalized_card_id = str(source_card_id or "").strip()
+        normalized_mechanic_excerpt = " ".join(
+            str(mechanic_source_excerpt or "").split()
+        )
+        if (
+            source_actor_id in normalized_target_ids
+            or normalized_card_kind
+            not in {"activity", "spell", "scene_procedure"}
+            or not normalized_card_id
+            or not normalized_mechanic_excerpt
+        ):
+            raise CombatEngineError(
+                "save damage requires distinct source/target actors and one "
+                "reviewed activity, spell, or scene procedure"
+            )
+        source_actor = combat_actor_snapshot(source_actor_id)
+        source_content = dict(source_actor.get("sheet") or {}).get(
+            "content", {}
+        )
+        card_excerpt = ""
+        if normalized_card_kind in {"activity", "spell"}:
+            collection = (
+                "activities" if normalized_card_kind == "activity" else "spells"
+            )
+            card = next(
+                (
+                    dict(item)
+                    for item in dict(source_content).get(collection, [])
+                    if isinstance(item, dict)
+                    and str(item.get("id") or "") == normalized_card_id
+                ),
+                None,
+            )
+            if card is None:
+                raise CombatEngineError(
+                    f"save-damage source {normalized_card_kind} is absent "
+                    "from the actor card"
+                )
+            card_excerpt = str(
+                dict(card.get("definition") or {}).get("effect")
+                or card.get("description")
+                or ""
+            )
+            if _normalize_source_evidence_text(card_excerpt) != (
+                _normalize_source_evidence_text(normalized_mechanic_excerpt)
+            ):
+                raise CombatEngineError(
+                    "save-damage mechanics must equal the reviewed actor-card excerpt"
+                )
+        else:
+            try:
+                _normalized, _source, expanded = managed_module_source_ref(
+                    campaign_id,
+                    normalized_ruling["source_ref"],
+                    require_exact=True,
+                    expected_scene_id=str(encounter.get("scene_id") or ""),
+                    require_active_module=True,
+                )
+                assert expanded is not None
+                managed_module_source_excerpt(
+                    expanded,
+                    normalized_mechanic_excerpt,
+                    field="save damage mechanic_source_excerpt",
+                    minimum_length=10,
+                )
+            except (LookupError, ValueError) as error:
+                raise CombatEngineError(str(error)) from error
+            card_excerpt = normalized_mechanic_excerpt
+        normalized_expression = "".join(
+            str(damage_expression or "").split()
+        ).casefold()
+        normalized_damage_type = str(damage_type or "").strip().casefold()
+        normalized_save_ability = (
+            str(save_ability or "").strip().casefold()
+        )
+        ability_pattern = {
+            "strength": "strength|str",
+            "dexterity": "dexterity|dex",
+            "constitution": "constitution|con",
+            "intelligence": "intelligence|int",
+            "wisdom": "wisdom|wis",
+            "charisma": "charisma|cha",
+        }.get(normalized_save_ability, "")
+        printed_half_damage = re.search(
+            r"(?i)\bhalf\s+(?:as\s+much|the)\s+damage\b.*"
+            r"\b(?:successful|success)\b",
+            card_excerpt,
+        )
+        if (
+            not ability_pattern
+            or isinstance(save_dc, bool)
+            or not isinstance(save_dc, int)
+            or not isinstance(half_on_success, bool)
+            or not isinstance(save_advantage, bool)
+            or not isinstance(save_disadvantage, bool)
+            or (save_advantage and save_disadvantage)
+            or re.search(
+                rf"(?i)\bDC\s*{save_dc}\s+(?:{ability_pattern})\s+saving throw\b",
+                card_excerpt,
+            )
+            is None
+            or normalized_expression
+            not in "".join(card_excerpt.split()).casefold()
+            or re.search(
+                rf"(?i)\b{re.escape(normalized_damage_type)}\b",
+                card_excerpt,
+            )
+            is None
+            or bool(printed_half_damage) != half_on_success
+        ):
+            raise CombatEngineError(
+                "save-damage declaration does not match the reviewed save, "
+                "damage, or success terms"
+            )
+        commitment = agent_save_damage_commitment(
+            application_id=str(normalized_ruling["application_id"]),
+            source_card_id=normalized_card_id,
+            source_card_kind=normalized_card_kind,
+            target_ids=normalized_target_ids,
+            save_ability=normalized_save_ability,
+            save_dc=save_dc,
+            save_advantage=save_advantage,
+            save_disadvantage=save_disadvantage,
+            damage_expression=normalized_expression,
+            damage_type=normalized_damage_type,
+            half_on_success=half_on_success,
+            mechanic_source_excerpt=normalized_mechanic_excerpt,
+            agent_ruling=normalized_ruling,
+        )
+        payment_entry = require_agent_save_damage_payment(
+            encounter,
+            source_actor_id=source_actor_id,
+            source_card_id=normalized_card_id,
+            source_card_kind=normalized_card_kind,
+            commitment=commitment,
+        )
+        if any(
+            item.get("type") == "agent_save_damage"
+            and str(item.get("application_id") or "")
+            == str(normalized_ruling["application_id"])
+            for item in encounter.get("log", [])
+            if isinstance(item, dict)
+        ):
+            raise CombatEngineError(
+                "this Agent save-damage application has already been settled"
+            )
+        target_actors = [
+            combat_actor_snapshot(target_id)
+            for target_id in normalized_target_ids
+        ]
+        rule_context = effective_rule_context(
+            campaign_id,
+            branch_id=resolved_branch_id,
+            facts={
+                "actor_ids": normalized_target_ids,
+                "source_actor_id": source_actor_id,
+                "source_card_id": normalized_card_id,
+                "kind": "save_damage",
+                "ability": normalized_save_ability,
+                "dc": save_dc,
+            },
+        )
+        settled = resolve_save_damage_to_sheets(
+            target_actors,
+            save_ability=normalized_save_ability,
+            save_dc=save_dc,
+            damage_expression=normalized_expression,
+            damage_type=normalized_damage_type,
+            half_on_success=half_on_success,
+            advantage=save_advantage,
+            disadvantage=save_disadvantage,
+            source=f"agent-ruling:{normalized_ruling['application_id']}",
+            death_saves_by_actor_id={
+                target_id: combatant_zero_hp_buffered(combatant)
+                for target_id, combatant in target_combatants.items()
+            },
+            ruleset=encounter_rules_edition(campaign_id, encounter),
+            rules=rule_context,
+        )
+        result = {
+            **dict(settled["result"]),
+            "source_actor_id": source_actor_id,
+            "source_card_id": normalized_card_id,
+            "source_card_kind": normalized_card_kind,
+            "agent_ruling": normalized_ruling,
+            "action_payment": payment_entry,
+        }
+        next_encounter = deepcopy(encounter)
+        updated_sheets = {
+            target_id: validate_character_sheet(sheet)
+            for target_id, sheet in dict(settled["sheets"]).items()
+        }
+        for target_result in result["targets"]:
+            target_id = str(target_result["target_id"])
+            updated_sheet = updated_sheets[target_id]
+            damage = dict(target_result.get("damage") or {})
+            if damage:
+                record_source_trait_damage(
+                    next_encounter,
+                    target_id=target_id,
+                    damage={**damage, "sheet": updated_sheet},
+                )
+                add_concentration_window(
+                    next_encounter,
+                    target_id,
+                    damage.get("concentration"),
+                    next_revision=campaign.revision + 1,
+                )
+            reconcile_source_attachments(
+                next_encounter,
+                actor_id=target_id,
+                sheet=updated_sheet,
+            )
+            sync_combatant_conditions(
+                next_encounter,
+                target_id,
+                updated_sheet,
+            )
+            reconcile_readied_spells(
+                next_encounter,
+                target_id,
+                updated_sheet,
+            )
+        next_encounter["log"] = [
+            *list(next_encounter.get("log") or []),
+            {
+                "type": "agent_save_damage",
+                "application_id": str(normalized_ruling["application_id"]),
+                "source_actor_id": source_actor_id,
+                "target_ids": normalized_target_ids,
+                "result": result,
+            },
+        ][-100:]
+        current_records = {
+            target_id: characters.get(target_id)
+            for target_id in normalized_target_ids
+        }
+        response = commit_campaign_state(
+            campaign,
+            {**dict(campaign.state or {}), "combat": next_encounter},
+            operation="combat.save_damage",
+            principal_id=principal_id,
+            branch_id=resolved_branch_id,
+            idempotency_key=idempotency_key,
+            scope=scope,
+            payload=request_payload,
+            response_fields={
+                "status": "committed",
+                "result": result,
+                "combat": next_encounter,
+            },
+            character_updates=[
+                CharacterStateUpdate(
+                    character_id=target_id,
+                    sheet=updated_sheets[target_id],
+                    notes=validate_character_notes(
+                        current_records[target_id].notes
+                    ),
+                    expected_revision=current_records[target_id].revision,
+                )
+                for target_id in normalized_target_ids
+            ],
+            rule_receipts=[
+                receipt
+                for target_result in result["targets"]
+                for receipt in dict(target_result.get("save") or {}).get(
+                    "rule_receipts", []
+                )
+            ],
         )
         return combat_response(campaign_id, principal_id, response)
 
@@ -30063,7 +30795,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     def combat_hp_change(
         campaign_id: str,
         target_id: str,
-        action: Literal["damage", "heal", "stabilize"],
+        action: Literal["damage", "heal", "stabilize", "save_damage"],
         payload: dict[str, Any],
         principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
@@ -30098,7 +30830,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 spell_id=data.get("spell_id"),
                 spell_level=data.get("spell_level"),
             )
-        else:
+        elif action == "stabilize":
             result = combat_source_stabilize(
                 campaign_id,
                 target_id,
@@ -30107,6 +30839,69 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 expected_revision,
                 branch_id,
                 idempotency_key,
+            )
+        else:
+            data = strict_facade_payload(
+                payload,
+                action="combat_hp_change.save_damage",
+                allowed={
+                    "target_ids",
+                    "source_actor_id",
+                    "source_card_id",
+                    "source_card_kind",
+                    "save_ability",
+                    "save_dc",
+                    "damage_expression",
+                    "damage_type",
+                    "half_on_success",
+                    "save_advantage",
+                    "save_disadvantage",
+                    "mechanic_source_excerpt",
+                    "agent_ruling",
+                },
+                required_names=(
+                    "source_actor_id",
+                    "source_card_id",
+                    "source_card_kind",
+                    "save_ability",
+                    "save_dc",
+                    "damage_expression",
+                    "damage_type",
+                    "half_on_success",
+                    "mechanic_source_excerpt",
+                    "agent_ruling",
+                ),
+            )
+            save_damage_target_ids = list(
+                data.get("target_ids") or [target_id]
+            )
+            if target_id not in save_damage_target_ids:
+                raise CombatEngineError(
+                    "combat_hp_change target_id must be included in "
+                    "save_damage target_ids"
+                )
+            result = combat_save_damage(
+                campaign_id,
+                save_damage_target_ids,
+                source_actor_id=required(data, "source_actor_id"),
+                source_card_id=required(data, "source_card_id"),
+                source_card_kind=required(data, "source_card_kind"),
+                save_ability=required(data, "save_ability"),
+                save_dc=required(data, "save_dc"),
+                damage_expression=required(data, "damage_expression"),
+                damage_type=required(data, "damage_type"),
+                half_on_success=required(data, "half_on_success"),
+                save_advantage=data.get("save_advantage", False),
+                save_disadvantage=data.get("save_disadvantage", False),
+                mechanic_source_excerpt=required(
+                    data,
+                    "mechanic_source_excerpt",
+                ),
+                agent_ruling=required(data, "agent_ruling"),
+                principal_id=principal_id,
+                expected_revision=expected_revision,
+                branch_id=branch_id,
+                idempotency_key=idempotency_key,
             )
         return facade_result(action, result)
 
