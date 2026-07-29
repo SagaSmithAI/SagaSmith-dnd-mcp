@@ -1812,13 +1812,30 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if provenance_indices:
             note_lines = note_lines[provenance_indices[-1] :]
         manual_rulings: list[str] = []
+        normalization_notes: list[str] = []
         for line in note_lines:
-            if "Manual rulings:" not in line:
-                continue
-            value = line.split("Manual rulings:", 1)[1].strip().rstrip(".")
-            value = value.partition(" Variant source:")[0].rstrip(". ")
-            manual_rulings.extend(item.strip() for item in value.split(";") if item.strip())
+            if "Manual rulings:" in line:
+                value = line.split("Manual rulings:", 1)[1].strip().rstrip(".")
+                value = value.partition(" Variant source:")[0].rstrip(". ")
+                manual_rulings.extend(
+                    item.strip() for item in value.split(";") if item.strip()
+                )
+            if "Normalization notes:" in line:
+                value = line.split("Normalization notes:", 1)[1].strip().rstrip(".")
+                normalization_notes.extend(
+                    item.strip() for item in value.split(";") if item.strip()
+                )
         manual_rulings = list(dict.fromkeys(manual_rulings))
+        normalization_notes = list(dict.fromkeys(normalization_notes))
+        legacy_normalization_notes = [
+            item for item in manual_rulings if is_statblock_normalization_note(item)
+        ]
+        normalization_notes = list(
+            dict.fromkeys([*normalization_notes, *legacy_normalization_notes])
+        )
+        manual_rulings = [
+            item for item in manual_rulings if not is_statblock_normalization_note(item)
+        ]
         specific_multiattacks = {
             item.split(":", 1)[0]
             for item in manual_rulings
@@ -1935,6 +1952,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "blocking_reasons": sorted(set(blockers)),
             "unresolved_rules": unresolved,
             "manual_rulings": manual_rulings,
+            "normalization_notes": normalization_notes,
             "ruling_requirements": ruling_requirements,
             "agent_rulings": [
                 item["reason"]
@@ -2258,6 +2276,16 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             )
         return requirements
 
+    def is_statblock_normalization_note(reason: str) -> bool:
+        """Return whether a parser diagnostic proves safe exclusion, not a rule gap."""
+
+        return reason.endswith(
+            (
+                "trailing creature prose excluded from action settlement",
+                "trailing page furniture excluded from action settlement",
+            )
+        )
+
     def statblock_ruling_kind(reason: str, *, character_type: str = "") -> str:
         """Classify a card boundary without treating absent source facts as DM fiat."""
 
@@ -2265,7 +2293,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             reason.endswith("ranged weapon range is missing")
             or reason.endswith("thrown weapon range is missing")
             or reason.endswith("no active spell artifact or complete statblock action exists")
-            or reason.endswith("trailing creature prose excluded from action settlement")
             or (
                 reason.startswith("Spellcasting:")
                 and reason.endswith("descriptive passive is not automatically settled")
@@ -2292,17 +2319,34 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     def statblock_settlement(
         warnings: list[str],
         *,
+        normalization_notes: list[str] | None = None,
         character_type: str = "",
     ) -> dict[str, Any]:
+        ruling_warnings = [
+            warning for warning in warnings if not is_statblock_normalization_note(warning)
+        ]
+        notes = list(
+            dict.fromkeys(
+                [
+                    *(normalization_notes or []),
+                    *(
+                        warning
+                        for warning in warnings
+                        if is_statblock_normalization_note(warning)
+                    ),
+                ]
+            )
+        )
         requirements = statblock_ruling_requirements(
-            warnings,
+            ruling_warnings,
             character_type=character_type,
         )
         has_source_review = any(
             item["default_resolver"] == "external_input" for item in requirements
         )
         return {
-            "warnings": list(warnings),
+            "warnings": ruling_warnings,
+            "normalization_notes": notes,
             "settlement": (
                 "automatic"
                 if not requirements
@@ -2313,6 +2357,22 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "ruling_requirements": requirements,
             "default_dm_resolver": "agent",
         }
+
+    def append_statblock_diagnostics(
+        provenance: str,
+        *,
+        warnings: list[str],
+        normalization_notes: list[str],
+    ) -> str:
+        """Persist executable boundaries separately from successful normalization."""
+
+        if warnings:
+            provenance += "\nManual rulings: " + "; ".join(warnings) + "."
+        if normalization_notes:
+            provenance += (
+                "\nNormalization notes: " + "; ".join(normalization_notes) + "."
+            )
+        return provenance
 
     def persist_source_bound_statblock(
         *,
@@ -27534,6 +27594,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 [*parsed.warnings, *spell_warnings],
                 variant,
             )
+            statblock_normalization_notes = retained_statblock_warnings(
+                list(parsed.normalization_notes),
+                variant,
+            )
             resolved_fill_warnings = set((filled or {}).get("resolved_warnings") or [])
             statblock_warnings = [
                 warning for warning in statblock_warnings if warning not in resolved_fill_warnings
@@ -27583,8 +27647,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     f"\nVariant source: {statblock_variant_source_label(variant)}; "
                     f"applied fields: {changed_fields}."
                 )
-            if statblock_warnings:
-                provenance += "\nManual rulings: " + "; ".join(statblock_warnings) + "."
+            provenance = append_statblock_diagnostics(
+                provenance,
+                warnings=statblock_warnings,
+                normalization_notes=statblock_normalization_notes,
+            )
             if filled is not None:
                 fill_labels = reviewed_statblock_fill_labels(filled["fill"])
                 provenance += (
@@ -27620,7 +27687,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "statblock": {
                     "challenge_rating": challenge_rating,
                     "experience_points": experience_points,
-                    **statblock_settlement(statblock_warnings),
+                    **statblock_settlement(
+                        statblock_warnings,
+                        normalization_notes=statblock_normalization_notes,
+                    ),
                     "agent_fill": (filled or {}).get("fill"),
                 },
                 "variant": deepcopy(variant) if variant is not None else None,
@@ -27677,6 +27747,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 [*parsed.warnings, *spell_warnings],
                 variant,
             )
+            statblock_normalization_notes = retained_statblock_warnings(
+                list(parsed.normalization_notes),
+                variant,
+            )
             resolved_fill_warnings = set((filled or {}).get("resolved_warnings") or [])
             statblock_warnings = [
                 warning for warning in statblock_warnings if warning not in resolved_fill_warnings
@@ -27725,8 +27799,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "applied fields: "
                     f"{changed_fields}."
                 )
-            if statblock_warnings:
-                provenance += "\nManual rulings: " + "; ".join(statblock_warnings) + "."
+            provenance = append_statblock_diagnostics(
+                provenance,
+                warnings=statblock_warnings,
+                normalization_notes=statblock_normalization_notes,
+            )
             if filled is not None:
                 fill_labels = reviewed_statblock_fill_labels(filled["fill"])
                 provenance += (
@@ -27760,7 +27837,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "statblock": {
                     "challenge_rating": challenge_rating,
                     "experience_points": experience_points,
-                    **statblock_settlement(statblock_warnings),
+                    **statblock_settlement(
+                        statblock_warnings,
+                        normalization_notes=statblock_normalization_notes,
+                    ),
                     "agent_fill": (filled or {}).get("fill"),
                 },
                 "variant": deepcopy(variant) if variant is not None else None,
@@ -27874,6 +27954,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 [*parsed.warnings, *spell_warnings],
                 variant,
             )
+            statblock_normalization_notes = retained_statblock_warnings(
+                list(parsed.normalization_notes),
+                variant,
+            )
             sheet = (
                 apply_statblock_variant(hydrated_sheet, variant)
                 if variant is not None
@@ -27914,8 +27998,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "applied fields: "
                     f"{changed_fields}."
                 )
-            if statblock_warnings:
-                provenance += "\nManual rulings: " + "; ".join(statblock_warnings) + "."
+            provenance = append_statblock_diagnostics(
+                provenance,
+                warnings=statblock_warnings,
+                normalization_notes=statblock_normalization_notes,
+            )
             existing_dm_notes = str(profile.get("dm_notes") or "").strip()
             profile["dm_notes"] = "\n".join(
                 item for item in (existing_dm_notes, provenance) if item
@@ -27950,7 +28037,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "statblock": {
                     "challenge_rating": challenge_rating,
                     "experience_points": experience_points,
-                    **statblock_settlement(statblock_warnings),
+                    **statblock_settlement(
+                        statblock_warnings,
+                        normalization_notes=statblock_normalization_notes,
+                    ),
                 },
                 "variant": deepcopy(variant) if variant is not None else None,
                 "variant_evidence": variant_evidence,

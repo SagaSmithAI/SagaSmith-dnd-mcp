@@ -176,7 +176,10 @@ def test_imported_rule_source_creates_a_source_bound_combat_actor(tmp_path: Path
     import_root = tmp_path / "rules"
     import_root.mkdir()
     commoner = import_root / "commoner.md"
-    commoner.write_text(COMMONER, encoding="utf-8")
+    commoner.write_text(
+        COMMONER + "\nA commoner is an ordinary resident with no special training.\n",
+        encoding="utf-8",
+    )
     config = McpConfig(
         home=tmp_path / "home",
         database_url=None,
@@ -274,6 +277,9 @@ def test_imported_rule_source_creates_a_source_bound_combat_actor(tmp_path: Path
             "challenge_rating": "0",
             "experience_points": 10,
             "warnings": [],
+            "normalization_notes": [
+                "Club: trailing creature prose excluded from action settlement"
+            ],
             "settlement": "automatic",
             "ruling_requirements": [],
             "default_dm_resolver": "agent",
@@ -286,6 +292,12 @@ def test_imported_rule_source_creates_a_source_bound_combat_actor(tmp_path: Path
         assert club["attack_bonus"] == 2
         assert club["damage_expression"] == "1d4"
         assert "rule-source:srd/commoner" in actor["notes"]["profile"]["dm_notes"]
+        assert "Normalization notes: Club: trailing creature prose excluded" in (
+            actor["notes"]["profile"]["dm_notes"]
+        )
+        assert "Manual rulings: Club: trailing creature prose excluded" not in (
+            actor["notes"]["profile"]["dm_notes"]
+        )
 
         replacement_arguments = {
             "mode": "statblock",

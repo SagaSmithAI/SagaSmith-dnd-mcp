@@ -85,6 +85,8 @@ def test_scene_readiness_blocks_missing_combatants_and_reserves(tmp_path: Path) 
                             "profile": {
                                 "dm_notes": (
                                     "Statblock import: test. Manual rulings: "
+                                    "Club: trailing creature prose excluded from action "
+                                    "settlement; "
                                     "Parry requires a reaction decision; "
                                     "Multiattack: Multiattack composition requires a DM ruling; "
                                     "Multiattack: descriptive action is not automatically settled. "
@@ -282,6 +284,9 @@ def test_scene_readiness_blocks_missing_combatants_and_reserves(tmp_path: Path) 
         assert captain_card["manual_rulings"] == [
             "Parry requires a reaction decision",
             "Multiattack: Multiattack composition requires a DM ruling",
+        ]
+        assert captain_card["normalization_notes"] == [
+            "Club: trailing creature prose excluded from action settlement"
         ]
         assert captain_card["default_dm_resolver"] == "agent"
         assert captain_card["agent_rulings"] == captain_card["manual_rulings"]
