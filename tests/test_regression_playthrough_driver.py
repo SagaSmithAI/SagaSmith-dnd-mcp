@@ -2124,7 +2124,7 @@ def test_party_item_claim_driver_uses_atomic_party_to_character_public_tool(
         "id": "stone-of-golorr",
         "name": "Stone of Golorr",
         "kind": "magic_item",
-        "quantity": 1,
+        "quantity": 2,
     }
 
     class Client:
@@ -2219,6 +2219,122 @@ def test_party_item_claim_driver_uses_atomic_party_to_character_public_tool(
         assert result["checkpoint"] is None
     else:
         assert result["checkpoint"]["verification"]["valid"] is True
+
+
+def test_party_item_claim_recovers_committed_partial_split_from_public_receipt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_ref = {
+        "module_id": "module-1",
+        "scene_id": "scene-1",
+        "chunk_id": "reward-chunk",
+        "page_start": 78,
+        "page_end": 78,
+        "heading_path": ["Mission to Thay", "Conclusion"],
+        "content_sha256": "a" * 64,
+    }
+    party_item = {
+        "id": "protection-bone",
+        "name": "Finger Bone of Protection from Undead",
+        "kind": "consumable",
+        "quantity": 3,
+        "description": "Snap it to activate its protection.",
+        "source_key": "module-chunk:reward-chunk",
+        "uses": {"value": 0, "max": 0},
+        "charges": {"value": 0, "max": 0},
+        "mechanics": {},
+    }
+    claimed_item = {
+        **deepcopy(party_item),
+        "id": "split-protection-bone",
+        "quantity": 1,
+    }
+
+    class Client:
+        def __init__(self) -> None:
+            sheet = default_character_sheet()
+            sheet["inventory"]["items"].append(deepcopy(claimed_item))
+            self.actor = {
+                "id": "brynja",
+                "name": "Brynja",
+                "campaign_id": "campaign-1",
+                "revision": 8,
+                "sheet": sheet,
+                "derived": {"armor_class": 18},
+            }
+            self.party = {"inventory": {"items": [deepcopy(party_item)]}}
+            self.receipt_arguments: dict | None = None
+
+        async def core(self, tool_id: str, arguments: dict):
+            assert tool_id == "campaign_query"
+            assert arguments["view"] == "party"
+            return {"result": deepcopy(self.party)}
+
+        async def domain(self, tool_id: str, arguments: dict):
+            if tool_id == "module_query":
+                return {
+                    "module_id": "module-1",
+                    "scene_id": "scene-1",
+                    "content": "Each character finds a finger bone among their belongings.",
+                    "spatial": {"locations": [{"key": "thay", "title": "Thay"}]},
+                }
+            if tool_id == "character_query":
+                return deepcopy(self.actor)
+            if tool_id == "state_revision":
+                self.receipt_arguments = deepcopy(arguments)
+                return {
+                    "key": arguments["payload"]["idempotency_key"],
+                    "response": {
+                        "party": deepcopy(self.party),
+                        "character": deepcopy(self.actor),
+                        "item": deepcopy(claimed_item),
+                    },
+                }
+            if tool_id == "inventory_transfer":
+                raise AssertionError("a committed split must not be submitted again")
+            raise AssertionError((tool_id, arguments))
+
+    monkeypatch.setattr(
+        regression_playthrough,
+        "_checkpoint",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("deferred recovery must not checkpoint")
+        ),
+    )
+    client = Client()
+    result = asyncio.run(
+        _claim_party_item_for_character(
+            client,
+            campaign_id="campaign-1",
+            run_id="run-1",
+            occurrence_id="brynja-bone",
+            scene_id="scene-1",
+            location_key="thay",
+            source_excerpt="Each character finds a finger bone among their belongings.",
+            source_ref=source_ref,
+            character_id="brynja",
+            item_id="protection-bone",
+            quantity=1,
+            reason="Brynja takes her source-authored reward.",
+            checkpoint_label="",
+            defer_checkpoint=True,
+        )
+    )
+
+    assert client.receipt_arguments == {
+        "campaign_id": "campaign-1",
+        "action": "receipt",
+        "payload": {
+            "idempotency_key": _mutation_key(
+                "run-1",
+                "party-item-claim",
+                _occurrence_identity("brynja-bone", "claim-party-item"),
+            )
+        },
+    }
+    assert result["recovered"] is True
+    assert result["claimed_item_id"] == "split-protection-bone"
+    assert result["transfer"]["status"] == "recovered"
 
 
 @pytest.mark.parametrize("defer_checkpoint", [False, True])
@@ -9889,6 +10005,8 @@ def test_record_outcome_commits_facts_then_syncs_manifest_and_checkpoint(
         assert result["checkpoint"] is None
     else:
         assert result["checkpoint"]["verification"]["valid"] is True
+
+
     assert result["scene"]["source_scene_id"] == "source-scene-1"
     assert result["scene"]["agent_ruling"]["committed"] is True
     assert client.continuity_payload["event"]["payload"]["source_scene_id"] == ("source-scene-1")

@@ -8276,19 +8276,93 @@ async def _claim_party_item_for_character(
         ),
         None,
     )
+    claim_key = _mutation_key(run_id, "party-item-claim", claim_identity)
+    expected_quantity = (
+        quantity
+        if quantity is not None
+        else int(dict(party_item or actor_item or {}).get("quantity", 0) or 0)
+    )
+    recovery_candidates: list[dict[str, Any]] = []
+    if (
+        party_item is not None
+        and actor_item is None
+        and expected_quantity > 0
+        and str(party_item.get("source_key") or "")
+    ):
+        semantic_fields = (
+            "name",
+            "kind",
+            "source_key",
+            "description",
+            "mechanics",
+            "uses",
+            "charges",
+        )
+        recovery_candidates = [
+            dict(item)
+            for item in actor["sheet"]["inventory"]["items"]
+            if (
+                str(item.get("id") or "") != normalized_item_id
+                and int(item.get("quantity", 0) or 0) == expected_quantity
+                and all(item.get(field) == party_item.get(field) for field in semantic_fields)
+            )
+        ]
+
     recovered = party_item is None and actor_item is not None
+    recovered_receipt: dict[str, Any] | None = None
+    if recovery_candidates:
+        try:
+            recovered_receipt = dict(
+                _facade_value(
+                    await client.domain(
+                        "state_revision",
+                        {
+                            "campaign_id": campaign_id,
+                            "action": "receipt",
+                            "payload": {"idempotency_key": claim_key},
+                        },
+                    )
+                )
+            )
+        except Exception as error:
+            missing_receipt = any(
+                message.startswith("idempotency receipt not found:")
+                for message in exception_leaf_messages(error)
+            )
+            if not missing_receipt:
+                raise
+        if recovered_receipt is not None:
+            receipt_response = dict(recovered_receipt.get("response") or {})
+            receipt_item_id = str(dict(receipt_response.get("item") or {}).get("id") or "")
+            actor_item = next(
+                (
+                    item
+                    for item in recovery_candidates
+                    if str(item.get("id") or "") == receipt_item_id
+                ),
+                None,
+            )
+            if actor_item is None:
+                raise RuntimeError(
+                    "party item claim receipt does not match the current character inventory"
+                )
+            recovered = True
     if party_item is None and not recovered:
         raise ValueError("party inventory does not carry the requested item")
     if actor_item is not None and party_item is not None:
-        raise RuntimeError("claimed item id already exists in both inventories")
+        if not recovered:
+            raise RuntimeError("claimed item id already exists in both inventories")
 
     if recovered:
-        transferred: dict[str, Any] = {
-            "party": party,
-            "character": actor,
-            "item": actor_item,
-            "status": "recovered",
-        }
+        transferred: dict[str, Any] = dict(
+            dict(recovered_receipt or {}).get("response")
+            or {
+                "party": party,
+                "character": actor,
+                "item": actor_item,
+            }
+        )
+        transferred["status"] = "recovered"
     else:
         campaign = await _campaign(client, campaign_id)
         payload: dict[str, Any] = {
@@ -8307,19 +8381,12 @@ async def _claim_party_item_for_character(
                     {
                         "mode": "party_to_character",
                         "payload": payload,
-                        "idempotency_key": _mutation_key(
-                            run_id,
-                            "party-item-claim",
-                            claim_identity,
-                        ),
+                        "idempotency_key": claim_key,
                     },
                 )
             )
         )
         claimed_item = dict(transferred.get("item") or {})
-        expected_quantity = (
-            quantity if quantity is not None else int(party_item.get("quantity", 0) or 0)
-        )
         if (
             not str(claimed_item.get("id") or "")
             or int(claimed_item.get("quantity", 0) or 0) != expected_quantity
