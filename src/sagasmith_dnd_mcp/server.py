@@ -29011,20 +29011,40 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     @mcp.tool()
     def combat_query(
         campaign_id: str,
-        view: Literal["status", "available_actions", "reactions"] = "status",
+        view: Literal[
+            "status",
+            "available_actions",
+            "reactions",
+            "transaction_history",
+            "transaction_receipt",
+        ] = "status",
         actor_id: str | None = None,
+        payload: dict[str, Any] | None = None,
         principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
     ) -> dict[str, Any]:
-        """Read combat status, legal actions, or legal reactions without committing combat state."""
+        """Read combat state or DM-only transaction evidence without committing state."""
+        data = facade_payload(payload)
         if view == "status":
             result = combat_status(campaign_id, principal_id)
         elif view == "available_actions":
             result = combat_available_actions(
                 campaign_id, required({"actor_id": actor_id}, "actor_id"), principal_id
             )
-        else:
+        elif view == "reactions":
             result = combat_reactions(
                 campaign_id, required({"actor_id": actor_id}, "actor_id"), principal_id
+            )
+        elif view == "transaction_history":
+            result = state_history(campaign_id, data.get("limit", 100), principal_id)
+        else:
+            receipt_key = str(required(data, "idempotency_key")).strip()
+            if not receipt_key:
+                raise ValueError("idempotency_key is required")
+            result = state_idempotency_receipt(
+                campaign_id,
+                receipt_key,
+                data.get("branch_id"),
+                principal_id,
             )
         return facade_result(view, result)
 

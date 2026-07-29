@@ -17,6 +17,7 @@ from scripts.regression_encounter import (
     _agent_target_priorities,
     _agent_target_reaction_contexts,
     _agent_turn_rulings,
+    _agent_turn_transaction_token,
     _apply_agent_positions,
     _apply_party_loadouts,
     _apply_source_casualty_rolls,
@@ -802,7 +803,12 @@ def test_agent_turn_ruling_rolls_area_damage_once_and_applies_each_save() -> Non
     ]
     assert client.calls[0][1]["idempotency_key"] == (
         "encounter-agent-turn-activity-"
-        + _operation_token(args, ruling["application_id"])
+        + _agent_turn_transaction_token(
+            args,
+            branch_id="branch-1",
+            application_id=ruling["application_id"],
+            parts=("action", "combat_use_activity"),
+        )
     )
     hp_change_calls = [
         arguments
@@ -893,6 +899,179 @@ def test_agent_turn_ruling_recovers_legacy_action_payment_after_interruption() -
     assert len({call["idempotency_key"] for call in activity_calls}) == 3
     assert result["action_result"]["recovered_legacy_action_payment"] is True
     assert result["action_result"]["legacy_turn_sequence"] == 6
+
+
+def test_agent_turn_ruling_recovers_action_roll_and_save_from_public_history() -> None:
+    class Client:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict]] = []
+
+        async def domain(self, tool_id: str, arguments: dict) -> dict | list[dict]:
+            self.calls.append((tool_id, arguments))
+            if tool_id == "combat_use_activity":
+                raise RuntimeError("actor has no action remaining")
+            if tool_id == "combat_query":
+                view = arguments["view"]
+                if view == "status":
+                    return {
+                        "round": 1,
+                        "turn_index": 1,
+                        "combatants": [
+                            {"actor_id": "pc-1"},
+                            {"actor_id": "dragon"},
+                        ],
+                    }
+                if view == "transaction_history":
+                    return [
+                        {
+                            "sequence": 13,
+                            "operation": "combat.save",
+                            "idempotency_key": "old-save",
+                            "mutation_group_id": "save-group",
+                        },
+                        {
+                            "sequence": 12,
+                            "operation": "dnd.dice.roll",
+                            "idempotency_key": "old-roll",
+                            "mutation_group_id": "roll-group",
+                        },
+                        {
+                            "sequence": 11,
+                            "operation": "combat.activity.use",
+                            "idempotency_key": "old-action",
+                            "mutation_group_id": "action-group",
+                        },
+                        {
+                            "sequence": 10,
+                            "operation": "combat.activity.use",
+                            "idempotency_key": "old-action",
+                            "mutation_group_id": "action-group",
+                        },
+                    ]
+                if view == "transaction_receipt":
+                    key = arguments["payload"]["idempotency_key"]
+                    if key == "old-action":
+                        return {
+                            "response": {
+                                "status": "pending_ruling",
+                                "result": {
+                                    "activity_id": "poison-breath-activity",
+                                    "requires_ruling": True,
+                                },
+                                "combat": {
+                                    "active": True,
+                                    "round": 1,
+                                    "turn_index": 1,
+                                    "combatants": [
+                                        {"actor_id": "pc-1"},
+                                        {"actor_id": "dragon"},
+                                    ],
+                                    "log": [],
+                                },
+                            }
+                        }
+                    if key == "old-roll":
+                        return {
+                            "response": {
+                                "expression": "16d6",
+                                "total": 56,
+                                "rolls": [3] * 16,
+                                "random_stream_receipt": {"before": 100, "after": 116},
+                            }
+                        }
+                    if key == "old-save":
+                        return {
+                            "response": {
+                                "status": "committed",
+                                "result": {
+                                    "kind": "save",
+                                    "dc": 18,
+                                    "success": False,
+                                },
+                                "combat": {
+                                    "log": [
+                                        {
+                                            "type": "save",
+                                            "actor_id": "pc-1",
+                                        }
+                                    ]
+                                },
+                            }
+                        }
+                    raise AssertionError(key)
+            if tool_id == "combat_hp_change":
+                return {
+                    "status": "committed",
+                    "result": {"applied_amount": 56},
+                }
+            if tool_id == "combat_map_patch":
+                return {"status": "committed", "world_patches": arguments["patches"]}
+            if tool_id in {"dnd_dice_roll", "combat_check"}:
+                raise AssertionError(f"{tool_id} must be recovered, not rerolled")
+            raise AssertionError(tool_id)
+
+    ruling = {
+        "application_id": "turn-ruling-history-1",
+        "actor_id": "dragon",
+        "feature_id": "",
+        "activity_id": "poison-breath-activity",
+        "spell_id": "",
+        "round": 1,
+        "target_id": "",
+        "target_ids": ["pc-1"],
+        "save": {
+            "ability": "constitution",
+            "dc": 18,
+            "advantage": False,
+            "disadvantage": False,
+            "success_outcome": "Half damage.",
+            "failure_outcome": "Full damage.",
+            "forced_target_id": "",
+            "ends_if_source_incapacitated": False,
+            "damage": {
+                "expression": "16d6",
+                "damage_type": "poison",
+                "half_on_success": True,
+            },
+        },
+        "agent_ruling": {
+            "default_resolver": "agent",
+            "ruling_kind": "agent_dm_adjudication",
+            "decision": "The dragon catches the target in its breath.",
+            "reason": "The cited encounter directs this opening action.",
+            "source_ref": {
+                "module_id": "module-1",
+                "scene_id": "scene-1",
+                "chunk_id": "chunk-1",
+                "content_sha256": "a" * 64,
+            },
+        },
+    }
+    client = Client()
+    with patch(
+        "scripts.regression_encounter.campaign_view",
+        new=AsyncMock(
+            side_effect=[{"revision": revision} for revision in range(10, 15)]
+        ),
+    ):
+        result = asyncio.run(
+            _settle_agent_turn_ruling(
+                client,
+                SimpleNamespace(campaign_id="campaign-1", run_id="run-1"),
+                branch_id="branch-1",
+                ruling=ruling,
+                sequence=1,
+            )
+        )
+
+    assert result["action_result"]["legacy_idempotency_key"] == "old-action"
+    assert result["damage_roll"]["legacy_idempotency_key"] == "old-roll"
+    assert result["save_results"][0]["result"]["legacy_idempotency_key"] == "old-save"
+    assert result["damage_results"][0]["applied_amount"] == 56
+    assert not {
+        "dnd_dice_roll",
+        "combat_check",
+    } & {name for name, _arguments in client.calls}
 
 
 def test_agent_turn_innate_spell_pays_daily_use_and_starts_concentration() -> None:

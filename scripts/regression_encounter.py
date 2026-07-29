@@ -182,6 +182,33 @@ def _operation_token(
     return _token(identity, length=length)
 
 
+def _agent_turn_transaction_token(
+    args: argparse.Namespace,
+    *,
+    branch_id: str,
+    application_id: str,
+    parts: tuple[object, ...] = (),
+) -> str:
+    """Identify one Agent settlement independently of driver-local encounter flags."""
+
+    identity = {
+        "campaign_id": str(args.campaign_id),
+        "run_id": str(args.run_id),
+        "branch_id": str(branch_id),
+        "application_id": str(application_id),
+        "parts": [str(part) for part in parts],
+    }
+    return _token(
+        json.dumps(
+            identity,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ),
+        length=24,
+    )
+
+
 def _encounter_start_operation_token(request: dict[str, Any]) -> str:
     identity = {key: value for key, value in request.items() if key != "idempotency_key"}
     return "encounter-start-" + _token(
@@ -6675,6 +6702,94 @@ async def _settle_agent_turn_ruling(
 ) -> dict[str, Any]:
     """Pay one descriptive action and persist the Agent's source-bound outcome."""
 
+    actor_id = str(ruling["actor_id"])
+    target_id = str(ruling.get("target_id") or "")
+    target_ids = [
+        str(item)
+        for item in ruling.get("target_ids") or ([target_id] if target_id else [])
+    ]
+    legacy_history: list[dict[str, Any]] | None = None
+    legacy_action_sequence = 0
+    recovered_transaction_keys: set[str] = set()
+
+    async def transaction_history() -> list[dict[str, Any]]:
+        nonlocal legacy_history
+        if legacy_history is None:
+            value = await client.domain(
+                "combat_query",
+                {
+                    "campaign_id": args.campaign_id,
+                    "view": "transaction_history",
+                    "payload": {"limit": 500},
+                },
+            )
+            legacy_history = [
+                dict(item) for item in value if isinstance(item, dict)
+            ]
+        return legacy_history
+
+    async def transaction_receipt(key: str) -> dict[str, Any]:
+        value = await client.domain(
+            "combat_query",
+            {
+                "campaign_id": args.campaign_id,
+                "view": "transaction_receipt",
+                "payload": {
+                    "idempotency_key": key,
+                    "branch_id": branch_id,
+                },
+            },
+        )
+        return dict(value)
+
+    def action_response_matches(
+        tool_id: str,
+        response: dict[str, Any],
+    ) -> bool:
+        result = dict(response.get("result") or {})
+        combat = dict(response.get("combat") or {})
+        combatants = list(combat.get("combatants") or [])
+        turn_index = int(combat.get("turn_index", -1) or 0)
+        current_actor_id = (
+            str(dict(combatants[turn_index]).get("actor_id") or "")
+            if 0 <= turn_index < len(combatants)
+            else ""
+        )
+        if (
+            not combat.get("active")
+            or int(combat.get("round", 0) or 0) != int(ruling["round"])
+            or current_actor_id != actor_id
+        ):
+            return False
+        if tool_id == "combat_use_activity":
+            return (
+                str(result.get("activity_id") or "")
+                == str(ruling.get("activity_id") or "")
+                and bool(result.get("requires_ruling"))
+            )
+        log = list(combat.get("log") or [])
+        if tool_id == "combat_cast_spell":
+            return any(
+                isinstance(item, dict)
+                and item.get("type") in {"common_action", "spell_attack_cast"}
+                and str(item.get("actor_id") or "") == actor_id
+                and (
+                    str(item.get("spell_id") or "")
+                    or str(dict(item.get("payload") or {}).get("spell_id") or "")
+                )
+                == str(ruling.get("spell_id") or "")
+                for item in log
+            )
+        return any(
+            isinstance(item, dict)
+            and item.get("type") == "common_action"
+            and item.get("action") == "improvise"
+            and str(item.get("actor_id") or "") == actor_id
+            and str(dict(item.get("payload") or {}).get("application_id") or "")
+            == str(ruling["application_id"])
+            for item in log
+        )
+
     async def pay_action(
         tool_id: str,
         arguments: dict[str, Any],
@@ -6690,8 +6805,14 @@ async def _settle_agent_turn_ruling(
         recover through the server's own idempotency ledger.
         """
 
+        nonlocal legacy_action_sequence
         application_id = str(ruling["application_id"])
-        stable_key = idempotency_prefix + _operation_token(args, application_id)
+        stable_key = idempotency_prefix + _agent_turn_transaction_token(
+            args,
+            branch_id=branch_id,
+            application_id=application_id,
+            parts=("action", tool_id),
+        )
         request = {**arguments, "idempotency_key": stable_key}
         try:
             return await client.domain(tool_id, request)
@@ -6744,6 +6865,36 @@ async def _settle_agent_turn_ruling(
             replayed["recovered_legacy_action_payment"] = True
             replayed["legacy_turn_sequence"] = legacy_sequence
             return replayed
+        expected_operation = {
+            "combat_use_activity": "combat.activity.use",
+            "combat_cast_spell": "combat.spell.cast",
+            "combat_common_action": "combat.common.improvise",
+        }[tool_id]
+        history = await transaction_history()
+        candidates: dict[str, int] = {}
+        for item in history:
+            key = str(item.get("idempotency_key") or "")
+            if not key or str(item.get("operation") or "") != expected_operation:
+                continue
+            candidates[key] = max(
+                candidates.get(key, 0),
+                int(item.get("sequence", 0) or 0),
+            )
+        for key, history_sequence in sorted(
+            candidates.items(),
+            key=lambda item: item[1],
+            reverse=True,
+        ):
+            receipt = await transaction_receipt(key)
+            response = dict(receipt.get("response") or {})
+            if not action_response_matches(tool_id, response):
+                continue
+            legacy_action_sequence = history_sequence
+            recovered_transaction_keys.add(key)
+            response["recovered_legacy_action_payment"] = True
+            response["legacy_history_sequence"] = history_sequence
+            response["legacy_idempotency_key"] = key
+            return response
         if last_error is not None:
             raise last_error
         raise RuntimeError(
@@ -6751,12 +6902,6 @@ async def _settle_agent_turn_ruling(
             "application receipt"
         )
 
-    actor_id = str(ruling["actor_id"])
-    target_id = str(ruling.get("target_id") or "")
-    target_ids = [
-        str(item)
-        for item in ruling.get("target_ids") or ([target_id] if target_id else [])
-    ]
     campaign = await _campaign(client, args.campaign_id)
     if ruling.get("activity_id"):
         action_result = await pay_action(
@@ -6827,6 +6972,40 @@ async def _settle_agent_turn_ruling(
         if action_result.get("status") != "committed":
             raise RuntimeError("Agent-adjudicated feature did not pay its combat action")
 
+    async def recover_legacy_transaction(
+        operation: str,
+        predicate: Any,
+    ) -> dict[str, Any] | None:
+        if legacy_action_sequence <= 0:
+            return None
+        history = await transaction_history()
+        candidates: dict[str, int] = {}
+        for item in history:
+            key = str(item.get("idempotency_key") or "")
+            item_sequence = int(item.get("sequence", 0) or 0)
+            if (
+                not key
+                or key in recovered_transaction_keys
+                or str(item.get("operation") or "") != operation
+                or item_sequence <= legacy_action_sequence
+            ):
+                continue
+            candidates[key] = min(
+                candidates.get(key, item_sequence),
+                item_sequence,
+            )
+        for key, history_sequence in sorted(candidates.items(), key=lambda item: item[1]):
+            receipt = await transaction_receipt(key)
+            response = dict(receipt.get("response") or {})
+            if not predicate(response):
+                continue
+            recovered_transaction_keys.add(key)
+            response["recovered_legacy_transaction"] = True
+            response["legacy_history_sequence"] = history_sequence
+            response["legacy_idempotency_key"] = key
+            return response
+        return None
+
     save_result = None
     save_results: list[dict[str, Any]] = []
     save_contract = dict(ruling.get("save") or {})
@@ -6837,48 +7016,88 @@ async def _settle_agent_turn_ruling(
     if save_contract:
         damage_contract = dict(save_contract.get("damage") or {})
         if damage_contract:
-            campaign = await _campaign(client, args.campaign_id)
-            damage_roll = await client.domain(
-                "dnd_dice_roll",
-                {
-                    "campaign_id": args.campaign_id,
-                    "expression": str(damage_contract["expression"]),
-                    "branch_id": branch_id,
-                    "expected_campaign_revision": campaign["revision"],
-                    "idempotency_key": (
-                        "encounter-agent-turn-damage-roll-"
-                        + _operation_token(args, ruling["application_id"])
-                    ),
-                },
+            damage_roll = await recover_legacy_transaction(
+                "dnd.dice.roll",
+                lambda response: (
+                    str(response.get("expression") or "").replace(" ", "").casefold()
+                    == str(damage_contract["expression"]).replace(" ", "").casefold()
+                    and bool(response.get("random_stream_receipt"))
+                ),
             )
-        for save_target_id in target_ids:
-            campaign = await _campaign(client, args.campaign_id)
-            current_save = await client.domain(
-                "combat_check",
-                {
-                    "campaign_id": args.campaign_id,
-                    "actor_id": save_target_id,
-                    "kind": "save",
-                    "ability": str(save_contract["ability"]),
-                    "dc": int(save_contract["dc"]),
-                    "advantage": bool(save_contract["advantage"]),
-                    "disadvantage": bool(save_contract["disadvantage"]),
-                    "rule_facts": {
-                        "source_ref": deepcopy(ruling["agent_ruling"]["source_ref"]),
-                        "agent_ruling_id": str(ruling["application_id"]),
+            if damage_roll is None:
+                campaign = await _campaign(client, args.campaign_id)
+                damage_roll = await client.domain(
+                    "dnd_dice_roll",
+                    {
+                        "campaign_id": args.campaign_id,
+                        "expression": str(damage_contract["expression"]),
+                        "branch_id": branch_id,
+                        "expected_campaign_revision": campaign["revision"],
+                        "idempotency_key": (
+                            "encounter-agent-turn-damage-roll-"
+                            + _agent_turn_transaction_token(
+                                args,
+                                branch_id=branch_id,
+                                application_id=str(ruling["application_id"]),
+                                parts=("damage_roll",),
+                            )
+                        ),
                     },
-                    "branch_id": branch_id,
-                    "expected_revision": campaign["revision"],
-                    "idempotency_key": (
-                        "encounter-agent-turn-save-"
-                        + _operation_token(
-                            args,
-                            ruling["application_id"],
-                            save_target_id,
-                        )
+                )
+        for save_target_id in target_ids:
+            def matching_save(response: dict[str, Any]) -> bool:
+                result = dict(response.get("result") or {})
+                log = list(dict(response.get("combat") or {}).get("log") or [])
+                logged_actor_id = next(
+                    (
+                        str(item.get("actor_id") or "")
+                        for item in reversed(log)
+                        if isinstance(item, dict) and item.get("type") == "save"
                     ),
-                },
+                    "",
+                )
+                return (
+                    response.get("status") == "committed"
+                    and result.get("kind") == "save"
+                    and int(result.get("dc", 0) or 0) == int(save_contract["dc"])
+                    and logged_actor_id == save_target_id
+                )
+
+            current_save = await recover_legacy_transaction(
+                "combat.save",
+                matching_save,
             )
+            if current_save is None:
+                campaign = await _campaign(client, args.campaign_id)
+                current_save = await client.domain(
+                    "combat_check",
+                    {
+                        "campaign_id": args.campaign_id,
+                        "actor_id": save_target_id,
+                        "kind": "save",
+                        "ability": str(save_contract["ability"]),
+                        "dc": int(save_contract["dc"]),
+                        "advantage": bool(save_contract["advantage"]),
+                        "disadvantage": bool(save_contract["disadvantage"]),
+                        "rule_facts": {
+                            "source_ref": deepcopy(
+                                ruling["agent_ruling"]["source_ref"]
+                            ),
+                            "agent_ruling_id": str(ruling["application_id"]),
+                        },
+                        "branch_id": branch_id,
+                        "expected_revision": campaign["revision"],
+                        "idempotency_key": (
+                            "encounter-agent-turn-save-"
+                            + _agent_turn_transaction_token(
+                                args,
+                                branch_id=branch_id,
+                                application_id=str(ruling["application_id"]),
+                                parts=("save", save_target_id),
+                            )
+                        ),
+                    },
+                )
             current_success = bool(
                 dict(current_save.get("result") or {}).get("success")
             )
@@ -6927,10 +7146,11 @@ async def _settle_agent_turn_ruling(
                             "expected_revision": campaign["revision"],
                             "idempotency_key": (
                                 "encounter-agent-turn-damage-"
-                                + _operation_token(
+                                + _agent_turn_transaction_token(
                                     args,
-                                    ruling["application_id"],
-                                    save_target_id,
+                                    branch_id=branch_id,
+                                    application_id=str(ruling["application_id"]),
+                                    parts=("damage", save_target_id),
                                 )
                             ),
                         },
@@ -7007,7 +7227,12 @@ async def _settle_agent_turn_ruling(
             "expected_revision": campaign["revision"],
             "idempotency_key": (
                 "encounter-agent-turn-patch-"
-                + _operation_token(args, ruling["application_id"])
+                + _agent_turn_transaction_token(
+                    args,
+                    branch_id=branch_id,
+                    application_id=str(ruling["application_id"]),
+                    parts=("receipt",),
+                )
             ),
         },
     )

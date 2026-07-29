@@ -34,6 +34,77 @@ def _config(tmp_path: Path) -> McpConfig:
     )
 
 
+def test_combat_query_exposes_dm_transaction_history_and_receipts(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        server = create_server(_config(tmp_path))
+        campaign = await _call(
+            server,
+            "campaign_create",
+            {
+                "name": "Combat transaction evidence",
+                "edition": "2014",
+                "idempotency_key": "campaign",
+            },
+        )
+        actor = await _call(
+            server,
+            "character_create",
+            {
+                "campaign_id": campaign["id"],
+                "name": "Receipt actor",
+                "idempotency_key": "receipt-actor",
+            },
+        )
+        campaign = await _call(
+            server,
+            "campaign_get",
+            {"campaign_id": campaign["id"]},
+        )
+        phase = await _call(
+            server,
+            "game_phase",
+            {
+                "campaign_id": campaign["id"],
+                "action": "set",
+                "tool_profile": "play",
+                "expected_revision": campaign["revision"],
+                "idempotency_key": "receipt-phase",
+            },
+        )
+
+        history = await _call(
+            server,
+            "combat_query",
+            {
+                "campaign_id": campaign["id"],
+                "view": "transaction_history",
+                "payload": {"limit": 100},
+            },
+        )
+        actor_revision = next(
+            item for item in history if item["idempotency_key"] == "receipt-phase"
+        )
+        assert actor_revision["request_hash"]
+
+        receipt = await _call(
+            server,
+            "combat_query",
+            {
+                "campaign_id": campaign["id"],
+                "view": "transaction_receipt",
+                "payload": {"idempotency_key": "receipt-phase"},
+            },
+        )
+        assert receipt["key"] == "receipt-phase"
+        assert receipt["response"]["campaign_id"] == campaign["id"]
+        assert receipt["response"]["campaign_revision"] == phase["campaign_revision"]
+        assert actor["id"]
+
+    asyncio.run(exercise())
+
+
 def test_end_turn_does_not_revision_unchanged_character_documents(tmp_path: Path) -> None:
     async def exercise() -> None:
         server = create_server(_config(tmp_path))
