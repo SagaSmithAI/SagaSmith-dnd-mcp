@@ -1116,12 +1116,30 @@ async def _require_encounter_readiness(
             {
                 "key": str(group.get("key") or ""),
                 "missing_count": int(group.get("missing_count", 0) or 0),
+                "unready_count": int(group.get("unready_count", 0) or 0),
+                "unready_actor_ids": [
+                    str(item) for item in group.get("unready_actor_ids") or []
+                ],
+                "blocking_reasons": {
+                    str(actor.get("id") or ""): list(
+                        dict(actor.get("combat_card") or {}).get(
+                            "blocking_reasons"
+                        )
+                        or []
+                    )
+                    for actor in group.get("actors") or []
+                    if isinstance(actor, dict)
+                    and dict(actor.get("combat_card") or {}).get(
+                        "blocking_reasons"
+                    )
+                },
                 "issues": list(group.get("issues") or []),
             }
             for group in readiness.get("groups", [])
             if isinstance(group, dict)
             and (
                 int(group.get("missing_count", 0) or 0) > 0
+                or int(group.get("unready_count", 0) or 0) > 0
                 or bool(group.get("issues"))
             )
         ]

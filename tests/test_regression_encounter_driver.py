@@ -228,6 +228,60 @@ def test_encounter_readiness_rejects_source_participants_before_other_calls() ->
     ]
 
 
+def test_encounter_readiness_reports_unready_actor_blockers() -> None:
+    manifest = {
+        "schema_version": 1,
+        "groups": [
+            {
+                "key": "source-hostiles",
+                "label": "One mage",
+                "role": "combatant",
+                "required_count": 1,
+                "actor_ids": ["mage-1"],
+                "source_excerpt": "One mage attacks.",
+            }
+        ],
+    }
+
+    class Client:
+        async def domain(self, tool_id: str, arguments: dict) -> dict:
+            assert tool_id == "module_query"
+            return {
+                "ready": False,
+                "groups": [
+                    {
+                        "key": "source-hostiles",
+                        "missing_count": 0,
+                        "unready_count": 1,
+                        "unready_actor_ids": ["mage-1"],
+                        "actors": [
+                            {
+                                "id": "mage-1",
+                                "combat_card": {
+                                    "blocking_reasons": ["missing_attack_range"]
+                                },
+                            }
+                        ],
+                    }
+                ],
+            }
+
+    with pytest.raises(RuntimeError) as raised:
+        asyncio.run(
+            _require_encounter_readiness(
+                Client(),
+                campaign_id="campaign-1",
+                scene_id="scene-1",
+                participant_manifest=manifest,
+            )
+        )
+
+    message = str(raised.value)
+    assert "'unready_count': 1" in message
+    assert "'unready_actor_ids': ['mage-1']" in message
+    assert "'mage-1': ['missing_attack_range']" in message
+
+
 def test_agent_attack_contexts_bind_source_and_attack_mode() -> None:
     excerpt = (
         "Clever characters can lure the dragon into a narrow tunnel where it is "
