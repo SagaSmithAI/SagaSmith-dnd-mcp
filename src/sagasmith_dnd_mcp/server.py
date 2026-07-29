@@ -2778,6 +2778,88 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             ]
         return value
 
+    def validate_agent_attack_context(
+        campaign_id: str,
+        action: dict[str, Any],
+        *,
+        encounter: dict[str, Any],
+    ) -> None:
+        """Bind Agent-supplied tactical facts to exact active-scene evidence."""
+
+        context = action.get("context")
+        if context is None:
+            return
+        if not isinstance(context, dict):
+            raise CombatEngineError("attack context must be an object")
+        cover = context.get("cover")
+        if cover is not None:
+            if not isinstance(cover, dict) or set(cover) != {"degree"}:
+                raise CombatEngineError(
+                    "attack cover context accepts only one rules-defined degree"
+                )
+            degree = str(cover.get("degree") or "").strip().casefold().replace("-", "_")
+            if degree not in {"half", "three_quarters", "total"}:
+                raise CombatEngineError(
+                    "Agent cover degree must be half, three_quarters, or total"
+                )
+            if not isinstance(context.get("agent_ruling"), dict):
+                raise CombatEngineError(
+                    "Agent cover context requires an exact source-bound Agent ruling"
+                )
+        raw_ruling = context.get("agent_ruling")
+        if raw_ruling is None:
+            return
+        if not isinstance(raw_ruling, dict):
+            raise CombatEngineError("attack context agent_ruling must be an object")
+        allowed = {
+            "application_id",
+            "default_resolver",
+            "ruling_kind",
+            "decision",
+            "reason",
+            "source_ref",
+            "source_excerpt",
+        }
+        unknown = set(raw_ruling) - allowed
+        application_id = str(raw_ruling.get("application_id") or "").strip()
+        decision = " ".join(str(raw_ruling.get("decision") or "").split())
+        reason = " ".join(str(raw_ruling.get("reason") or "").split())
+        source_ref = raw_ruling.get("source_ref")
+        source_excerpt = str(raw_ruling.get("source_excerpt") or "")
+        scene_id = str(encounter.get("scene_id") or "").strip()
+        if (
+            unknown
+            or not application_id
+            or raw_ruling.get("default_resolver") != "agent"
+            or raw_ruling.get("ruling_kind")
+            not in {"agent_dm_adjudication", "source_or_scene_fact"}
+            or not 10 <= len(decision) <= 1000
+            or not 10 <= len(reason) <= 500
+            or not isinstance(source_ref, dict)
+            or not scene_id
+        ):
+            raise CombatEngineError(
+                "attack context requires a bounded source-bound Agent ruling "
+                "for the active encounter scene"
+            )
+        try:
+            _normalized, _source, expanded = managed_module_source_ref(
+                campaign_id,
+                source_ref,
+                require_exact=True,
+                expected_scene_id=scene_id,
+                require_active_module=True,
+            )
+            assert expanded is not None
+            managed_module_source_excerpt(
+                expanded,
+                source_excerpt,
+                field="attack context source_excerpt",
+                minimum_length=10,
+            )
+        except (LookupError, ValueError) as error:
+            raise CombatEngineError(str(error)) from error
+
     def apply_agent_attack_rulings(
         attacker: dict[str, Any],
         plan: dict[str, Any],
@@ -7729,6 +7811,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         campaign, encounter = active_encounter(campaign_id)
         require_campaign_actor(campaign_id, target_id)
         action = sanitize_attack_action(campaign_id, principal_id, dict(action or {}))
+        validate_agent_attack_context(
+            campaign_id,
+            action,
+            encounter=encounter,
+        )
         try:
             attacker = combat_actor_snapshot(actor_id)
             plan = preflight_attack(
@@ -7838,6 +7925,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 f"expected {expected_revision}, found {campaign.revision}"
             )
         _, encounter = active_encounter(campaign_id)
+        validate_agent_attack_context(
+            campaign_id,
+            action_payload,
+            encounter=encounter,
+        )
         spell_resolution: dict[str, Any] | None = None
         if spell_resolution_id:
             spell_resolution = deepcopy(

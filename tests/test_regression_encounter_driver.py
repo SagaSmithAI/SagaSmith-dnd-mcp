@@ -317,16 +317,18 @@ def test_agent_attack_contexts_bind_source_and_attack_mode() -> None:
         encounter_source_excerpt=excerpt,
     )
 
-    ruling = contexts[("dragon-1", "melee")]
+    ruling = contexts[("dragon-1", "", "melee")]
     assert ruling["context"]["disadvantage"] is True
     assert ruling["context"]["disadvantage_sources"] == [
         f"agent-ruling:{ruling['application_id']}"
     ]
     assert ruling["agent_ruling"]["source_ref"] == source_ref
+    assert ruling["agent_ruling"]["ruling_kind"] == "source_or_scene_fact"
+    assert ruling["context"]["agent_ruling"] == ruling["agent_ruling"]
 
 
 def test_agent_attack_contexts_reject_unbound_or_ambiguous_modifier() -> None:
-    with pytest.raises(ValueError, match="exactly one true advantage state"):
+    with pytest.raises(ValueError, match="unambiguous advantage state"):
         _agent_attack_contexts(
             [
                 {
@@ -348,6 +350,66 @@ def test_agent_attack_contexts_reject_unbound_or_ambiguous_modifier() -> None:
             participant_ids=["dragon-1"],
             scene_id="scene-1",
             encounter_source_excerpt="The actual encounter excerpt.",
+        )
+
+
+def test_agent_attack_contexts_bind_rules_cover_to_one_target() -> None:
+    excerpt = (
+        "Longo and Yek are in the rafters and enjoy half cover against ranged "
+        "attacks made from below."
+    )
+    source_ref = {
+        "module_id": "module-1",
+        "scene_id": "scene-1",
+        "chunk_id": "chunk-1",
+        "content_sha256": "a" * 64,
+    }
+
+    contexts = _agent_attack_contexts(
+        [
+            {
+                "actor_id": "archer-1",
+                "target_id": "yek-1",
+                "attack_mode": "ranged",
+                "cover": "half",
+                "source_ref": source_ref,
+                "source_excerpt": excerpt,
+                "decision": (
+                    "Yek remains in the rafters above this archer and receives "
+                    "the printed half cover."
+                ),
+                "ruling_reason": (
+                    "The current positions satisfy the source restriction that "
+                    "the ranged attack is made from below."
+                ),
+            }
+        ],
+        participant_ids=["archer-1", "yek-1"],
+        scene_id="scene-1",
+        encounter_source_excerpt=excerpt,
+    )
+
+    ruling = contexts[("archer-1", "yek-1", "ranged")]
+    assert ruling["context"]["cover"] == {"degree": "half"}
+    assert ruling["context"]["agent_ruling"]["source_ref"] == source_ref
+    assert ruling["target_id"] == "yek-1"
+
+    with pytest.raises(ValueError, match="distinct target"):
+        _agent_attack_contexts(
+            [
+                {
+                    "actor_id": "archer-1",
+                    "attack_mode": "ranged",
+                    "cover": "half",
+                    "source_ref": source_ref,
+                    "source_excerpt": excerpt,
+                    "decision": "The target is claimed to have half cover here.",
+                    "ruling_reason": "This lacks the required target relationship.",
+                }
+            ],
+            participant_ids=["archer-1", "yek-1"],
+            scene_id="scene-1",
+            encounter_source_excerpt=excerpt,
         )
 
 
@@ -2156,7 +2218,7 @@ def test_preflight_applies_agent_attack_context_only_to_its_mode() -> None:
         },
     }
     contexts = {
-        ("dragon-1", "melee"): {
+        ("dragon-1", "", "melee"): {
             "context": {
                 "advantage": False,
                 "disadvantage": True,

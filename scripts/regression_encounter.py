@@ -617,10 +617,11 @@ def _arguments() -> argparse.Namespace:
         type=json.loads,
         default=[],
         help=(
-            "Source-bound Agent-as-DM attack context with actor_id, attack_mode, "
-            "exact source_ref and source_excerpt, exactly one true advantage or "
-            "disadvantage result, decision, and ruling_reason; repeat for distinct "
-            "actors or attack modes"
+            "Source-bound Agent-as-DM attack context with actor_id, optional "
+            "target_id, attack_mode, exact source_ref and source_excerpt, decision, "
+            "ruling_reason, and either an unambiguous advantage/disadvantage result "
+            "or target-relative cover (half, three_quarters, or total); repeat for "
+            "distinct actor, target, or attack-mode relationships"
         ),
     )
     parser.add_argument(
@@ -2455,16 +2456,18 @@ def _agent_attack_contexts(
     participant_ids: list[str],
     scene_id: str,
     encounter_source_excerpt: str,
-) -> dict[tuple[str, str], dict[str, Any]]:
+) -> dict[tuple[str, str, str], dict[str, Any]]:
     """Validate generic source-bound Agent rulings for attack-roll context."""
 
-    normalized: dict[tuple[str, str], dict[str, Any]] = {}
+    normalized: dict[tuple[str, str, str], dict[str, Any]] = {}
     compact_encounter = " ".join(encounter_source_excerpt.split()).casefold()
     allowed = {
         "actor_id",
+        "target_id",
         "attack_mode",
         "advantage",
         "disadvantage",
+        "cover",
         "source_ref",
         "source_excerpt",
         "decision",
@@ -2480,6 +2483,7 @@ def _agent_attack_contexts(
                 f"{', '.join(sorted(unknown))}"
             )
         actor_id = str(raw.get("actor_id") or "").strip()
+        target_id = str(raw.get("target_id") or "").strip()
         attack_mode = str(raw.get("attack_mode") or "").strip().casefold()
         source_ref = raw.get("source_ref")
         source_excerpt = " ".join(str(raw.get("source_excerpt") or "").split())
@@ -2487,14 +2491,28 @@ def _agent_attack_contexts(
         ruling_reason = " ".join(str(raw.get("ruling_reason") or "").split())
         advantage = raw.get("advantage")
         disadvantage = raw.get("disadvantage")
-        identity = (actor_id, attack_mode)
+        cover = str(raw.get("cover") or "").strip().casefold().replace("-", "_")
+        advantage_declared = "advantage" in raw or "disadvantage" in raw
+        valid_advantage = (
+            advantage_declared
+            and isinstance(advantage, bool)
+            and isinstance(disadvantage, bool)
+            and advantage != disadvantage
+        )
+        valid_cover = cover in {"half", "three_quarters", "total"}
+        identity = (actor_id, target_id, attack_mode)
         if (
             actor_id not in participant_ids
+            or (
+                target_id
+                and (target_id not in participant_ids or target_id == actor_id)
+            )
             or attack_mode not in ATTACK_MODES
             or identity in normalized
-            or not isinstance(advantage, bool)
-            or not isinstance(disadvantage, bool)
-            or advantage == disadvantage
+            or (advantage_declared and not valid_advantage)
+            or (not valid_advantage and not valid_cover)
+            or (bool(raw.get("cover")) and not valid_cover)
+            or (valid_cover and not target_id)
             or not isinstance(source_ref, dict)
             or any(
                 not str(source_ref.get(key) or "").strip()
@@ -2507,9 +2525,11 @@ def _agent_attack_contexts(
             or len(ruling_reason) < 10
         ):
             raise ValueError(
-                f"Agent attack context {index} requires one participant and attack "
-                "mode, exactly one true advantage state, a source_ref for the current "
-                "scene, an exact encounter excerpt, and concrete Agent reasoning"
+                f"Agent attack context {index} requires one acting participant, "
+                "an optional distinct target, one attack mode, an unambiguous "
+                "advantage state and/or target-relative rules cover, a source_ref "
+                "for the current scene, an exact encounter excerpt, and concrete "
+                "Agent reasoning"
             )
         application_id = (
             "attack-context-"
@@ -2517,7 +2537,11 @@ def _agent_attack_contexts(
                 json.dumps(
                     {
                         "actor_id": actor_id,
+                        "target_id": target_id,
                         "attack_mode": attack_mode,
+                        "advantage": advantage if valid_advantage else None,
+                        "disadvantage": disadvantage if valid_advantage else None,
+                        "cover": cover,
                         "source_ref": source_ref,
                         "source_excerpt": source_excerpt,
                         "decision": decision,
@@ -2530,27 +2554,37 @@ def _agent_attack_contexts(
             )
         )
         source_key = f"agent-ruling:{application_id}"
-        context: dict[str, Any] = {
-            "advantage": advantage,
-            "disadvantage": disadvantage,
+        agent_ruling = {
+            "application_id": application_id,
+            "default_resolver": "agent",
+            "ruling_kind": "source_or_scene_fact",
+            "decision": decision,
+            "reason": ruling_reason,
+            "source_ref": deepcopy(source_ref),
+            "source_excerpt": source_excerpt,
         }
-        if advantage:
-            context["advantage_sources"] = [source_key]
-        else:
-            context["disadvantage_sources"] = [source_key]
+        context: dict[str, Any] = {"agent_ruling": deepcopy(agent_ruling)}
+        if valid_advantage:
+            context.update(
+                {
+                    "advantage": advantage,
+                    "disadvantage": disadvantage,
+                }
+            )
+            if advantage:
+                context["advantage_sources"] = [source_key]
+            else:
+                context["disadvantage_sources"] = [source_key]
+        if valid_cover:
+            context["cover"] = {"degree": cover}
         normalized[identity] = {
             "application_id": application_id,
             "actor_id": actor_id,
+            "target_id": target_id,
             "attack_mode": attack_mode,
+            "cover": cover,
             "context": context,
-            "agent_ruling": {
-                "default_resolver": "agent",
-                "ruling_kind": "agent_dm_adjudication",
-                "decision": decision,
-                "reason": ruling_reason,
-                "source_ref": deepcopy(source_ref),
-                "source_excerpt": source_excerpt,
-            },
+            "agent_ruling": agent_ruling,
         }
     return normalized
 
@@ -7847,7 +7881,7 @@ async def _preflight_attack(
     preferred_weapon_id: str = "",
     multiattack_option_id: str = "",
     action_context: dict[str, Any] | None = None,
-    agent_attack_contexts: dict[tuple[str, str], dict[str, Any]] | None = None,
+    agent_attack_contexts: dict[tuple[str, str, str], dict[str, Any]] | None = None,
     agent_target_reaction_contexts: (
         dict[tuple[str, str], dict[str, Any]] | None
     ) = None,
@@ -7941,7 +7975,10 @@ async def _preflight_attack(
                 context = dict(action_context or {})
                 agent_context = dict(
                     (agent_attack_contexts or {}).get(
-                        (str(actor["id"]), attack_mode)
+                        (str(actor["id"]), target_id, attack_mode)
+                    )
+                    or (agent_attack_contexts or {}).get(
+                        (str(actor["id"]), "", attack_mode)
                     )
                     or {}
                 )

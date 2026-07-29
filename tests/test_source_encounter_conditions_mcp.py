@@ -28,7 +28,8 @@ def test_source_condition_is_validated_persisted_and_cleared_with_encounter(
         "## 10. Common Room\n\n"
         "Four Redbrand ruffians are drinking and playing knucklebones. "
         "All four are heavily drunk and poisoned. One ruffian is wearing a "
-        "knucklebones sack over his head and is blinded while it remains in place.\n",
+        "knucklebones sack over his head and is blinded while it remains in place. "
+        "The overturned table grants the hero half cover against the ruffians.\n",
         encoding="utf-8",
     )
     config = McpConfig(
@@ -302,6 +303,84 @@ def test_source_condition_is_validated_persisted_and_cleared_with_encounter(
             {"character_id": ruffian["id"]},
         )
         assert after_interaction["sheet"]["conditions"] == ["poisoned"]
+        uncovered = await _call(
+            server,
+            "combat_preflight_attack",
+            {
+                "campaign_id": campaign["id"],
+                "actor_id": ruffian["id"],
+                "target_id": hero["id"],
+                "action": {
+                    "weapon_id": "unarmed-strike",
+                    "attack_mode": "melee",
+                },
+            },
+        )
+        cover_excerpt = (
+            "The overturned table grants the hero half cover against the ruffians."
+        )
+        cover_ruling = {
+            "application_id": "common-room-table-cover",
+            "default_resolver": "agent",
+            "ruling_kind": "source_or_scene_fact",
+            "decision": (
+                "The hero remains behind the overturned table relative to this "
+                "ruffian's attack."
+            ),
+            "reason": (
+                "The active scene explicitly grants the hero half cover against "
+                "the ruffians."
+            ),
+            "source_ref": expanded["source_ref"],
+            "source_excerpt": cover_excerpt,
+        }
+        covered = await _call(
+            server,
+            "combat_preflight_attack",
+            {
+                "campaign_id": campaign["id"],
+                "actor_id": ruffian["id"],
+                "target_id": hero["id"],
+                "action": {
+                    "weapon_id": "unarmed-strike",
+                    "attack_mode": "melee",
+                    "context": {
+                        "cover": {"degree": "half"},
+                        "agent_ruling": cover_ruling,
+                    },
+                },
+            },
+        )
+        assert covered["target_ac"] == uncovered["target_ac"] + 2
+        assert covered["cover"] == {
+            "degree": "half",
+            "armor_class_bonus": 2,
+        }
+        assert covered["context_ruling"] == cover_ruling
+        with pytest.raises(Exception, match="content_sha256 does not match"):
+            await _call(
+                server,
+                "combat_preflight_attack",
+                {
+                    "campaign_id": campaign["id"],
+                    "actor_id": ruffian["id"],
+                    "target_id": hero["id"],
+                    "action": {
+                        "weapon_id": "unarmed-strike",
+                        "attack_mode": "melee",
+                        "context": {
+                            "cover": {"degree": "half"},
+                            "agent_ruling": {
+                                **cover_ruling,
+                                "source_ref": {
+                                    **expanded["source_ref"],
+                                    "content_sha256": "0" * 64,
+                                },
+                            },
+                        },
+                    },
+                },
+            )
         joined = await _call(
             server,
             "combat_join",
@@ -341,6 +420,35 @@ def test_source_condition_is_validated_persisted_and_cleared_with_encounter(
             },
         )
         assert preflight["disadvantage"] is True
+        resolved_cover = await _call(
+            server,
+            "combat_resolve_attack",
+            {
+                "campaign_id": campaign["id"],
+                "actor_id": ruffian["id"],
+                "target_id": hero["id"],
+                "action": {
+                    "weapon_id": "unarmed-strike",
+                    "attack_mode": "melee",
+                    "context": {
+                        "cover": {"degree": "half"},
+                        "agent_ruling": cover_ruling,
+                    },
+                },
+                "expected_revision": joined["campaign_revision"],
+                "idempotency_key": "covered-attack",
+            },
+        )
+        assert resolved_cover["cover"] == {
+            "degree": "half",
+            "armor_class_bonus": 2,
+        }
+        assert resolved_cover["context_ruling"] == cover_ruling
+        current_after_attack = await _call(
+            server,
+            "campaign_query",
+            {"view": "get", "payload": {"campaign_id": campaign["id"]}},
+        )
 
         ended = await _call(
             server,
@@ -351,7 +459,7 @@ def test_source_condition_is_validated_persisted_and_cleared_with_encounter(
                     "status": "interrupted",
                     "summary": "The encounter-scoped condition cleanup was verified.",
                 },
-                "expected_revision": joined["campaign_revision"],
+                "expected_revision": current_after_attack["revision"],
                 "idempotency_key": "end",
             },
         )
