@@ -12,11 +12,10 @@ from scripts.regression_encounter import (
     MAGIC_MISSILE_ID,
     EncounterRulingRequiredError,
     _agent_attack_contexts,
-    _agent_casting_perception_ruling,
+    _agent_casting_perception_rulings,
     _agent_object_interactions,
     _agent_party_absences,
     _agent_positions,
-    _agent_source_on_hit_ruling,
     _agent_target_priorities,
     _agent_target_reaction_contexts,
     _agent_turn_rulings,
@@ -3312,68 +3311,87 @@ def test_party_spell_tactics_prioritize_recovery_then_supported_offense() -> Non
     ) == (MAGIC_MISSILE_ID, "wizard", 1)
 
 
-def test_agent_casting_perception_adjudicates_only_unseen_living_observers() -> None:
-    ruling = _agent_casting_perception_ruling(
-        {
-            "combatants": [
-                {
-                    "actor_id": "hidden-mage",
-                    "hidden": True,
-                    "visible_to_actor_ids": ["seen-enemy"],
-                    "conditions": [],
-                },
-                {"actor_id": "seen-enemy", "conditions": []},
-                {"actor_id": "unseen-ally", "conditions": []},
-                {"actor_id": "dead-observer", "conditions": ["dead"]},
-            ]
-        },
-        caster_id="hidden-mage",
-    )
-
-    assert ruling is not None
-    assert ruling["casting_perception"] == [
-        {
-            "observer_id": "unseen-ally",
-            "perceived": True,
-            "reason": (
-                "Agent-as-DM: the active encounter records no sound-blocking "
-                "or total-cover fact, so the spell's perceivable components "
-                "betray the hidden casting."
-            ),
-        }
-    ]
-
-
-def test_agent_casting_perception_skips_visible_caster_or_complete_visibility() -> None:
-    assert (
-        _agent_casting_perception_ruling(
+def test_agent_casting_perception_requires_an_explicit_observer_matrix() -> None:
+    rulings = _agent_casting_perception_rulings(
+        [
             {
-                "combatants": [
-                    {"actor_id": "mage", "hidden": False, "conditions": []},
-                    {"actor_id": "enemy", "conditions": []},
-                ]
-            },
-            caster_id="mage",
-        )
-        is None
-    )
-    assert (
-        _agent_casting_perception_ruling(
-            {
-                "combatants": [
+                "caster_id": "hidden-mage",
+                "observations": [
                     {
-                        "actor_id": "mage",
-                        "hidden": True,
-                        "visible_to_actor_ids": ["enemy"],
-                        "conditions": [],
+                        "observer_id": "guard",
+                        "perceived": True,
+                        "reason": "The guard hears the spell's verbal component.",
                     },
-                    {"actor_id": "enemy", "conditions": []},
-                ]
-            },
-            caster_id="mage",
-        )
-        is None
+                    {
+                        "observer_id": "ally",
+                        "perceived": False,
+                        "reason": "A closed stone door blocks the ally from hearing it.",
+                    },
+                ],
+                "decision": "Only the guard perceives the hidden spellcasting.",
+                "ruling_reason": (
+                    "The Agent applies the recorded doors and relative positions "
+                    "instead of treating missing facts as proof."
+                ),
+            }
+        ],
+        participant_ids=["hidden-mage", "guard", "ally"],
     )
+
+    ruling = rulings["hidden-mage"]
+    assert ruling["component_ruling"]["casting_perception"] == [
+        {
+            "observer_id": "guard",
+            "perceived": True,
+            "reason": "The guard hears the spell's verbal component.",
+        },
+        {
+            "observer_id": "ally",
+            "perceived": False,
+            "reason": "A closed stone door blocks the ally from hearing it.",
+        },
+    ]
+    assert ruling["agent_ruling"]["ruling_kind"] == "agent_dm_adjudication"
+
+
+@pytest.mark.parametrize(
+    "declaration,match",
+    [
+        (
+            {
+                "caster_id": "mage",
+                "observations": [],
+                "decision": "No observer perceives the spellcasting.",
+                "ruling_reason": "The Agent reviewed every current observer.",
+            },
+            "requires one unique",
+        ),
+        (
+            {
+                "caster_id": "mage",
+                "observations": [
+                    {
+                        "observer_id": "mage",
+                        "perceived": True,
+                        "reason": "The caster cannot be its own observer.",
+                    }
+                ],
+                "decision": "The caster perceives its own spellcasting.",
+                "ruling_reason": "This invalid declaration must be rejected.",
+            },
+            "distinct participant observer",
+        ),
+    ],
+)
+def test_agent_casting_perception_rejects_incomplete_or_self_authored_matrix(
+    declaration: dict,
+    match: str,
+) -> None:
+    with pytest.raises(ValueError, match=match):
+        _agent_casting_perception_rulings(
+            [declaration],
+            participant_ids=["mage", "guard"],
+        )
 
 
 def test_party_spell_tactics_respect_preparation_and_upcast_when_needed() -> None:
@@ -5526,33 +5544,33 @@ def test_source_on_hit_ruling_accepts_agent_selected_direct_damage_type() -> Non
     }
 
 
-def test_agent_source_on_hit_ruling_structures_reviewed_periodic_damage() -> None:
+def test_periodic_on_hit_damage_requires_an_explicit_agent_declaration() -> None:
     excerpt = (
         "If the target is a creature or a flammable object, it ignites. Until "
         "a creature takes an action to douse the fire, the target takes 5 "
         "(1d10) fire damage at the start of each of its turns."
     )
-
-    ruling = _agent_source_on_hit_ruling(
-        {
-            "attacker_id": "fire-elemental",
+    ruling = {
+        "actor_id": "fire-elemental",
+        "weapon_id": "touch",
+        "id": "ongoing_damage",
+        "applies": True,
+        "damage_formula": "1d10",
+        "damage_type": "fire",
+        "trigger_timing": "turn_start",
+        "end_action": "improvise",
+        "end_action_description": "douse the fire",
+        "trigger_facts": {
             "target_id": "hero",
-            "weapon_id": "touch",
-            "effect": excerpt,
-        }
-    )
-
-    assert ruling is not None
-    assert ruling["id"] == "ongoing_damage"
-    assert ruling["damage_formula"] == "1d10"
-    assert ruling["damage_type"] == "fire"
-    assert ruling["trigger_timing"] == "turn_start"
-    assert ruling["end_action"] == "improvise"
-    assert ruling["end_action_description"] == "douse the fire"
-    assert ruling["trigger_facts"] == {
-        "target_id": "hero",
-        "target_is_creature": True,
+            "target_is_creature": True,
+        },
+        "default_resolver": "agent",
+        "ruling_kind": "agent_dm_adjudication",
+        "decision": "Apply the printed ongoing fire damage to the target.",
+        "reason": "The target is a creature and the hit ignites it.",
+        "source_excerpt": excerpt,
     }
+
     assert _source_on_hit_rulings(
         [ruling],
         participant_ids=["fire-elemental"],
@@ -5784,7 +5802,7 @@ def test_interrupted_guiding_bolt_ruling_resumes_with_exact_effect() -> None:
     }
 
 
-def test_interrupted_periodic_damage_resumes_with_agent_structured_ruling() -> None:
+def test_interrupted_periodic_damage_resumes_with_explicit_agent_ruling() -> None:
     calls: list[tuple[str, dict]] = []
     excerpt = (
         "If the target is a creature or a flammable object, it ignites. Until "
@@ -5804,7 +5822,31 @@ def test_interrupted_periodic_damage_resumes_with_agent_structured_ruling() -> N
     result = asyncio.run(
         _resolve_pending(
             Client(),
-            SimpleNamespace(campaign_id="campaign-1"),
+            SimpleNamespace(
+                campaign_id="campaign-1",
+                source_on_hit_ruling_json=[
+                    {
+                        "actor_id": "fire-elemental",
+                        "weapon_id": "touch",
+                        "id": "ongoing_damage",
+                        "applies": True,
+                        "damage_formula": "1d10",
+                        "damage_type": "fire",
+                        "trigger_timing": "turn_start",
+                        "end_action": "improvise",
+                        "end_action_description": "douse the fire",
+                        "trigger_facts": {
+                            "target_id": "hero",
+                            "target_is_creature": True,
+                        },
+                        "default_resolver": "agent",
+                        "ruling_kind": "agent_dm_adjudication",
+                        "decision": "Apply the printed ongoing fire damage.",
+                        "reason": "The target is a creature ignited by the hit.",
+                        "source_excerpt": excerpt,
+                    }
+                ],
+            ),
             "branch-1",
             {
                 "pending": [

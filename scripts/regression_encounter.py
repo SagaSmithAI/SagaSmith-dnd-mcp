@@ -625,6 +625,18 @@ def _arguments() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--agent-casting-perception-json",
+        action="append",
+        type=json.loads,
+        default=[],
+        help=(
+            "Explicit Agent-as-DM hidden-casting perception decision with caster_id, "
+            "one observation per affected observer (observer_id, perceived, reason), "
+            "decision, and ruling_reason. The driver never infers perception from "
+            "missing scene facts."
+        ),
+    )
+    parser.add_argument(
         "--agent-target-reaction-context-json",
         action="append",
         type=json.loads,
@@ -2703,6 +2715,97 @@ def _agent_target_reaction_contexts(
     return normalized
 
 
+def _agent_casting_perception_rulings(
+    declarations: list[dict[str, Any]],
+    *,
+    participant_ids: list[str],
+) -> dict[str, dict[str, Any]]:
+    """Validate explicit hidden-casting perception decisions from the DM Agent."""
+
+    participants = set(participant_ids)
+    normalized: dict[str, dict[str, Any]] = {}
+    allowed = {
+        "caster_id",
+        "observations",
+        "decision",
+        "ruling_reason",
+    }
+    observation_allowed = {"observer_id", "perceived", "reason"}
+    for index, declaration in enumerate(declarations):
+        if not isinstance(declaration, dict):
+            raise ValueError(
+                f"Agent casting-perception ruling {index} must be an object"
+            )
+        unknown = set(declaration) - allowed
+        if unknown:
+            raise ValueError(
+                f"Agent casting-perception ruling {index} has unsupported fields: "
+                f"{', '.join(sorted(unknown))}"
+            )
+        caster_id = str(declaration.get("caster_id") or "").strip()
+        raw_observations = declaration.get("observations")
+        decision = " ".join(str(declaration.get("decision") or "").split())
+        ruling_reason = " ".join(
+            str(declaration.get("ruling_reason") or "").split()
+        )
+        if (
+            caster_id not in participants
+            or caster_id in normalized
+            or not isinstance(raw_observations, list)
+            or not raw_observations
+            or not 10 <= len(decision) <= 500
+            or not 10 <= len(ruling_reason) <= 500
+        ):
+            raise ValueError(
+                f"Agent casting-perception ruling {index} requires one unique "
+                "participant caster, observations, decision, and ruling_reason"
+            )
+        observations: list[dict[str, Any]] = []
+        observer_ids: set[str] = set()
+        for observation_index, raw_observation in enumerate(raw_observations):
+            if not isinstance(raw_observation, dict):
+                raise ValueError(
+                    "Agent casting-perception observation "
+                    f"{index}:{observation_index} must be an object"
+                )
+            observation_unknown = set(raw_observation) - observation_allowed
+            observer_id = str(raw_observation.get("observer_id") or "").strip()
+            perceived = raw_observation.get("perceived")
+            reason = " ".join(str(raw_observation.get("reason") or "").split())
+            if (
+                observation_unknown
+                or observer_id not in participants
+                or observer_id == caster_id
+                or observer_id in observer_ids
+                or not isinstance(perceived, bool)
+                or not 10 <= len(reason) <= 500
+            ):
+                raise ValueError(
+                    "Agent casting-perception observation "
+                    f"{index}:{observation_index} requires one distinct participant "
+                    "observer, a boolean perceived decision, and a bounded reason"
+                )
+            observations.append(
+                {
+                    "observer_id": observer_id,
+                    "perceived": perceived,
+                    "reason": reason,
+                }
+            )
+            observer_ids.add(observer_id)
+        normalized[caster_id] = {
+            "caster_id": caster_id,
+            "component_ruling": {"casting_perception": observations},
+            "agent_ruling": {
+                "default_resolver": "agent",
+                "ruling_kind": "agent_dm_adjudication",
+                "decision": decision,
+                "reason": ruling_reason,
+            },
+        }
+    return normalized
+
+
 def _agent_turn_rulings(
     values: list[dict[str, Any]],
     *,
@@ -3905,66 +4008,6 @@ def _source_on_hit_rulings(
     return normalized
 
 
-def _agent_source_on_hit_ruling(
-    pending: dict[str, Any],
-) -> dict[str, Any] | None:
-    """Translate a fully explicit reviewed effect into one typed Agent ruling."""
-
-    effect = str(pending.get("effect") or "").strip()
-    damage = re.search(
-        r"(?i)(?:\d+\s*\(\s*)?"
-        r"(?P<formula>\d+d\d+(?:\s*[+\-]\s*\d+)?)\s*\)?\s+"
-        r"(?P<damage_type>[a-z]+)\s+damage\s+at\s+the\s+start\s+"
-        r"of\s+each\s+of\s+(?:its|his|her|their)\s+turns?\b",
-        effect,
-    )
-    ending = re.search(
-        r"(?i)\b(?:takes?|use)\s+an?\s+action\s+to\s+"
-        r"(?P<description>[^.;,]+)",
-        effect,
-    )
-    actor_id = str(pending.get("attacker_id") or "").strip()
-    target_id = str(pending.get("target_id") or pending.get("actor_id") or "").strip()
-    weapon_id = str(pending.get("weapon_id") or "").strip()
-    if (
-        damage is None
-        or ending is None
-        or not actor_id
-        or not target_id
-        or not weapon_id
-    ):
-        return None
-    damage_formula = re.sub(r"\s+", "", damage.group("formula")).casefold()
-    damage_type = damage.group("damage_type").casefold()
-    end_action_description = " ".join(ending.group("description").split())
-    return {
-        "actor_id": actor_id,
-        "weapon_id": weapon_id,
-        "id": "ongoing_damage",
-        "applies": True,
-        "damage_formula": damage_formula,
-        "damage_type": damage_type,
-        "trigger_timing": "turn_start",
-        "end_action": "improvise",
-        "end_action_description": end_action_description,
-        "trigger_facts": {
-            "target_id": target_id,
-            "target_is_creature": True,
-        },
-        "default_resolver": "agent",
-        "ruling_kind": "agent_dm_adjudication",
-        "decision": (
-            f"Apply the reviewed {damage_formula} {damage_type} damage at the "
-            "start of the target's turns until the recorded ending action."
-        ),
-        "reason": (
-            "The pending target is an encounter creature and the reviewed "
-            "effect states both the periodic damage and its ending action."
-        ),
-        "source_excerpt": effect,
-    }
-
-
 def _source_extra_damage_rulings(
     values: list[dict[str, Any]],
     *,
@@ -5057,6 +5100,10 @@ async def _start(
         scene_id=str(args.scene_id or ""),
         encounter_source_excerpt=str(args.source_excerpt or ""),
     )
+    agent_casting_perception_rulings = _agent_casting_perception_rulings(
+        getattr(args, "agent_casting_perception_json", []),
+        participant_ids=[*party_ids, *all_hostile_ids],
+    )
     agent_target_reaction_contexts = _agent_target_reaction_contexts(
         getattr(args, "agent_target_reaction_context_json", []),
         participant_ids=[*party_ids, *all_hostile_ids],
@@ -5480,6 +5527,9 @@ async def _start(
         "source_contest_activities": list(contest_activities.values()),
         "source_attack_environments": list(attack_environments.values()),
         "agent_attack_contexts": list(agent_attack_contexts.values()),
+        "agent_casting_perception_rulings": list(
+            agent_casting_perception_rulings.values()
+        ),
         "agent_target_reaction_contexts": list(
             agent_target_reaction_contexts.values()
         ),
@@ -5815,57 +5865,6 @@ def _observable_target_ids(
         if not target.get("hidden") or (isinstance(visible_to, list) and observer_id in visible_to):
             observable.append(target_id)
     return observable
-
-
-def _agent_casting_perception_ruling(
-    combat: dict[str, Any],
-    *,
-    caster_id: str,
-) -> dict[str, Any] | None:
-    """Supply the Agent-as-DM observer ruling for perceivable hidden casting."""
-
-    combatants = [
-        item
-        for item in combat.get("combatants", [])
-        if isinstance(item, dict) and str(item.get("actor_id") or "")
-    ]
-    caster = next(
-        (
-            item
-            for item in combatants
-            if str(item.get("actor_id") or "") == caster_id
-        ),
-        None,
-    )
-    if caster is None or not bool(caster.get("hidden", False)):
-        return None
-    visible_to = {
-        str(item) for item in list(caster.get("visible_to_actor_ids") or []) if str(item)
-    }
-    observers = sorted(
-        str(item["actor_id"])
-        for item in combatants
-        if str(item.get("actor_id") or "") != caster_id
-        and "dead"
-        not in {str(value).casefold() for value in item.get("conditions", [])}
-        and str(item.get("actor_id") or "") not in visible_to
-    )
-    if not observers:
-        return None
-    return {
-        "casting_perception": [
-            {
-                "observer_id": observer_id,
-                "perceived": True,
-                "reason": (
-                    "Agent-as-DM: the active encounter records no sound-blocking "
-                    "or total-cover fact, so the spell's perceivable components "
-                    "betray the hidden casting."
-                ),
-            }
-            for observer_id in observers
-        ]
-    }
 
 
 def _body_thief_sides(
@@ -7042,18 +7041,6 @@ async def _resolve_pending(
                 str(pending.get("weapon_id") or ""),
             )
         )
-        if ruling is None:
-            agent_ruling = _agent_source_on_hit_ruling(pending)
-            if agent_ruling is not None:
-                ruling = _source_on_hit_rulings(
-                    [agent_ruling],
-                    participant_ids=[str(agent_ruling["actor_id"])],
-                )[
-                    (
-                        str(agent_ruling["actor_id"]),
-                        str(agent_ruling["weapon_id"]),
-                    )
-                ]
         if ruling is None:
             raise EncounterRulingRequiredError(
                 {
@@ -8505,6 +8492,10 @@ async def _auto_run(
         participant_ids=[*party_ids, *hostile_ids],
         scene_id=str(args.scene_id or ""),
         encounter_source_excerpt=str(args.source_excerpt or ""),
+    )
+    agent_casting_perception_rulings = _agent_casting_perception_rulings(
+        getattr(args, "agent_casting_perception_json", []),
+        participant_ids=[*party_ids, *hostile_ids],
     )
     agent_target_reaction_contexts = _agent_target_reaction_contexts(
         getattr(args, "agent_target_reaction_context_json", []),
@@ -10109,17 +10100,33 @@ async def _auto_run(
                 cast_arguments["declaration"] = {"target_id": spell_target_id}
             elif area_declaration is not None:
                 cast_arguments["declaration"] = area_declaration
-            casting_perception_ruling = _agent_casting_perception_ruling(
-                combat,
-                caster_id=actor_id,
+            casting_perception_decision = dict(
+                agent_casting_perception_rulings.get(actor_id) or {}
             )
-            if casting_perception_ruling is not None:
-                cast_arguments["component_ruling"] = casting_perception_ruling
+            if casting_perception_decision:
+                cast_arguments["component_ruling"] = deepcopy(
+                    casting_perception_decision["component_ruling"]
+                )
             cast = await client.domain("combat_cast_spell", cast_arguments)
             spell_result: dict[str, Any] = {"cast": cast}
-            if casting_perception_ruling is not None:
+            if casting_perception_decision:
                 spell_result["agent_casting_perception_ruling"] = (
-                    casting_perception_ruling
+                    casting_perception_decision
+                )
+            if cast.get("status") == "pending_ruling":
+                raise EncounterRulingRequiredError(
+                    cast,
+                    operation="combat_cast_spell",
+                    actor_id=actor_id,
+                    target_id=spell_target_id,
+                    action={
+                        "spell_id": spell_id,
+                        "cast_level": cast_level,
+                    },
+                    retry_hint=(
+                        "Inspect the active scene and retry with an explicit "
+                        "--agent-casting-perception-json observer matrix."
+                    ),
                 )
             source_flee_observations = _record_source_flee_damage(
                 cast,
@@ -10524,25 +10531,6 @@ async def _auto_run(
                 )
                 ruling = on_hit_rulings.get((actor_id, selected_weapon_id))
                 if ruling is None:
-                    pending_window = next(
-                        (
-                            dict(item)
-                            for item in dict(resolved.get("combat") or {}).get(
-                                "pending", []
-                            )
-                            if isinstance(item, dict)
-                            and str(item.get("id") or "") == choice_id
-                        ),
-                        {},
-                    )
-                    agent_ruling = _agent_source_on_hit_ruling(pending_window)
-                    if agent_ruling is not None:
-                        ruling = _source_on_hit_rulings(
-                            [agent_ruling],
-                            participant_ids=[actor_id],
-                            actors=actors,
-                        )[(actor_id, selected_weapon_id)]
-                if ruling is None:
                     raise EncounterRulingRequiredError(
                         resolved,
                         operation="combat_choice.on_hit_ruling",
@@ -10761,6 +10749,9 @@ async def _auto_run(
         "source_contest_activities": list(contest_activities.values()),
         "source_attack_environments": list(attack_environments.values()),
         "agent_attack_contexts": list(agent_attack_contexts.values()),
+        "agent_casting_perception_rulings": list(
+            agent_casting_perception_rulings.values()
+        ),
         "agent_target_reaction_contexts": list(
             agent_target_reaction_contexts.values()
         ),
