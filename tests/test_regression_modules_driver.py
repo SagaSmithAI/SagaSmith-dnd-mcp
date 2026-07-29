@@ -415,6 +415,31 @@ def test_playthrough_manifest_builder_preserves_unknown_party_size_review() -> N
     assert manifest["review_blocks"] == review
 
 
+def test_skt_archetype_references_are_not_mislabeled_as_pregenerated_pcs() -> None:
+    fixture_path = Path(__file__).resolve().parents[1] / "fixtures" / "full_campaign_corpus.json"
+    manifest = json.loads(fixture_path.read_text(encoding="utf-8"))
+    line = next(
+        item
+        for item in manifest["campaign_lines"]
+        if item["id"] == "storm-kings-thunder"
+    )
+    templates = [
+        item
+        for item in line["player_materials"]
+        if item["role"] == "associated_character_template"
+    ]
+    pregenerated = line["play_requirements"]["pregenerated_characters"]
+
+    assert len(templates) == 7
+    assert {
+        item["review_status"] for item in templates
+    } == {"reviewed_not_module_pregen"}
+    assert all("Character name, level" in item["notes"][1] for item in templates)
+    assert pregenerated["official_sheets_present_in_corpus"] is False
+    assert pregenerated["selected_count"] == 0
+    assert pregenerated["status"] == "reviewed_not_module_pregen"
+
+
 def test_corpus_source_refs_resolve_to_one_exact_managed_chunk() -> None:
     content = "Characters begin at 1st level. The ideal party size is four characters."
     content_sha256 = hashlib.sha256(content.encode("utf-8")).hexdigest()

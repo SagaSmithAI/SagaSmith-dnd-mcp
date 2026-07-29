@@ -391,6 +391,11 @@ def test_six_character_campaign_parties_use_source_maximum_and_ranger(
     assert audit["species_unique"] is True
     assert audit["ability_methods"] == ["manual", "point_buy", "standard_array"]
     assert audit["spell_resource_models"] == ["known", "prepared", "spellbook"]
+    if campaign_line_id == "storm-kings-thunder":
+        assert audit["pregenerated_first"]["associated_archetype_templates"] == 7
+        assert "leave identity, level, all ability scores" in audit["pregenerated_first"][
+            "disposition"
+        ]
     assert ranger["feature_choices"]["Favored Enemy"]["favored_enemy"] == {
         "creature_type": "Giants",
         "humanoid_races": [],

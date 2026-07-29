@@ -347,43 +347,92 @@
           "path": "Storm King's Thunder/Characters/AncestralGuardianBarbarian.pdf",
           "role": "associated_character_template",
           "size": 1606689,
-          "sha256": "6c36a52e1761237e87969ef1b151424f085382d6f9bd0ae745c9c3d5b4aac27c"
+          "sha256": "6c36a52e1761237e87969ef1b151424f085382d6f9bd0ae745c9c3d5b4aac27c",
+          "priority": "review_before_fallback_generation",
+          "review_status": "reviewed_not_module_pregen",
+          "notes": [
+            "The fillable archetype reference preselects race, background, subclass, and later-level feature text.",
+            "Character name, level, all six ability scores, hit points, armor class, attacks, equipment, and spells are blank.",
+            "It is associated player material rather than a complete module-provided pregenerated PC."
+          ]
         },
         {
           "path": "Storm King's Thunder/Characters/HunterRanger.pdf",
           "role": "associated_character_template",
           "size": 1661212,
-          "sha256": "a9349243dff771d5a8ed8b62447efd266b5d598742cb7a5dd6296e83d341f457"
+          "sha256": "a9349243dff771d5a8ed8b62447efd266b5d598742cb7a5dd6296e83d341f457",
+          "priority": "review_before_fallback_generation",
+          "review_status": "reviewed_not_module_pregen",
+          "notes": [
+            "The fillable archetype reference preselects race, background, subclass, and later-level feature text.",
+            "Character name, level, all six ability scores, hit points, armor class, attacks, equipment, and spells are blank.",
+            "It is associated player material rather than a complete module-provided pregenerated PC."
+          ]
         },
         {
           "path": "Storm King's Thunder/Characters/OpenHandMonk.pdf",
           "role": "associated_character_template",
           "size": 1654655,
-          "sha256": "4dbc4c54b2093ab60d04b0236149cf5c8209e0702059fa8d5ef704458dbc74ec"
+          "sha256": "4dbc4c54b2093ab60d04b0236149cf5c8209e0702059fa8d5ef704458dbc74ec",
+          "priority": "review_before_fallback_generation",
+          "review_status": "reviewed_not_module_pregen",
+          "notes": [
+            "The fillable archetype reference preselects race, background, subclass, and later-level feature text.",
+            "Character name, level, all six ability scores, hit points, armor class, attacks, equipment, and spells are blank.",
+            "It is associated player material rather than a complete module-provided pregenerated PC."
+          ]
         },
         {
           "path": "Storm King's Thunder/Characters/ShadowSorcerer.pdf",
           "role": "associated_character_template",
           "size": 1531922,
-          "sha256": "ddbc69b6bb308a4ddfc95b6060f626909c83546271b04c9ba65ad0f5ec068622"
+          "sha256": "ddbc69b6bb308a4ddfc95b6060f626909c83546271b04c9ba65ad0f5ec068622",
+          "priority": "review_before_fallback_generation",
+          "review_status": "reviewed_not_module_pregen",
+          "notes": [
+            "The fillable archetype reference preselects race, background, subclass, and later-level feature text.",
+            "Character name, level, all six ability scores, hit points, armor class, attacks, equipment, and spells are blank.",
+            "It is associated player material rather than a complete module-provided pregenerated PC."
+          ]
         },
         {
           "path": "Storm King's Thunder/Characters/TempestCleric.pdf",
           "role": "associated_character_template",
           "size": 1615934,
-          "sha256": "b4b6ca74d6f2b53a0766ed652d17081326fe0669b16119890f01e802151b5291"
+          "sha256": "b4b6ca74d6f2b53a0766ed652d17081326fe0669b16119890f01e802151b5291",
+          "priority": "review_before_fallback_generation",
+          "review_status": "reviewed_not_module_pregen",
+          "notes": [
+            "The fillable archetype reference preselects race, background, subclass, and later-level feature text.",
+            "Character name, level, all six ability scores, hit points, armor class, attacks, equipment, and spells are blank.",
+            "It is associated player material rather than a complete module-provided pregenerated PC."
+          ]
         },
         {
           "path": "Storm King's Thunder/Characters/VengencePaladin.pdf",
           "role": "associated_character_template",
           "size": 1618256,
-          "sha256": "5a8771b8e8a6f8aeb45472c47c24690683aecece1265f8e9ca947a56881c2a7a"
+          "sha256": "5a8771b8e8a6f8aeb45472c47c24690683aecece1265f8e9ca947a56881c2a7a",
+          "priority": "review_before_fallback_generation",
+          "review_status": "reviewed_not_module_pregen",
+          "notes": [
+            "The fillable archetype reference preselects race, background, subclass, and later-level feature text.",
+            "Character name, level, all six ability scores, hit points, armor class, attacks, equipment, and spells are blank.",
+            "It is associated player material rather than a complete module-provided pregenerated PC."
+          ]
         },
         {
           "path": "Storm King's Thunder/Characters/WildSorcerer.pdf",
           "role": "associated_character_template",
           "size": 1533048,
-          "sha256": "b17da317249b739e21a75b4e05630f443c5b488924fc78075bb71901b01083f5"
+          "sha256": "b17da317249b739e21a75b4e05630f443c5b488924fc78075bb71901b01083f5",
+          "priority": "review_before_fallback_generation",
+          "review_status": "reviewed_not_module_pregen",
+          "notes": [
+            "The fillable archetype reference preselects race, background, subclass, and later-level feature text.",
+            "Character name, level, all six ability scores, hit points, armor class, attacks, equipment, and spells are blank.",
+            "It is associated player material rather than a complete module-provided pregenerated PC."
+          ]
         },
         {
           "path": "Storm King's Thunder/SKT-PCStats.txt",
@@ -442,9 +491,9 @@
         "pregenerated_characters": {
           "official_sheets_present_in_corpus": false,
           "associated_templates_present": 7,
-          "selected_count": 6,
-          "status": "incomplete_templates_require_legal_completion",
-          "selection_policy": "complete and use six legal associated templates, excluding one duplicate sorcerer unless review establishes a better composition",
+          "selected_count": 0,
+          "status": "reviewed_not_module_pregen",
+          "selection_policy": "Review the associated archetype references first, but do not represent their blank character identities and core statistics as module-provided pregenerated PCs; generate six legal characters from confirmed rule packs.",
           "additional_requirement": "At least one selected character must know Giant."
         },
         "source_refs": [

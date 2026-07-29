@@ -1185,11 +1185,14 @@ def audit_profiles(
         pregen_review = {
             "module_mentions_included_characters": False,
             "official_sheets_present_in_corpus": False,
+            "associated_archetype_templates": 7,
             "associated_pc_stats_asset": "SKT-PCStats.txt",
             "disposition": (
-                "reviewed and excluded as pregenerated PCs: ability-number rows "
-                "without identities, classes, species, backgrounds, equipment, "
-                "features, or provenance sufficient for legal character sheets"
+                "reviewed and excluded as pregenerated PCs: the fillable PDFs "
+                "preselect race, background, subclass, and later-level feature "
+                "text but leave identity, level, all ability scores, hit points, "
+                "armor class, attacks, equipment, and spells blank; the separate "
+                "ability-number rows have no actor mapping or generation provenance"
             ),
         }
     elif campaign_line_id == "tomb-of-annihilation":
