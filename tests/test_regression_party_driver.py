@@ -23,6 +23,8 @@ from scripts.regression_party import (
     audit_profiles,
     lost_mine_party_profiles,
     select_profiles,
+    storm_kings_party_profiles,
+    tomb_of_annihilation_party_profiles,
     tyranny_party_profiles,
     waterdeep_party_profiles,
 )
@@ -360,6 +362,51 @@ def test_tyranny_party_uses_source_four_and_preserves_continuous_party() -> None
         ),
     }
     assert "bardic_inspiration" not in seraphine["resources"]
+
+
+@pytest.mark.parametrize(
+    ("campaign_line_id", "factory", "terrain"),
+    [
+        ("storm-kings-thunder", storm_kings_party_profiles, "Mountain"),
+        (
+            "tomb-of-annihilation",
+            tomb_of_annihilation_party_profiles,
+            "Forest",
+        ),
+    ],
+)
+def test_six_character_campaign_parties_use_source_maximum_and_ranger(
+    campaign_line_id: str,
+    factory,
+    terrain: str,
+) -> None:
+    profiles = factory()
+    audit = audit_profiles(profiles, campaign_line_id=campaign_line_id)
+    ranger = next(item for item in profiles if item["class"] == "Ranger")
+
+    assert audit["selected_size"] == audit["source_maximum"] == 6
+    assert audit["party_size_basis"]["source_minimum"] == 4
+    assert audit["party_size_basis"]["starting_level"] == 1
+    assert audit["classes_unique"] is True
+    assert audit["species_unique"] is True
+    assert audit["ability_methods"] == ["manual", "point_buy", "standard_array"]
+    assert audit["spell_resource_models"] == ["known", "prepared", "spellbook"]
+    assert ranger["feature_choices"]["Favored Enemy"]["favored_enemy"] == {
+        "creature_type": "Giants",
+        "humanoid_races": [],
+        "enemy_speaks_language": False,
+        "language": "",
+    }
+    assert "Giant" in ranger["background_languages"]
+    assert ranger["feature_choices"]["Natural Explorer"] == {"terrain": terrain}
+    assert _class_starting_supplements(ranger)
+    assert {item["name"] for item in ranger["items"]} >= {
+        "Scale mail",
+        "Shortsword",
+        "Longbow",
+        "Arrows",
+        "Quiver",
+    }
 
 
 def test_catalog_source_normalizes_srd_table_markers_but_never_invents_items() -> None:

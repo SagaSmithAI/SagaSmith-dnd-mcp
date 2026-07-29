@@ -58,6 +58,7 @@ _ITEM_WEIGHT_OZ: dict[str, int | float] = {
     "lamp": 16,
     "lantern, hooded": 32,
     "leather": 160,
+    "longbow": 32,
     "lute": 32,
     "mace": 64,
     "mess kit": 16,
@@ -69,12 +70,14 @@ _ITEM_WEIGHT_OZ: dict[str, int | float] = {
     "rapier": 32,
     "rations (1 day)": 32,
     "shield": 96,
+    "scale mail": 720,
     "shortbow": 32,
     "shortsword": 32,
     "spellbook": 48,
     "thieves' tools": 16,
     "tinderbox": 16,
     "torch": 16,
+    "quiver": 16,
     "waterskin": 80,
 }
 
@@ -95,6 +98,8 @@ def _arguments() -> argparse.Namespace:
             "lost-mine-of-phandelver",
             "waterdeep-dragon-heist",
             "tyranny-of-dragons",
+            "storm-kings-thunder",
+            "tomb-of-annihilation",
         ),
         default="lost-mine-of-phandelver",
     )
@@ -325,6 +330,7 @@ _CLASS_PACK: dict[str, str] = {
     "cleric": "Priest's Pack",
     "fighter": "Explorer's Pack",
     "rogue": "Burglar's Pack",
+    "ranger": "Explorer's Pack",
     "wizard": "Scholar's Pack",
 }
 
@@ -443,6 +449,8 @@ def _class_starting_supplements(profile: dict[str, Any]) -> list[dict[str, Any]]
         ]
     if class_name == "bard":
         return _pack_contents(profile, _class_pack_name(profile))
+    if class_name == "ranger":
+        return _pack_contents(profile, _class_pack_name(profile))
     raise ValueError(f"no audited starting-equipment supplement for {profile['class']}")
 
 
@@ -549,6 +557,17 @@ CORE_BACKGROUND_CUSTOMIZATIONS = {
         "ideal": "Concord. Lasting peace begins with accurate understanding.",
         "bond": "A network of humble shrines carried my messages through dangerous country.",
         "flaw": "I sometimes promise compromise where a clear refusal is needed.",
+    },
+    "Tala Windmere": {
+        "name": "Frontier Giant-Speaker",
+        "skills": ["insight", "investigation"],
+        "personality_traits": [
+            "I compare every trail against the weather and the stories of local guides.",
+            "I learn a stranger's language before I ask them to trust my intentions.",
+        ],
+        "ideal": "Balance. Strength carries an obligation to leave room for smaller lives.",
+        "bond": "A wandering giant once spared my village after I answered in its own tongue.",
+        "flaw": "I keep pursuing a trail after wiser companions have decided to turn back.",
     },
 }
 
@@ -984,6 +1003,118 @@ def tyranny_party_profiles() -> list[dict[str, Any]]:
     return waterdeep_party_profiles()
 
 
+def _ranger_profile(*, favored_terrain: str) -> dict[str, Any]:
+    return _customize_core_backgrounds(
+        [
+            {
+                "name": "Tala Windmere",
+                "class": "Ranger",
+                "species": "Half-Orc",
+                "background": "Acolyte",
+                "ability_method": "manual",
+                "abilities": {
+                    "strength": 10,
+                    "dexterity": 15,
+                    "constitution": 14,
+                    "intelligence": 12,
+                    "wisdom": 13,
+                    "charisma": 8,
+                },
+                "species_selection": {},
+                "background_languages": ["Giant", "Primordial"],
+                "hit_die": 10,
+                "saving_throws": ["strength", "dexterity"],
+                "skills": ["animal_handling", "nature", "survival"],
+                "armor_proficiencies": ["light armor", "medium armor", "shields"],
+                "weapon_proficiencies": ["simple weapons", "martial weapons"],
+                "feature_choices": {
+                    "Favored Enemy": {
+                        "favored_enemy": {
+                            "creature_type": "Giants",
+                            "humanoid_races": [],
+                            # The source-recommended Giant language is already
+                            # granted by this customized background. Favored
+                            # Enemy permits a language spoken by the enemy but
+                            # does not grant a language the Ranger already
+                            # knows, so this selection must not duplicate it.
+                            "enemy_speaks_language": False,
+                            "language": "",
+                        }
+                    },
+                    "Natural Explorer": {"terrain": favored_terrain},
+                },
+                "items": [
+                    _armor(
+                        "tala-scale-mail",
+                        "Scale mail",
+                        "Scale mail",
+                        base_ac=14,
+                        dexterity_mode="max",
+                        dexterity_max=2,
+                        stealth_disadvantage=True,
+                    ),
+                    _weapon(
+                        "tala-shortswords",
+                        "Shortsword",
+                        "Shortsword",
+                        category="martial",
+                        damage="1d6",
+                        damage_type="piercing",
+                        attack_ability="dexterity",
+                        properties=["finesse", "light"],
+                        quantity=2,
+                    ),
+                    _equipment(
+                        "tala-arrows",
+                        "Arrows",
+                        "Arrows (20)",
+                        kind="ammunition",
+                        quantity=20,
+                    ),
+                    _weapon(
+                        "tala-longbow",
+                        "Longbow",
+                        "Longbow",
+                        category="martial",
+                        damage="1d8",
+                        damage_type="piercing",
+                        attack_type="ranged",
+                        attack_ability="dexterity",
+                        properties=["ammunition", "heavy", "two-handed"],
+                        normal_range=150,
+                        long_range=600,
+                        ammunition_item_id="tala-arrows",
+                    ),
+                    _equipment(
+                        "tala-quiver",
+                        "Quiver",
+                        "Quiver",
+                    ),
+                ],
+                "main_hand": "tala-longbow",
+            }
+        ]
+    )[0]
+
+
+def storm_kings_party_profiles() -> list[dict[str, Any]]:
+    """Return six legal level-one PCs for SKT's formal chapter-one opening."""
+
+    return [
+        *lost_mine_party_profiles(),
+        _ranger_profile(favored_terrain="Mountain"),
+    ]
+
+
+def tomb_of_annihilation_party_profiles() -> list[dict[str, Any]]:
+    """Return six legal level-one PCs for the complete Chult expedition."""
+
+    return [
+        *lost_mine_party_profiles(),
+        _ranger_profile(favored_terrain="Forest"),
+    ]
+
+
 def audit_profiles(
     profiles: list[dict[str, Any]],
     *,
@@ -1038,6 +1169,45 @@ def audit_profiles(
                 "legally generate all four source-confirmed seats once and "
                 "preserve them across both volumes"
             ),
+        }
+    elif campaign_line_id == "storm-kings-thunder":
+        expected_size = 6
+        size_basis = {
+            "kind": "module_source_maximum",
+            "source_minimum": 4,
+            "source_maximum": 6,
+            "selected": 6,
+            "starting_level": 1,
+            "alternate_starting_level": 5,
+            "expected_ending_level": 11,
+            "route": "formal chapter-one opening",
+        }
+        pregen_review = {
+            "module_mentions_included_characters": False,
+            "official_sheets_present_in_corpus": False,
+            "associated_pc_stats_asset": "SKT-PCStats.txt",
+            "disposition": (
+                "reviewed and excluded as pregenerated PCs: ability-number rows "
+                "without identities, classes, species, backgrounds, equipment, "
+                "features, or provenance sufficient for legal character sheets"
+            ),
+        }
+    elif campaign_line_id == "tomb-of-annihilation":
+        expected_size = 6
+        size_basis = {
+            "kind": "module_source_maximum",
+            "source_minimum": 4,
+            "source_maximum": 6,
+            "selected": 6,
+            "starting_level": 1,
+            "expected_ending_level": 11,
+            "route": "formal Syndra Silvane opening",
+        }
+        pregen_review = {
+            "module_mentions_included_characters": False,
+            "official_sheets_present_in_corpus": False,
+            "associated_templates_present": 0,
+            "disposition": "legally generate all six source-confirmed seats",
         }
     else:
         raise ValueError(f"unsupported campaign party profile: {campaign_line_id}")
@@ -1913,6 +2083,8 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
         "lost-mine-of-phandelver": lost_mine_party_profiles,
         "waterdeep-dragon-heist": waterdeep_party_profiles,
         "tyranny-of-dragons": tyranny_party_profiles,
+        "storm-kings-thunder": storm_kings_party_profiles,
+        "tomb-of-annihilation": tomb_of_annihilation_party_profiles,
     }
     profiles, profile_audit = select_profiles(
         profile_factories[args.party](),
