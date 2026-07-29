@@ -185,6 +185,10 @@ from sagasmith_dnd.content_import import (
     normalize_2014_statblock_candidate,
     validate_selection_ready_artifacts,
 )
+from sagasmith_dnd.content_solution import (
+    ContentSolutionError,
+    build_content_solution,
+)
 from sagasmith_dnd.core_content import PACK_ID as CORE_CONTENT_PACK_ID
 from sagasmith_dnd.core_content import PACK_VERSION as CORE_CONTENT_PACK_VERSION
 from sagasmith_dnd.core_content import build_srd2014_content
@@ -256,6 +260,7 @@ from sagasmith_dnd.resolution_plan import (
     execute_resolution_plan,
     require_resolution_plan_trigger,
     resolution_plan_contract,
+    resolution_plan_template,
 )
 from sagasmith_dnd.resources import mutate_bounded_resource
 from sagasmith_dnd.rule_engine import (
@@ -2991,12 +2996,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "source_excerpt": source_excerpt,
         }
 
-    def character_resolution_plan(
+    def character_source_card(
         sheet: dict[str, Any],
         source_card_id: str,
         source_card_kind: str,
-    ) -> tuple[dict[str, Any], Any]:
-        """Resolve one executable plan from the exact recorded character card."""
+    ) -> dict[str, Any]:
+        """Resolve exactly one durable source card from a character sheet."""
 
         collections = {
             "activity": ("activities",),
@@ -3011,7 +3016,6 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 for item in dict(sheet.get("inventory") or {}).get("items", [])
                 if isinstance(item, dict)
                 and str(item.get("id") or "") == source_card_id
-                and isinstance(item.get("resolution_plan"), dict)
             ]
         elif collections is None:
             raise CombatEngineError(
@@ -3025,13 +3029,29 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 for item in dict(sheet.get("content") or {}).get(collection, [])
                 if isinstance(item, dict)
                 and str(item.get("id") or "") == source_card_id
-                and isinstance(item.get("resolution_plan"), dict)
             ]
         if len(matches) != 1:
             raise CombatEngineError(
-                "source card must resolve to exactly one recorded resolution plan"
+                "source card must resolve to exactly one recorded character card"
             )
-        card = deepcopy(matches[0])
+        return deepcopy(matches[0])
+
+    def character_resolution_plan(
+        sheet: dict[str, Any],
+        source_card_id: str,
+        source_card_kind: str,
+    ) -> tuple[dict[str, Any], Any]:
+        """Resolve one executable plan from the exact recorded character card."""
+
+        card = character_source_card(
+            sheet,
+            source_card_id,
+            source_card_kind,
+        )
+        if not isinstance(card.get("resolution_plan"), dict):
+            raise CombatEngineError(
+                "source card has no recorded resolution plan"
+            )
         try:
             compiled = compile_resolution_plan(card["resolution_plan"])
         except ResolutionPlanCompilationError as error:
@@ -3046,6 +3066,127 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "recorded resolution plan does not match its source card"
             )
         return card, compiled
+
+    def validate_first_use_item_plan(
+        campaign_id: str,
+        raw_plan: Any,
+        *,
+        source_actor_id: str,
+        source_card: dict[str, Any],
+    ) -> Any:
+        """Compile one reusable custom item recipe against exact module evidence."""
+
+        try:
+            compiled = compile_resolution_plan(raw_plan)
+        except ResolutionPlanCompilationError as error:
+            raise CombatEngineError(
+                f"first-use resolution plan is invalid: {error}"
+            ) from error
+        source_card_id = str(source_card.get("id") or "")
+        if (
+            compiled.schema_version != 2
+            or compiled.source_card_id != source_card_id
+            or compiled.source_card_kind != "item"
+            or compiled.trigger != "attack.after_hit"
+        ):
+            raise CombatEngineError(
+                "first-use item solutions require a schema v2 item "
+                "attack.after_hit plan for the exact source card"
+            )
+        trigger_filter = compiled.trigger_filter
+        source_actor_filter = trigger_filter.get("source_actor_id")
+        target_actor_filter = trigger_filter.get("target_actor_id")
+        source_slot = (
+            source_actor_filter.get("$slot")
+            if isinstance(source_actor_filter, dict)
+            else None
+        )
+        target_slot = (
+            target_actor_filter.get("$slot")
+            if isinstance(target_actor_filter, dict)
+            else None
+        )
+        if (
+            not source_slot
+            or not target_slot
+            or source_slot == target_slot
+            or trigger_filter.get("weapon_id") != source_card_id
+            or trigger_filter.get("hit") is not True
+        ):
+            raise CombatEngineError(
+                "first-use item solutions must bind source_actor_id and "
+                "target_actor_id slots and lock the paid weapon hit"
+            )
+        for slot_name in (source_slot, target_slot):
+            definition = compiled.slots.get(str(slot_name))
+            if (
+                not isinstance(definition, dict)
+                or definition.get("kind") != "actor_id"
+                or definition.get("owner") != "agent"
+            ):
+                raise CombatEngineError(
+                    "first-use item trigger actors require Agent-owned actor_id slots"
+                )
+        effect = _normalize_source_evidence_text(
+            dict(source_card.get("mechanics") or {}).get("on_hit_effect")
+            or source_card.get("description")
+        )
+        if not effect:
+            raise CombatEngineError(
+                "first-use item solution requires recorded source effect text"
+            )
+        relevant_citation = False
+        for index, citation in enumerate(compiled.citations):
+            try:
+                _normalized, _source, expanded = managed_module_source_ref(
+                    campaign_id,
+                    citation["source_ref"],
+                    require_exact=True,
+                    require_active_module=True,
+                )
+                assert expanded is not None
+                excerpt = managed_module_source_excerpt(
+                    expanded,
+                    citation["source_excerpt"],
+                    field=f"resolution_plan.citations[{index}].source_excerpt",
+                    minimum_length=10,
+                    maximum_length=4000,
+                )
+            except (LookupError, ValueError) as error:
+                raise CombatEngineError(str(error)) from error
+            normalized_excerpt = _normalize_source_evidence_text(excerpt)
+            if normalized_excerpt in effect or effect in normalized_excerpt:
+                relevant_citation = True
+        if not relevant_citation:
+            raise CombatEngineError(
+                "first-use resolution plan must cite the exact recorded item effect"
+            )
+        require_campaign_actor(campaign_id, source_actor_id)
+        return compiled
+
+    def sheet_with_item_solution(
+        sheet: dict[str, Any],
+        *,
+        source_card_id: str,
+        compiled_plan: Any,
+        solution: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Attach one compiled recipe to exactly one source item."""
+
+        updated = deepcopy(sheet)
+        matches = [
+            item
+            for item in dict(updated.get("inventory") or {}).get("items", [])
+            if isinstance(item, dict)
+            and str(item.get("id") or "") == source_card_id
+        ]
+        if len(matches) != 1:
+            raise CombatEngineError(
+                "source item must resolve exactly once before solution storage"
+            )
+        matches[0]["resolution_plan"] = resolution_plan_template(compiled_plan)
+        matches[0]["resolution_solution"] = deepcopy(solution)
+        return validate_character_sheet(updated)
 
     def agent_resolution_commitment(
         *,
@@ -9357,6 +9498,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 actor_id_value=target_id,
                 event="attack.on_hit.effect",
                 candidates=[
+                    {
+                        "id": "compile_solution",
+                        "name": (
+                            "Compile and store a source-bound solution for reuse"
+                        ),
+                    },
                     *(
                         [
                             {
@@ -9406,11 +9553,24 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             pending_on_hit_ruling = next_encounter["pending"][-1]
             pending_on_hit_ruling.update(
                 trigger="attack_on_hit_effect",
+                attack_ref=str(
+                    plan.get("attack_id") or plan.get("weapon_id") or ""
+                ),
                 attacker_id=actor_id,
+                branch_id=resolved_branch_id,
+                campaign_id=campaign_id,
+                critical=bool(attack_roll.get("critical", False)),
                 target_id=target_id,
                 weapon_id=str(plan.get("weapon_id") or ""),
                 effect=str(on_hit_ruling["effect"]).strip(),
             )
+            result["semantic_solution"] = {
+                "status": "compilation_required",
+                "application_id": pending_on_hit_ruling["id"],
+                "source_card_id": str(plan.get("weapon_id") or ""),
+                "source_card_kind": "item",
+                "required_action": "combat_choice(compile_solution)",
+            }
             result["pending_on_hit_ruling_id"] = pending_on_hit_ruling["id"]
         critical_followup_window = add_critical_followup_window(
             next_encounter,
@@ -16731,6 +16891,177 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 ["dnd5e.core.damage.zero_hp"],
                 "combat.source.stabilize",
             ),
+        )
+        return combat_response(campaign_id, principal_id, response)
+
+    def combat_compile_content_solution(
+        campaign_id: str,
+        source_actor_id: str,
+        application_id: str,
+        raw_plan: dict[str, Any],
+        agent_ruling: dict[str, Any],
+        *,
+        principal_id: str,
+        expected_revision: int | None,
+        branch_id: str | None,
+        idempotency_key: str | None,
+    ) -> dict[str, Any]:
+        """Compile and store a custom on-hit recipe at its first paid use."""
+
+        access.require_campaign(
+            campaign_id,
+            principal_id,
+            roles=CAMPAIGN_DM_ROLES,
+        )
+        require_write_contract(expected_revision, idempotency_key)
+        resolved_branch_id = require_current_branch(campaign_id, branch_id)
+        payload = {
+            "source_actor_id": source_actor_id,
+            "application_id": application_id,
+            "resolution_plan": deepcopy(raw_plan),
+            "agent_ruling": deepcopy(agent_ruling),
+            "branch_id": resolved_branch_id,
+        }
+        scope = (
+            f"combat-content-solution:{campaign_id}:{resolved_branch_id}:"
+            f"{principal_id}"
+        )
+        replay = replay_idempotent(scope, idempotency_key, payload)
+        if replay is not None:
+            return combat_response(campaign_id, principal_id, replay)
+        campaign, encounter = active_encounter(campaign_id)
+        if campaign.revision != expected_revision:
+            raise ValueError(
+                "campaign revision conflict: "
+                f"expected {expected_revision}, found {campaign.revision}"
+            )
+        window = next(
+            (
+                item
+                for item in encounter.get("pending", [])
+                if isinstance(item, dict)
+                and str(item.get("id") or "") == application_id
+            ),
+            None,
+        )
+        if (
+            not isinstance(window, dict)
+            or window.get("trigger") != "attack_on_hit_effect"
+            or str(window.get("attacker_id") or "") != source_actor_id
+        ):
+            raise CombatEngineError(
+                "first-use compilation requires the exact pending custom "
+                "on-hit application"
+            )
+        source_card_id = str(window.get("weapon_id") or "")
+        source_record = require_campaign_actor(campaign_id, source_actor_id)
+        source_card = character_source_card(
+            source_record.sheet,
+            source_card_id,
+            "item",
+        )
+        if (
+            isinstance(source_card.get("resolution_plan"), dict)
+            or isinstance(source_card.get("resolution_solution"), dict)
+        ):
+            raise CombatEngineError(
+                "source item already has a compiled solution"
+            )
+        compiled_plan = validate_first_use_item_plan(
+            campaign_id,
+            raw_plan,
+            source_actor_id=source_actor_id,
+            source_card=source_card,
+        )
+        try:
+            solution = build_content_solution(
+                compiled_plan,
+                application_id=application_id,
+                agent_ruling=agent_ruling,
+            )
+        except ContentSolutionError as error:
+            raise CombatEngineError(
+                f"first-use Agent compilation is invalid: {error}"
+            ) from error
+        next_sheet = sheet_with_item_solution(
+            source_record.sheet,
+            source_card_id=source_card_id,
+            compiled_plan=compiled_plan,
+            solution=solution,
+        )
+        next_encounter = deepcopy(encounter)
+        next_window = next(
+            item
+            for item in next_encounter.get("pending", [])
+            if isinstance(item, dict)
+            and str(item.get("id") or "") == application_id
+        )
+        next_window.update(
+            event="attack.on_hit.semantic_plan",
+            trigger="attack_semantic_plan",
+            attack_ref=str(
+                next_window.get("attack_ref") or source_card_id
+            ),
+            branch_id=resolved_branch_id,
+            campaign_id=campaign_id,
+            critical=bool(next_window.get("critical", False)),
+            plan_id=compiled_plan.id,
+            plan_fingerprint=compiled_plan.fingerprint,
+            resolution_plan_contract=resolution_plan_contract(compiled_plan),
+            candidates=[
+                {
+                    "id": "execute_plan",
+                    "name": "Execute the compiled item plan",
+                }
+            ],
+        )
+        next_encounter["log"] = [
+            *list(next_encounter.get("log") or []),
+            {
+                "type": "content_solution_compiled",
+                "application_id": application_id,
+                "actor_id": source_actor_id,
+                "source_card_id": source_card_id,
+                "source_card_kind": "item",
+                "plan_id": compiled_plan.id,
+                "plan_fingerprint": compiled_plan.fingerprint,
+                "source_fingerprint": solution["source_fingerprint"],
+                "solution_version": solution["solution_version"],
+            },
+        ][-100:]
+        next_state = {
+            **dict(campaign.state or {}),
+            "combat": next_encounter,
+        }
+        response = commit_campaign_state(
+            campaign,
+            next_state,
+            operation="combat.content_solution.compile",
+            principal_id=principal_id,
+            branch_id=resolved_branch_id,
+            idempotency_key=idempotency_key,
+            scope=scope,
+            payload=payload,
+            response_fields={
+                "status": "compiled",
+                "result": {
+                    "semantic_plan": {
+                        "status": "ready",
+                        "application_id": application_id,
+                        "contract": resolution_plan_contract(compiled_plan),
+                    },
+                    "solution": solution,
+                },
+                "combat": next_encounter,
+            },
+            character_updates=[
+                CharacterStateUpdate(
+                    character_id=source_record.id,
+                    sheet=next_sheet,
+                    notes=validate_character_notes(source_record.notes),
+                    expected_revision=source_record.revision,
+                )
+            ],
         )
         return combat_response(campaign_id, principal_id, response)
 
@@ -32971,6 +33302,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "resolve",
             "resolve_defense",
             "on_hit_ruling",
+            "compile_solution",
             "execute_plan",
         ],
         payload: dict[str, Any],
@@ -32981,7 +33313,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Open or resolve a validated choice window during active combat."""
-        if action in {"on_hit_ruling", "execute_plan"}:
+        if action in {"on_hit_ruling", "compile_solution", "execute_plan"}:
             access.require_campaign(
                 campaign_id,
                 principal_id,
@@ -32993,7 +33325,33 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             PROFILE_COMBAT,
         )
         resolved_actor_id = str(required({"actor_id": actor_id}, "actor_id"))
-        if action == "execute_plan":
+        if action == "compile_solution":
+            data = strict_facade_payload(
+                payload,
+                action="combat_choice(compile_solution)",
+                allowed={
+                    "application_id",
+                    "resolution_plan",
+                    "agent_ruling",
+                },
+                required_names=(
+                    "application_id",
+                    "resolution_plan",
+                    "agent_ruling",
+                ),
+            )
+            result = combat_compile_content_solution(
+                campaign_id,
+                resolved_actor_id,
+                str(required(data, "application_id")),
+                required(data, "resolution_plan"),
+                required(data, "agent_ruling"),
+                principal_id=principal_id,
+                expected_revision=expected_revision,
+                branch_id=branch_id,
+                idempotency_key=idempotency_key,
+            )
+        elif action == "execute_plan":
             data = strict_facade_payload(
                 payload,
                 action="combat_choice(execute_plan)",

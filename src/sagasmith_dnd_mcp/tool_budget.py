@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-TOOL_BUDGET_VERSION = "2026-07-compact-facades-v7"
+TOOL_BUDGET_VERSION = "2026-07-compact-facades-v8"
 
 # Captured before the conservative facade consolidation.  Keep this historical
 # baseline so a lower tool count cannot conceal a larger aggregate input schema.
@@ -18,8 +18,10 @@ TARGET_CORE_TOOL_COUNT = 12
 # arbitrary string. Version 6 adds 14 bytes for the generic, action-bound
 # combat_hp_change(save_damage) settlement. Version 7 adds 15 bytes for the
 # source-bound combat_choice(execute_plan) action without another public tool.
+# Version 8 adds the first-use combat_choice(compile_solution) action while
+# keeping the same public and core tool counts.
 # The aggregate remains well below the captured 92-tool baseline.
-TARGET_INPUT_SCHEMA_BYTES = 47_971
+TARGET_INPUT_SCHEMA_BYTES = 47_990
 PROFILE_TOOL_LIMITS = {
     "lobby": 61,
     "play": 46,

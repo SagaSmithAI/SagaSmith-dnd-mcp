@@ -912,9 +912,18 @@ def test_item_on_hit_plan_uses_the_attack_event_as_payment(
         wielder_sheet["inventory"]["equipment_slots"]["main_hand"] = (
             "binding-blade"
         )
+        first_use_plan = wielder_sheet["inventory"]["items"][0].pop(
+            "resolution_plan"
+        )
+        target_sheet = default_character_sheet()
+        target_sheet["combat"]["hp"] = {
+            "value": 50,
+            "max": 50,
+            "temp": 0,
+        }
         for actor, sheet, key in (
             (wielder, wielder_sheet, "wielder-sheet"),
-            (target, default_character_sheet(), "target-sheet"),
+            (target, target_sheet, "target-sheet"),
         ):
             await _call(
                 server,
@@ -986,13 +995,71 @@ def test_item_on_hit_plan_uses_the_attack_event_as_payment(
                 "idempotency_key": "attack",
             },
         )
-        semantic = attacked["result"]["semantic_plan"]
+        required_solution = attacked["result"]["semantic_solution"]
+        assert required_solution["status"] == "compilation_required"
+        assert required_solution["required_action"] == (
+            "combat_choice(compile_solution)"
+        )
+        compile_payload = {
+            "application_id": required_solution["application_id"],
+            "resolution_plan": first_use_plan,
+            "agent_ruling": {
+                "default_resolver": "agent",
+                "ruling_kind": "module_specific_procedure",
+                "decision": (
+                    "Compile the quoted binding effect into a reusable "
+                    "item solution."
+                ),
+                "reason": (
+                    "The exact source clause has a deterministic "
+                    "condition and trigger."
+                ),
+            },
+        }
+        invalid_payload = deepcopy(compile_payload)
+        invalid_payload["resolution_plan"]["citations"][0][
+            "source_excerpt"
+        ] = "An invented rule that is absent from the managed source."
+        with pytest.raises(Exception, match="is not present"):
+            await _call(
+                server,
+                "combat_choice",
+                {
+                    "campaign_id": campaign["id"],
+                    "actor_id": wielder["id"],
+                    "action": "compile_solution",
+                    "payload": invalid_payload,
+                    "expected_revision": attacked["campaign_revision"],
+                    "idempotency_key": "reject-invented-source",
+                },
+            )
+        compile_arguments = {
+            "campaign_id": campaign["id"],
+            "actor_id": wielder["id"],
+            "action": "compile_solution",
+            "payload": compile_payload,
+            "expected_revision": attacked["campaign_revision"],
+            "idempotency_key": "compile-first-use",
+        }
+        compiled = await _call(
+            server,
+            "combat_choice",
+            compile_arguments,
+        )
+        assert await _call(
+            server,
+            "combat_choice",
+            compile_arguments,
+        ) == compiled
+        semantic = compiled["result"]["semantic_plan"]
         contract = semantic["contract"]
-        assert attacked["status"] == "pending_ruling"
+        assert compiled["status"] == "compiled"
         assert semantic["application_id"]
         assert contract["plan_id"] == plan_id
         assert contract["trigger_filter"]["weapon_id"] == "binding-blade"
-        assert "on_hit_ruling" not in attacked["result"]
+        assert attacked["result"]["semantic_solution"]["status"] == (
+            "compilation_required"
+        )
         agent_ruling = {
             "application_id": semantic["application_id"],
             "default_resolver": "agent",
@@ -1030,7 +1097,7 @@ def test_item_on_hit_plan_uses_the_attack_event_as_payment(
                     "payload": {
                         "commitment": wrong_target_commitment,
                     },
-                    "expected_revision": attacked["campaign_revision"],
+                    "expected_revision": compiled["campaign_revision"],
                     "idempotency_key": "wrong-target-settle",
                 },
             )
@@ -1042,7 +1109,7 @@ def test_item_on_hit_plan_uses_the_attack_event_as_payment(
                 "actor_id": wielder["id"],
                 "action": "execute_plan",
                 "payload": {"commitment": commitment},
-                "expected_revision": attacked["campaign_revision"],
+                "expected_revision": compiled["campaign_revision"],
                 "idempotency_key": "settle",
             },
         )
@@ -1054,9 +1121,50 @@ def test_item_on_hit_plan_uses_the_attack_event_as_payment(
 
         assert settled["status"] == "committed"
         assert "restrained" in target_after["sheet"]["conditions"]
+        wielder_after = await _call(
+            server,
+            "character_get",
+            {"character_id": wielder["id"]},
+        )
+        stored_item = wielder_after["sheet"]["inventory"]["items"][0]
+        assert stored_item["resolution_solution"]["plan_fingerprint"] == (
+            contract["plan_fingerprint"]
+        )
         assert all(
             item.get("id") != semantic["application_id"]
             for item in settled["combat"].get("pending", [])
         )
+        revision = settled["campaign_revision"]
+        for index, actor in enumerate((wielder, target)):
+            ended = await _call(
+                server,
+                "combat_end_turn",
+                {
+                    "campaign_id": campaign["id"],
+                    "actor_id": actor["id"],
+                    "expected_revision": revision,
+                    "idempotency_key": f"next-round-{index}",
+                },
+            )
+            revision = ended["campaign_revision"]
+        reused = await _raw(
+            server,
+            "combat_resolve_attack",
+            {
+                "campaign_id": campaign["id"],
+                "actor_id": wielder["id"],
+                "target_id": target["id"],
+                "action": {
+                    "weapon_id": "binding-blade",
+                    "attack_mode": "melee",
+                },
+                "expected_revision": revision,
+                "idempotency_key": "second-attack",
+            },
+        )
+        assert reused["result"]["semantic_plan"]["status"] == (
+            "payment_recorded"
+        )
+        assert "semantic_solution" not in reused["result"]
 
     asyncio.run(exercise())
