@@ -723,10 +723,14 @@ def test_agent_turn_ruling_rolls_area_damage_once_and_applies_each_save() -> Non
                     "status": "committed",
                     "result": {"success": arguments["actor_id"] == "pc-1"},
                 }
-            if tool_id == "combat_apply_damage":
+            if tool_id == "combat_hp_change":
+                assert arguments["action"] == "damage"
+                assert set(arguments["payload"]) == {"parts"}
                 return {
                     "status": "committed",
-                    "applied_amount": arguments["parts"][0]["amount"],
+                    "result": {
+                        "applied_amount": arguments["payload"]["parts"][0]["amount"]
+                    },
                 }
             if tool_id == "combat_map_patch":
                 return {"status": "committed", "world_patches": arguments["patches"]}
@@ -790,10 +794,19 @@ def test_agent_turn_ruling_rolls_area_damage_once_and_applies_each_save() -> Non
         "combat_use_activity",
         "dnd_dice_roll",
         "combat_check",
-        "combat_apply_damage",
+        "combat_hp_change",
         "combat_check",
-        "combat_apply_damage",
+        "combat_hp_change",
         "combat_map_patch",
+    ]
+    hp_change_calls = [
+        arguments
+        for name, arguments in client.calls
+        if name == "combat_hp_change"
+    ]
+    assert [call["payload"]["parts"][0]["amount"] for call in hp_change_calls] == [
+        28,
+        56,
     ]
     assert [item["applied_amount"] for item in result["damage_results"]] == [28, 56]
     assert result["save_results"][0]["success"] is True

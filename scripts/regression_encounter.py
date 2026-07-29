@@ -6841,18 +6841,21 @@ async def _settle_agent_turn_ruling(
                 if amount:
                     campaign = await _campaign(client, args.campaign_id)
                     applied = await client.domain(
-                        "combat_apply_damage",
+                        "combat_hp_change",
                         {
                             "campaign_id": args.campaign_id,
                             "target_id": save_target_id,
-                            "parts": [
-                                {
-                                    "amount": amount,
-                                    "damage_type": str(
-                                        damage_contract["damage_type"]
-                                    ),
-                                }
-                            ],
+                            "action": "damage",
+                            "payload": {
+                                "parts": [
+                                    {
+                                        "amount": amount,
+                                        "damage_type": str(
+                                            damage_contract["damage_type"]
+                                        ),
+                                    }
+                                ]
+                            },
                             "branch_id": branch_id,
                             "expected_revision": campaign["revision"],
                             "idempotency_key": (
