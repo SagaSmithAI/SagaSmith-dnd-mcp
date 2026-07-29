@@ -443,8 +443,34 @@ def _arguments() -> argparse.Namespace:
         type=json.loads,
         default=[],
         help=(
-            "Agent tactical focus-fire decision with party actor_ids, ordered hostile "
-            "priority_groups, and ruling_reason; the server still validates every target"
+            "Agent tactical target decision with same-side actor_ids, every opposing "
+            "participant exactly once in ordered priority_groups, decision, and "
+            "ruling_reason; the server still validates every attempted target"
+        ),
+    )
+    parser.add_argument(
+        "--agent-weapon-priority-json",
+        action="append",
+        type=json.loads,
+        default=[],
+        help=(
+            "Agent tactical weapon policy with actor_id, ordered choices "
+            "(weapon_id, attack_mode, optional multiattack_option_id), decision, "
+            "and ruling_reason. Auto-run stops at the Agent boundary when a turn "
+            "needs an attack and no source opening or Agent policy exists."
+        ),
+    )
+    parser.add_argument(
+        "--agent-spell-priority-json",
+        action="append",
+        type=json.loads,
+        default=[],
+        help=(
+            "Agent tactical spell policy with actor_id, ordered choices "
+            "(spell_id, target_policy, cast_level_policy=lowest_available), "
+            "decision, and ruling_reason. Supported target policies are "
+            "downed_ally, prioritized_opponent, and "
+            "maximize_opponents_without_allies."
         ),
     )
     parser.add_argument(
@@ -2085,8 +2111,14 @@ def _agent_target_priorities(
 
     party = set(party_ids)
     hostiles = set(hostile_ids)
+    participants = party | hostiles
     by_actor: dict[str, dict[str, Any]] = {}
-    allowed = {"actor_ids", "priority_groups", "ruling_reason"}
+    allowed = {
+        "actor_ids",
+        "priority_groups",
+        "decision",
+        "ruling_reason",
+    }
     for index, declaration in enumerate(declarations):
         if not isinstance(declaration, dict):
             raise ValueError(f"Agent target priority {index} must be an object")
@@ -2097,22 +2129,27 @@ def _agent_target_priorities(
             )
         actor_ids = [str(item).strip() for item in declaration.get("actor_ids") or []]
         raw_groups = declaration.get("priority_groups")
+        decision = " ".join(str(declaration.get("decision") or "").split())
         ruling_reason = " ".join(
             str(declaration.get("ruling_reason") or "").split()
         )
+        actors_are_party = bool(set(actor_ids)) and set(actor_ids) <= party
+        actors_are_hostile = bool(set(actor_ids)) and set(actor_ids) <= hostiles
+        expected_targets = hostiles if actors_are_party else party
         if (
             not actor_ids
             or any(not item for item in actor_ids)
             or len(actor_ids) != len(set(actor_ids))
-            or not set(actor_ids) <= party
+            or not set(actor_ids) <= participants
+            or actors_are_party == actors_are_hostile
             or not isinstance(raw_groups, list)
             or not raw_groups
-            or not ruling_reason
-            or len(ruling_reason) > 500
+            or not 10 <= len(decision) <= 500
+            or not 10 <= len(ruling_reason) <= 500
         ):
             raise ValueError(
-                "Agent target priority requires unique party actor_ids, non-empty "
-                "hostile priority_groups, and a 1-to-500-character ruling_reason"
+                "Agent target priority requires unique same-side actor_ids, "
+                "non-empty opposing priority_groups, decision, and ruling_reason"
             )
         priority_groups: list[list[str]] = []
         for raw_group in raw_groups:
@@ -2123,21 +2160,27 @@ def _agent_target_priorities(
                 not group
                 or any(not item for item in group)
                 or len(group) != len(set(group))
-                or not set(group) <= hostiles
+                or not set(group) <= expected_targets
             ):
                 raise ValueError(
-                    "Agent target priority groups must contain unique encounter hostiles"
+                    "Agent target priority groups must contain unique opposing "
+                    "encounter participants"
                 )
             priority_groups.append(group)
         target_ids = [item for group in priority_groups for item in group]
-        if len(target_ids) != len(set(target_ids)) or set(actor_ids) & set(by_actor):
+        if (
+            len(target_ids) != len(set(target_ids))
+            or set(target_ids) != expected_targets
+            or set(actor_ids) & set(by_actor)
+        ):
             raise ValueError(
-                "Agent priority targets must be unique and each party actor may be "
-                "declared only once"
+                "Agent priority targets must enumerate every opponent exactly once "
+                "and each acting participant may be declared only once"
             )
         value = {
             "actor_ids": actor_ids,
             "priority_groups": priority_groups,
+            "decision": decision,
             "ruling_reason": ruling_reason,
             "default_resolver": "agent",
             "ruling_kind": "agent_dm_adjudication",
@@ -2145,6 +2188,319 @@ def _agent_target_priorities(
         for actor_id in actor_ids:
             by_actor[actor_id] = value
     return by_actor
+
+
+def _validate_agent_target_refinements(
+    source_priorities: dict[str, dict[str, Any]],
+    agent_priorities: dict[str, dict[str, Any]],
+) -> None:
+    """Keep Agent ordering within any source-authored priority constraints."""
+
+    for actor_id in set(source_priorities) & set(agent_priorities):
+        source = source_priorities[actor_id]
+        agent = agent_priorities[actor_id]
+        source_rank = {
+            target_id: group_index
+            for group_index, group in enumerate(source["priority_groups"])
+            for target_id in group
+        }
+        fallback_rank = len(source["priority_groups"])
+        ordered_targets = [
+            target_id
+            for group in agent["priority_groups"]
+            for target_id in group
+        ]
+        ranks = [
+            source_rank.get(target_id, fallback_rank)
+            for target_id in ordered_targets
+        ]
+        if ranks != sorted(ranks):
+            raise ValueError(
+                f"Agent target priority for {actor_id} contradicts the "
+                "source-authored target order"
+            )
+
+
+def _weapon_attack_modes(weapon: dict[str, Any]) -> set[str]:
+    modes = {str(weapon.get("attack_type") or "melee").strip().casefold()}
+    properties = {
+        str(item).strip().casefold() for item in weapon.get("properties", [])
+    }
+    thrown_range = dict(
+        weapon.get("thrown_range_ft")
+        or weapon.get("range_ft")
+        or {}
+    )
+    if (
+        "thrown" in properties
+        and int(thrown_range.get("normal", 0) or 0) > 0
+    ):
+        modes.add("ranged")
+    return modes & ATTACK_MODES
+
+
+def _agent_weapon_priorities(
+    declarations: list[dict[str, Any]],
+    *,
+    participant_ids: list[str],
+    actors: dict[str, dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Validate reusable weapon choices authored by the acting Agent."""
+
+    participants = set(participant_ids)
+    normalized: dict[str, dict[str, Any]] = {}
+    allowed = {"actor_id", "choices", "decision", "ruling_reason"}
+    choice_allowed = {
+        "weapon_id",
+        "attack_mode",
+        "multiattack_option_id",
+    }
+    for index, declaration in enumerate(declarations):
+        if not isinstance(declaration, dict):
+            raise ValueError(f"Agent weapon priority {index} must be an object")
+        unknown = set(declaration) - allowed
+        if unknown:
+            raise ValueError(
+                f"Agent weapon priority {index} has unsupported fields: "
+                f"{', '.join(sorted(unknown))}"
+            )
+        actor_id = str(declaration.get("actor_id") or "").strip()
+        raw_choices = declaration.get("choices")
+        decision = " ".join(str(declaration.get("decision") or "").split())
+        ruling_reason = " ".join(
+            str(declaration.get("ruling_reason") or "").split()
+        )
+        if (
+            actor_id not in participants
+            or actor_id in normalized
+            or not isinstance(raw_choices, list)
+            or not raw_choices
+            or not 10 <= len(decision) <= 500
+            or not 10 <= len(ruling_reason) <= 500
+        ):
+            raise ValueError(
+                f"Agent weapon priority {index} requires one unique participant, "
+                "ordered choices, decision, and ruling_reason"
+            )
+        actor = actors.get(actor_id)
+        weapons = {
+            str(item.get("item_id") or ""): dict(item)
+            for item in (
+                dict(dict(actor or {}).get("derived") or {})
+                .get("inventory", {})
+                .get("weapon_attacks", [])
+            )
+            if isinstance(item, dict) and str(item.get("item_id") or "")
+        }
+        multiattacks = {
+            str(item.get("id") or ""): dict(item)
+            for item in dict(dict(actor or {}).get("derived") or {}).get(
+                "multiattack_options", []
+            )
+            if isinstance(item, dict) and str(item.get("id") or "")
+        }
+        choices: list[dict[str, str]] = []
+        identities: set[tuple[str, str, str]] = set()
+        for choice_index, raw_choice in enumerate(raw_choices):
+            if not isinstance(raw_choice, dict):
+                raise ValueError(
+                    f"Agent weapon priority choice {index}:{choice_index} "
+                    "must be an object"
+                )
+            choice_unknown = set(raw_choice) - choice_allowed
+            weapon_id = str(raw_choice.get("weapon_id") or "").strip()
+            attack_mode = (
+                str(raw_choice.get("attack_mode") or "").strip().casefold()
+            )
+            multiattack_option_id = str(
+                raw_choice.get("multiattack_option_id") or ""
+            ).strip()
+            identity = (weapon_id, attack_mode, multiattack_option_id)
+            weapon = weapons.get(weapon_id)
+            option = (
+                multiattacks.get(multiattack_option_id)
+                if multiattack_option_id
+                else None
+            )
+            option_attacks = [
+                dict(item)
+                for item in dict(option or {}).get("attacks", [])
+                if isinstance(item, dict)
+            ]
+            first_option_attack = option_attacks[0] if option_attacks else {}
+            if (
+                choice_unknown
+                or weapon is None
+                or attack_mode not in _weapon_attack_modes(weapon)
+                or identity in identities
+                or (
+                    multiattack_option_id
+                    and (
+                        option is None
+                        or str(first_option_attack.get("weapon_id") or "")
+                        != weapon_id
+                        or str(first_option_attack.get("attack_mode") or "melee")
+                        != attack_mode
+                    )
+                )
+            ):
+                raise ValueError(
+                    f"Agent weapon priority choice {index}:{choice_index} must "
+                    "name one existing weapon and legal attack mode; an optional "
+                    "Multiattack must exist and begin with that exact attack"
+                )
+            choices.append(
+                {
+                    "weapon_id": weapon_id,
+                    "attack_mode": attack_mode,
+                    **(
+                        {"multiattack_option_id": multiattack_option_id}
+                        if multiattack_option_id
+                        else {}
+                    ),
+                }
+            )
+            identities.add(identity)
+        normalized[actor_id] = {
+            "actor_id": actor_id,
+            "choices": choices,
+            "agent_ruling": {
+                "default_resolver": "agent",
+                "ruling_kind": "agent_dm_adjudication",
+                "decision": decision,
+                "reason": ruling_reason,
+            },
+        }
+    return normalized
+
+
+def _agent_spell_priorities(
+    declarations: list[dict[str, Any]],
+    *,
+    participant_ids: list[str],
+    actors: dict[str, dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Validate explicit spell and targeting policies from the acting Agent."""
+
+    participants = set(participant_ids)
+    normalized: dict[str, dict[str, Any]] = {}
+    allowed = {"actor_id", "choices", "decision", "ruling_reason"}
+    choice_allowed = {"spell_id", "target_policy", "cast_level_policy"}
+    target_policies = {
+        "downed_ally",
+        "prioritized_opponent",
+        "maximize_opponents_without_allies",
+    }
+    for index, declaration in enumerate(declarations):
+        if not isinstance(declaration, dict):
+            raise ValueError(f"Agent spell priority {index} must be an object")
+        unknown = set(declaration) - allowed
+        if unknown:
+            raise ValueError(
+                f"Agent spell priority {index} has unsupported fields: "
+                f"{', '.join(sorted(unknown))}"
+            )
+        actor_id = str(declaration.get("actor_id") or "").strip()
+        raw_choices = declaration.get("choices")
+        decision = " ".join(str(declaration.get("decision") or "").split())
+        ruling_reason = " ".join(
+            str(declaration.get("ruling_reason") or "").split()
+        )
+        if (
+            actor_id not in participants
+            or actor_id in normalized
+            or not isinstance(raw_choices, list)
+            or not raw_choices
+            or not 10 <= len(decision) <= 500
+            or not 10 <= len(ruling_reason) <= 500
+        ):
+            raise ValueError(
+                f"Agent spell priority {index} requires one unique participant, "
+                "ordered choices, decision, and ruling_reason"
+            )
+        actor = actors.get(actor_id)
+        spell_cards = {
+            str(item.get("id") or ""): dict(item)
+            for item in (
+                dict(dict(actor or {}).get("sheet") or {})
+                .get("content", {})
+                .get("spells", [])
+            )
+            if isinstance(item, dict) and str(item.get("id") or "")
+        }
+        choices: list[dict[str, str]] = []
+        identities: set[tuple[str, str]] = set()
+        for choice_index, raw_choice in enumerate(raw_choices):
+            if not isinstance(raw_choice, dict):
+                raise ValueError(
+                    f"Agent spell priority choice {index}:{choice_index} "
+                    "must be an object"
+                )
+            choice_unknown = set(raw_choice) - choice_allowed
+            spell_id = str(raw_choice.get("spell_id") or "").strip()
+            target_policy = (
+                str(raw_choice.get("target_policy") or "").strip().casefold()
+            )
+            cast_level_policy = (
+                str(
+                    raw_choice.get("cast_level_policy")
+                    or "lowest_available"
+                )
+                .strip()
+                .casefold()
+            )
+            spell = spell_cards.get(spell_id)
+            resolution = dict(dict(spell or {}).get("resolution") or {})
+            area_targeting = (
+                dict(resolution.get("targeting") or {}).get("mode") == "area"
+            )
+            identity = (spell_id, target_policy)
+            compatible = (
+                target_policy == "downed_ally"
+                and (
+                    spell_id == HEALING_WORD_ID
+                    or resolution.get("kind") == "healing"
+                )
+            ) or (
+                target_policy == "prioritized_opponent"
+                and spell_id in {MAGIC_MISSILE_ID, GUIDING_BOLT_ID}
+            ) or (
+                target_policy == "maximize_opponents_without_allies"
+                and resolution.get("kind") == "saving_throw"
+                and area_targeting
+            )
+            if (
+                choice_unknown
+                or spell is None
+                or target_policy not in target_policies
+                or cast_level_policy != "lowest_available"
+                or not compatible
+                or identity in identities
+            ):
+                raise ValueError(
+                    f"Agent spell priority choice {index}:{choice_index} must "
+                    "name one hydrated supported spell, a compatible explicit "
+                    "target policy, and lowest_available cast-level policy"
+                )
+            choices.append(
+                {
+                    "spell_id": spell_id,
+                    "target_policy": target_policy,
+                    "cast_level_policy": cast_level_policy,
+                }
+            )
+            identities.add(identity)
+        normalized[actor_id] = {
+            "actor_id": actor_id,
+            "choices": choices,
+            "agent_ruling": {
+                "default_resolver": "agent",
+                "ruling_kind": "agent_dm_adjudication",
+                "decision": decision,
+                "reason": ruling_reason,
+            },
+        }
+    return normalized
 
 
 def _prioritize_targets(
@@ -2156,12 +2512,25 @@ def _prioritize_targets(
     declaration = priorities_by_actor.get(actor_id)
     if declaration is None:
         return prioritized
-    rank = {
-        target_id: group_index
-        for group_index, group in enumerate(declaration["priority_groups"])
-        for target_id in group
-    }
-    fallback_rank = len(declaration["priority_groups"])
+    if declaration.get("default_resolver") == "agent":
+        rank = {
+            target_id: order
+            for order, target_id in enumerate(
+                target_id
+                for group in declaration["priority_groups"]
+                for target_id in group
+            )
+        }
+        fallback_rank = sum(
+            len(group) for group in declaration["priority_groups"]
+        )
+    else:
+        rank = {
+            target_id: group_index
+            for group_index, group in enumerate(declaration["priority_groups"])
+            for target_id in group
+        }
+        fallback_rank = len(declaration["priority_groups"])
     prioritized.sort(key=lambda target_id: rank.get(target_id, fallback_rank))
     return prioritized
 
@@ -3156,6 +3525,15 @@ def _agent_turn_rulings(
             "activity_id": activity_id,
             "spell_id": spell_id,
             "procedure_id": procedure_id,
+            "mechanic_source_excerpt": (
+                str(
+                    spell_definition.get("effect")
+                    or dict(card or {}).get("description")
+                    or ""
+                )
+                if spell_id
+                else ruling_source_excerpt
+            ),
             "spell_payment_economies": (
                 ["none"]
                 if spell_id
@@ -4860,67 +5238,6 @@ def _validate_hostile_attacks(
             raise RuntimeError(f"source hostile {actor_id} has unresolved trailing action prose")
 
 
-def _preferred_hostile_weapon_id(
-    actor: dict[str, Any],
-    *,
-    hostile_index: int,
-) -> str:
-    weapons = list(
-        dict(dict(actor.get("derived") or {}).get("inventory") or {}).get("weapon_attacks", [])
-    )
-    attack_ids = {str(item.get("item_id") or "") for item in weapons}
-    if hostile_index >= 2 and "shortbow" in attack_ids:
-        return "shortbow"
-    if "scimitar" in attack_ids:
-        return "scimitar"
-    melee = next(
-        (str(item.get("item_id") or "") for item in weapons if item.get("attack_type") == "melee"),
-        "",
-    )
-    return melee or (str(weapons[0].get("item_id") or "") if weapons else "")
-
-
-def _preferred_multiattack_option_id(
-    actor: dict[str, Any],
-    *,
-    preferred_weapon_id: str,
-) -> str:
-    options = [
-        item
-        for item in dict(actor.get("derived") or {}).get("multiattack_options", [])
-        if isinstance(item, dict)
-        and str(item.get("id") or "")
-        and (
-            sum(
-                int(attack.get("count", 0) or 0)
-                for attack in item.get("attacks", [])
-                if isinstance(attack, dict)
-            )
-            + sum(
-                int(activity.get("count", 0) or 0)
-                for activity in item.get("activities", [])
-                if isinstance(activity, dict)
-            )
-        )
-        >= 2
-    ]
-    if not options:
-        return ""
-    if preferred_weapon_id:
-        matching = [
-            option
-            for option in options
-            if any(
-                str(attack.get("weapon_id") or "") == preferred_weapon_id
-                for attack in option.get("attacks", [])
-                if isinstance(attack, dict)
-            )
-        ]
-        if matching:
-            return str(matching[0]["id"])
-    return str(options[0]["id"])
-
-
 def _has_multiattack_followup(combat: dict[str, Any], actor_id: str) -> bool:
     combatant = next(
         (
@@ -5018,14 +5335,13 @@ async def _start(
     )
     agent_target_priorities = _agent_target_priorities(
         getattr(args, "agent_target_priority_json", []),
-        party_ids=pc_ids,
+        party_ids=party_ids,
         hostile_ids=all_hostile_ids,
     )
-    if set(source_target_priorities) & set(agent_target_priorities):
-        raise ValueError(
-            "the same actor cannot have both source-authored and Agent tactical "
-            "target priorities"
-        )
+    _validate_agent_target_refinements(
+        source_target_priorities,
+        agent_target_priorities,
+    )
     source_conditions_by_actor = _source_declared_conditions(
         args.source_condition_json,
         participant_ids=[*party_ids, *all_hostile_ids],
@@ -5051,6 +5367,16 @@ async def _start(
         client,
         args.campaign_id,
         [*party_ids, *all_hostile_ids],
+    )
+    agent_weapon_priorities = _agent_weapon_priorities(
+        getattr(args, "agent_weapon_priority_json", []),
+        participant_ids=[*party_ids, *all_hostile_ids],
+        actors=actors,
+    )
+    agent_spell_priorities = _agent_spell_priorities(
+        getattr(args, "agent_spell_priority_json", []),
+        participant_ids=[*party_ids, *all_hostile_ids],
+        actors=actors,
     )
     opening_weapons = _source_opening_weapons(
         args.source_opening_weapon_json,
@@ -5511,6 +5837,8 @@ async def _start(
                 for value in agent_target_priorities.values()
             }.values()
         ),
+        "agent_weapon_priorities": list(agent_weapon_priorities.values()),
+        "agent_spell_priorities": list(agent_spell_priorities.values()),
         "source_precombat_casts": precombat_cast_results,
         "source_opening_weapons": list(opening_weapons.values()),
         "source_ammunition_selections": list(source_ammunition_selections.values()),
@@ -5731,18 +6059,19 @@ def _area_spell_declaration(
     return deepcopy(best[3]) if best is not None else None
 
 
-def _choose_party_spell(
+def _choose_agent_spell(
     actor_id: str,
     *,
     party_ids: list[str],
     actors: dict[str, dict[str, Any]],
     living_targets: list[str],
+    spell_choices: list[dict[str, str]],
     leveled_spell_available: bool = True,
     combat: dict[str, Any] | None = None,
 ) -> tuple[str, str, int] | tuple[str, str, int, dict[str, Any]] | None:
-    """Choose a prepared/known supported spell and the lowest legal available slot."""
+    """Apply one explicit Agent spell policy to current structured state."""
 
-    if not leveled_spell_available:
+    if not leveled_spell_available or not spell_choices:
         return None
     actor = actors[actor_id]
     sheet = dict(actor.get("sheet") or {})
@@ -5778,46 +6107,59 @@ def _choose_party_spell(
     )
     if not available_slot_levels:
         return None
-    if actor_id in party_ids:
-        downed_allies = [
-            ally_id
-            for ally_id in party_ids
-            if ally_id != actor_id
-            and _hit_points(actors[ally_id]) == 0
-            and "dead" not in _conditions(actors[ally_id])
-        ]
-        downed_allies.sort(key=lambda item: "stable" in _conditions(actors[item]))
-        if HEALING_WORD_ID in spells and downed_allies:
-            return HEALING_WORD_ID, downed_allies[0], available_slot_levels[0]
-    if living_targets and combat is not None:
-        for spell in sorted(
+    allied_ids = (
+        list(party_ids)
+        if actor_id in party_ids
+        else [item for item in actors if item not in set(party_ids)]
+    )
+    for choice in spell_choices:
+        spell_id = str(choice.get("spell_id") or "")
+        target_policy = str(choice.get("target_policy") or "")
+        if spell_id not in spells:
+            continue
+        spell = next(
             (
                 item
                 for item in spell_cards
-                if str(item.get("id") or "") in spells
-                and dict(item.get("resolution") or {}).get("kind")
-                == "saving_throw"
-                and dict(
-                    dict(item.get("resolution") or {}).get("targeting") or {}
-                ).get("mode")
-                == "area"
+                if str(item.get("id") or "") == spell_id
             ),
-            key=lambda item: (
-                -int(item.get("level", 0) or 0),
-                str(item.get("id") or ""),
-            ),
-        ):
-            spell_level = int(spell.get("level", 0) or 0)
-            cast_level = next(
-                (level for level in available_slot_levels if level >= spell_level),
-                None,
+            None,
+        )
+        spell_level = int(dict(spell or {}).get("level", 1) or 0)
+        cast_level = next(
+            (level for level in available_slot_levels if level >= spell_level),
+            None,
+        )
+        if cast_level is None:
+            continue
+        if target_policy == "downed_ally":
+            downed_allies = [
+                ally_id
+                for ally_id in allied_ids
+                if ally_id != actor_id
+                and _hit_points(actors[ally_id]) == 0
+                and "dead" not in _conditions(actors[ally_id])
+            ]
+            downed_allies.sort(
+                key=lambda item: "stable" in _conditions(actors[item])
             )
-            if cast_level is None:
-                continue
+            if downed_allies:
+                return spell_id, downed_allies[0], cast_level
+            continue
+        if target_policy == "prioritized_opponent":
+            if living_targets:
+                return spell_id, living_targets[0], cast_level
+            continue
+        if (
+            target_policy == "maximize_opponents_without_allies"
+            and living_targets
+            and combat is not None
+            and spell is not None
+        ):
             declaration = _area_spell_declaration(
                 spell,
                 actor_id=actor_id,
-                party_ids=party_ids,
+                party_ids=allied_ids,
                 living_targets=living_targets,
                 actors=actors,
                 combat=combat,
@@ -5827,17 +6169,7 @@ def _choose_party_spell(
                     str(item["target_id"])
                     for item in declaration["target_contexts"]
                 ]
-                return (
-                    str(spell["id"]),
-                    affected_ids[0],
-                    cast_level,
-                    declaration,
-                )
-    cast_level = available_slot_levels[0]
-    if MAGIC_MISSILE_ID in spells and living_targets:
-        return MAGIC_MISSILE_ID, living_targets[0], cast_level
-    if GUIDING_BOLT_ID in spells and living_targets:
-        return GUIDING_BOLT_ID, living_targets[0], cast_level
+                return spell_id, affected_ids[0], cast_level, declaration
     return None
 
 
@@ -7243,6 +7575,68 @@ async def _settle_agent_turn_ruling(
         str(item)
         for item in ruling.get("target_ids") or ([target_id] if target_id else [])
     ]
+    save_contract = dict(ruling.get("save") or {})
+    damage_contract = dict(save_contract.get("damage") or {})
+    source_card_kind = (
+        "activity"
+        if ruling.get("activity_id")
+        else "spell"
+        if ruling.get("spell_id")
+        else "scene_procedure"
+    )
+    source_card_id = str(
+        ruling.get("activity_id")
+        or ruling.get("spell_id")
+        or ruling.get("procedure_id")
+        or ""
+    )
+    mechanic_source_excerpt = " ".join(
+        str(ruling.get("mechanic_source_excerpt") or "").split()
+    )
+    scene_agent_ruling = (
+        {
+            "application_id": str(ruling["application_id"]),
+            "default_resolver": "agent",
+            "ruling_kind": "agent_dm_adjudication",
+            "decision": " ".join(
+                str(ruling["agent_ruling"]["decision"]).split()
+            ),
+            "reason": " ".join(
+                str(ruling["agent_ruling"]["reason"]).split()
+            ),
+            "source_ref": deepcopy(ruling["agent_ruling"]["source_ref"]),
+            "source_excerpt": str(
+                ruling["agent_ruling"]["encounter_source_excerpt"]
+            ),
+        }
+        if damage_contract
+        else None
+    )
+    save_damage_commitment = (
+        {
+            "application_id": str(ruling["application_id"]),
+            "source_card_id": source_card_id,
+            "source_card_kind": source_card_kind,
+            "target_ids": target_ids,
+            "save_ability": str(save_contract["ability"]).strip().casefold(),
+            "save_dc": int(save_contract["dc"]),
+            "save_advantage": bool(save_contract["advantage"]),
+            "save_disadvantage": bool(save_contract["disadvantage"]),
+            "damage_expression": "".join(
+                str(damage_contract["expression"]).split()
+            ).casefold(),
+            "damage_type": str(
+                damage_contract["damage_type"]
+            ).strip().casefold(),
+            "half_on_success": bool(
+                damage_contract["half_on_success"]
+            ),
+            "mechanic_source_excerpt": mechanic_source_excerpt,
+            "agent_ruling": deepcopy(scene_agent_ruling),
+        }
+        if damage_contract
+        else None
+    )
     legacy_history: list[dict[str, Any]] | None = None
     legacy_action_sequence = 0
     recovered_transaction_keys: set[str] = set()
@@ -7445,6 +7839,15 @@ async def _settle_agent_turn_ruling(
                 "campaign_id": args.campaign_id,
                 "actor_id": actor_id,
                 "activity_id": str(ruling["activity_id"]),
+                **(
+                    {
+                        "declaration": {
+                            "agent_ruling_commitment": save_damage_commitment
+                        }
+                    }
+                    if save_damage_commitment is not None
+                    else {}
+                ),
                 "branch_id": branch_id,
                 "expected_revision": campaign["revision"],
             },
@@ -7464,6 +7867,15 @@ async def _settle_agent_turn_ruling(
                 "campaign_id": args.campaign_id,
                 "actor_id": actor_id,
                 "spell_id": str(ruling["spell_id"]),
+                **(
+                    {
+                        "declaration": {
+                            "agent_ruling_commitment": save_damage_commitment
+                        }
+                    }
+                    if save_damage_commitment is not None
+                    else {}
+                ),
                 "branch_id": branch_id,
                 "expected_revision": campaign["revision"],
             },
@@ -7499,6 +7911,15 @@ async def _settle_agent_turn_ruling(
                     "procedure_id": str(ruling.get("procedure_id") or ""),
                     "application_id": str(ruling["application_id"]),
                     "decision": str(ruling["agent_ruling"]["decision"]),
+                    **(
+                        {
+                            "agent_ruling_commitment": (
+                                save_damage_commitment
+                            )
+                        }
+                        if save_damage_commitment is not None
+                        else {}
+                    ),
                 },
                 "branch_id": branch_id,
                 "expected_revision": campaign["revision"],
@@ -7544,13 +7965,12 @@ async def _settle_agent_turn_ruling(
 
     save_result = None
     save_results: list[dict[str, Any]] = []
-    save_contract = dict(ruling.get("save") or {})
     save_success = None
     outcome = str(ruling["agent_ruling"]["decision"])
     damage_roll = None
     damage_results: list[dict[str, Any]] = []
+    atomic_save_damage = None
     if save_contract:
-        damage_contract = dict(save_contract.get("damage") or {})
         if damage_contract:
             damage_roll = await recover_legacy_transaction(
                 "dnd.dice.roll",
@@ -7562,25 +7982,99 @@ async def _settle_agent_turn_ruling(
             )
             if damage_roll is None:
                 campaign = await _campaign(client, args.campaign_id)
-                damage_roll = await client.domain(
-                    "dnd_dice_roll",
-                    {
-                        "campaign_id": args.campaign_id,
-                        "expression": str(damage_contract["expression"]),
-                        "branch_id": branch_id,
-                        "expected_campaign_revision": campaign["revision"],
-                        "idempotency_key": (
-                            "encounter-agent-turn-damage-roll-"
-                            + _agent_turn_transaction_token(
-                                args,
-                                branch_id=branch_id,
-                                application_id=str(ruling["application_id"]),
-                                parts=("damage_roll",),
-                            )
-                        ),
-                    },
+                atomic_save_damage = _facade_value(
+                    await client.domain(
+                        "combat_hp_change",
+                        {
+                            "campaign_id": args.campaign_id,
+                            "target_id": target_ids[0],
+                            "action": "save_damage",
+                            "payload": {
+                                "target_ids": target_ids,
+                                "source_actor_id": actor_id,
+                                "source_card_id": source_card_id,
+                                "source_card_kind": source_card_kind,
+                                "save_ability": str(save_contract["ability"]),
+                                "save_dc": int(save_contract["dc"]),
+                                "save_advantage": bool(
+                                    save_contract["advantage"]
+                                ),
+                                "save_disadvantage": bool(
+                                    save_contract["disadvantage"]
+                                ),
+                                "damage_expression": str(
+                                    damage_contract["expression"]
+                                ),
+                                "damage_type": str(
+                                    damage_contract["damage_type"]
+                                ),
+                                "half_on_success": bool(
+                                    damage_contract["half_on_success"]
+                                ),
+                                "mechanic_source_excerpt": (
+                                    mechanic_source_excerpt
+                                ),
+                                "agent_ruling": scene_agent_ruling,
+                            },
+                            "branch_id": branch_id,
+                            "expected_revision": campaign["revision"],
+                            "idempotency_key": (
+                                "encounter-agent-turn-save-damage-"
+                                + _agent_turn_transaction_token(
+                                    args,
+                                    branch_id=branch_id,
+                                    application_id=str(
+                                        ruling["application_id"]
+                                    ),
+                                    parts=("save_damage", *target_ids),
+                                )
+                            ),
+                        },
+                    )
                 )
-        for save_target_id in target_ids:
+                atomic_result = dict(atomic_save_damage.get("result") or {})
+                damage_roll = deepcopy(atomic_result.get("damage_roll"))
+                for target_result in atomic_result.get("targets", []):
+                    save_target_id = str(target_result["target_id"])
+                    current_success = bool(target_result["success"])
+                    current_outcome = str(
+                        save_contract["success_outcome"]
+                        if current_success
+                        else save_contract["failure_outcome"]
+                    )
+                    current_save = {
+                        "status": "committed",
+                        "result": deepcopy(target_result["save"]),
+                        "combat": deepcopy(atomic_save_damage.get("combat")),
+                        "atomic_save_damage": True,
+                    }
+                    save_results.append(
+                        {
+                            "target_id": save_target_id,
+                            "result": current_save,
+                            "success": current_success,
+                            "outcome": current_outcome,
+                        }
+                    )
+                    damage_results.append(
+                        {
+                            "target_id": save_target_id,
+                            "rolled": _roll_total(dict(damage_roll or {})),
+                            "applied_amount": int(
+                                target_result.get("damage_amount", 0) or 0
+                            ),
+                            "result": {
+                                "status": "committed",
+                                "result": deepcopy(
+                                    target_result.get("damage")
+                                ),
+                                "atomic_save_damage": True,
+                            },
+                        }
+                    )
+        for save_target_id in (
+            [] if atomic_save_damage is not None else target_ids
+        ):
             def matching_save(response: dict[str, Any]) -> bool:
                 result = dict(response.get("result") or {})
                 log = list(dict(response.get("combat") or {}).get("log") or [])
@@ -7651,6 +8145,9 @@ async def _settle_agent_turn_ruling(
                 }
             )
             if damage_contract:
+                # Recovery-only compatibility for an encounter interrupted
+                # after the legacy driver had already committed its shared
+                # damage roll. New executions use atomic save_damage above.
                 rolled_damage = _roll_total(dict(damage_roll or {}))
                 amount = (
                     rolled_damage // 2
@@ -7867,6 +8364,7 @@ async def _preflight_attack(
     *,
     preferred_weapon_id: str = "",
     multiattack_option_id: str = "",
+    agent_weapon_choices: list[dict[str, str]] | None = None,
     action_context: dict[str, Any] | None = None,
     agent_attack_contexts: dict[tuple[str, str, str], dict[str, Any]] | None = None,
     agent_target_reaction_contexts: (
@@ -7903,24 +8401,31 @@ async def _preflight_attack(
                 f"required source opening weapon {preferred_weapon_id!r} is absent "
                 f"from {actor['id']}"
             )
-    for target_id in target_ids:
-        for weapon in weapons or [{"item_id": "unarmed-strike", "attack_type": "melee"}]:
-            attack_modes = [str(weapon.get("attack_type") or "melee")]
-            properties = {
-                str(item).strip().casefold() for item in weapon.get("properties", [])
-            }
-            thrown_range = dict(
-                weapon.get("thrown_range_ft")
-                or weapon.get("range_ft")
-                or {}
-            )
-            if (
-                "thrown" in properties
-                and int(thrown_range.get("normal", 0) or 0) > 0
-                and "ranged" not in attack_modes
-            ):
-                attack_modes.append("ranged")
-            for attack_mode in attack_modes:
+    weapon_by_id = {
+        str(weapon.get("item_id") or ""): weapon for weapon in weapons
+    }
+    attack_candidates: list[tuple[dict[str, Any], str, str]] = []
+    if agent_weapon_choices:
+        for choice in agent_weapon_choices:
+            weapon = weapon_by_id.get(str(choice.get("weapon_id") or ""))
+            if weapon is not None:
+                attack_candidates.append(
+                    (
+                        weapon,
+                        str(choice.get("attack_mode") or ""),
+                        str(choice.get("multiattack_option_id") or ""),
+                    )
+                )
+    else:
+        for weapon in weapons or [
+            {"item_id": "unarmed-strike", "attack_type": "melee"}
+        ]:
+            for attack_mode in sorted(_weapon_attack_modes(weapon)):
+                attack_candidates.append(
+                    (weapon, attack_mode, multiattack_option_id)
+                )
+    for weapon, attack_mode, candidate_multiattack_option_id in attack_candidates:
+        for target_id in target_ids:
                 if target_id in knock_out_targets and attack_mode != "melee":
                     continue
                 action = {
@@ -7984,8 +8489,10 @@ async def _preflight_attack(
                     context.update(dict(target_reaction_context["context"]))
                 if context:
                     action["context"] = context
-                if multiattack_option_id:
-                    action["multiattack_option_id"] = multiattack_option_id
+                if candidate_multiattack_option_id:
+                    action["multiattack_option_id"] = (
+                        candidate_multiattack_option_id
+                    )
                 try:
                     plan = await client.domain(
                         "combat_preflight_attack",
@@ -8080,7 +8587,11 @@ async def _preflight_attack(
                         ),
                     )
                 return target_id, action, plan
-    if multiattack_option_id and not require_preferred_weapon:
+    if (
+        multiattack_option_id
+        and not agent_weapon_choices
+        and not require_preferred_weapon
+    ):
         # A creature may always take one ordinary Attack instead of selecting its
         # Multiattack action.  Keep the source-preferred option first, but do not
         # move into a hazard merely because that option is illegal at the current
@@ -8092,6 +8603,7 @@ async def _preflight_attack(
             target_ids,
             preferred_weapon_id=preferred_weapon_id,
             multiattack_option_id="",
+            agent_weapon_choices=None,
             action_context=action_context,
             agent_attack_contexts=agent_attack_contexts,
             agent_target_reaction_contexts=agent_target_reaction_contexts,
@@ -8376,11 +8888,10 @@ async def _auto_run(
         party_ids=party_ids,
         hostile_ids=hostile_ids,
     )
-    if set(source_target_priorities) & set(agent_target_priorities):
-        raise ValueError(
-            "the same actor cannot have both source-authored and Agent tactical "
-            "target priorities"
-        )
+    _validate_agent_target_refinements(
+        source_target_priorities,
+        agent_target_priorities,
+    )
     target_priorities = {**source_target_priorities, **agent_target_priorities}
     ally_ids = _selected_prepared_actor_ids(
         args.ally_report,
@@ -8439,6 +8950,16 @@ async def _auto_run(
         client,
         args.campaign_id,
         [*party_ids, *hostile_ids],
+    )
+    agent_weapon_priorities = _agent_weapon_priorities(
+        getattr(args, "agent_weapon_priority_json", []),
+        participant_ids=[*party_ids, *hostile_ids],
+        actors=initial_actors,
+    )
+    agent_spell_priorities = _agent_spell_priorities(
+        getattr(args, "agent_spell_priority_json", []),
+        participant_ids=[*party_ids, *hostile_ids],
+        actors=initial_actors,
     )
     on_hit_rulings = _source_on_hit_rulings(
         args.source_on_hit_ruling_json,
@@ -8648,7 +9169,6 @@ async def _auto_run(
         )
         effective_party_ids = list(body_thief_sides["effective_party_ids"])
         attackable_hostile_ids = list(body_thief_sides["attackable_hostile_ids"])
-        hostile_turn_actor_ids = set(body_thief_sides["hostile_turn_actor_ids"])
         defeated_hostiles = [
             actor_id
             for actor_id in hostile_ids
@@ -10042,6 +10562,33 @@ async def _auto_run(
                 observer_id=actor_id,
                 target_ids=living_targets,
             )
+        if len(living_targets) > 1 and actor_id not in target_priorities:
+            raise EncounterRulingRequiredError(
+                {
+                    "status": "pending_ruling",
+                    "default_resolver": "agent",
+                    "ruling_kind": "agent_dm_adjudication",
+                    "reason": (
+                        "the current actor has multiple observable legal opponents "
+                        "but no explicit Agent or source-authored target order"
+                    ),
+                    "committed": False,
+                    "missing": ["agent_target_priority"],
+                    "retry_contract": {
+                        "resolver": "agent",
+                        "reuse_current_revision": True,
+                        "use_public_tools_only": True,
+                    },
+                },
+                operation="encounter.auto_run.choose_target",
+                actor_id=actor_id,
+                target_id="",
+                action={"candidate_target_ids": living_targets},
+                retry_hint=(
+                    "Retry with --agent-target-priority-json enumerating every "
+                    "opponent in the Agent's exact order."
+                ),
+            )
         living_targets.sort(
             key=lambda item: (
                 *(
@@ -10065,11 +10612,16 @@ async def _auto_run(
         spell_targets = [
             target_id for target_id in living_targets if target_id not in knock_out_hostile_ids
         ]
-        spell_choice = _choose_party_spell(
+        spell_choice = _choose_agent_spell(
             actor_id,
             party_ids=effective_party_ids,
             actors=actors,
             living_targets=spell_targets,
+            spell_choices=list(
+                dict(agent_spell_priorities.get(actor_id) or {}).get(
+                    "choices", []
+                )
+            ),
             combat=combat,
             leveled_spell_available=not bool(
                 dict(combatants[actor_id].get("turn_flags") or {}).get("cast_declared")
@@ -10303,25 +10855,57 @@ async def _auto_run(
             actor_id=actor_id,
             completed_actor_ids=completed_opening_weapon_actor_ids,
         )
+        agent_weapon_priority = dict(
+            agent_weapon_priorities.get(actor_id) or {}
+        )
+        agent_weapon_choices = list(agent_weapon_priority.get("choices") or [])
+        if required_source_opening_weapon is None and not agent_weapon_choices:
+            raise EncounterRulingRequiredError(
+                {
+                    "status": "pending_ruling",
+                    "default_resolver": "agent",
+                    "ruling_kind": "agent_dm_adjudication",
+                    "reason": (
+                        "the current actor has no explicit Agent weapon policy "
+                        "after all higher-priority source actions and spell policies"
+                    ),
+                    "committed": False,
+                    "missing": ["agent_weapon_priority"],
+                    "retry_contract": {
+                        "resolver": "agent",
+                        "reuse_current_revision": True,
+                        "use_public_tools_only": True,
+                    },
+                },
+                operation="encounter.auto_run.choose_action",
+                actor_id=actor_id,
+                target_id=(living_targets[0] if living_targets else ""),
+                action={"round": int(combat.get("round", 1) or 1)},
+                retry_hint=(
+                    "Retry with --agent-weapon-priority-json containing ordered "
+                    "weapon/mode choices and the Agent's decision and reasoning."
+                ),
+            )
         preferred_weapon_id = ""
         if required_source_opening_weapon is not None:
             preferred_weapon_id = required_source_opening_weapon["weapon_id"]
-        elif actor_id in hostile_turn_actor_ids:
-            tactical_source_id = str(body_thief_sides["controlled_hosts"].get(actor_id, actor_id))
-            preferred_weapon_id = _preferred_hostile_weapon_id(
-                actor,
-                hostile_index=hostile_ids.index(tactical_source_id),
-            )
         active_multiattack = bool(
             dict(combatants[actor_id].get("turn_flags") or {}).get("multiattack")
         )
-        multiattack_option_id = (
-            _preferred_multiattack_option_id(
-                actor,
-                preferred_weapon_id=preferred_weapon_id,
-            )
-            if not active_multiattack
-            else ""
+        active_agent_weapon_choices = (
+            [
+                {
+                    **choice,
+                    **(
+                        {"multiattack_option_id": ""}
+                        if active_multiattack
+                        else {}
+                    ),
+                }
+                for choice in agent_weapon_choices
+            ]
+            if required_source_opening_weapon is None
+            else []
         )
         attack_context = (
             {"direct_sunlight": attack_environments[actor_id]["direct_sunlight"]}
@@ -10336,7 +10920,8 @@ async def _auto_run(
             actor,
             living_targets,
             preferred_weapon_id=preferred_weapon_id,
-            multiattack_option_id=multiattack_option_id,
+            multiattack_option_id="",
+            agent_weapon_choices=active_agent_weapon_choices,
             action_context=attack_context,
             agent_attack_contexts=agent_attack_contexts,
             agent_target_reaction_contexts=agent_target_reaction_contexts,
@@ -10416,7 +11001,8 @@ async def _auto_run(
                     actor,
                     living_targets,
                     preferred_weapon_id=preferred_weapon_id,
-                    multiattack_option_id=multiattack_option_id,
+                    multiattack_option_id="",
+                    agent_weapon_choices=active_agent_weapon_choices,
                     action_context=attack_context,
                     agent_attack_contexts=agent_attack_contexts,
                     agent_target_reaction_contexts=(
@@ -10725,6 +11311,8 @@ async def _auto_run(
         "completed_opening_cast_sequences": sorted(completed_opening_casts),
         "source_opening_weapons": list(opening_weapons.values()),
         "completed_opening_weapon_actor_ids": sorted(completed_opening_weapon_actor_ids),
+        "agent_weapon_priorities": list(agent_weapon_priorities.values()),
+        "agent_spell_priorities": list(agent_spell_priorities.values()),
         "source_ammunition_selections": list(source_ammunition_selections.values()),
         "source_on_hit_rulings": list(on_hit_rulings.values()),
         "source_extra_damage_rulings": [

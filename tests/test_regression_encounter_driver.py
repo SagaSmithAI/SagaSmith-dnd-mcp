@@ -16,10 +16,12 @@ from scripts.regression_encounter import (
     _agent_object_interactions,
     _agent_party_absences,
     _agent_positions,
+    _agent_spell_priorities,
     _agent_target_priorities,
     _agent_target_reaction_contexts,
     _agent_turn_rulings,
     _agent_turn_transaction_token,
+    _agent_weapon_priorities,
     _apply_agent_positions,
     _apply_party_loadouts,
     _apply_source_casualty_rolls,
@@ -29,8 +31,8 @@ from scripts.regression_encounter import (
     _captured_hostile_ids,
     _character_summary,
     _characters,
+    _choose_agent_spell,
     _choose_destination,
-    _choose_party_spell,
     _completed_source_opening_weapon_actor_ids,
     _consume_agent_forced_target,
     _consume_agent_target_reaction,
@@ -54,8 +56,6 @@ from scripts.regression_encounter import (
     _pending_agent_forced_targets,
     _postcombat_stabilization_target,
     _postcombat_unavailable_grapple_effect_ids,
-    _preferred_hostile_weapon_id,
-    _preferred_multiattack_option_id,
     _preflight_attack,
     _prepared_actor_ids,
     _primary_hostile_source_excerpt,
@@ -115,6 +115,7 @@ from scripts.regression_encounter import (
     _surprise_from_check_report,
     _surprise_from_hostile_stealth_totals,
     _surprise_from_party_stealth_reports,
+    _validate_agent_target_refinements,
     _validate_hostile_attacks,
     _validate_source_flee_configuration,
     _wound_priority,
@@ -932,7 +933,7 @@ def test_agent_turn_ruling_pays_action_rolls_save_and_persists_world_patch() -> 
     assert patch_value["ends_if_source_incapacitated"] is True
 
 
-def test_agent_turn_ruling_rolls_area_damage_once_and_applies_each_save() -> None:
+def test_agent_turn_ruling_settles_area_save_damage_atomically() -> None:
     class Client:
         def __init__(self) -> None:
             self.calls: list[tuple[str, dict]] = []
@@ -944,21 +945,30 @@ def test_agent_turn_ruling_rolls_area_damage_once_and_applies_each_save() -> Non
                     "status": "pending_ruling",
                     "result": {"requires_ruling": True},
                 }
-            if tool_id == "dnd_dice_roll":
-                return {"status": "committed", "result": {"total": 56}}
-            if tool_id == "combat_check":
-                return {
-                    "status": "committed",
-                    "result": {"success": arguments["actor_id"] == "pc-1"},
-                }
             if tool_id == "combat_hp_change":
-                assert arguments["action"] == "damage"
-                assert set(arguments["payload"]) == {"parts"}
+                assert arguments["action"] == "save_damage"
                 return {
                     "status": "committed",
                     "result": {
-                        "applied_amount": arguments["payload"]["parts"][0]["amount"]
+                        "damage_roll": {"total": 56},
+                        "targets": [
+                            {
+                                "target_id": "pc-1",
+                                "success": True,
+                                "save": {"success": True},
+                                "damage_amount": 28,
+                                "damage": {"applied_amount": 28},
+                            },
+                            {
+                                "target_id": "pc-2",
+                                "success": False,
+                                "save": {"success": False},
+                                "damage_amount": 56,
+                                "damage": {"applied_amount": 56},
+                            },
+                        ],
                     },
+                    "combat": {},
                 }
             if tool_id == "combat_map_patch":
                 return {"status": "committed", "world_patches": arguments["patches"]}
@@ -973,6 +983,11 @@ def test_agent_turn_ruling_rolls_area_damage_once_and_applies_each_save() -> Non
         "round": 1,
         "target_id": "",
         "target_ids": ["pc-1", "pc-2"],
+        "mechanic_source_excerpt": (
+            "Poison Breath. Each creature in the area must make a DC 18 "
+            "Constitution saving throw, taking 16d6 poison damage on a failed "
+            "save, or half as much damage on a successful one."
+        ),
         "save": {
             "ability": "constitution",
             "dc": 18,
@@ -993,6 +1008,9 @@ def test_agent_turn_ruling_rolls_area_damage_once_and_applies_each_save() -> Non
             "ruling_kind": "agent_dm_adjudication",
             "decision": "The dragon catches both targets in its breath.",
             "reason": "The cited encounter directs this breath attack.",
+            "encounter_source_excerpt": (
+                "The dragon catches both heroes in the cone and uses Poison Breath."
+            ),
             "source_ref": {
                 "module_id": "module-1",
                 "scene_id": "scene-1",
@@ -1021,10 +1039,6 @@ def test_agent_turn_ruling_rolls_area_damage_once_and_applies_each_save() -> Non
 
     assert [name for name, _arguments in client.calls] == [
         "combat_use_activity",
-        "dnd_dice_roll",
-        "combat_check",
-        "combat_hp_change",
-        "combat_check",
         "combat_hp_change",
         "combat_map_patch",
     ]
@@ -1037,15 +1051,13 @@ def test_agent_turn_ruling_rolls_area_damage_once_and_applies_each_save() -> Non
             parts=("action", "combat_use_activity"),
         )
     )
-    hp_change_calls = [
-        arguments
-        for name, arguments in client.calls
-        if name == "combat_hp_change"
+    payment_commitment = client.calls[0][1]["declaration"][
+        "agent_ruling_commitment"
     ]
-    assert [call["payload"]["parts"][0]["amount"] for call in hp_change_calls] == [
-        28,
-        56,
-    ]
+    settlement_payload = client.calls[1][1]["payload"]
+    assert payment_commitment["target_ids"] == ["pc-1", "pc-2"]
+    assert payment_commitment["agent_ruling"] == settlement_payload["agent_ruling"]
+    assert settlement_payload["target_ids"] == ["pc-1", "pc-2"]
     assert [item["applied_amount"] for item in result["damage_results"]] == [28, 56]
     assert result["save_results"][0]["success"] is True
     assert result["save_results"][1]["success"] is False
@@ -1246,6 +1258,11 @@ def test_agent_turn_ruling_recovers_action_roll_and_save_from_public_history() -
         "round": 1,
         "target_id": "",
         "target_ids": ["pc-1"],
+        "mechanic_source_excerpt": (
+            "Poison Breath. The target must make a DC 18 Constitution saving "
+            "throw, taking 16d6 poison damage on a failed save, or half as "
+            "much damage on a successful one."
+        ),
         "save": {
             "ability": "constitution",
             "dc": 18,
@@ -1266,6 +1283,9 @@ def test_agent_turn_ruling_recovers_action_roll_and_save_from_public_history() -
             "ruling_kind": "agent_dm_adjudication",
             "decision": "The dragon catches the target in its breath.",
             "reason": "The cited encounter directs this opening action.",
+            "encounter_source_excerpt": (
+                "The dragon opens with Poison Breath against the hero."
+            ),
             "source_ref": {
                 "module_id": "module-1",
                 "scene_id": "scene-1",
@@ -2186,6 +2206,52 @@ def test_preflight_tries_a_recorded_thrown_weapon_at_range() -> None:
         "melee",
         "ranged",
     ]
+
+
+def test_preflight_uses_only_agent_declared_weapon_modes_in_order() -> None:
+    class Client:
+        def __init__(self) -> None:
+            self.calls: list[dict] = []
+
+        async def domain(self, tool_id: str, arguments: dict) -> dict:
+            assert tool_id == "combat_preflight_attack"
+            self.calls.append(arguments)
+            if arguments["action"]["weapon_id"] == "shortbow":
+                raise RuntimeError("the target is inside the bow's minimum policy range")
+            return {"status": "ready", **arguments["action"]}
+
+    client = Client()
+    actor = {
+        "id": "goblin",
+        "derived": {
+            "inventory": {
+                "weapon_attacks": [
+                    {"item_id": "scimitar", "attack_type": "melee"},
+                    {"item_id": "shortbow", "attack_type": "ranged"},
+                ]
+            }
+        },
+    }
+
+    target_id, action, _ = asyncio.run(
+        _preflight_attack(
+            client,
+            SimpleNamespace(campaign_id="campaign-1"),
+            actor,
+            ["pc-1"],
+            agent_weapon_choices=[
+                {"weapon_id": "shortbow", "attack_mode": "ranged"},
+                {"weapon_id": "scimitar", "attack_mode": "melee"},
+            ],
+        )
+    )
+
+    assert target_id == "pc-1"
+    assert action == {"weapon_id": "scimitar", "attack_mode": "melee"}
+    assert [
+        (call["action"]["weapon_id"], call["action"]["attack_mode"])
+        for call in client.calls
+    ] == [("shortbow", "ranged"), ("scimitar", "melee")]
 
 
 def test_preflight_applies_agent_attack_context_only_to_its_mode() -> None:
@@ -3272,43 +3338,114 @@ def test_party_spell_tactics_prioritize_recovery_then_supported_offense() -> Non
         "goblin": _spell_actor(slots=0),
     }
 
-    assert _choose_party_spell(
+    assert _choose_agent_spell(
         "cleric",
         party_ids=["cleric", "wizard", "ally"],
         actors=actors,
         living_targets=["goblin"],
+        spell_choices=[
+            {"spell_id": HEALING_WORD_ID, "target_policy": "downed_ally"},
+            {
+                "spell_id": GUIDING_BOLT_ID,
+                "target_policy": "prioritized_opponent",
+            },
+        ],
     ) == (HEALING_WORD_ID, "ally", 1)
 
     actors["ally"]["sheet"]["combat"]["hp"]["value"] = 3
-    assert _choose_party_spell(
+    assert _choose_agent_spell(
         "cleric",
         party_ids=["cleric", "wizard", "ally"],
         actors=actors,
         living_targets=["goblin"],
+        spell_choices=[
+            {"spell_id": HEALING_WORD_ID, "target_policy": "downed_ally"},
+            {
+                "spell_id": GUIDING_BOLT_ID,
+                "target_policy": "prioritized_opponent",
+            },
+        ],
     ) == (GUIDING_BOLT_ID, "goblin", 1)
-    assert _choose_party_spell(
+    assert _choose_agent_spell(
         "wizard",
         party_ids=["cleric", "wizard", "ally"],
         actors=actors,
         living_targets=["goblin"],
+        spell_choices=[
+            {
+                "spell_id": MAGIC_MISSILE_ID,
+                "target_policy": "prioritized_opponent",
+            }
+        ],
     ) == (MAGIC_MISSILE_ID, "goblin", 1)
     assert (
-        _choose_party_spell(
+        _choose_agent_spell(
             "cleric",
             party_ids=["cleric", "wizard", "ally"],
             actors=actors,
             living_targets=["goblin"],
+            spell_choices=[
+                {
+                    "spell_id": GUIDING_BOLT_ID,
+                    "target_policy": "prioritized_opponent",
+                }
+            ],
             leveled_spell_available=False,
         )
         is None
     )
     actors["evil-mage"] = _spell_actor(MAGIC_MISSILE_ID)
-    assert _choose_party_spell(
+    assert _choose_agent_spell(
         "evil-mage",
         party_ids=["cleric", "wizard", "ally"],
         actors=actors,
         living_targets=["wizard"],
+        spell_choices=[
+            {
+                "spell_id": MAGIC_MISSILE_ID,
+                "target_policy": "prioritized_opponent",
+            }
+        ],
     ) == (MAGIC_MISSILE_ID, "wizard", 1)
+
+
+def test_agent_spell_priority_preserves_explicit_order_and_target_policy() -> None:
+    actor = _spell_actor(HEALING_WORD_ID, GUIDING_BOLT_ID)
+    priorities = _agent_spell_priorities(
+        [
+            {
+                "actor_id": "cleric",
+                "choices": [
+                    {
+                        "spell_id": HEALING_WORD_ID,
+                        "target_policy": "downed_ally",
+                        "cast_level_policy": "lowest_available",
+                    },
+                    {
+                        "spell_id": GUIDING_BOLT_ID,
+                        "target_policy": "prioritized_opponent",
+                    },
+                ],
+                "decision": "Recover a fallen ally before making a spell attack.",
+                "ruling_reason": "The Agent explicitly prioritizes party survival.",
+            }
+        ],
+        participant_ids=["cleric"],
+        actors={"cleric": actor},
+    )
+
+    assert priorities["cleric"]["choices"] == [
+        {
+            "spell_id": HEALING_WORD_ID,
+            "target_policy": "downed_ally",
+            "cast_level_policy": "lowest_available",
+        },
+        {
+            "spell_id": GUIDING_BOLT_ID,
+            "target_policy": "prioritized_opponent",
+            "cast_level_policy": "lowest_available",
+        },
+    ]
 
 
 def test_agent_casting_perception_requires_an_explicit_observer_matrix() -> None:
@@ -3416,11 +3553,17 @@ def test_party_spell_tactics_respect_preparation_and_upcast_when_needed() -> Non
     wizard["derived"] = {"spellcasting": {"prepared_spell_ids": [MAGIC_MISSILE_ID]}}
     actors = {"wizard": wizard, "goblin": _spell_actor(slots=0)}
 
-    assert _choose_party_spell(
+    assert _choose_agent_spell(
         "wizard",
         party_ids=["wizard"],
         actors=actors,
         living_targets=["goblin"],
+        spell_choices=[
+            {
+                "spell_id": MAGIC_MISSILE_ID,
+                "target_policy": "prioritized_opponent",
+            }
+        ],
     ) == (MAGIC_MISSILE_ID, "goblin", 2)
 
 
@@ -3485,11 +3628,17 @@ def test_party_spell_tactics_choose_safe_structured_area_damage() -> None:
         ],
     }
 
-    choice = _choose_party_spell(
+    choice = _choose_agent_spell(
         "wizard",
         party_ids=["wizard", "ally"],
         actors=actors,
         living_targets=["goblin-1", "goblin-2"],
+        spell_choices=[
+            {
+                "spell_id": fireball_id,
+                "target_policy": "maximize_opponents_without_allies",
+            }
+        ],
         combat=combat,
     )
 
@@ -3569,11 +3718,17 @@ def test_area_spell_tactics_exclude_dead_combatants_from_target_contexts() -> No
         ],
     }
 
-    choice = _choose_party_spell(
+    choice = _choose_agent_spell(
         "wizard",
         party_ids=["wizard"],
         actors=actors,
         living_targets=["goblin-1", "goblin-2"],
+        spell_choices=[
+            {
+                "spell_id": fireball_id,
+                "target_policy": "maximize_opponents_without_allies",
+            }
+        ],
         combat=combat,
     )
 
@@ -5039,16 +5194,23 @@ def test_source_target_priorities_preserve_authored_roles_and_tactical_order() -
         raise AssertionError("target priorities cannot cite nonparticipants")
 
 
-def test_agent_target_priorities_are_tactical_and_party_scoped() -> None:
+def test_agent_target_priorities_are_explicit_for_both_sides() -> None:
     priorities = _agent_target_priorities(
         [
             {
                 "actor_ids": ["cleric", "rogue"],
                 "priority_groups": [["kobold-1", "kobold-2"], ["drake"]],
+                "decision": "Attack the kobolds in the listed order, then the drake.",
                 "ruling_reason": (
                     "Remove the fragile bomb throwers before focusing the guard drake."
                 ),
-            }
+            },
+            {
+                "actor_ids": ["drake"],
+                "priority_groups": [["rogue"], ["wizard"], ["cleric"]],
+                "decision": "Attack the rogue first, followed by wizard and cleric.",
+                "ruling_reason": "The Agent selected the drake's complete target order.",
+            },
         ],
         party_ids=["cleric", "rogue", "wizard"],
         hostile_ids=["kobold-1", "kobold-2", "drake"],
@@ -5061,34 +5223,66 @@ def test_agent_target_priorities_are_tactical_and_party_scoped() -> None:
         "cleric",
         ["drake", "kobold-2", "kobold-1"],
         priorities,
-    ) == ["kobold-2", "kobold-1", "drake"]
+    ) == ["kobold-1", "kobold-2", "drake"]
+    assert _prioritize_targets(
+        "drake",
+        ["cleric", "wizard", "rogue"],
+        priorities,
+    ) == ["rogue", "wizard", "cleric"]
 
 
 def test_agent_target_priorities_reject_wrong_side_actors_and_targets() -> None:
-    with pytest.raises(ValueError, match="unique party actor_ids"):
+    with pytest.raises(ValueError, match="same-side actor_ids"):
         _agent_target_priorities(
             [
                 {
-                    "actor_ids": ["drake"],
+                    "actor_ids": ["cleric", "drake"],
                     "priority_groups": [["kobold"]],
-                    "ruling_reason": "Invalid hostile actor.",
+                    "decision": "Mix party and hostile actors in one declaration.",
+                    "ruling_reason": "The validator must reject this mixed side.",
                 }
             ],
             party_ids=["cleric"],
             hostile_ids=["kobold", "drake"],
         )
-    with pytest.raises(ValueError, match="unique encounter hostiles"):
+    with pytest.raises(ValueError, match="opposing encounter participants"):
         _agent_target_priorities(
             [
                 {
                     "actor_ids": ["cleric"],
                     "priority_groups": [["cleric"]],
-                    "ruling_reason": "Invalid friendly target.",
+                    "decision": "Select a friendly creature as an opponent.",
+                    "ruling_reason": "The validator must reject this target.",
                 }
             ],
             party_ids=["cleric"],
             hostile_ids=["kobold"],
         )
+
+
+def test_agent_target_priority_may_refine_but_not_reverse_source_order() -> None:
+    source = {
+        "cleric": {
+            "actor_ids": ["cleric"],
+            "priority_groups": [["kobold-1", "kobold-2"], ["drake"]],
+        }
+    }
+    valid = {
+        "cleric": {
+            "actor_ids": ["cleric"],
+            "priority_groups": [["kobold-2"], ["kobold-1"], ["drake"]],
+        }
+    }
+    _validate_agent_target_refinements(source, valid)
+
+    invalid = {
+        "cleric": {
+            "actor_ids": ["cleric"],
+            "priority_groups": [["drake"], ["kobold-1"], ["kobold-2"]],
+        }
+    }
+    with pytest.raises(ValueError, match="contradicts"):
+        _validate_agent_target_refinements(source, invalid)
 
 
 def test_source_opening_item_casts_preserve_authored_order_and_evidence() -> None:
@@ -6735,35 +6929,56 @@ def test_required_hostile_attack_still_rejects_incomplete_statblock() -> None:
         raise AssertionError("incomplete reviewed statblock was accepted")
 
 
-def test_hostile_weapon_preference_is_capability_based() -> None:
-    wolf = {
-        "derived": {
-            "inventory": {
-                "weapon_attacks": [
-                    {"item_id": "bite", "attack_type": "melee"},
-                ]
-            }
-        }
-    }
+def test_agent_weapon_priority_is_explicit_and_card_validated() -> None:
     goblin = {
+        "id": "goblin",
         "derived": {
             "inventory": {
                 "weapon_attacks": [
                     {"item_id": "scimitar", "attack_type": "melee"},
                     {"item_id": "shortbow", "attack_type": "ranged"},
                 ]
-            }
+            },
+            "multiattack_options": [],
         }
     }
 
-    assert _preferred_hostile_weapon_id(wolf, hostile_index=1) == "bite"
-    assert _preferred_hostile_weapon_id(goblin, hostile_index=0) == "scimitar"
-    assert _preferred_hostile_weapon_id(goblin, hostile_index=2) == "shortbow"
+    priorities = _agent_weapon_priorities(
+        [
+            {
+                "actor_id": "goblin",
+                "choices": [
+                    {"weapon_id": "shortbow", "attack_mode": "ranged"},
+                    {"weapon_id": "scimitar", "attack_mode": "melee"},
+                ],
+                "decision": "Use the bow while possible, then draw the scimitar.",
+                "ruling_reason": "This is the Agent's explicit encounter tactic.",
+            }
+        ],
+        participant_ids=["goblin"],
+        actors={"goblin": goblin},
+    )
+
+    assert priorities["goblin"]["choices"] == [
+        {"weapon_id": "shortbow", "attack_mode": "ranged"},
+        {"weapon_id": "scimitar", "attack_mode": "melee"},
+    ]
+    assert (
+        priorities["goblin"]["agent_ruling"]["ruling_kind"]
+        == "agent_dm_adjudication"
+    )
 
 
-def test_hostile_multiattack_selection_follows_the_preferred_weapon() -> None:
+def test_agent_multiattack_priority_must_begin_with_the_declared_attack() -> None:
     actor = {
+        "id": "archer",
         "derived": {
+            "inventory": {
+                "weapon_attacks": [
+                    {"item_id": "shortsword", "attack_type": "melee"},
+                    {"item_id": "shortbow", "attack_type": "ranged"},
+                ]
+            },
             "multiattack_options": [
                 {
                     "id": "melee",
@@ -6777,20 +6992,45 @@ def test_hostile_multiattack_selection_follows_the_preferred_weapon() -> None:
         }
     }
 
-    assert _preferred_multiattack_option_id(actor, preferred_weapon_id="shortsword") == "melee"
-    assert _preferred_multiattack_option_id(actor, preferred_weapon_id="shortbow") == "ranged"
-
-    actor["derived"]["multiattack_options"] = [
-        {
-            "id": "mixed-special-action",
-            "attacks": [{"weapon_id": "claws", "attack_mode": "melee", "count": 1}],
-            "activities": [{"activity_id": "devour-intellect-action", "count": 1}],
-        }
-    ]
-    assert (
-        _preferred_multiattack_option_id(actor, preferred_weapon_id="claws")
-        == "mixed-special-action"
+    priorities = _agent_weapon_priorities(
+        [
+            {
+                "actor_id": "archer",
+                "choices": [
+                    {
+                        "weapon_id": "shortbow",
+                        "attack_mode": "ranged",
+                        "multiattack_option_id": "ranged",
+                    }
+                ],
+                "decision": "Use the reviewed ranged Multiattack option.",
+                "ruling_reason": "Both attacks can reach the selected target.",
+            }
+        ],
+        participant_ids=["archer"],
+        actors={"archer": actor},
     )
+    assert priorities["archer"]["choices"][0]["multiattack_option_id"] == "ranged"
+
+    with pytest.raises(ValueError, match="begin with that exact attack"):
+        _agent_weapon_priorities(
+            [
+                {
+                    "actor_id": "archer",
+                    "choices": [
+                        {
+                            "weapon_id": "shortbow",
+                            "attack_mode": "ranged",
+                            "multiattack_option_id": "melee",
+                        }
+                    ],
+                    "decision": "Use an inconsistent Multiattack declaration.",
+                    "ruling_reason": "The validator must reject this mismatch.",
+                }
+            ],
+            participant_ids=["archer"],
+            actors={"archer": actor},
+        )
 
 
 def test_completed_source_opening_weapons_are_rebuilt_from_public_combat_log() -> None:
