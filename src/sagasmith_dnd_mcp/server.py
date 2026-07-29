@@ -428,7 +428,7 @@ def has_active_owned_condition(
     target_id: str,
     condition: str,
 ) -> bool:
-    """Return whether another active on-hit effect still owns the condition."""
+    """Return whether an active structured or source effect still owns the condition."""
 
     normalized_condition = condition.casefold()
     return any(
@@ -438,6 +438,12 @@ def has_active_owned_condition(
         and str(effect.get("target_id") or "") == target_id
         and str(effect.get("condition") or "").casefold() == normalized_condition
         for effect in encounter.get("ongoing_effects", [])
+    ) or any(
+        isinstance(effect, dict)
+        and effect.get("active", True)
+        and str(effect.get("actor_id") or "") == target_id
+        and str(effect.get("condition") or "").casefold() == normalized_condition
+        for effect in encounter.get("source_conditions", [])
     )
 
 
@@ -3341,6 +3347,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "source_excerpt": normalized_excerpt,
                     "added_by_encounter": added_by_encounter,
                     "resisted_by_immunity": condition not in applied_conditions,
+                    "active": True,
                 }
             )
         return (
@@ -11367,7 +11374,24 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     def combat_common_action(
         campaign_id: str,
         actor_id: str,
-        action: str,
+        action: Literal[
+            "dash",
+            "disengage",
+            "dodge",
+            "escape",
+            "help",
+            "hide",
+            "influence",
+            "interact_object",
+            "improvise",
+            "ready",
+            "search",
+            "stabilize",
+            "study",
+            "use_object",
+            "utilize",
+            "detach_attachment",
+        ],
         target_id: str | None = None,
         trigger: str | None = None,
         payload: dict[str, Any] | None = None,
@@ -11404,6 +11428,145 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if target_id is not None:
             require_campaign_actor(campaign_id, target_id)
         normalized_action = str(action).strip().lower().replace("-", "_")
+        condition_resolution = None
+        character_updates: list[CharacterStateUpdate] = []
+        engine_payload = payload
+        source_condition_record = None
+        source_condition = ""
+        source_condition_ruling = None
+        if normalized_action == "interact_object":
+            interaction_payload = dict(payload or {})
+            allowed_fields = {
+                "object_description",
+                "interaction",
+                "remove_source_condition",
+                "source_ref",
+                "source_excerpt",
+                "agent_ruling",
+            }
+            unknown_fields = set(interaction_payload) - allowed_fields
+            if unknown_fields:
+                raise CombatEngineError(
+                    "interact_object contains unsupported fields: "
+                    + ", ".join(sorted(unknown_fields))
+                )
+            object_description = " ".join(
+                str(interaction_payload.get("object_description") or "").split()
+            )
+            interaction = " ".join(
+                str(interaction_payload.get("interaction") or "").split()
+            ).casefold()
+            if not object_description or not interaction:
+                raise CombatEngineError(
+                    "interact_object requires an object_description and interaction"
+                )
+            source_condition = str(
+                interaction_payload.get("remove_source_condition") or ""
+            ).strip().casefold()
+            conditional_fields = {
+                "remove_source_condition",
+                "source_ref",
+                "source_excerpt",
+                "agent_ruling",
+            }
+            if source_condition:
+                access.require_campaign(
+                    campaign_id,
+                    principal_id,
+                    roles=CAMPAIGN_DM_ROLES,
+                )
+                if interaction != "remove":
+                    raise CombatEngineError(
+                        "ending a source condition requires interaction=remove"
+                    )
+                if not conditional_fields <= set(interaction_payload):
+                    raise CombatEngineError(
+                        "ending a source condition requires remove_source_condition, "
+                        "source_ref, source_excerpt, and agent_ruling"
+                    )
+                source_ref = interaction_payload.get("source_ref")
+                source_excerpt = " ".join(
+                    str(interaction_payload.get("source_excerpt") or "").split()
+                )
+                raw_ruling = interaction_payload.get("agent_ruling")
+                if not isinstance(source_ref, dict) or not source_excerpt:
+                    raise CombatEngineError(
+                        "ending a source condition requires exact source evidence"
+                    )
+                if not isinstance(raw_ruling, dict):
+                    raise CombatEngineError(
+                        "ending a source condition requires an Agent adjudication"
+                    )
+                allowed_ruling_fields = {
+                    "default_resolver",
+                    "ruling_kind",
+                    "decision",
+                    "reason",
+                }
+                if set(raw_ruling) != allowed_ruling_fields:
+                    raise CombatEngineError(
+                        "source-condition Agent ruling requires exactly "
+                        "default_resolver, ruling_kind, decision, and reason"
+                    )
+                decision = " ".join(str(raw_ruling.get("decision") or "").split())
+                reason = " ".join(str(raw_ruling.get("reason") or "").split())
+                if (
+                    raw_ruling.get("default_resolver") != "agent"
+                    or raw_ruling.get("ruling_kind") != "agent_dm_adjudication"
+                    or not decision
+                    or len(decision) > 1_000
+                    or not reason
+                    or len(reason) > 500
+                ):
+                    raise CombatEngineError(
+                        "source-condition Agent ruling must be a bounded settled "
+                        "agent_dm_adjudication"
+                    )
+                source_condition_ruling = {
+                    "default_resolver": "agent",
+                    "ruling_kind": "agent_dm_adjudication",
+                    "decision": decision,
+                    "reason": reason,
+                    "committed": True,
+                }
+                source_condition_record = next(
+                    (
+                        item
+                        for item in encounter.get("source_conditions", [])
+                        if isinstance(item, dict)
+                        and item.get("active", True)
+                        and str(item.get("actor_id") or "") == actor_id
+                        and str(item.get("condition") or "").casefold()
+                        == source_condition
+                        and item.get("source_ref") == source_ref
+                        and " ".join(
+                            str(item.get("source_excerpt") or "").split()
+                        )
+                        == source_excerpt
+                        and item.get("added_by_encounter", False)
+                    ),
+                    None,
+                )
+                if source_condition_record is None:
+                    raise CombatEngineError(
+                        "the cited active encounter source condition is not owned "
+                        "by this actor"
+                    )
+                current_character = characters.get(actor_id)
+                if source_condition not in condition_ids(
+                    current_character.sheet.get("conditions", [])
+                ):
+                    raise CombatEngineError(
+                        "the cited encounter source condition is not active on the actor"
+                    )
+            elif set(interaction_payload) & conditional_fields:
+                raise CombatEngineError(
+                    "source-condition fields require remove_source_condition"
+                )
+            engine_payload = {
+                "object_description": object_description,
+                "interaction": interaction,
+            }
         if normalized_action == "detach_attachment":
             effect_id = str(dict(payload or {}).get("effect_id") or "").strip()
             if not effect_id:
@@ -11420,8 +11583,52 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 action=action,
                 target_id=target_id,
                 trigger=trigger,
-                payload=payload,
+                payload=engine_payload,
             )
+        if source_condition_record is not None:
+            next_source_condition = next(
+                item
+                for item in next_encounter.get("source_conditions", [])
+                if isinstance(item, dict)
+                and item.get("active", True)
+                and str(item.get("actor_id") or "") == actor_id
+                and str(item.get("condition") or "").casefold() == source_condition
+                and item.get("source_ref") == source_condition_record["source_ref"]
+                and item.get("source_excerpt") == source_condition_record["source_excerpt"]
+            )
+            next_source_condition["active"] = False
+            next_source_condition["ended_reason"] = "agent_object_interaction"
+            next_source_condition["ended_round"] = int(next_encounter.get("round", 1) or 1)
+            next_source_condition["agent_ruling"] = source_condition_ruling
+            current_character = characters.get(actor_id)
+            updated_sheet = deepcopy(current_character.sheet)
+            if not has_active_owned_condition(
+                next_encounter,
+                target_id=actor_id,
+                condition=source_condition,
+            ):
+                apply_condition_change(
+                    updated_sheet,
+                    condition_id=source_condition,
+                    add=False,
+                )
+            sync_combatant_conditions(next_encounter, actor_id, updated_sheet)
+            character_updates.append(
+                CharacterStateUpdate(
+                    character_id=actor_id,
+                    sheet=validate_character_sheet(updated_sheet),
+                    notes=validate_character_notes(current_character.notes),
+                    expected_revision=current_character.revision,
+                )
+            )
+            condition_resolution = {
+                "condition": source_condition,
+                "removed": source_condition
+                not in condition_ids(updated_sheet.get("conditions", [])),
+                "source_ref": deepcopy(next_source_condition["source_ref"]),
+                "source_excerpt": str(next_source_condition["source_excerpt"]),
+                "agent_ruling": deepcopy(source_condition_ruling),
+            }
         end_effect_id = str(
             dict(payload or {}).get("end_ongoing_effect_id") or ""
         ).strip()
@@ -11501,8 +11708,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             response_fields={
                 "status": "committed",
                 "action": action,
+                "condition_resolution": condition_resolution,
                 "combat": next_encounter,
             },
+            character_updates=character_updates,
             rule_receipts=action_receipts,
         )
         return combat_response(campaign_id, principal_id, response)
@@ -19942,7 +20151,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 for source_condition in combat.get("source_conditions", []):
                     if str(
                         source_condition.get("actor_id") or ""
-                    ) != actor.id or not source_condition.get("added_by_encounter", False):
+                    ) != actor.id or not (
+                        source_condition.get("active", True)
+                        and source_condition.get("added_by_encounter", False)
+                    ):
                         continue
                     condition = str(source_condition.get("condition") or "").casefold()
                     apply_condition_change(sheet, condition_id=condition, add=False)

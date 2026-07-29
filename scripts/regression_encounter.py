@@ -655,6 +655,18 @@ def _arguments() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--agent-object-interaction-json",
+        action="append",
+        type=json.loads,
+        default=[],
+        help=(
+            "Agent-as-DM free object interaction that ends one exact "
+            "encounter-source condition: actor_id, round, object_description, "
+            "interaction=remove, condition, source_ref, exact source_excerpt, "
+            "decision, and ruling_reason"
+        ),
+    )
+    parser.add_argument(
         "--source-avoidance-report",
         action="append",
         type=Path,
@@ -3072,6 +3084,109 @@ def _agent_turn_rulings(
     return normalized
 
 
+def _agent_object_interactions(
+    values: list[dict[str, Any]],
+    *,
+    participant_ids: list[str],
+    source_conditions: list[dict[str, Any]],
+) -> dict[tuple[str, int], dict[str, Any]]:
+    """Validate Agent decisions that remove a source condition with a free interaction."""
+
+    participants = set(participant_ids)
+    allowed = {
+        "actor_id",
+        "round",
+        "object_description",
+        "interaction",
+        "condition",
+        "source_ref",
+        "source_excerpt",
+        "decision",
+        "ruling_reason",
+    }
+    normalized: dict[tuple[str, int], dict[str, Any]] = {}
+    for index, raw in enumerate(values):
+        if not isinstance(raw, dict):
+            raise ValueError(f"Agent object interaction {index} must be an object")
+        unknown = set(raw) - allowed
+        if unknown:
+            raise ValueError(
+                f"Agent object interaction {index} has unsupported fields: "
+                + ", ".join(sorted(unknown))
+            )
+        actor_id = str(raw.get("actor_id") or "").strip()
+        round_number = raw.get("round")
+        object_description = " ".join(
+            str(raw.get("object_description") or "").split()
+        )
+        interaction = str(raw.get("interaction") or "").strip().casefold()
+        condition = str(raw.get("condition") or "").strip().casefold()
+        source_ref = raw.get("source_ref")
+        source_excerpt = _normalized_source_text(
+            str(raw.get("source_excerpt") or "")
+        )
+        decision = " ".join(str(raw.get("decision") or "").split())
+        ruling_reason = " ".join(str(raw.get("ruling_reason") or "").split())
+        identity = (actor_id, round_number if isinstance(round_number, int) else 0)
+        if (
+            actor_id not in participants
+            or isinstance(round_number, bool)
+            or not isinstance(round_number, int)
+            or round_number < 1
+            or not object_description
+            or interaction != "remove"
+            or not condition
+            or not isinstance(source_ref, dict)
+            or not source_excerpt
+            or not decision
+            or len(decision) > 1_000
+            or not ruling_reason
+            or len(ruling_reason) > 500
+            or identity in normalized
+        ):
+            raise ValueError(
+                f"Agent object interaction {index} requires one participant, "
+                "positive round, removal description, exact source evidence, "
+                "and bounded Agent reasoning"
+            )
+        source_condition = next(
+            (
+                item
+                for item in source_conditions
+                if isinstance(item, dict)
+                and str(item.get("actor_id") or "") == actor_id
+                and str(item.get("condition") or "").casefold() == condition
+                and item.get("source_ref") == source_ref
+                and _normalized_source_text(
+                    str(item.get("source_excerpt") or "")
+                )
+                == source_excerpt
+            ),
+            None,
+        )
+        if source_condition is None:
+            raise ValueError(
+                f"Agent object interaction {index} does not match an exact "
+                "encounter-source condition for the actor"
+            )
+        normalized[identity] = {
+            "actor_id": actor_id,
+            "round": round_number,
+            "object_description": object_description,
+            "interaction": "remove",
+            "condition": condition,
+            "source_ref": deepcopy(source_ref),
+            "source_excerpt": str(source_condition["source_excerpt"]),
+            "agent_ruling": {
+                "default_resolver": "agent",
+                "ruling_kind": "agent_dm_adjudication",
+                "decision": decision,
+                "reason": ruling_reason,
+            },
+        }
+    return normalized
+
+
 def _source_avoidances(
     paths: list[Path],
     *,
@@ -4921,6 +5036,15 @@ async def _start(
         scene_id=str(args.scene_id or ""),
         encounter_source_excerpt=str(args.source_excerpt or ""),
     )
+    agent_object_interactions = _agent_object_interactions(
+        getattr(args, "agent_object_interaction_json", []),
+        participant_ids=[*party_ids, *all_hostile_ids],
+        source_conditions=[
+            {"actor_id": actor_id, **deepcopy(item)}
+            for actor_id, conditions in source_conditions_by_actor.items()
+            for item in conditions
+        ],
+    )
     source_casualty_pools = _source_casualty_pools(
         args.source_casualty_pool_json,
         hostile_ids=initial_hostile_ids,
@@ -5326,6 +5450,7 @@ async def _start(
             agent_target_reaction_contexts.values()
         ),
         "agent_turn_rulings": list(agent_turn_rulings.values()),
+        "agent_object_interactions": list(agent_object_interactions.values()),
         "source_casualty_pools": list(source_casualty_pools.values()),
         "source_separations": list(source_separations.values()),
         "agent_positions": list(agent_positions.values()),
@@ -8357,6 +8482,15 @@ async def _auto_run(
         scene_id=str(args.scene_id or ""),
         encounter_source_excerpt=str(args.source_excerpt or ""),
     )
+    agent_object_interactions = _agent_object_interactions(
+        getattr(args, "agent_object_interaction_json", []),
+        participant_ids=[*party_ids, *hostile_ids],
+        source_conditions=[
+            deepcopy(item)
+            for item in initial_combat.get("source_conditions", [])
+            if isinstance(item, dict)
+        ],
+    )
     avoided_cells_by_actor, source_avoidance_evidence = _source_avoidances(
         args.source_avoidance_report,
         campaign_id=args.campaign_id,
@@ -8833,6 +8967,85 @@ async def _auto_run(
                     "until_round": delayed["until_round"],
                     "source_excerpt": delayed["source_excerpt"],
                     "result": ended_turn,
+                }
+            )
+            continue
+        agent_object_interaction = agent_object_interactions.get(
+            (actor_id, round_number)
+        )
+        active_object_condition = (
+            next(
+                (
+                    item
+                    for item in combat.get("source_conditions", [])
+                    if isinstance(item, dict)
+                    and item.get("active", True)
+                    and str(item.get("actor_id") or "") == actor_id
+                    and str(item.get("condition") or "").casefold()
+                    == str(agent_object_interaction["condition"]).casefold()
+                    and item.get("source_ref")
+                    == agent_object_interaction["source_ref"]
+                    and _normalized_source_text(
+                        str(item.get("source_excerpt") or "")
+                    )
+                    == _normalized_source_text(
+                        str(agent_object_interaction["source_excerpt"])
+                    )
+                ),
+                None,
+            )
+            if agent_object_interaction is not None
+            else None
+        )
+        if (
+            agent_object_interaction is not None
+            and active_object_condition is not None
+            and agent_object_interaction["condition"] in actor_conditions
+            and _hit_points(actor) > 0
+            and not actor_conditions & INCAPACITATING_STATE_IDS
+        ):
+            campaign = await _campaign(client, args.campaign_id)
+            interacted = await client.domain(
+                "combat_common_action",
+                {
+                    "campaign_id": args.campaign_id,
+                    "actor_id": actor_id,
+                    "action": "interact_object",
+                    "payload": {
+                        "object_description": agent_object_interaction[
+                            "object_description"
+                        ],
+                        "interaction": agent_object_interaction["interaction"],
+                        "remove_source_condition": agent_object_interaction[
+                            "condition"
+                        ],
+                        "source_ref": agent_object_interaction["source_ref"],
+                        "source_excerpt": agent_object_interaction[
+                            "source_excerpt"
+                        ],
+                        "agent_ruling": agent_object_interaction["agent_ruling"],
+                    },
+                    "branch_id": branch["id"],
+                    "expected_revision": campaign["revision"],
+                    "idempotency_key": (
+                        "encounter-agent-object-interaction-"
+                        + _operation_token(
+                            args,
+                            actor_id,
+                            round_number,
+                            agent_object_interaction["condition"],
+                        )
+                    ),
+                },
+            )
+            turns.append(
+                {
+                    "sequence": sequence,
+                    "kind": "agent_object_interaction",
+                    "actor_id": actor_id,
+                    "round": round_number,
+                    "declaration": deepcopy(agent_object_interaction),
+                    "result": interacted,
                 }
             )
             continue
@@ -10515,6 +10728,7 @@ async def _auto_run(
             agent_target_reaction_contexts.values()
         ),
         "agent_turn_rulings": list(agent_turn_rulings.values()),
+        "agent_object_interactions": list(agent_object_interactions.values()),
         "pending_agent_forced_targets": deepcopy(agent_forced_targets),
         "agent_preflight_rulings": agent_preflight_rulings,
         "source_avoidances": source_avoidance_evidence,

@@ -13,6 +13,7 @@ from scripts.regression_encounter import (
     EncounterRulingRequiredError,
     _agent_attack_contexts,
     _agent_casting_perception_ruling,
+    _agent_object_interactions,
     _agent_party_absences,
     _agent_positions,
     _agent_source_on_hit_ruling,
@@ -4714,6 +4715,82 @@ def test_source_declared_conditions_are_scoped_to_cited_participants() -> None:
     by_actor = {item["actor_id"]: item for item in config}
     assert "source_conditions" not in by_actor["pc-1"]
     assert by_actor["ruffian-1"]["source_conditions"][0]["condition"] == "poisoned"
+
+
+def test_agent_object_interactions_require_an_exact_source_condition() -> None:
+    source_ref = {
+        "module_id": "module-1",
+        "scene_id": "scene-1",
+        "chunk_id": "chunk-1",
+        "page_start": 24,
+        "page_end": 24,
+        "heading_path": ["Nightstone", "4G. Nesper Farm"],
+        "content_sha256": "a" * 64,
+    }
+    source_excerpt = (
+        "While wearing the pumpkins, the goblins are effectively blinded."
+    )
+    declaration = {
+        "actor_id": "goblin-1",
+        "round": 1,
+        "object_description": "eyeless, hollowed-out pumpkin",
+        "interaction": "remove",
+        "condition": "Blinded",
+        "source_ref": source_ref,
+        "source_excerpt": source_excerpt,
+        "decision": "The goblin removes the loose pumpkin from its own head.",
+        "ruling_reason": (
+            "Removing the ordinary worn object ends only the source-authored "
+            "blindness it causes."
+        ),
+    }
+
+    interactions = _agent_object_interactions(
+        [declaration],
+        participant_ids=["goblin-1", "pc-1"],
+        source_conditions=[
+            {
+                "actor_id": "goblin-1",
+                "condition": "blinded",
+                "duration": "encounter",
+                "source_ref": source_ref,
+                "source_excerpt": source_excerpt,
+            }
+        ],
+    )
+
+    assert interactions[("goblin-1", 1)] == {
+        "actor_id": "goblin-1",
+        "round": 1,
+        "object_description": "eyeless, hollowed-out pumpkin",
+        "interaction": "remove",
+        "condition": "blinded",
+        "source_ref": source_ref,
+        "source_excerpt": source_excerpt,
+        "agent_ruling": {
+            "default_resolver": "agent",
+            "ruling_kind": "agent_dm_adjudication",
+            "decision": "The goblin removes the loose pumpkin from its own head.",
+            "reason": (
+                "Removing the ordinary worn object ends only the source-authored "
+                "blindness it causes."
+            ),
+        },
+    }
+
+    with pytest.raises(ValueError, match="does not match an exact"):
+        _agent_object_interactions(
+            [{**declaration, "source_excerpt": "A different sentence."}],
+            participant_ids=["goblin-1", "pc-1"],
+            source_conditions=[
+                {
+                    "actor_id": "goblin-1",
+                    "condition": "blinded",
+                    "source_ref": source_ref,
+                    "source_excerpt": source_excerpt,
+                }
+            ],
+        )
 
 
 def test_source_traits_and_allied_npcs_preserve_distinct_zero_hp_rules() -> None:

@@ -27,7 +27,8 @@ def test_source_condition_is_validated_persisted_and_cleared_with_encounter(
         "# Redbrand Hideout\n\n"
         "## 10. Common Room\n\n"
         "Four Redbrand ruffians are drinking and playing knucklebones. "
-        "All four are heavily drunk and poisoned.\n",
+        "All four are heavily drunk and poisoned. One ruffian is wearing a "
+        "knucklebones sack over his head and is blinded while it remains in place.\n",
         encoding="utf-8",
     )
     config = McpConfig(
@@ -170,6 +171,15 @@ def test_source_condition_is_validated_persisted_and_cleared_with_encounter(
             "source_ref": expanded["source_ref"],
             "source_excerpt": "All four are heavily drunk and poisoned.",
         }
+        removable_condition = {
+            "condition": "blinded",
+            "duration": "encounter",
+            "source_ref": expanded["source_ref"],
+            "source_excerpt": (
+                "One ruffian is wearing a knucklebones sack over his head and "
+                "is blinded while it remains in place."
+            ),
+        }
         invalid_condition = {
             **source_condition,
             "source_ref": {
@@ -185,7 +195,7 @@ def test_source_condition_is_validated_persisted_and_cleared_with_encounter(
                     "actor_id": ruffian["id"],
                     "initiative": 20,
                     "disposition": "hostile",
-                    "source_conditions": [source_condition],
+                    "source_conditions": [source_condition, removable_condition],
                 },
                 {
                     "actor_id": hero["id"],
@@ -231,7 +241,7 @@ def test_source_condition_is_validated_persisted_and_cleared_with_encounter(
             for item in started["combat"]["combatants"]
             if item["actor_id"] == ruffian["id"]
         )
-        assert ruffian_combatant["conditions"] == ["poisoned"]
+        assert set(ruffian_combatant["conditions"]) == {"blinded", "poisoned"}
         assert started["combat"]["source_conditions"][0]["source_ref"] == (
             expanded["source_ref"]
         )
@@ -240,7 +250,58 @@ def test_source_condition_is_validated_persisted_and_cleared_with_encounter(
             "character_get",
             {"character_id": ruffian["id"]},
         )
-        assert during["sheet"]["conditions"] == ["poisoned"]
+        assert set(during["sheet"]["conditions"]) == {"blinded", "poisoned"}
+        interacted = await _call(
+            server,
+            "combat_common_action",
+            {
+                "campaign_id": campaign["id"],
+                "actor_id": ruffian["id"],
+                "action": "interact_object",
+                "payload": {
+                    "object_description": "a knucklebones sack worn over his head",
+                    "interaction": "remove",
+                    "remove_source_condition": "blinded",
+                    "source_ref": expanded["source_ref"],
+                    "source_excerpt": removable_condition["source_excerpt"],
+                    "agent_ruling": {
+                        "default_resolver": "agent",
+                        "ruling_kind": "agent_dm_adjudication",
+                        "decision": (
+                            "The ruffian removes the ordinary sack from his own head "
+                            "during his turn."
+                        ),
+                        "reason": (
+                            "The source makes Blinded conditional on the removable "
+                            "sack remaining over the ruffian's head."
+                        ),
+                    },
+                },
+                "expected_revision": started["campaign_revision"],
+                "idempotency_key": "remove-sack",
+            },
+        )
+        interacted_combatant = next(
+            item
+            for item in interacted["combat"]["combatants"]
+            if item["actor_id"] == ruffian["id"]
+        )
+        assert interacted["condition_resolution"]["removed"] is True
+        assert interacted_combatant["turn_budget"]["object_interaction"] == 0
+        assert interacted_combatant["turn_budget"]["main_action"] == 1
+        ended_source_condition = next(
+            item
+            for item in interacted["combat"]["source_conditions"]
+            if item["condition"] == "blinded"
+        )
+        assert ended_source_condition["active"] is False
+        assert ended_source_condition["ended_reason"] == "agent_object_interaction"
+        after_interaction = await _call(
+            server,
+            "character_get",
+            {"character_id": ruffian["id"]},
+        )
+        assert after_interaction["sheet"]["conditions"] == ["poisoned"]
         joined = await _call(
             server,
             "combat_join",
@@ -252,7 +313,7 @@ def test_source_condition_is_validated_persisted_and_cleared_with_encounter(
                     "disposition": "hostile",
                     "source_conditions": [source_condition],
                 },
-                "expected_revision": started["campaign_revision"],
+                "expected_revision": interacted["campaign_revision"],
                 "idempotency_key": "join-late-ruffian",
             },
         )

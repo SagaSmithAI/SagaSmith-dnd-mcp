@@ -271,7 +271,7 @@ def test_compact_public_tool_and_schema_budgets_are_locked(tmp_path: Path) -> No
                 "combat": 44,
             }
         )
-        assert schema_bytes == TARGET_INPUT_SCHEMA_BYTES == 47_761
+        assert schema_bytes == TARGET_INPUT_SCHEMA_BYTES == 47_942
         assert schema_bytes < BASELINE_INPUT_SCHEMA_BYTES
         by_name = {tool.name: tool for tool in tools}
         assert by_name["chase"].inputSchema["properties"]["action"]["enum"] == [
@@ -326,6 +326,26 @@ def test_compact_public_tool_and_schema_budgets_are_locked(tmp_path: Path) -> No
             "reactions",
             "transaction_history",
             "transaction_receipt",
+        ]
+        assert by_name["combat_common_action"].inputSchema["properties"]["action"][
+            "enum"
+        ] == [
+            "dash",
+            "disengage",
+            "dodge",
+            "escape",
+            "help",
+            "hide",
+            "influence",
+            "interact_object",
+            "improvise",
+            "ready",
+            "search",
+            "stabilize",
+            "study",
+            "use_object",
+            "utilize",
+            "detach_attachment",
         ]
 
         expected_budget = {
