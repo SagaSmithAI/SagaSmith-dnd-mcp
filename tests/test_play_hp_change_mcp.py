@@ -144,4 +144,47 @@ def test_play_hp_changes_use_the_same_zero_hp_and_recovery_rules(tmp_path: Path)
         )
         assert {"dead", "prone"} <= set(damaged["character"]["sheet"]["conditions"])
 
+        fallen_sheet = default_character_sheet()
+        fallen_sheet["edition"] = "2014"
+        fallen_sheet["combat"]["hp"] = {"value": 0, "max": 18, "temp": 0}
+        fallen_sheet["combat"]["death_saves"] = {"successes": 0, "failures": 3}
+        fallen_sheet["conditions"] = ["dead", "prone", "unconscious"]
+        fallen = await call(
+            server,
+            "character_create",
+            {
+                "name": "Raise Dead target",
+                "campaign_id": campaign["id"],
+                "character_type": "pc",
+                "sheet": fallen_sheet,
+                "idempotency_key": "fallen",
+            },
+        )
+        revival_arguments = {
+            "character_id": fallen["id"],
+            "action": "revive",
+            "payload": {
+                "elapsed_days": 1,
+                "soul_willing": True,
+                "body_intact": True,
+                "source_ref": "module:rise-of-tiamat:p57",
+                "reason": "The allied factions restore the fallen party after the second attack.",
+            },
+            "expected_revision": fallen["revision"],
+            "idempotency_key": "revive",
+        }
+        revived = await call(server, "character_state_change", revival_arguments)
+        replay = await call(server, "character_state_change", revival_arguments)
+        assert replay == revived
+        assert revived["result"]["status"] == "revived"
+        assert revived["rule_receipts"][0]["mechanic_id"] == "dnd5e.core.spell.raise_dead"
+        assert revived["character"]["sheet"]["combat"]["hp"]["value"] == 1
+        assert revived["character"]["sheet"]["conditions"] == ["prone"]
+        ordeal = next(
+            effect
+            for effect in revived["character"]["sheet"]["effects"]
+            if effect["kind"] == "revival_ordeal"
+        )
+        assert {change["value"] for change in ordeal["changes"]} == {-4}
+
     asyncio.run(exercise())

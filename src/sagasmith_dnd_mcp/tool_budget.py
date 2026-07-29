@@ -14,7 +14,7 @@ TARGET_CORE_TOOL_COUNT = 12
 # Combat transaction-history and receipt views make interrupted multi-call Agent
 # rulings publicly recoverable without another tool or direct storage access. The
 # 194-byte schema increase remains well below the captured 92-tool baseline.
-TARGET_INPUT_SCHEMA_BYTES = 47_752
+TARGET_INPUT_SCHEMA_BYTES = 47_761
 PROFILE_TOOL_LIMITS = {
     "lobby": 61,
     "play": 46,

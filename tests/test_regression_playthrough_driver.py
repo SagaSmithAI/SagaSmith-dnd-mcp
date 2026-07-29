@@ -74,6 +74,7 @@ from scripts.regression_playthrough import (
     _remove_source_effect,
     _resolve_check,
     _restore_phase_after_failed_refresh,
+    _revive_character,
     _roll_source_sequence,
     _roll_source_table,
     _scene_progress_percent,
@@ -6748,6 +6749,112 @@ def test_source_state_initialization_uses_cited_public_action_without_fake_damag
         "source_state": _mutation_key("run-1", "source-state", identity),
         "continuity": _mutation_key("run-1", "source-state-continuity", identity),
         "sync": _mutation_key("run-1", "sync", f"source-state-sync:{identity}"),
+    }
+
+
+def test_source_backed_revival_uses_public_character_facade() -> None:
+    source_ref = {
+        "module_id": "module-1",
+        "scene_id": "scene-1",
+        "chunk_id": "chunk-1",
+        "page_start": 57,
+        "page_end": 57,
+        "heading_path": ["Second Attack", "Conclusion"],
+        "content_sha256": "abc",
+    }
+
+    class Client:
+        def __init__(self) -> None:
+            self.revision = 30
+            self.keys: dict[str, str] = {}
+
+        async def core(self, tool_id: str, arguments: dict):
+            assert tool_id == "campaign_query"
+            return {
+                "result": {
+                    "id": "campaign-1",
+                    "revision": self.revision,
+                }
+            }
+
+        async def domain(self, tool_id: str, arguments: dict):
+            if tool_id == "module_query":
+                return {
+                    "module_id": "module-1",
+                    "scene_id": "scene-1",
+                    "content": (
+                        "Even if the party is defeated, the characters wake after the "
+                        "battle to discover that they are being tended to in a well-guarded "
+                        "location and have been restored to life by allies."
+                    ),
+                    "locations": [{"key": "second-attack"}],
+                }
+            if tool_id == "character_query":
+                actor_id = arguments["payload"]["character_id"]
+                return {
+                    "id": actor_id,
+                    "name": "Brynja",
+                    "campaign_id": "campaign-1",
+                    "revision": 7,
+                }
+            if tool_id == "character_state_change":
+                assert arguments["action"] == "revive"
+                assert arguments["payload"] == {
+                    "elapsed_days": 0,
+                    "soul_willing": True,
+                    "body_intact": True,
+                    "source_ref": "module-chunk:chunk-1",
+                    "reason": "Allied factions restore Brynja after the cult attack.",
+                }
+                self.keys["revive"] = arguments["idempotency_key"]
+                self.revision += 1
+                return {"result": {"status": "revived", "hit_points": 1}}
+            if tool_id == "playthrough_manifest":
+                self.keys["sync"] = arguments["idempotency_key"]
+                return {
+                    "manifest": {"status": "in_progress"},
+                    "campaign_revision": self.revision,
+                }
+            raise AssertionError((tool_id, arguments))
+
+    client = Client()
+    excerpt = (
+        "Even if the party is defeated, the characters wake after the battle to "
+        "discover that they are being tended to in a well-guarded location and have "
+        "been restored to life by allies."
+    )
+    result = asyncio.run(
+        _revive_character(
+            client,
+            campaign_id="campaign-1",
+            run_id="run-1",
+            scene_id="scene-1",
+            source_scene_id="",
+            location_key="second-attack",
+            source_excerpt=excerpt,
+            source_ref=source_ref,
+            occurrence_id="second-attack-revive-brynja",
+            actor_id="brynja",
+            source_actor_id="",
+            elapsed_days=0,
+            soul_willing=True,
+            body_intact=True,
+            reason="Allied factions restore Brynja after the cult attack.",
+        )
+    )
+
+    assert result["revival"]["result"]["status"] == "revived"
+    assert client.keys == {
+        "revive": _mutation_key(
+            "run-1",
+            "revive-character",
+            "second-attack-revive-brynja",
+        ),
+        "sync": _mutation_key(
+            "run-1",
+            "sync",
+            "revive-character-sync:second-attack-revive-brynja",
+        ),
     }
 
 

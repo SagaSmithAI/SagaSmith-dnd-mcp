@@ -210,6 +210,7 @@ from sagasmith_dnd.lifecycle import (
     advance_source_turn_effect_durations,
     advance_world_effect_durations,
     allows_trance_rest,
+    apply_raise_dead_to_sheet,
     apply_rest,
     expire_combat_bound_effects,
     initialize_source_state,
@@ -17942,6 +17943,85 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             response_extra={"result": result},
         )
 
+    def character_apply_raise_dead(
+        character_id: str,
+        *,
+        elapsed_days: int,
+        soul_willing: bool,
+        body_intact: bool,
+        source_ref: str,
+        reason: str,
+        source_actor_id: str | None = None,
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
+        expected_revision: int | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Apply a source-backed 2014 Raise Dead transition outside combat."""
+
+        current = characters.get(character_id)
+        require_character_control(current, principal_id)
+        require_outside_active_combat(current, "revival")
+        if current.campaign_id is None:
+            raise CombatEngineError("revival requires a campaign-bound actor")
+        access.require_campaign(current.campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
+        exact_source_ref = str(source_ref).strip()
+        exact_reason = str(reason).strip()
+        if not exact_source_ref or not exact_reason:
+            raise CombatEngineError("revival requires source_ref and reason")
+        if source_actor_id is not None:
+            require_campaign_actor(current.campaign_id, source_actor_id)
+        if expected_revision is None or not idempotency_key:
+            raise ValueError(
+                "expected_revision and idempotency_key are required for character writes"
+            )
+        operation = "character.revival.raise_dead"
+        mutation_payload = {
+            "elapsed_days": elapsed_days,
+            "soul_willing": soul_willing,
+            "body_intact": body_intact,
+            "source_ref": exact_source_ref,
+            "reason": exact_reason,
+            "source_actor_id": source_actor_id,
+        }
+        branch_id = require_current_branch(current.campaign_id, None)
+        request_payload = {
+            "operation": operation,
+            "character_id": current.id,
+            **mutation_payload,
+        }
+        scope = (
+            f"character-write:{current.campaign_id}:{branch_id}:"
+            f"{principal_id}:{current.id}"
+        )
+        replay = replay_idempotent(scope, idempotency_key, request_payload)
+        if replay is not None:
+            return replay
+        applied = apply_raise_dead_to_sheet(
+            current.sheet,
+            elapsed_days=elapsed_days,
+            soul_willing=soul_willing,
+            body_intact=body_intact,
+            source_ref=exact_source_ref,
+            source_actor_id=source_actor_id,
+        )
+        result = {key: value for key, value in applied.items() if key != "sheet"}
+        rule_receipts = core_receipts(
+            effective_rule_context(current.campaign_id),
+            ["dnd5e.core.spell.raise_dead"],
+            "character.revival.raise_dead",
+        )
+        return update_sheet(
+            character_id,
+            applied["sheet"],
+            operation=operation,
+            principal_id=principal_id,
+            expected_revision=expected_revision,
+            idempotency_key=idempotency_key,
+            payload=mutation_payload,
+            response_extra={"result": result, "rule_receipts": rule_receipts},
+            rule_receipts=rule_receipts,
+        )
+
     @mcp.tool()
     def character_spell_prepare(
         character_id: str,
@@ -27645,6 +27725,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "exhaustion_set",
             "damage",
             "heal",
+            "revive",
             "level_advance",
             "resource_sync",
             "source_state",
@@ -27709,6 +27790,33 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 source_actor_id=data.get("source_actor_id"),
                 spell_id=data.get("spell_id"),
                 spell_level=data.get("spell_level"),
+                principal_id=principal_id,
+                expected_revision=expected_revision,
+                idempotency_key=idempotency_key,
+            )
+        elif action == "revive":
+            unexpected = set(data) - {
+                "elapsed_days",
+                "soul_willing",
+                "body_intact",
+                "source_ref",
+                "reason",
+                "source_actor_id",
+            }
+            if unexpected:
+                raise ValueError(
+                    "revive payload accepts only elapsed_days, soul_willing, body_intact, "
+                    "source_ref, reason, and source_actor_id; "
+                    f"unexpected fields: {sorted(unexpected)}"
+                )
+            result = character_apply_raise_dead(
+                character_id,
+                elapsed_days=required(data, "elapsed_days"),
+                soul_willing=required(data, "soul_willing"),
+                body_intact=required(data, "body_intact"),
+                source_ref=required(data, "source_ref"),
+                reason=required(data, "reason"),
+                source_actor_id=data.get("source_actor_id"),
                 principal_id=principal_id,
                 expected_revision=expected_revision,
                 idempotency_key=idempotency_key,

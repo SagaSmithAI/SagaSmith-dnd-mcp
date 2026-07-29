@@ -97,6 +97,7 @@ DEFERRED_CHECKPOINT_ACTIONS = frozenset(
         "use-activity",
         "cast-source-spell",
         "cast-healing-spell",
+        "revive-character",
         "record-event",
         "record-outcome",
         "register-replacement",
@@ -169,6 +170,7 @@ def _arguments() -> argparse.Namespace:
             "use-activity",
             "cast-source-spell",
             "cast-healing-spell",
+            "revive-character",
             "branch-from-snapshot",
             "initialize-clock",
             "advance-time",
@@ -376,6 +378,12 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--spell-cast-level", type=int)
     parser.add_argument("--spell-component-ruling-json", type=json.loads)
     parser.add_argument("--spell-reason", default="")
+    parser.add_argument("--revive-actor-id", default="")
+    parser.add_argument("--revive-source-actor-id", default="")
+    parser.add_argument("--revive-elapsed-days", type=int, default=0)
+    parser.add_argument("--revive-soul-willing", action="store_true")
+    parser.add_argument("--revive-body-intact", action="store_true")
+    parser.add_argument("--revive-reason", default="")
     parser.add_argument("--snapshot-slot", type=int)
     parser.add_argument("--branch-name", default="")
     parser.add_argument(
@@ -5563,6 +5571,114 @@ async def _initialize_source_state(
         "state": initialized,
         "knowledge_actor_ids": recipients,
         "continuity": committed,
+        "sync": synced,
+    }
+
+
+async def _revive_character(
+    client: ExposureClient,
+    *,
+    campaign_id: str,
+    run_id: str,
+    scene_id: str,
+    source_scene_id: str,
+    location_key: str,
+    source_excerpt: str,
+    source_ref: dict[str, Any] | None,
+    occurrence_id: str,
+    actor_id: str,
+    source_actor_id: str,
+    elapsed_days: int,
+    soul_willing: bool,
+    body_intact: bool,
+    reason: str,
+) -> dict[str, Any]:
+    identity = _occurrence_identity(occurrence_id, "revive-character")
+    if not all((scene_id, location_key, source_excerpt, actor_id, reason.strip())):
+        raise ValueError(
+            "revive-character requires scene, location, source, actor, and reason"
+        )
+    current_scene = await client.domain(
+        "module_query",
+        {
+            "campaign_id": campaign_id,
+            "view": "scene",
+            "payload": {"scene_id": scene_id},
+        },
+    )
+    cited_scene_id = source_scene_id or scene_id
+    cited_scene = (
+        current_scene
+        if cited_scene_id == scene_id
+        else await client.domain(
+            "module_query",
+            {
+                "campaign_id": campaign_id,
+                "view": "scene",
+                "payload": {"scene_id": cited_scene_id},
+            },
+        )
+    )
+    exact_ref = await _validate_source_ref(
+        client,
+        cited_scene,
+        source_ref,
+        excerpt=source_excerpt,
+    )
+    if location_key not in {
+        str(item.get("key") or "") for item in _scene_locations(current_scene)
+    }:
+        raise ValueError("revival location is not present in the current scene atlas")
+    actor = await client.domain(
+        "character_query",
+        {"view": "get", "payload": {"character_id": actor_id}},
+    )
+    if actor.get("campaign_id") != campaign_id:
+        raise ValueError("revival actor does not belong to the campaign")
+    normalized_source_actor_id = source_actor_id.strip()
+    if normalized_source_actor_id:
+        provider = await client.domain(
+            "character_query",
+            {"view": "get", "payload": {"character_id": normalized_source_actor_id}},
+        )
+        if provider.get("campaign_id") != campaign_id:
+            raise ValueError("revival source actor does not belong to the campaign")
+    revival_payload: dict[str, Any] = {
+        "elapsed_days": elapsed_days,
+        "soul_willing": soul_willing,
+        "body_intact": body_intact,
+        "source_ref": f"module-chunk:{exact_ref['chunk_id']}",
+        "reason": reason.strip(),
+    }
+    if normalized_source_actor_id:
+        revival_payload["source_actor_id"] = normalized_source_actor_id
+    revived = await client.domain(
+        "character_state_change",
+        {
+            "character_id": actor_id,
+            "action": "revive",
+            "payload": revival_payload,
+            "expected_revision": actor["revision"],
+            "idempotency_key": _mutation_key(run_id, "revive-character", identity),
+        },
+    )
+    synced = await _manifest_mutation(
+        client,
+        campaign_id=campaign_id,
+        action="sync",
+        run_id=run_id,
+        identity=f"revive-character-sync:{identity}",
+    )
+    return {
+        "scene": {
+            "scene_id": scene_id,
+            "source_scene_id": cited_scene_id,
+            "location_key": location_key,
+            "source_ref": exact_ref,
+        },
+        "actor": {"id": actor_id, "name": actor["name"]},
+        "occurrence_id": identity,
+        "revival": revived,
         "sync": synced,
     }
 
@@ -12038,6 +12154,27 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     reason=args.spell_reason,
                     knowledge_actor_ids=args.knowledge_actor_id,
                     defer_checkpoint=args.defer_checkpoint,
+                )
+            elif args.action == "revive-character":
+                if phase != "play":
+                    raise RuntimeError("revive-character requires the play phase")
+                await client.load("play.characters")
+                report["result"] = await _revive_character(
+                    client,
+                    campaign_id=args.campaign_id,
+                    run_id=args.run_id,
+                    occurrence_id=args.occurrence_id,
+                    scene_id=str(args.scene_id or ""),
+                    source_scene_id=args.source_scene_id,
+                    location_key=args.location_key,
+                    source_excerpt=args.source_excerpt,
+                    source_ref=args.source_ref_json,
+                    actor_id=args.revive_actor_id,
+                    source_actor_id=args.revive_source_actor_id,
+                    elapsed_days=args.revive_elapsed_days,
+                    soul_willing=args.revive_soul_willing,
+                    body_intact=args.revive_body_intact,
+                    reason=args.revive_reason,
                 )
             elif args.action == "long-rest":
                 if phase != "play":
