@@ -102,6 +102,7 @@ DEFERRED_CHECKPOINT_ACTIONS = frozenset(
         "initialize-source-state",
         "stand-up",
         "use-activity",
+        "cast-spell",
         "cast-source-spell",
         "cast-healing-spell",
         "revive-character",
@@ -137,6 +138,7 @@ KNOWLEDGE_ACTOR_PREFLIGHT_ACTIONS = frozenset(
         "initialize-source-state",
         "stand-up",
         "use-activity",
+        "cast-spell",
         "cast-source-spell",
         "cast-healing-spell",
         "advance-time",
@@ -178,6 +180,7 @@ def _arguments() -> argparse.Namespace:
             "apply-damage",
             "stand-up",
             "use-activity",
+            "cast-spell",
             "cast-source-spell",
             "cast-healing-spell",
             "revive-character",
@@ -420,6 +423,15 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--spell-target-id", default="")
     parser.add_argument("--spell-cast-level", type=int)
     parser.add_argument("--spell-component-ruling-json", type=json.loads)
+    parser.add_argument(
+        "--spell-agent-ruling-json",
+        type=json.loads,
+        help=(
+            "Settled Agent interpretation of a paid standard spell's descriptive "
+            "effect. Required only when the engine returns a post-commit "
+            "generic_spell_effect ruling."
+        ),
+    )
     parser.add_argument("--spell-reason", default="")
     parser.add_argument("--revive-actor-id", default="")
     parser.add_argument("--revive-source-actor-id", default="")
@@ -6829,6 +6841,244 @@ async def _use_activity(
     }
 
 
+async def _cast_standard_spell(
+    client: ExposureClient,
+    *,
+    campaign_id: str,
+    run_id: str,
+    occurrence_id: str,
+    scene_id: str,
+    source_scene_id: str,
+    location_key: str,
+    source_excerpt: str,
+    source_ref: dict[str, Any] | None,
+    actor_id: str,
+    target_id: str,
+    spell_id: str,
+    cast_level: int | None,
+    component_ruling: dict[str, Any] | None,
+    agent_ruling: dict[str, Any] | None,
+    reason: str,
+    knowledge_actor_ids: list[str],
+    defer_checkpoint: bool = False,
+) -> dict[str, Any]:
+    cast_identity = _occurrence_identity(occurrence_id, "cast-spell")
+    normalized_actor_id = actor_id.strip()
+    normalized_target_id = target_id.strip()
+    normalized_spell_id = spell_id.strip()
+    normalized_reason = reason.strip()
+    if not all(
+        (
+            scene_id,
+            source_scene_id,
+            location_key,
+            source_excerpt.strip(),
+            normalized_actor_id,
+            normalized_spell_id,
+            normalized_reason,
+        )
+    ):
+        raise ValueError(
+            "cast-spell requires occurrence and source scenes, location, excerpt, "
+            "actor, spell, and reason"
+        )
+    if cast_level is not None and cast_level < 0:
+        raise ValueError("spell cast level must be non-negative")
+    occurrence_scene = await client.domain(
+        "module_query",
+        {
+            "campaign_id": campaign_id,
+            "view": "scene",
+            "payload": {"scene_id": scene_id},
+        },
+    )
+    cited_scene = await client.domain(
+        "module_query",
+        {
+            "campaign_id": campaign_id,
+            "view": "scene",
+            "payload": {"scene_id": source_scene_id},
+        },
+    )
+    exact_ref = await _validate_source_ref(
+        client,
+        cited_scene,
+        source_ref,
+        excerpt=source_excerpt,
+    )
+    if location_key not in {
+        str(item.get("key") or "") for item in _scene_locations(occurrence_scene)
+    }:
+        raise ValueError("cast-spell location is not present in the occurrence scene")
+    actor = await client.domain(
+        "character_query",
+        {"view": "get", "payload": {"character_id": normalized_actor_id}},
+    )
+    if actor.get("campaign_id") != campaign_id:
+        raise ValueError("cast-spell actor does not belong to the campaign")
+    if normalized_target_id:
+        target = await client.domain(
+            "character_query",
+            {"view": "get", "payload": {"character_id": normalized_target_id}},
+        )
+        if target.get("campaign_id") != campaign_id:
+            raise ValueError("cast-spell target does not belong to the campaign")
+    payload: dict[str, Any] = {"spell_id": normalized_spell_id}
+    if cast_level is not None:
+        payload["cast_level"] = cast_level
+    if component_ruling is not None:
+        payload["component_ruling"] = deepcopy(component_ruling)
+    if normalized_target_id:
+        payload["target_character_ids"] = [normalized_target_id]
+        payload["willing_target_ids"] = [normalized_target_id]
+    acted = await client.domain(
+        "character_action",
+        {
+            "character_id": normalized_actor_id,
+            "action": "cast_spell",
+            "payload": payload,
+            "expected_revision": actor["revision"],
+            "idempotency_key": _mutation_key(
+                run_id,
+                "standard-spell-cast",
+                cast_identity,
+            ),
+        },
+    )
+    payment = dict(dict(acted.get("result") or {}).get("payment") or {})
+    if acted.get("status") == "pending_ruling" and not payment:
+        raise_for_pending_ruling(
+            acted,
+            operation="character_action.cast_spell",
+            context={
+                "actor_id": normalized_actor_id,
+                "target_id": normalized_target_id,
+                "spell_id": normalized_spell_id,
+            },
+            retry_hint=(
+                "Resolve the typed pre-commit ruling and retry at the current "
+                "character revision."
+            ),
+        )
+    if acted.get("status") not in {"committed", "pending_ruling"} or not payment:
+        raise RuntimeError("standard spell did not consume its canonical resource")
+    normalized_agent_ruling = _settled_agent_ruling(
+        agent_ruling,
+        label="standard spell",
+        ruling_kinds=frozenset({"generic_spell_effect"}),
+    )
+    if acted.get("status") == "pending_ruling":
+        pending = normalize_pending_ruling(acted)
+        if pending["ruling_kind"] != "generic_spell_effect":
+            raise RuntimeError(
+                "a paid standard spell returned an unsupported post-commit ruling kind"
+            )
+        if normalized_agent_ruling is None:
+            raise ValueError(
+                "a paid descriptive standard spell requires --spell-agent-ruling-json"
+            )
+    elif normalized_agent_ruling is not None:
+        raise ValueError(
+            "spell Agent ruling must be omitted when the engine fully commits the effect"
+        )
+    branches = await client.domain(
+        "branch_query",
+        {"campaign_id": campaign_id, "view": "list"},
+    )
+    branch = next((item for item in branches if item.get("is_current")), None)
+    if branch is None:
+        raise RuntimeError("campaign has no current branch")
+    recipients = list(
+        dict.fromkeys(
+            [
+                normalized_actor_id,
+                *([normalized_target_id] if normalized_target_id else []),
+                *knowledge_actor_ids,
+            ]
+        )
+    )
+    campaign = await _campaign(client, campaign_id)
+    continuity_payload = {
+        "event": {
+            "summary": normalized_reason,
+            "event_type": "standard_spell_cast",
+            "audience_scope": "party",
+            "payload": {
+                "scene_id": scene_id,
+                "source_scene_id": source_scene_id,
+                "location_key": location_key,
+                "occurrence_id": cast_identity,
+                "actor_id": normalized_actor_id,
+                "target_id": normalized_target_id,
+                "spell_id": normalized_spell_id,
+                "payment": payment,
+                "resolution_status": acted["status"],
+                "source_excerpt": source_excerpt,
+                "source_ref": exact_ref,
+                "agent_ruling": normalized_agent_ruling,
+            },
+        },
+        "actor_knowledge": [
+            {
+                "actor_id": recipient,
+                "knowledge_key": (
+                    f"playthrough.{_token(run_id)}.{_token(scene_id)}."
+                    f"spell.{_token(cast_identity)}"
+                ),
+                "proposition": normalized_reason,
+                "disclosure_scope": "owner",
+            }
+            for recipient in recipients
+        ],
+        "branch_id": str(branch["id"]),
+    }
+    if not defer_checkpoint:
+        continuity_payload["snapshot"] = {
+            "label": (
+                f"Full playthrough standard spell: {actor['name']} cast "
+                f"{normalized_spell_id}"
+            )
+        }
+    committed = await client.domain(
+        "memory_change",
+        {
+            "campaign_id": campaign_id,
+            "action": "commit",
+            "payload": continuity_payload,
+            "expected_revision": campaign["revision"],
+            "idempotency_key": _mutation_key(
+                run_id,
+                "standard-spell-continuity",
+                cast_identity,
+            ),
+        },
+    )
+    synced = await _manifest_mutation(
+        client,
+        campaign_id=campaign_id,
+        action="sync",
+        run_id=run_id,
+        identity=f"standard-spell-sync:{cast_identity}",
+    )
+    return {
+        "scene": {
+            "scene_id": scene_id,
+            "source_scene_id": source_scene_id,
+            "location_key": location_key,
+            "source_ref": exact_ref,
+        },
+        "actor": {"id": normalized_actor_id, "name": actor["name"]},
+        "target_id": normalized_target_id,
+        "occurrence_id": cast_identity,
+        "spell_id": normalized_spell_id,
+        "cast": acted,
+        "agent_ruling": normalized_agent_ruling,
+        "knowledge_actor_ids": recipients,
+        "continuity": committed,
+        "sync": synced,
+    }
+
+
 async def _cast_source_spell(
     client: ExposureClient,
     *,
@@ -12906,6 +13156,30 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     activity_event_id=args.activity_event_id,
                     declaration=args.activity_declaration_json,
                     reason=args.activity_reason,
+                    knowledge_actor_ids=args.knowledge_actor_id,
+                    defer_checkpoint=args.defer_checkpoint,
+                )
+            elif args.action == "cast-spell":
+                if phase != "play":
+                    raise RuntimeError("cast-spell requires the play phase")
+                await client.load("play.characters")
+                report["result"] = await _cast_standard_spell(
+                    client,
+                    campaign_id=args.campaign_id,
+                    run_id=args.run_id,
+                    occurrence_id=args.occurrence_id,
+                    scene_id=str(args.scene_id or ""),
+                    source_scene_id=args.source_scene_id,
+                    location_key=args.location_key,
+                    source_excerpt=args.source_excerpt,
+                    source_ref=args.source_ref_json,
+                    actor_id=args.spell_actor_id,
+                    target_id=args.spell_target_id,
+                    spell_id=args.spell_id,
+                    cast_level=args.spell_cast_level,
+                    component_ruling=args.spell_component_ruling_json,
+                    agent_ruling=args.spell_agent_ruling_json,
+                    reason=args.spell_reason,
                     knowledge_actor_ids=args.knowledge_actor_id,
                     defer_checkpoint=args.defer_checkpoint,
                 )
