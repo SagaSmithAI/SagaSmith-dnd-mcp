@@ -140,6 +140,7 @@ from sagasmith_dnd.combat_engine import (
     end_hypnotic_pattern_effects,
     end_turn,
     force_move_directly_away,
+    force_move_directly_toward,
     pay_activity_activation,
     pay_attack_action,
     pay_multiattack_activity,
@@ -6183,6 +6184,85 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             ended_reason=reason,
         )
 
+    def settle_standard_attack_forced_movement(
+        campaign_id: str,
+        encounter: dict[str, Any],
+        attack_result: dict[str, Any],
+        *,
+        attacker_id: str,
+        target_id: str,
+        sheets: dict[str, dict[str, Any]],
+    ) -> set[str]:
+        """Apply an engine-settled weapon movement rider in the same transaction."""
+
+        structured = dict(attack_result.get("structured_on_hit") or {})
+        movement = structured.get("forced_movement")
+        if (
+            attack_result.get("hit") is not True
+            or structured.get("kind") != "contest_pull"
+            or movement is None
+        ):
+            return set()
+        if (
+            not isinstance(movement, dict)
+            or set(movement)
+            != {
+                "source_actor_id",
+                "target_actor_id",
+                "distance_ft",
+                "direction",
+            }
+            or str(movement.get("source_actor_id") or "") != attacker_id
+            or str(movement.get("target_actor_id") or "") != target_id
+            or movement.get("direction") != "toward_source"
+        ):
+            raise CombatEngineError(
+                "standard attack forced-movement settlement is invalid"
+            )
+        before_movement = deepcopy(encounter)
+        moved = force_move_directly_toward(
+            encounter,
+            source_actor_id=attacker_id,
+            target_actor_id=target_id,
+            distance_ft=int(movement["distance_ft"]),
+        )
+        encounter.clear()
+        encounter.update(moved["encounter"])
+        movement["settlement"] = {
+            key: deepcopy(value)
+            for key, value in moved.items()
+            if key != "encounter"
+        }
+        structured["forced_movement"] = movement
+        attack_result["structured_on_hit"] = structured
+
+        ended_tethers = newly_ended_witch_bolt_tethers(
+            before_movement,
+            encounter,
+        )
+        changed_sheet_ids: set[str] = set()
+        by_caster: dict[str, list[dict[str, Any]]] = {}
+        for tether in ended_tethers:
+            caster_id = str(tether.get("source_actor_id") or "")
+            if not caster_id:
+                raise CombatEngineError(
+                    "ended Witch Bolt tether has no source actor"
+                )
+            by_caster.setdefault(caster_id, []).append(tether)
+        for caster_id, tethers in by_caster.items():
+            if caster_id not in sheets:
+                sheets[caster_id] = deepcopy(
+                    require_campaign_actor(campaign_id, caster_id).sheet
+                )
+            ended = end_tether_concentrations(sheets[caster_id], tethers)
+            sheets[caster_id] = ended["sheet"]
+            changed_sheet_ids.add(caster_id)
+        if ended_tethers:
+            movement["settlement"]["ended_witch_bolt_tether_ids"] = [
+                str(item.get("id") or "") for item in ended_tethers
+            ]
+        return changed_sheet_ids
+
     def reconcile_actor_witch_bolt_concentration(
         encounter: dict[str, Any],
         actor_id_value: str,
@@ -10585,6 +10665,20 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             attack=attack_roll,
             rules=rule_context,
         )
+        attack_sheets = {
+            actor_id: updated_attacker["sheet"],
+            target_id: updated_target["sheet"],
+        }
+        forced_movement_sheet_ids = settle_standard_attack_forced_movement(
+            campaign_id,
+            next_encounter,
+            result,
+            attacker_id=actor_id,
+            target_id=target_id,
+            sheets=attack_sheets,
+        )
+        updated_attacker["sheet"] = attack_sheets[actor_id]
+        updated_target["sheet"] = attack_sheets[target_id]
         if ammunition is not None:
             result["ammunition"] = ammunition
         result["attack_payment"] = attack_payment
@@ -10987,6 +11081,24 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             (target_record, updated_target),
         ):
             normalized_sheet = validate_character_sheet(updated["sheet"])
+            normalized_notes = validate_character_notes(record.notes)
+            if normalized_sheet == record.sheet and normalized_notes == record.notes:
+                continue
+            updates.append(
+                CharacterStateUpdate(
+                    character_id=record.id,
+                    sheet=normalized_sheet,
+                    notes=normalized_notes,
+                    expected_revision=record.revision,
+                )
+            )
+        for changed_actor_id in sorted(
+            forced_movement_sheet_ids - {actor_id, target_id}
+        ):
+            record = require_campaign_actor(campaign_id, changed_actor_id)
+            normalized_sheet = validate_character_sheet(
+                attack_sheets[changed_actor_id]
+            )
             normalized_notes = validate_character_notes(record.notes)
             if normalized_sheet == record.sheet and normalized_notes == record.notes:
                 continue
@@ -13692,6 +13804,20 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             attack=attack_roll,
             rules=rule_context,
         )
+        attack_sheets = {
+            actor_id: updated_attacker["sheet"],
+            target_id: updated_target["sheet"],
+        }
+        forced_movement_sheet_ids = settle_standard_attack_forced_movement(
+            campaign_id,
+            next_encounter,
+            result,
+            attacker_id=actor_id,
+            target_id=target_id,
+            sheets=attack_sheets,
+        )
+        updated_attacker["sheet"] = attack_sheets[actor_id]
+        updated_target["sheet"] = attack_sheets[target_id]
         if ammunition is not None:
             result["ammunition"] = ammunition
         sync_combatant_conditions(next_encounter, actor_id, updated_attacker["sheet"])
@@ -13799,6 +13925,23 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     notes=validate_character_notes(characters.get(target_id).notes),
                     expected_revision=characters.get(target_id).revision,
                 ),
+                *[
+                    CharacterStateUpdate(
+                        character_id=changed_actor_id,
+                        sheet=validate_character_sheet(
+                            attack_sheets[changed_actor_id]
+                        ),
+                        notes=validate_character_notes(
+                            characters.get(changed_actor_id).notes
+                        ),
+                        expected_revision=characters.get(
+                            changed_actor_id
+                        ).revision,
+                    )
+                    for changed_actor_id in sorted(
+                        forced_movement_sheet_ids - {actor_id, target_id}
+                    )
+                ],
             ],
             rule_receipts=[
                 *list(result.get("rule_receipts") or []),
@@ -13955,6 +14098,20 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             attack=attack,
             rules=rule_context,
         )
+        attack_sheets = {
+            attacker_id: updated_attacker["sheet"],
+            actor_id: updated_target["sheet"],
+        }
+        forced_movement_sheet_ids = settle_standard_attack_forced_movement(
+            campaign_id,
+            next_encounter,
+            result,
+            attacker_id=attacker_id,
+            target_id=actor_id,
+            sheets=attack_sheets,
+        )
+        updated_attacker["sheet"] = attack_sheets[attacker_id]
+        updated_target["sheet"] = attack_sheets[actor_id]
         result["attack_payment"] = deepcopy(window.get("attack_payment") or {})
         if window.get("ammunition") is not None:
             result["ammunition"] = deepcopy(window["ammunition"])
@@ -14113,6 +14270,23 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     notes=validate_character_notes(characters.get(actor_id).notes),
                     expected_revision=characters.get(actor_id).revision,
                 ),
+                *[
+                    CharacterStateUpdate(
+                        character_id=changed_actor_id,
+                        sheet=validate_character_sheet(
+                            attack_sheets[changed_actor_id]
+                        ),
+                        notes=validate_character_notes(
+                            characters.get(changed_actor_id).notes
+                        ),
+                        expected_revision=characters.get(
+                            changed_actor_id
+                        ).revision,
+                    )
+                    for changed_actor_id in sorted(
+                        forced_movement_sheet_ids - {attacker_id, actor_id}
+                    )
+                ],
             ],
             rule_receipts=[
                 *list(result.get("rule_receipts") or []),
@@ -18573,6 +18747,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         target = {
             "id": f"scene-object:{scene_id}:{object_id}",
             "name": object_name,
+            "kind": "object",
             "sheet": validate_character_sheet(object_sheet),
             "derived": derive_character_sheet(object_sheet),
             "death_saves": False,
@@ -20016,14 +20191,20 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                             ),
                         )
                     )
-                    self.set_sheet(
-                        attacker_id,
-                        dict(updated_attacker["sheet"]),
+                    attack_sheets = {
+                        attacker_id: dict(updated_attacker["sheet"]),
+                        target_id: dict(updated_target["sheet"]),
+                    }
+                    settle_standard_attack_forced_movement(
+                        campaign_id,
+                        self.encounter,
+                        result,
+                        attacker_id=attacker_id,
+                        target_id=target_id,
+                        sheets=attack_sheets,
                     )
-                    self.set_sheet(
-                        target_id,
-                        dict(updated_target["sheet"]),
-                    )
+                    for sheet_actor_id, sheet in attack_sheets.items():
+                        self.set_sheet(sheet_actor_id, sheet)
                     return result
                 if opcode == "damage.apply":
                     rolled = (
