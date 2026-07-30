@@ -5742,7 +5742,10 @@ def test_level_preflight_rejects_missing_feature_choice_without_mutation() -> No
             raise AssertionError((tool_id, arguments))
 
     client = Client()
-    with pytest.raises(ValueError, match="requires an explicit option choice"):
+    with pytest.raises(
+        ValueError,
+        match=r"requires an explicit option choice; allowed choices: Defense, Dueling",
+    ):
         asyncio.run(
             _preflight_level_completion(
                 client,
@@ -5761,6 +5764,24 @@ def test_level_preflight_rejects_missing_feature_choice_without_mutation() -> No
         "character_query",
         "rule_pack_query",
     ]
+
+    with pytest.raises(
+        ValueError,
+        match=r"invalid option choice\(s\): Archery; allowed choices: Defense, Dueling",
+    ):
+        asyncio.run(
+            _preflight_level_completion(
+                client,
+                campaign_id="campaign-1",
+                actor=actor,
+                class_name="Fighter",
+                target_level=2,
+                subclass_artifact_id="",
+                feature_selections={"feature-style": {"option": "Archery"}},
+                spell_selections=[],
+                prepared_spell_ids=[],
+            )
+        )
 
 
 def test_prepared_caster_spell_hydration_does_not_consume_known_spell_quota() -> None:

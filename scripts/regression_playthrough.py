@@ -10794,8 +10794,33 @@ def _validate_level_feature_completion(
         choice_field = str(requirements.get("field") or "")
         selection = feature_selections.get(artifact_id, {})
         if choice_field and choice_field not in selection:
+            allowed = [str(item) for item in requirements.get("options") or []]
+            suffix = f"; allowed choices: {', '.join(allowed)}" if allowed else ""
             raise ValueError(
-                f"level feature {artifact_id} requires an explicit {choice_field} choice"
+                f"level feature {artifact_id} requires an explicit "
+                f"{choice_field} choice{suffix}"
+            )
+        allowed = [str(item) for item in requirements.get("options") or []]
+        if not choice_field or not allowed:
+            continue
+        selected = selection[choice_field]
+        selected_values = (
+            [str(item) for item in selected]
+            if isinstance(selected, list)
+            else [str(selected)]
+        )
+        invalid = [item for item in selected_values if item not in allowed]
+        if invalid:
+            raise ValueError(
+                f"level feature {artifact_id} has invalid {choice_field} "
+                f"choice(s): {', '.join(invalid)}; allowed choices: "
+                + ", ".join(allowed)
+            )
+        expected_count = int(requirements.get("count", 1) or 1)
+        if len(selected_values) != expected_count:
+            raise ValueError(
+                f"level feature {artifact_id} requires exactly {expected_count} "
+                f"{choice_field} choice(s); got {len(selected_values)}"
             )
 
 
