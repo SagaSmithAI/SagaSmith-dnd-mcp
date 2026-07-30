@@ -910,8 +910,9 @@ def _arguments() -> argparse.Namespace:
         default=None,
         help=(
             "Agent-selected minimum number of hostiles that must finish alive and "
-            "unconscious; when no eligible hostile ids are supplied, every encounter "
-            "hostile is eligible"
+            "unconscious; zero keeps the selected nonlethal preference without making "
+            "capture a hard encounter-success condition; when no eligible hostile ids "
+            "are supplied, every encounter hostile is eligible"
         ),
     )
     parser.add_argument(
@@ -6471,8 +6472,8 @@ def _knockout_objective(
     minimum = getattr(args, "minimum_hostile_knockouts", None)
     if minimum is None:
         return requested, None
-    if isinstance(minimum, bool) or not isinstance(minimum, int) or minimum <= 0:
-        raise ValueError("--minimum-hostile-knockouts must be a positive integer")
+    if isinstance(minimum, bool) or not isinstance(minimum, int) or minimum < 0:
+        raise ValueError("--minimum-hostile-knockouts must be a non-negative integer")
     candidates = requested or set(hostile_ids)
     if minimum > len(candidates):
         raise ValueError(

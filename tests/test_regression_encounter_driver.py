@@ -1957,6 +1957,19 @@ def test_knockout_objective_keeps_exact_target_compatibility() -> None:
     assert minimum is None
 
 
+def test_knockout_objective_supports_nonlethal_preference_without_hard_minimum() -> None:
+    candidates, minimum = _knockout_objective(
+        SimpleNamespace(
+            knock_out_hostile_id=["zaltember"],
+            minimum_hostile_knockouts=0,
+        ),
+        hostile_ids=["zaltember", "ogre-1"],
+    )
+
+    assert candidates == {"zaltember"}
+    assert minimum == 0
+
+
 def test_knockout_objective_rejects_impossible_minimum() -> None:
     with pytest.raises(ValueError, match="eligible hostile count"):
         _knockout_objective(
