@@ -204,7 +204,10 @@ def test_area_save_damage_derives_every_target_and_recharges_at_turn_start(
                     "campaign_id": campaign["id"],
                     "actor_id": source["id"],
                     "activity_id": activity_id,
-                    "declaration": {"origin": {"x": 101, "y": 0}},
+                    "declaration": {
+                        "origin": {"x": 101, "y": 0},
+                        "target_contexts": [],
+                    },
                     "expected_revision": started["campaign_revision"],
                     "idempotency_key": "bad-origin",
                 },
@@ -217,7 +220,16 @@ def test_area_save_damage_derives_every_target_and_recharges_at_turn_start(
                 "campaign_id": campaign["id"],
                 "actor_id": source["id"],
                 "activity_id": activity_id,
-                "declaration": {"origin": {"x": 4, "y": 0}},
+                "declaration": {
+                    "origin": {"x": 4, "y": 0},
+                    "target_contexts": [
+                        {"target_id": actors[0]["id"], "cover": "none"},
+                        {
+                            "target_id": actors[1]["id"],
+                            "cover": "three_quarters",
+                        },
+                    ],
+                },
                 "expected_revision": started["campaign_revision"],
                 "idempotency_key": "lightning",
             },
@@ -232,6 +244,7 @@ def test_area_save_damage_derives_every_target_and_recharges_at_turn_start(
             actors[1]["id"],
         ]
         assert [item["damage_amount"] for item in effect["targets"]] == [12, 6]
+        assert [item["save_bonus"] for item in effect["targets"]] == [0, 5]
         assert effect["damage_roll"]["total"] == 12
         assert any(
             item["mechanic_id"] == "dnd5e.core.activity.area_save_damage"

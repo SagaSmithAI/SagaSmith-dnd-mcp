@@ -99,6 +99,7 @@ from sagasmith_dnd.character_schema import (
     default_character_notes,
     default_character_sheet,
     derive_character_sheet,
+    effective_size,
     equip_inventory_item,
     receive_inventory_item,
     remove_effect,
@@ -149,6 +150,7 @@ from sagasmith_dnd.combat_engine import (
     force_move_directly_toward,
     pay_activity_activation,
     pay_attack_action,
+    pay_legendary_action,
     pay_multiattack_activity,
     pay_witch_bolt_sustain_action,
     preflight_attack,
@@ -363,7 +365,9 @@ from sagasmith_dnd.statblocks import (
     apply_statblock_variant,
     area_save_damage_spec,
     effective_statblock_rating,
+    frightful_presence_spec,
     gazer_eye_ray_spec,
+    legendary_action_spec,
     parse_2014_statblock,
     recover_2014_statblock_from_ocr,
     source_contest_effect_spec,
@@ -434,6 +438,8 @@ ENGINE_SETTLED_CARD_MECHANIC_IDS = frozenset(
         "dnd5e.core.activity.area_save_damage",
         "dnd5e.core.activity.battle_cry",
         "dnd5e.core.activity.cunning_action",
+        "dnd5e.core.activity.frightful_presence",
+        "dnd5e.core.activity.legendary_action",
         "dnd5e.core.activity.preserve_life",
         "dnd5e.core.activity.random_save_effects",
         "dnd5e.core.activity.second_wind",
@@ -778,11 +784,19 @@ def _agent_evidence_supports_fact(
 ) -> bool:
     """Allow bounded OCR glyph repairs while preserving every numeric token."""
 
+    def normalize_ocr_artifacts(value: str) -> str:
+        # Common layout-OCR artifacts inside a mechanically complete token.
+        # These repairs are deliberately contextual: arbitrary standalone
+        # digits remain untouched and are still compared exactly below.
+        return re.sub(r"reacl1(?=\d+ft)", "reach", value)
+
     # Text layers and OCR engines commonly render a slash inside a numeric
     # weapon range as ``f`` (``150f600``).  Compact evidence has already
     # removed the real slash, so discard only this digit-bounded impostor.
     fact = re.sub(r"(?<=\d)f(?=\d)", "", fact)
     evidence = re.sub(r"(?<=\d)f(?=\d)", "", evidence)
+    fact = normalize_ocr_artifacts(fact)
+    evidence = normalize_ocr_artifacts(evidence)
     if not fact:
         return True
     if fact in evidence:
@@ -837,6 +851,41 @@ def _agent_evidence_supports_fact(
                     elif pair <= {"0", "o"} and "0" in pair:
                         comparable_fact[index] = "0"
                         comparable_candidate[index] = "0"
+                    else:
+                        embedded_glyphs = {
+                            "3": "e",
+                            "4": "a",
+                            "5": "s",
+                            "7": "t",
+                            "8": "b",
+                            "9": "o",
+                        }
+                        candidate_is_glyph = (
+                            candidate_character in embedded_glyphs
+                            and fact_character
+                            == embedded_glyphs[candidate_character]
+                            and index > 0
+                            and index + 1 < len(comparable_candidate)
+                            and comparable_candidate[index - 1].isalpha()
+                            and comparable_candidate[index + 1].isalpha()
+                        )
+                        fact_is_glyph = (
+                            fact_character in embedded_glyphs
+                            and candidate_character
+                            == embedded_glyphs[fact_character]
+                            and index > 0
+                            and index + 1 < len(comparable_fact)
+                            and comparable_fact[index - 1].isalpha()
+                            and comparable_fact[index + 1].isalpha()
+                        )
+                        if candidate_is_glyph or fact_is_glyph:
+                            normalized_character = (
+                                fact_character
+                                if candidate_is_glyph
+                                else candidate_character
+                            )
+                            comparable_fact[index] = normalized_character
+                            comparable_candidate[index] = normalized_character
             normalized_fact = "".join(comparable_fact)
             normalized_candidate = "".join(comparable_candidate)
             if re.findall(r"\d+", normalized_candidate) != re.findall(
@@ -12610,11 +12659,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             if len(encoded_trigger_facts) > 10000:
                 raise CombatEngineError("conditional extra-damage trigger facts are too large")
 
-            target_size = (
-                str(dict(target_record.sheet.get("traits") or {}).get("size") or "")
-                .strip()
-                .casefold()
-            )
+            target_size = effective_size(target_record.sheet)
             if "target_size" in trigger_facts:
                 recorded_target_size = (
                     str(trigger_facts.get("target_size") or "").strip().casefold()
@@ -12803,6 +12848,49 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             response,
         )
 
+    def grant_frightful_presence_immunity(
+        sheet: dict[str, Any],
+        *,
+        source_actor_id: str,
+        immunity_duration: dict[str, Any],
+        source_excerpt: str,
+        revision: int,
+    ) -> dict[str, Any]:
+        """Apply the source-scoped immunity whenever the printed fear effect ends."""
+
+        if any(
+            isinstance(effect, dict)
+            and effect.get("active", True)
+            and effect.get("kind") == "frightful_presence_immunity"
+            and str(effect.get("source") or "") == source_actor_id
+            for effect in sheet.get("effects", [])
+        ):
+            return deepcopy(sheet)
+        updated, _ = add_effect(
+            sheet,
+            {
+                "id": (
+                    f"frightful-presence-immunity:{source_actor_id}:"
+                    f"{revision}"
+                ),
+                "name": "Frightful Presence immunity",
+                "kind": "frightful_presence_immunity",
+                "source": source_actor_id,
+                "active": True,
+                "duration": {
+                    "period": str(
+                        immunity_duration.get("period") or "hour"
+                    ),
+                    "remaining": int(
+                        immunity_duration.get("remaining", 24) or 24
+                    ),
+                },
+                "changes": [],
+                "description": str(source_excerpt or ""),
+            },
+        )
+        return updated
+
     @mcp.tool()
     @_agent_ruling_boundary
     def combat_end_turn(
@@ -12918,7 +13006,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             if (
                 not isinstance(ongoing, dict)
                 or not ongoing.get("active", True)
-                or ongoing.get("kind") != "on_hit_save_condition"
+                or ongoing.get("kind")
+                not in {
+                    "on_hit_save_condition",
+                    "frightful_presence",
+                }
                 or str(ongoing.get("target_id") or "") != actor_id
                 or ongoing.get("repeat_save_timing") != "turn_end"
             ):
@@ -12933,9 +13025,42 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 ),
                 None,
             )
-            if sheet_effect is None or condition not in {
-                str(item).strip().casefold() for item in current_sheet.get("conditions", [])
-            }:
+            condition_present = condition in {
+                str(item).strip().casefold()
+                for item in current_sheet.get("conditions", [])
+            }
+            if sheet_effect is None or not condition_present:
+                if ongoing.get("kind") == "frightful_presence":
+                    current_sheet = grant_frightful_presence_immunity(
+                        current_sheet,
+                        source_actor_id=str(
+                            ongoing.get("source_actor_id") or ""
+                        ),
+                        immunity_duration=dict(
+                            ongoing.get("immunity_duration") or {}
+                        ),
+                        source_excerpt=str(
+                            ongoing.get("source_excerpt") or ""
+                        ),
+                        revision=campaign.revision + 1,
+                    )
+                    ongoing["active"] = False
+                    ongoing["resolution"] = {
+                        "kind": "effect_ended",
+                        "actor_id": actor_id,
+                        "round": int(
+                            next_encounter.get("round", 1) or 1
+                        ),
+                    }
+                    repeat_saves.append(
+                        {
+                            "ongoing_effect_id": effect_id,
+                            "condition": condition,
+                            "save": None,
+                            "condition_ended": True,
+                            "source_immunity_applied": True,
+                        }
+                    )
                 continue
             save_ability = str(ongoing.get("save_ability") or "").strip().casefold()
             save_dc = int(ongoing.get("save_dc", 0) or 0)
@@ -12947,6 +13072,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 kind="save",
                 ability=save_ability,
                 dc=save_dc,
+                save_source_kind=(
+                    "nonmagical_effect"
+                    if ongoing.get("kind") == "frightful_presence"
+                    else None
+                ),
+                save_effect_conditions=[condition],
                 ruleset=str(next_encounter.get("ruleset") or "2014"),
                 rules=effective_rule_context(
                     campaign_id,
@@ -12963,6 +13094,20 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             ended = bool(saved["success"])
             if ended:
                 current_sheet = remove_effect(current_sheet, effect_id)
+                if ongoing.get("kind") == "frightful_presence":
+                    current_sheet = grant_frightful_presence_immunity(
+                        current_sheet,
+                        source_actor_id=str(
+                            ongoing.get("source_actor_id") or ""
+                        ),
+                        immunity_duration=dict(
+                            ongoing.get("immunity_duration") or {}
+                        ),
+                        source_excerpt=str(
+                            ongoing.get("source_excerpt") or ""
+                        ),
+                        revision=campaign.revision + 1,
+                    )
                 ongoing["active"] = False
                 ongoing["resolution"] = {
                     "kind": "repeat_save_success",
@@ -13141,6 +13286,38 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 )
                 sheet = minutes["sheet"]
                 expired.extend(minutes["expired"])
+            for ongoing in next_state["combat"].get(
+                "ongoing_effects", []
+            ):
+                if (
+                    not isinstance(ongoing, dict)
+                    or not ongoing.get("active", True)
+                    or ongoing.get("kind") != "frightful_presence"
+                    or str(ongoing.get("target_id") or "") != target_id
+                    or str(ongoing.get("id") or "") not in expired
+                ):
+                    continue
+                sheet = grant_frightful_presence_immunity(
+                    sheet,
+                    source_actor_id=str(
+                        ongoing.get("source_actor_id") or ""
+                    ),
+                    immunity_duration=dict(
+                        ongoing.get("immunity_duration") or {}
+                    ),
+                    source_excerpt=str(
+                        ongoing.get("source_excerpt") or ""
+                    ),
+                    revision=campaign.revision + 1,
+                )
+                ongoing["active"] = False
+                ongoing["resolution"] = {
+                    "kind": "duration_expired",
+                    "actor_id": target_id,
+                    "round": int(
+                        next_state["combat"].get("round", 1) or 1
+                    ),
+                }
             extension = apply_rule_event(
                 sheet,
                 "duration.advance",
@@ -17846,6 +18023,16 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             if compiled_activity_plan is not None
             else area_save_damage_spec(current.sheet, activity_id)
         )
+        frightful_spec = (
+            None
+            if compiled_activity_plan is not None
+            else frightful_presence_spec(current.sheet, activity_id)
+        )
+        legendary_spec = (
+            None
+            if compiled_activity_plan is not None
+            else legendary_action_spec(current.sheet, activity_id)
+        )
         source_contest_spec = (
             None
             if compiled_activity_plan is not None
@@ -17860,7 +18047,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         random_targets: list[dict[str, Any]] = []
         area_target_records: dict[str, Any] = {}
         area_targets: list[dict[str, Any]] = []
+        area_save_bonuses: dict[str, int] = {}
         area_origin: dict[str, int] | None = None
+        area_endpoint: dict[str, int] | None = None
+        frightful_target_records: dict[str, Any] = {}
+        frightful_targets: list[dict[str, Any]] = []
+        legendary_wing_target_records: dict[str, Any] = {}
+        legendary_wing_targets: list[dict[str, Any]] = []
+        legendary_wing_save_bonuses: dict[str, int] = {}
+        legendary_wing_destination: dict[str, int] | None = None
         source_save_target_record = None
         source_save_target: dict[str, Any] | None = None
         source_contest_target_record = None
@@ -17872,30 +18067,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "source area saving-throw settlement requires the Agent in the DM role"
                 )
             declared = dict(declaration or {})
-            if set(declared) != {"origin"}:
-                raise CombatEngineError(
-                    "area saving-throw activity declaration requires only origin"
-                )
-            raw_origin = declared.get("origin")
-            if not isinstance(raw_origin, dict) or set(raw_origin) != {"x", "y"}:
-                raise CombatEngineError(
-                    "area saving-throw activity origin requires integer x and y"
-                )
-            if any(
-                isinstance(raw_origin[coordinate], bool)
-                or not isinstance(raw_origin[coordinate], int)
-                for coordinate in ("x", "y")
-            ):
-                raise CombatEngineError(
-                    "area saving-throw activity origin requires integer x and y"
-                )
-            area_origin = {
-                "x": int(raw_origin["x"]),
-                "y": int(raw_origin["y"]),
-            }
             battle_map = dict(encounter.get("battle_map") or {})
-            if battle_map:
-                validate_position(battle_map, area_origin)
             cell_ft = int(
                 dict(battle_map.get("grid") or {}).get("cell_ft", 5) or 5
             )
@@ -17928,34 +18100,107 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "a blinded source cannot choose a point it can see"
                 )
             origin_contract = dict(area_save_spec.get("origin") or {})
-            if origin_contract.get("kind") != "visible_point":
-                raise CombatEngineError(
-                    "unsupported area saving-throw origin contract"
-                )
-            origin_distance = combat_distance(
-                source_position,
-                area_origin,
-                cell_ft=cell_ft,
-            )
-            if (
-                origin_distance is None
-                or origin_distance > int(origin_contract.get("range_ft", 0) or 0)
-            ):
-                raise CombatEngineError(
-                    "area saving-throw origin is outside the recorded range"
-                )
             area_contract = dict(area_save_spec.get("area") or {})
+            origin_kind = str(origin_contract.get("kind") or "")
+            shape = str(area_contract.get("shape") or "")
             if (
-                area_contract.get("shape") != "radius"
-                or area_save_spec.get("targets") != "each_creature"
+                origin_kind == "visible_point"
+                and shape == "radius"
+                and area_save_spec.get("targets") == "each_creature"
             ):
+                if set(declared) != {"origin", "target_contexts"}:
+                    raise CombatEngineError(
+                        "point-radius saving-throw activity requires origin "
+                        "and target_contexts"
+                    )
+                raw_origin = declared.get("origin")
+                if (
+                    not isinstance(raw_origin, dict)
+                    or set(raw_origin) != {"x", "y"}
+                    or any(
+                        isinstance(raw_origin[coordinate], bool)
+                        or not isinstance(raw_origin[coordinate], int)
+                        for coordinate in ("x", "y")
+                    )
+                ):
+                    raise CombatEngineError(
+                        "area saving-throw origin requires integer x and y"
+                    )
+                area_origin = {
+                    "x": int(raw_origin["x"]),
+                    "y": int(raw_origin["y"]),
+                }
+                if battle_map:
+                    validate_position(battle_map, area_origin)
+                origin_distance = combat_distance(
+                    source_position,
+                    area_origin,
+                    cell_ft=cell_ft,
+                )
+                if (
+                    origin_distance is None
+                    or origin_distance
+                    > int(origin_contract.get("range_ft", 0) or 0)
+                ):
+                    raise CombatEngineError(
+                        "area saving-throw origin is outside the recorded range"
+                    )
+                radius_ft = int(area_contract.get("radius_ft", 0) or 0)
+                if radius_ft <= 0:
+                    raise CombatEngineError(
+                        "area saving-throw radius must be positive"
+                    )
+            elif (
+                origin_kind == "self"
+                and shape == "line"
+                and area_save_spec.get("targets") == "each_creature"
+            ):
+                if set(declared) != {"endpoint", "target_contexts"}:
+                    raise CombatEngineError(
+                        "self-line saving-throw activity requires endpoint "
+                        "and target_contexts"
+                    )
+                raw_endpoint = declared.get("endpoint")
+                if (
+                    not isinstance(raw_endpoint, dict)
+                    or set(raw_endpoint) != {"x", "y"}
+                    or any(
+                        isinstance(raw_endpoint[coordinate], bool)
+                        or not isinstance(raw_endpoint[coordinate], int)
+                        for coordinate in ("x", "y")
+                    )
+                ):
+                    raise CombatEngineError(
+                        "area saving-throw endpoint requires integer x and y"
+                    )
+                area_origin = {
+                    "x": int(source_position["x"]),
+                    "y": int(source_position["y"]),
+                }
+                area_endpoint = {
+                    "x": int(raw_endpoint["x"]),
+                    "y": int(raw_endpoint["y"]),
+                }
+                if battle_map:
+                    validate_position(battle_map, area_endpoint)
+                length_ft = int(area_contract.get("length_ft", 0) or 0)
+                width_ft = int(area_contract.get("width_ft", 0) or 0)
+                endpoint_distance = math.hypot(
+                    int(area_endpoint["x"]) - int(area_origin["x"]),
+                    int(area_endpoint["y"]) - int(area_origin["y"]),
+                ) * cell_ft
+                if (
+                    length_ft <= 0
+                    or width_ft <= 0
+                    or endpoint_distance <= 0
+                    or endpoint_distance > length_ft
+                ):
+                    raise CombatEngineError(
+                        "area saving-throw line endpoint is outside its recorded length"
+                    )
+            else:
                 raise CombatEngineError(
                     "unsupported area saving-throw target contract"
-                )
-            radius_ft = int(area_contract.get("radius_ft", 0) or 0)
-            if radius_ft <= 0:
-                raise CombatEngineError(
-                    "area saving-throw radius must be positive"
                 )
             for target_combatant in encounter.get("combatants", []):
                 target_id = str(target_combatant.get("actor_id") or "")
@@ -17972,13 +18217,39 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         "combatant position",
                         missing=(f"area_save_target_position:{target_id}",),
                     )
-                distance = combat_distance(
-                    area_origin,
-                    target_position,
-                    cell_ft=cell_ft,
-                )
-                if distance is None or distance > radius_ft:
-                    continue
+                if shape == "radius":
+                    distance = combat_distance(
+                        area_origin,
+                        target_position,
+                        cell_ft=cell_ft,
+                    )
+                    if distance is None or distance > radius_ft:
+                        continue
+                else:
+                    assert area_endpoint is not None
+                    origin_x = float(area_origin["x"])
+                    origin_y = float(area_origin["y"])
+                    delta_x = float(area_endpoint["x"]) - origin_x
+                    delta_y = float(area_endpoint["y"]) - origin_y
+                    squared_length = delta_x**2 + delta_y**2
+                    target_x = float(target_position["x"]) - origin_x
+                    target_y = float(target_position["y"]) - origin_y
+                    projection = (
+                        target_x * delta_x + target_y * delta_y
+                    ) / squared_length
+                    perpendicular_ft = (
+                        abs(target_x * delta_y - target_y * delta_x)
+                        / math.sqrt(squared_length)
+                        * cell_ft
+                    )
+                    if (
+                        target_id == actor_id
+                        or projection <= 0
+                        or projection > 1
+                        or perpendicular_ft
+                        > float(area_contract["width_ft"]) / 2
+                    ):
+                        continue
                 target = require_campaign_actor(campaign_id, target_id)
                 access.require_actor(
                     campaign_id,
@@ -17988,6 +18259,388 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 )
                 area_target_records[target_id] = target
                 area_targets.append(combat_actor_snapshot(target_id))
+            target_contexts = declared.get("target_contexts")
+            if not isinstance(target_contexts, list):
+                raise CombatEngineError(
+                    "area saving-throw target_contexts must be a list"
+                )
+            normalized_contexts: dict[str, str] = {}
+            for context in target_contexts:
+                if (
+                    not isinstance(context, dict)
+                    or set(context) != {"target_id", "cover"}
+                ):
+                    raise CombatEngineError(
+                        "each area target context requires target_id and cover"
+                    )
+                target_id = str(context.get("target_id") or "").strip()
+                cover = (
+                    str(context.get("cover") or "")
+                    .strip()
+                    .casefold()
+                    .replace("-", "_")
+                )
+                if (
+                    not target_id
+                    or target_id in normalized_contexts
+                    or cover
+                    not in {
+                        "none",
+                        "half",
+                        "three_quarters",
+                        "total",
+                    }
+                ):
+                    raise CombatEngineError(
+                        "area target contexts require unique targets and a "
+                        "rules-defined cover degree"
+                    )
+                normalized_contexts[target_id] = cover
+            geometric_target_ids = set(area_target_records)
+            if set(normalized_contexts) != geometric_target_ids:
+                raise CombatEngineError(
+                    "area target_contexts must cover every living creature "
+                    "inside the geometric area"
+                )
+            totally_covered = {
+                target_id
+                for target_id, cover in normalized_contexts.items()
+                if cover == "total"
+            }
+            for target_id in totally_covered:
+                area_target_records.pop(target_id, None)
+            area_targets = [
+                target
+                for target in area_targets
+                if str(target.get("id") or "") not in totally_covered
+            ]
+            area_save_bonuses = {
+                target_id: {
+                    "none": 0,
+                    "half": 2,
+                    "three_quarters": 5,
+                }[cover]
+                for target_id, cover in normalized_contexts.items()
+                if cover != "total"
+            }
+        if frightful_spec is not None:
+            if not is_dm(campaign_id, principal_id):
+                raise PermissionError(
+                    "Frightful Presence settlement requires the Agent in the DM role"
+                )
+            declared = dict(declaration or {})
+            if set(declared) != {"targets"} or not isinstance(
+                declared.get("targets"), list
+            ):
+                raise CombatEngineError(
+                    "Frightful Presence declaration requires only a targets list"
+                )
+            source_combatant = next(
+                (
+                    item
+                    for item in encounter.get("combatants", [])
+                    if str(item.get("actor_id") or "") == actor_id
+                ),
+                None,
+            )
+            source_position = dict((source_combatant or {}).get("position") or {})
+            if set(source_position) != {"x", "y"}:
+                raise NeedsRulingError(
+                    "Frightful Presence requires the source position",
+                    missing=("frightful_presence_source_position",),
+                )
+            selected_ids: set[str] = set()
+            for selected in declared["targets"]:
+                if (
+                    not isinstance(selected, dict)
+                    or set(selected) != {"target_id", "aware"}
+                    or selected.get("aware") is not True
+                ):
+                    raise CombatEngineError(
+                        "each Frightful Presence target requires target_id and aware=true"
+                    )
+                target_id = str(selected.get("target_id") or "").strip()
+                if not target_id or target_id == actor_id or target_id in selected_ids:
+                    raise CombatEngineError(
+                        "Frightful Presence targets must be unique other actors"
+                    )
+                selected_ids.add(target_id)
+                target_combatant = next(
+                    (
+                        item
+                        for item in encounter.get("combatants", [])
+                        if str(item.get("actor_id") or "") == target_id
+                    ),
+                    None,
+                )
+                target_position = dict(
+                    (target_combatant or {}).get("position") or {}
+                )
+                target_conditions = {
+                    str(item).strip().casefold()
+                    for item in (target_combatant or {}).get("conditions", [])
+                }
+                source_immunities = dict(
+                    (target_combatant or {}).get("source_immunities") or {}
+                )
+                target_record = (
+                    require_campaign_actor(campaign_id, target_id)
+                    if target_combatant is not None
+                    else None
+                )
+                source_immunity_effect = any(
+                    isinstance(effect, dict)
+                    and effect.get("active", True)
+                    and effect.get("kind")
+                    == "frightful_presence_immunity"
+                    and str(effect.get("source") or "") == actor_id
+                    for effect in (
+                        (target_record.sheet if target_record else {}).get(
+                            "effects", []
+                        )
+                    )
+                )
+                if (
+                    target_combatant is None
+                    or "dead" in target_conditions
+                    or set(target_position) != {"x", "y"}
+                    or actor_id in source_immunities.get(
+                        "frightful_presence", []
+                    )
+                    or source_immunity_effect
+                ):
+                    raise CombatEngineError(
+                        "Frightful Presence target is absent, dead, unpositioned, "
+                        "or immune to this source"
+                    )
+                distance = combat_distance(
+                    source_position,
+                    target_position,
+                    cell_ft=int(
+                        dict(
+                            dict(encounter.get("battle_map") or {}).get("grid")
+                            or {}
+                        ).get("cell_ft", 5)
+                        or 5
+                    ),
+                )
+                if (
+                    distance is None
+                    or distance > int(frightful_spec["range_ft"])
+                ):
+                    raise CombatEngineError(
+                        "Frightful Presence target is outside the recorded range"
+                    )
+                assert target_record is not None
+                target = target_record
+                access.require_actor(
+                    campaign_id,
+                    target_id,
+                    principal_id,
+                    control=True,
+                )
+                frightful_target_records[target_id] = target
+                frightful_targets.append(combat_actor_snapshot(target_id))
+            if not frightful_targets:
+                raise CombatEngineError(
+                    "Frightful Presence requires at least one chosen aware target"
+                )
+        if legendary_spec is not None:
+            if not is_dm(campaign_id, principal_id):
+                raise PermissionError(
+                    "legendary actions require the Agent in the DM role"
+                )
+            legendary_effect = dict(legendary_spec.get("effect") or {})
+            legendary_kind = str(legendary_effect.get("kind") or "")
+            declared = dict(declaration or {})
+            if legendary_kind in {"skill_check", "weapon_attack"}:
+                if declared:
+                    raise CombatEngineError(
+                        "this legendary action accepts no declaration"
+                    )
+            elif legendary_kind == "wing_attack_2014":
+                if set(declared) not in (
+                    {"target_contexts"},
+                    {"destination", "target_contexts"},
+                ):
+                    raise CombatEngineError(
+                        "Wing Attack requires target_contexts and accepts "
+                        "only an optional destination"
+                    )
+                source_combatant = next(
+                    (
+                        item
+                        for item in encounter.get("combatants", [])
+                        if str(item.get("actor_id") or "") == actor_id
+                    ),
+                    None,
+                )
+                source_position = dict(
+                    (source_combatant or {}).get("position") or {}
+                )
+                if set(source_position) != {"x", "y"}:
+                    raise NeedsRulingError(
+                        "Wing Attack requires the source position",
+                        missing=("wing_attack_source_position",),
+                    )
+                raw_destination = declared.get("destination")
+                if raw_destination is not None:
+                    if (
+                        not isinstance(raw_destination, dict)
+                        or set(raw_destination) != {"x", "y"}
+                        or any(
+                            isinstance(raw_destination[coordinate], bool)
+                            or not isinstance(raw_destination[coordinate], int)
+                            for coordinate in ("x", "y")
+                        )
+                    ):
+                        raise CombatEngineError(
+                            "Wing Attack destination requires integer x and y"
+                        )
+                    legendary_wing_destination = {
+                        "x": int(raw_destination["x"]),
+                        "y": int(raw_destination["y"]),
+                    }
+                    battle_map = dict(encounter.get("battle_map") or {})
+                    if battle_map:
+                        validate_position(
+                            battle_map,
+                            legendary_wing_destination,
+                        )
+                    fly_speed = int(
+                        dict(derive_character_sheet(current.sheet).get("speed") or {}).get(
+                            "fly", 0
+                        )
+                        or 0
+                    )
+                    distance = combat_distance(
+                        source_position,
+                        legendary_wing_destination,
+                        cell_ft=int(
+                            dict(battle_map.get("grid") or {}).get(
+                                "cell_ft", 5
+                            )
+                            or 5
+                        ),
+                    )
+                    if (
+                        fly_speed <= 0
+                        or distance is None
+                        or distance > fly_speed // 2
+                    ):
+                        raise CombatEngineError(
+                            "Wing Attack destination exceeds half the flying speed"
+                        )
+                radius = int(
+                    dict(legendary_effect.get("area") or {}).get(
+                        "radius_ft", 0
+                    )
+                    or 0
+                )
+                for target_combatant in encounter.get("combatants", []):
+                    target_id = str(target_combatant.get("actor_id") or "")
+                    if target_id == actor_id or "dead" in {
+                        str(item).strip().casefold()
+                        for item in target_combatant.get("conditions", [])
+                    }:
+                        continue
+                    target_position = dict(
+                        target_combatant.get("position") or {}
+                    )
+                    if set(target_position) != {"x", "y"}:
+                        raise NeedsRulingError(
+                            "Wing Attack requires every living combatant position",
+                            missing=(f"wing_attack_target_position:{target_id}",),
+                        )
+                    if (
+                        combat_distance(source_position, target_position)
+                        or 0
+                    ) > radius:
+                        continue
+                    target = require_campaign_actor(campaign_id, target_id)
+                    access.require_actor(
+                        campaign_id,
+                        target_id,
+                        principal_id,
+                        control=True,
+                    )
+                    legendary_wing_target_records[target_id] = target
+                    legendary_wing_targets.append(
+                        combat_actor_snapshot(target_id)
+                    )
+                target_contexts = declared.get("target_contexts")
+                if not isinstance(target_contexts, list):
+                    raise CombatEngineError(
+                        "Wing Attack target_contexts must be a list"
+                    )
+                normalized_contexts: dict[str, str] = {}
+                for context in target_contexts:
+                    if (
+                        not isinstance(context, dict)
+                        or set(context) != {"target_id", "cover"}
+                    ):
+                        raise CombatEngineError(
+                            "each Wing Attack target context requires "
+                            "target_id and cover"
+                        )
+                    target_id = str(
+                        context.get("target_id") or ""
+                    ).strip()
+                    cover = (
+                        str(context.get("cover") or "")
+                        .strip()
+                        .casefold()
+                        .replace("-", "_")
+                    )
+                    if (
+                        not target_id
+                        or target_id in normalized_contexts
+                        or cover
+                        not in {
+                            "none",
+                            "half",
+                            "three_quarters",
+                            "total",
+                        }
+                    ):
+                        raise CombatEngineError(
+                            "Wing Attack target contexts require unique "
+                            "targets and a rules-defined cover degree"
+                        )
+                    normalized_contexts[target_id] = cover
+                geometric_target_ids = set(
+                    legendary_wing_target_records
+                )
+                if set(normalized_contexts) != geometric_target_ids:
+                    raise CombatEngineError(
+                        "Wing Attack target_contexts must cover every living "
+                        "creature inside its radius"
+                    )
+                totally_covered = {
+                    target_id
+                    for target_id, cover in normalized_contexts.items()
+                    if cover == "total"
+                }
+                for target_id in totally_covered:
+                    legendary_wing_target_records.pop(target_id, None)
+                legendary_wing_targets = [
+                    target
+                    for target in legendary_wing_targets
+                    if str(target.get("id") or "") not in totally_covered
+                ]
+                legendary_wing_save_bonuses = {
+                    target_id: {
+                        "none": 0,
+                        "half": 2,
+                        "three_quarters": 5,
+                    }[cover]
+                    for target_id, cover in normalized_contexts.items()
+                    if cover != "total"
+                }
+            else:
+                raise CombatEngineError(
+                    "unsupported legendary-action effect contract"
+                )
         if random_save_spec is not None:
             if not is_dm(campaign_id, principal_id):
                 raise PermissionError(
@@ -18455,7 +19108,16 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 if isinstance(item, dict)
             )
         )
-        if source_save_is_followup:
+        if legendary_spec is not None:
+            next_encounter, activity_activation_payment = (
+                pay_legendary_action(
+                    encounter,
+                    actor_id_value=actor_id,
+                    activity_id=activity_id,
+                    spec=legendary_spec,
+                )
+            )
+        elif source_save_is_followup:
             next_encounter, activity_activation_payment = pay_multiattack_activity(
                 encounter,
                 actor_id,
@@ -18508,6 +19170,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         area_save_spec["half_on_success"]
                     ),
                     source=str(activity_card.get("name") or activity_id),
+                    save_bonuses_by_actor_id=area_save_bonuses,
                     death_saves_by_actor_id={
                         str(item.get("actor_id") or ""): bool(
                             item.get("death_saves", False)
@@ -18516,7 +19179,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         for item in next_encounter.get("combatants", [])
                     },
                     ruleset=str(next_encounter.get("ruleset") or "2014"),
-                    rules=rule_context,
+                    rules=context_with_facts(
+                        rule_context,
+                        save_source_kind=str(
+                            area_save_spec["save_source_kind"]
+                        ),
+                    ),
                 )
                 area_result = settled_area["result"]
             else:
@@ -18566,11 +19234,338 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "kind": "area_save_damage",
                 "contract": str(area_save_spec.get("kind") or ""),
                 "origin": area_origin,
+                **(
+                    {"endpoint": area_endpoint}
+                    if area_endpoint is not None
+                    else {}
+                ),
                 "damage_roll": area_result["damage_roll"],
                 "targets": area_result["targets"],
+                "target_contexts": deepcopy(
+                    dict(declaration or {}).get("target_contexts") or []
+                ),
                 "activation_payment": activity_activation_payment,
                 "requires_ruling": False,
             }
+        if frightful_spec is not None:
+            frightful_results: list[dict[str, Any]] = []
+            immunity_duration = dict(
+                frightful_spec.get("immunity_on_success_or_end") or {}
+            )
+            for target_actor in frightful_targets:
+                target_id = str(target_actor["id"])
+                saved = resolve_actor_check(
+                    target_actor,
+                    kind="save",
+                    ability=str(frightful_spec["save_ability"]),
+                    dc=int(frightful_spec["save_dc"]),
+                    save_source_kind="nonmagical_effect",
+                    save_effect_conditions=["frightened"],
+                    ruleset=str(next_encounter.get("ruleset") or "2014"),
+                    rules=effective_rule_context(
+                        campaign_id,
+                        facts={
+                            "actor_id": target_id,
+                            "source_actor_id": actor_id,
+                            "kind": "frightful_presence",
+                        },
+                    ),
+                )
+                target_sheet = deepcopy(target_actor["sheet"])
+                effect_id: str | None = None
+                condition_applied = False
+                if saved["success"]:
+                    target_sheet = grant_frightful_presence_immunity(
+                        target_sheet,
+                        source_actor_id=actor_id,
+                        immunity_duration=immunity_duration,
+                        source_excerpt=str(
+                            frightful_spec.get("source_excerpt") or ""
+                        ),
+                        revision=campaign.revision + 1,
+                    )
+                else:
+                    effect_id = (
+                        f"frightful-presence:{actor_id}:{target_id}"
+                    )
+                    target_sheet, _ = add_effect(
+                        target_sheet,
+                        {
+                            "id": effect_id,
+                            "name": "Frightful Presence",
+                            "kind": "timed_conditions",
+                            "source": actor_id,
+                            "active": True,
+                            "duration": deepcopy(frightful_spec["duration"]),
+                            "changes": [
+                                {
+                                    "path": "conditions",
+                                    "mode": "add",
+                                    "value": ["frightened"],
+                                }
+                            ],
+                            "description": str(
+                                frightful_spec.get("source_excerpt") or ""
+                            ),
+                        },
+                    )
+                    condition_applied = "frightened" in {
+                        str(item).strip().casefold()
+                        for item in target_sheet.get("conditions", [])
+                    }
+                    if condition_applied:
+                        next_encounter["ongoing_effects"] = [
+                            *list(
+                                next_encounter.get("ongoing_effects") or []
+                            ),
+                            {
+                                "id": effect_id,
+                                "kind": "frightful_presence",
+                                "source_actor_id": actor_id,
+                                "target_id": target_id,
+                                "condition": "frightened",
+                                "save_ability": str(
+                                    frightful_spec["save_ability"]
+                                ),
+                                "save_dc": int(
+                                    frightful_spec["save_dc"]
+                                ),
+                                "repeat_save_timing": "turn_end",
+                                "immunity_duration": immunity_duration,
+                                "source_excerpt": str(
+                                    frightful_spec.get("source_excerpt") or ""
+                                ),
+                                "active": True,
+                            },
+                        ]
+                    else:
+                        target_sheet = remove_effect(
+                            target_sheet,
+                            effect_id,
+                        )
+                        effect_id = None
+                target_sheet = validate_character_sheet(target_sheet)
+                sync_combatant_conditions(
+                    next_encounter,
+                    target_id,
+                    target_sheet,
+                )
+                target_record = frightful_target_records[target_id]
+                additional_updates.append(
+                    CharacterStateUpdate(
+                        character_id=target_id,
+                        sheet=target_sheet,
+                        notes=validate_character_notes(
+                            target_record.notes
+                        ),
+                        expected_revision=target_record.revision,
+                    )
+                )
+                frightful_results.append(
+                    {
+                        "target_id": target_id,
+                        "save": saved,
+                        "condition_applied": condition_applied,
+                        "effect_id": effect_id,
+                        "source_immunity_applied": bool(saved["success"]),
+                    }
+                )
+            core_effect = {
+                "kind": "frightful_presence",
+                "targets": frightful_results,
+                "activation_payment": activity_activation_payment,
+                "requires_ruling": False,
+            }
+        if legendary_spec is not None:
+            legendary_effect = dict(legendary_spec.get("effect") or {})
+            legendary_kind = str(legendary_effect.get("kind") or "")
+            if legendary_kind == "skill_check":
+                source_actor = combat_actor_snapshot(actor_id)
+                source_actor["sheet"] = applied["sheet"]
+                source_actor["derived"] = derive_character_sheet(
+                    applied["sheet"]
+                )
+                skill_name = str(legendary_effect["skill"])
+                core_effect = {
+                    "kind": "legendary_action",
+                    "effect_kind": "skill_check",
+                    "check": resolve_actor_check(
+                        source_actor,
+                        kind="ability",
+                        ability=skill_name,
+                        dc=0,
+                        ruleset=str(
+                            next_encounter.get("ruleset") or "2014"
+                        ),
+                        rules=rule_context,
+                    ),
+                    "activation_payment": activity_activation_payment,
+                    "requires_ruling": False,
+                }
+            elif legendary_kind == "weapon_attack":
+                core_effect = {
+                    "kind": "legendary_action",
+                    "effect_kind": "weapon_attack",
+                    "weapon_id": str(legendary_effect["weapon_id"]),
+                    "attack_mode": str(legendary_effect["attack_mode"]),
+                    "attack_pending": True,
+                    "activation_payment": activity_activation_payment,
+                    "requires_ruling": False,
+                }
+            elif legendary_kind == "wing_attack_2014":
+                if legendary_wing_targets:
+                    settled_wing = resolve_save_damage_to_sheets(
+                        legendary_wing_targets,
+                        save_ability=str(
+                            legendary_effect["save_ability"]
+                        ),
+                        save_dc=int(legendary_effect["save_dc"]),
+                        damage_expression=str(
+                            legendary_effect["damage_formula"]
+                        ),
+                        damage_type=str(
+                            legendary_effect["damage_type"]
+                        ),
+                        half_on_success=False,
+                        source=str(
+                            activity_card.get("name") or activity_id
+                        ),
+                        save_bonuses_by_actor_id=(
+                            legendary_wing_save_bonuses
+                        ),
+                        death_saves_by_actor_id={
+                            str(item.get("actor_id") or ""): bool(
+                                item.get("death_saves", False)
+                                or item.get("zero_hp_recovery", False)
+                            )
+                            for item in next_encounter.get(
+                                "combatants", []
+                            )
+                        },
+                        ruleset=str(
+                            next_encounter.get("ruleset") or "2014"
+                        ),
+                        rules=context_with_facts(
+                            rule_context,
+                            save_source_kind=str(
+                                legendary_effect["save_source_kind"]
+                            ),
+                        ),
+                    )
+                    wing_result = settled_wing["result"]
+                else:
+                    settled_wing = {"sheets": {}}
+                    wing_result = {
+                        "kind": "save_damage",
+                        "damage_roll": None,
+                        "targets": [],
+                    }
+                for target_result in wing_result["targets"]:
+                    target_id = str(target_result["target_id"])
+                    target_sheet = deepcopy(
+                        settled_wing["sheets"][target_id]
+                    )
+                    if not bool(
+                        dict(target_result.get("save") or {}).get("success")
+                    ):
+                        apply_condition_change(
+                            target_sheet,
+                            condition_id="prone",
+                            add=True,
+                        )
+                    target_sheet = validate_character_sheet(target_sheet)
+                    sync_combatant_conditions(
+                        next_encounter,
+                        target_id,
+                        target_sheet,
+                    )
+                    concentration = dict(
+                        dict(target_result.get("damage") or {}).get(
+                            "concentration"
+                        )
+                        or {}
+                    )
+                    add_concentration_window(
+                        next_encounter,
+                        target_id,
+                        concentration or None,
+                        next_revision=campaign.revision + 1,
+                    )
+                    target_record = legendary_wing_target_records[target_id]
+                    additional_updates.append(
+                        CharacterStateUpdate(
+                            character_id=target_id,
+                            sheet=target_sheet,
+                            notes=validate_character_notes(
+                                target_record.notes
+                            ),
+                            expected_revision=target_record.revision,
+                        )
+                    )
+                if legendary_wing_destination is not None:
+                    source_combatant = next(
+                        item
+                        for item in next_encounter.get("combatants", [])
+                        if str(item.get("actor_id") or "") == actor_id
+                    )
+                    fly_speed = int(
+                        dict(
+                            derive_character_sheet(
+                                applied["sheet"]
+                            ).get("speed")
+                            or {}
+                        ).get("fly", 0)
+                        or 0
+                    )
+                    flags = dict(source_combatant.get("turn_flags") or {})
+                    flags["legendary_wing_movement"] = {
+                        "remaining_ft": fly_speed // 2,
+                        "turn_token": str(
+                            activity_activation_payment["turn_token"]
+                        ),
+                        "activity_id": activity_id,
+                    }
+                    source_combatant["turn_flags"] = flags
+                    origin = dict(source_combatant.get("position") or {})
+                    movement_distance = int(
+                        combat_distance(
+                            origin,
+                            legendary_wing_destination,
+                            cell_ft=int(
+                                dict(
+                                    dict(
+                                        next_encounter.get("battle_map")
+                                        or {}
+                                    ).get("grid")
+                                    or {}
+                                ).get("cell_ft", 5)
+                                or 5
+                            ),
+                        )
+                        or 0
+                    )
+                    next_encounter = spend_movement(
+                        next_encounter,
+                        actor_id,
+                        movement_distance,
+                        destination=legendary_wing_destination,
+                        movement_mode="legendary_wing",
+                    )
+                core_effect = {
+                    "kind": "legendary_action",
+                    "effect_kind": "wing_attack_2014",
+                    "damage_roll": wing_result["damage_roll"],
+                    "targets": wing_result["targets"],
+                    "target_contexts": deepcopy(
+                        dict(declaration or {}).get(
+                            "target_contexts"
+                        )
+                        or []
+                    ),
+                    "destination": legendary_wing_destination,
+                    "activation_payment": activity_activation_payment,
+                    "requires_ruling": False,
+                }
         if random_save_spec is not None:
             source_actor = combat_actor_snapshot(actor_id)
             source_actor["sheet"] = applied["sheet"]
@@ -18852,6 +19847,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "aggressive": "dnd5e.core.monster.aggressive",
                 "battle_cry": "dnd5e.core.activity.battle_cry",
                 "cunning_action": "dnd5e.core.activity.cunning_action",
+                "frightful_presence": (
+                    "dnd5e.core.activity.frightful_presence"
+                ),
+                "legendary_action": (
+                    "dnd5e.core.activity.legendary_action"
+                ),
                 "second_wind": "dnd5e.core.activity.second_wind",
                 "turn_undead": "dnd5e.core.activity.turn_undead",
                 "random_save_effects": "dnd5e.core.activity.random_save_effects",
