@@ -42,6 +42,18 @@ REACTIVE_COMMONER = COMMONER + """
 """
 
 
+BROKEN_SPELLCASTER = COMMONER.replace(
+    "###### Actions",
+    """***Spellcasting***. The commoner is a 1st-level spellcaster. Its
+spellcasting ability is Intelligence (spell save DC 10, +2 to hit with spell
+attacks). It has the following wizard spells prepared:
+
+Cantrips (at will): fire boit
+
+###### Actions""",
+)
+
+
 SPLIT_GUARD_LAYOUT = """# Appendix B: Nonplayer Characters
 
 ## CULT FANATIC
@@ -704,6 +716,94 @@ def test_rule_statblock_recovers_split_text_layout_without_images(tmp_path: Path
                         "character_type": "monster",
                     },
                     "idempotency_key": "reject-wrong-card",
+                },
+            )
+
+    asyncio.run(exercise())
+
+
+def test_standard_statblock_rejects_damaged_spell_names_before_persist(
+    tmp_path: Path,
+) -> None:
+    import_root = tmp_path / "rules"
+    import_root.mkdir()
+    source_path = import_root / "broken-spellcaster.md"
+    source_path.write_text(BROKEN_SPELLCASTER, encoding="utf-8")
+    config = McpConfig(
+        home=tmp_path / "home",
+        database_url=None,
+        chroma_url=None,
+        chroma_path_override=None,
+        dnd_skills_dir=tmp_path / "dnd",
+        modulegen_skills_dir=tmp_path / "modulegen",
+        rule_import_roots=(import_root,),
+        auto_seed_rules=False,
+    )
+
+    async def exercise() -> None:
+        server = create_server(config)
+        campaign = await _call(
+            server,
+            "campaign_create",
+            {
+                "name": "Damaged spell source gate",
+                "edition": "2014",
+                "idempotency_key": "campaign",
+            },
+        )
+        staged = await _call(
+            server,
+            "rule_import",
+            {
+                "campaign_id": campaign["id"],
+                "action": "stage",
+                "payload": {
+                    "source_path": str(source_path),
+                    "source_key": "mm/broken-spellcaster",
+                    "title": "Broken Spellcaster",
+                    "edition": "2014",
+                    "publication_id": "mm2014",
+                },
+                "idempotency_key": "stage",
+            },
+        )
+        await _call(
+            server,
+            "rule_import",
+            {
+                "campaign_id": campaign["id"],
+                "action": "inspect",
+                "payload": {"job_id": staged["job"]["id"]},
+                "idempotency_key": "inspect",
+            },
+        )
+        ingested = await _call(
+            server,
+            "rule_import",
+            {
+                "campaign_id": campaign["id"],
+                "action": "ingest",
+                "payload": {"job_id": staged["job"]["id"]},
+                "idempotency_key": "ingest",
+            },
+        )
+
+        with pytest.raises(
+            ToolError,
+            match="standard rule spell list requires source recovery.*fire boit",
+        ):
+            await _call(
+                server,
+                "character_create_from",
+                {
+                    "mode": "statblock",
+                    "payload": {
+                        "campaign_id": campaign["id"],
+                        "source_id": ingested["source_id"],
+                        "name": "Rejected Broken Spellcaster",
+                        "character_type": "monster",
+                    },
+                    "idempotency_key": "reject-broken-spellcaster",
                 },
             )
 

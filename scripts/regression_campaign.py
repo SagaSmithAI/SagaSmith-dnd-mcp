@@ -3353,6 +3353,7 @@ async def _prepare_rule_statblock(args: argparse.Namespace) -> dict[str, Any]:
                             " score is ambiguous",
                             "contain no creature core headed",
                             "contains unparsed weapon action markers",
+                            "standard rule spell list requires source recovery",
                         )
                     )
                     if (

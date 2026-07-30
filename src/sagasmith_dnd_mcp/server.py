@@ -2555,6 +2555,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     def require_standard_statblock_engine_support(
         sheet: dict[str, Any],
         agent_fill: dict[str, Any] | None,
+        *,
+        spell_warnings: list[str] | tuple[str, ...] = (),
     ) -> dict[str, Any]:
         """Keep canonical rulebook mechanics authoritative in the engine.
 
@@ -2608,6 +2610,21 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             raise ValueError(
                 "standard rule card requires engine implementation: "
                 + ", ".join(names)
+            )
+        incomplete_spells = sorted(
+            warning
+            for warning in spell_warnings
+            if warning.endswith(
+                (
+                    "no active spell artifact or complete statblock action exists",
+                    "multiple active spell artifacts match the statblock entry",
+                )
+            )
+        )
+        if incomplete_spells:
+            raise ValueError(
+                "standard rule spell list requires source recovery: "
+                + "; ".join(incomplete_spells)
             )
         return {
             "required": False,
@@ -33979,6 +33996,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             require_standard_statblock_engine_support(
                 hydrated_sheet,
                 reviewed_fill,
+                spell_warnings=spell_warnings,
             )
             filled = (
                 apply_reviewed_statblock_fill(hydrated_sheet, reviewed_fill)
@@ -34388,6 +34406,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             require_standard_statblock_engine_support(
                 hydrated_sheet,
                 None,
+                spell_warnings=spell_warnings,
             )
             variant = data.get("variant")
             variant_evidence = statblock_variant_evidence(campaign_id, variant)
