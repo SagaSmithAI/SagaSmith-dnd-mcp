@@ -744,6 +744,19 @@ def _arguments() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--agent-death-trigger-ruling-json",
+        action="append",
+        type=json.loads,
+        default=[],
+        help=(
+            "Agent-as-DM scene-fact settlement for one engine-owned standard "
+            "death trigger: actor_id, decision, ruling_reason, and an explicit "
+            "ignited_objects list of {id, description}. The engine owns the "
+            "printed save and damage; the Agent only identifies qualifying "
+            "unattended flammable objects in the recorded area."
+        ),
+    )
+    parser.add_argument(
         "--agent-object-interaction-json",
         action="append",
         type=json.loads,
@@ -3880,6 +3893,86 @@ def _agent_turn_rulings(
     return normalized
 
 
+def _agent_death_trigger_rulings(
+    values: list[dict[str, Any]],
+    *,
+    participant_ids: list[str],
+) -> dict[str, dict[str, Any]]:
+    """Validate Agent scene facts without moving standard mechanics out of the engine."""
+
+    participants = set(participant_ids)
+    allowed = {
+        "actor_id",
+        "decision",
+        "ruling_reason",
+        "ignited_objects",
+    }
+    object_allowed = {"id", "description"}
+    normalized: dict[str, dict[str, Any]] = {}
+    for index, raw in enumerate(values):
+        if not isinstance(raw, dict):
+            raise ValueError(f"Agent death-trigger ruling {index} must be an object")
+        unknown = set(raw) - allowed
+        if unknown:
+            raise ValueError(
+                f"Agent death-trigger ruling {index} has unsupported fields: "
+                f"{', '.join(sorted(unknown))}"
+            )
+        actor_id = str(raw.get("actor_id") or "").strip()
+        decision = " ".join(str(raw.get("decision") or "").split())
+        ruling_reason = " ".join(str(raw.get("ruling_reason") or "").split())
+        raw_objects = raw.get("ignited_objects")
+        if (
+            actor_id not in participants
+            or actor_id in normalized
+            or not 10 <= len(decision) <= 500
+            or not 10 <= len(ruling_reason) <= 500
+            or not isinstance(raw_objects, list)
+        ):
+            raise ValueError(
+                f"Agent death-trigger ruling {index} requires one unique "
+                "participant, a concrete decision and reason, and an explicit "
+                "ignited_objects list"
+            )
+        objects: list[dict[str, str]] = []
+        object_ids: set[str] = set()
+        for object_index, raw_object in enumerate(raw_objects):
+            if not isinstance(raw_object, dict):
+                raise ValueError(
+                    "Agent death-trigger ruling "
+                    f"{index} object {object_index} must be an object"
+                )
+            object_unknown = set(raw_object) - object_allowed
+            object_id = str(raw_object.get("id") or "").strip()
+            description = " ".join(
+                str(raw_object.get("description") or "").split()
+            )
+            if (
+                object_unknown
+                or not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,127}", object_id)
+                or object_id in object_ids
+                or not 10 <= len(description) <= 500
+            ):
+                raise ValueError(
+                    "Agent death-trigger ruling "
+                    f"{index} object {object_index} requires only a unique "
+                    "stable id and bounded concrete description"
+                )
+            objects.append({"id": object_id, "description": description})
+            object_ids.add(object_id)
+        normalized[actor_id] = {
+            "actor_id": actor_id,
+            "environment_ruling": {
+                "default_resolver": "agent",
+                "ruling_kind": "source_or_scene_fact",
+                "decision": decision,
+                "reason": ruling_reason,
+                "ignited_objects": objects,
+            },
+        }
+    return normalized
+
+
 def _agent_object_interactions(
     values: list[dict[str, Any]],
     *,
@@ -5745,6 +5838,10 @@ async def _start(
         scene_id=str(args.scene_id or ""),
         encounter_source_excerpt=str(args.source_excerpt or ""),
     )
+    agent_death_trigger_rulings = _agent_death_trigger_rulings(
+        getattr(args, "agent_death_trigger_ruling_json", []),
+        participant_ids=all_participant_ids,
+    )
     agent_object_interactions = _agent_object_interactions(
         getattr(args, "agent_object_interaction_json", []),
         participant_ids=all_participant_ids,
@@ -6179,6 +6276,9 @@ async def _start(
             agent_target_reaction_contexts.values()
         ),
         "agent_turn_rulings": list(agent_turn_rulings.values()),
+        "agent_death_trigger_rulings": list(
+            agent_death_trigger_rulings.values()
+        ),
         "agent_object_interactions": list(agent_object_interactions.values()),
         "source_casualty_pools": list(source_casualty_pools.values()),
         "source_separations": list(source_separations.values()),
@@ -7680,6 +7780,79 @@ async def _resolve_pending(
     campaign = await _campaign(client, args.campaign_id)
     actor_id = str(pending.get("actor_id") or "")
     identity = f"{pending.get('id')}:{campaign['revision']}"
+    if pending.get("trigger") == "standard_death_burst":
+        source_actor_id = str(
+            pending.get("source_actor_id")
+            or dict(pending.get("standard_trigger") or {}).get("source_actor_id")
+            or actor_id
+        )
+        participant_ids = [
+            str(item.get("actor_id") or "")
+            for item in combat.get("combatants", [])
+            if isinstance(item, dict) and str(item.get("actor_id") or "")
+        ]
+        rulings = _agent_death_trigger_rulings(
+            list(
+                getattr(args, "agent_death_trigger_ruling_json", None)
+                or []
+            ),
+            participant_ids=participant_ids,
+        )
+        ruling = rulings.get(source_actor_id)
+        if ruling is None:
+            raise EncounterRulingRequiredError(
+                {
+                    "status": "pending_ruling",
+                    "default_resolver": "agent",
+                    "ruling_kind": "source_or_scene_fact",
+                    "reason": (
+                        "the standard death trigger requires an explicit scene-fact "
+                        "decision about qualifying unattended flammable objects"
+                    ),
+                    "committed": True,
+                    "retry_contract": {
+                        "resolver": "agent",
+                        "reuse_current_revision": True,
+                        "use_public_tools_only": True,
+                    },
+                },
+                operation="combat_choice.resolve_death_trigger",
+                actor_id=source_actor_id,
+                action={
+                    "choice_id": str(pending.get("id") or ""),
+                    "environment_ruling_required": deepcopy(
+                        pending.get("environment_ruling_required")
+                    ),
+                },
+                retry_hint=(
+                    "Inspect the recorded combat area and retry with one explicit "
+                    "--agent-death-trigger-ruling-json settlement for the source "
+                    "actor. Use an empty ignited_objects list when no qualifying "
+                    "object is established."
+                ),
+            )
+        return _facade_value(
+            await client.domain(
+                "combat_choice",
+                {
+                    "campaign_id": args.campaign_id,
+                    "action": "resolve_death_trigger",
+                    "actor_id": source_actor_id,
+                    "payload": {
+                        "choice_id": str(pending["id"]),
+                        "environment_ruling": deepcopy(
+                            ruling["environment_ruling"]
+                        ),
+                    },
+                    "branch_id": branch_id,
+                    "expected_revision": campaign["revision"],
+                    "idempotency_key": (
+                        "encounter-standard-death-trigger-"
+                        + _token(identity, length=24)
+                    ),
+                },
+            )
+        )
     if (
         pending.get("trigger") == "attack_on_hit_effect"
         and str(pending.get("effect") or "").strip().casefold() == GUIDING_BOLT_ON_HIT.casefold()
@@ -9389,6 +9562,10 @@ async def _auto_run(
         actors=initial_actors,
         scene_id=str(args.scene_id or ""),
         encounter_source_excerpt=str(args.source_excerpt or ""),
+    )
+    agent_death_trigger_rulings = _agent_death_trigger_rulings(
+        getattr(args, "agent_death_trigger_ruling_json", []),
+        participant_ids=[*party_ids, *hostile_ids],
     )
     agent_object_interactions = _agent_object_interactions(
         getattr(args, "agent_object_interaction_json", []),
@@ -11807,6 +11984,9 @@ async def _auto_run(
             agent_target_reaction_contexts.values()
         ),
         "agent_turn_rulings": list(agent_turn_rulings.values()),
+        "agent_death_trigger_rulings": list(
+            agent_death_trigger_rulings.values()
+        ),
         "agent_object_interactions": list(agent_object_interactions.values()),
         "pending_agent_forced_targets": deepcopy(agent_forced_targets),
         "agent_preflight_rulings": agent_preflight_rulings,

@@ -14,6 +14,7 @@ from scripts.regression_encounter import (
     _agent_attack_contexts,
     _agent_casting_perception_rulings,
     _agent_common_action_priorities,
+    _agent_death_trigger_rulings,
     _agent_object_interactions,
     _agent_party_absences,
     _agent_positions,
@@ -6344,6 +6345,182 @@ def test_interrupted_guiding_bolt_ruling_resumes_with_exact_effect() -> None:
         "id": "next_attack_advantage",
         "source_excerpt": GUIDING_BOLT_ON_HIT,
     }
+
+
+def test_agent_death_trigger_rulings_bind_only_scene_facts() -> None:
+    rulings = _agent_death_trigger_rulings(
+        [
+            {
+                "actor_id": "magmin-1",
+                "decision": "The loose straw bale in the burst area catches fire.",
+                "ruling_reason": (
+                    "The recorded object is flammable, unattended, and within "
+                    "ten feet of the dying creature."
+                ),
+                "ignited_objects": [
+                    {
+                        "id": "loose-straw-bale",
+                        "description": (
+                            "An unattended loose straw bale beside the combatants."
+                        ),
+                    }
+                ],
+            }
+        ],
+        participant_ids=["magmin-1", "hero-1"],
+    )
+
+    assert rulings["magmin-1"] == {
+        "actor_id": "magmin-1",
+        "environment_ruling": {
+            "default_resolver": "agent",
+            "ruling_kind": "source_or_scene_fact",
+            "decision": "The loose straw bale in the burst area catches fire.",
+            "reason": (
+                "The recorded object is flammable, unattended, and within "
+                "ten feet of the dying creature."
+            ),
+            "ignited_objects": [
+                {
+                    "id": "loose-straw-bale",
+                    "description": (
+                        "An unattended loose straw bale beside the combatants."
+                    ),
+                }
+            ],
+        },
+    }
+
+
+def test_agent_death_trigger_rulings_require_explicit_object_list() -> None:
+    with pytest.raises(ValueError, match="explicit ignited_objects"):
+        _agent_death_trigger_rulings(
+            [
+                {
+                    "actor_id": "magmin-1",
+                    "decision": "Nothing else in the recorded area catches fire.",
+                    "ruling_reason": (
+                        "No qualifying unattended flammable object is established."
+                    ),
+                }
+            ],
+            participant_ids=["magmin-1"],
+        )
+
+
+def test_interrupted_standard_death_burst_uses_agent_scene_fact_ruling() -> None:
+    calls: list[tuple[str, dict]] = []
+
+    class Client:
+        async def core(self, tool_id: str, arguments: dict) -> dict:
+            assert tool_id == "campaign_query"
+            return {"revision": 23}
+
+        async def domain(self, tool_id: str, arguments: dict) -> dict:
+            calls.append((tool_id, arguments))
+            return {"result": {"status": "committed"}}
+
+    result = asyncio.run(
+        _resolve_pending(
+            Client(),
+            SimpleNamespace(
+                campaign_id="campaign-1",
+                agent_death_trigger_ruling_json=[
+                    {
+                        "actor_id": "magmin-1",
+                        "decision": (
+                            "No qualifying unattended flammable object is "
+                            "established in the recorded burst area."
+                        ),
+                        "ruling_reason": (
+                            "The combat map records creature positions but no "
+                            "eligible loose object at this location."
+                        ),
+                        "ignited_objects": [],
+                    }
+                ],
+            ),
+            "branch-1",
+            {
+                "combatants": [
+                    {"actor_id": "magmin-1"},
+                    {"actor_id": "hero-1"},
+                ],
+                "pending": [
+                    {
+                        "id": "death-window-1",
+                        "kind": "save",
+                        "actor_id": "magmin-1",
+                        "source_actor_id": "magmin-1",
+                        "trigger": "standard_death_burst",
+                        "status": "pending",
+                    }
+                ],
+            },
+        )
+    )
+
+    assert result == {"status": "committed"}
+    assert calls == [
+        (
+            "combat_choice",
+            {
+                "campaign_id": "campaign-1",
+                "action": "resolve_death_trigger",
+                "actor_id": "magmin-1",
+                "payload": {
+                    "choice_id": "death-window-1",
+                    "environment_ruling": {
+                        "default_resolver": "agent",
+                        "ruling_kind": "source_or_scene_fact",
+                        "decision": (
+                            "No qualifying unattended flammable object is "
+                            "established in the recorded burst area."
+                        ),
+                        "reason": (
+                            "The combat map records creature positions but no "
+                            "eligible loose object at this location."
+                        ),
+                        "ignited_objects": [],
+                    },
+                },
+                "branch_id": "branch-1",
+                "expected_revision": 23,
+                "idempotency_key": calls[0][1]["idempotency_key"],
+            },
+        )
+    ]
+
+
+def test_interrupted_standard_death_burst_requests_agent_when_absent() -> None:
+    class Client:
+        async def core(self, tool_id: str, arguments: dict) -> dict:
+            assert tool_id == "campaign_query"
+            return {"revision": 24}
+
+    with pytest.raises(
+        EncounterRulingRequiredError,
+        match="standard death trigger",
+    ):
+        asyncio.run(
+            _resolve_pending(
+                Client(),
+                SimpleNamespace(campaign_id="campaign-1"),
+                "branch-1",
+                {
+                    "combatants": [{"actor_id": "magmin-1"}],
+                    "pending": [
+                        {
+                            "id": "death-window-2",
+                            "actor_id": "magmin-1",
+                            "source_actor_id": "magmin-1",
+                            "trigger": "standard_death_burst",
+                            "status": "pending",
+                        }
+                    ],
+                },
+            )
+        )
 
 
 def test_interrupted_periodic_damage_resumes_with_explicit_agent_ruling() -> None:
