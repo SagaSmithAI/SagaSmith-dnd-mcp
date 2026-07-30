@@ -380,6 +380,13 @@ def test_imported_rule_source_creates_a_source_bound_combat_actor(tmp_path: Path
                                 "id": "gauntlet-slam",
                                 "name": "Gauntlet Slam",
                                 "damage_type": "force",
+                                "additional_damage": [
+                                    {
+                                        "damage_formula": "1d6",
+                                        "damage_bonus": 0,
+                                        "damage_type": "fire",
+                                    }
+                                ],
                             }
                         },
                     },
@@ -419,6 +426,14 @@ def test_imported_rule_source_creates_a_source_bound_combat_actor(tmp_path: Path
         assert variant_actor["derived"]["inventory"]["weapon_attacks"][0]["item_id"] == (
             "gauntlet-slam"
         )
+        assert variant_actor["derived"]["inventory"]["weapon_attacks"][0][
+            "additional_damage"
+        ][0] == {
+            "damage_formula": "1d6",
+            "damage_bonus": 0,
+            "damage_type": "fire",
+            "damage_expression": "1d6",
+        }
         assert "Variant source: rule-chunk:" in (
             variant_actor["notes"]["profile"]["dm_notes"]
         )
