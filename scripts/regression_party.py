@@ -1936,6 +1936,17 @@ async def _initialize_prepared_spells(
     idempotency_key: str,
 ) -> dict[str, Any]:
     """Resume one-time setup without replaying an already committed spell list."""
+    actor = dict(
+        _facade_value(
+            await client.domain(
+                "character_query",
+                {
+                    "view": "get",
+                    "payload": {"character_id": actor["id"]},
+                },
+            )
+        )
+    )
     preparation = dict(
         dict(actor["sheet"].get("spellcasting") or {}).get("preparation") or {}
     )

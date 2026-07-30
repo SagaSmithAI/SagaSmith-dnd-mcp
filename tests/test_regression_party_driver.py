@@ -81,9 +81,12 @@ def test_party_catalog_ruling_returns_structured_control_to_agent() -> None:
 def test_resumed_replacement_keeps_exact_committed_prepared_spell_setup() -> None:
     class Client:
         async def domain(self, tool_id: str, arguments: dict) -> dict:
-            raise AssertionError(
-                f"committed one-time setup must not be submitted again: {tool_id}"
-            )
+            assert tool_id == "character_query"
+            assert arguments == {
+                "view": "get",
+                "payload": {"character_id": actor["id"]},
+            }
+            return actor
 
     actor = {
         "id": "replacement-cleric",
@@ -106,10 +109,15 @@ def test_resumed_replacement_keeps_exact_committed_prepared_spell_setup() -> Non
         )
     )
 
-    assert resumed is actor
+    assert resumed == actor
 
 
 def test_resumed_replacement_rejects_different_prepared_spell_setup() -> None:
+    class Client:
+        async def domain(self, tool_id: str, arguments: dict) -> dict:
+            assert tool_id == "character_query"
+            return actor
+
     actor = {
         "id": "replacement-cleric",
         "revision": 12,
@@ -125,7 +133,7 @@ def test_resumed_replacement_rejects_different_prepared_spell_setup() -> None:
     with pytest.raises(RuntimeError, match="different committed prepared-spell list"):
         asyncio.run(
             _initialize_prepared_spells(
-                object(),
+                Client(),
                 actor=actor,
                 prepared_ids=["cure-wounds"],
                 idempotency_key="replacement-cleric-setup",
