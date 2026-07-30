@@ -94,6 +94,33 @@ def _review_override_page(
     return selected
 
 
+def _review_override_asset_id(
+    assets: list[dict[str, Any]],
+    requested_asset_id: str,
+) -> str:
+    pdf_assets = [
+        item
+        for item in assets
+        if str(item.get("media_type") or "") == "application/pdf"
+    ]
+    requested = requested_asset_id.strip()
+    if requested:
+        matches = [
+            item for item in pdf_assets if str(item.get("id") or "") == requested
+        ]
+        if len(matches) != 1:
+            raise RuntimeError(
+                "--source-asset-id must identify one PDF asset in the candidate module"
+            )
+        return requested
+    if len(pdf_assets) != 1:
+        raise RuntimeError(
+            "review override requires --source-asset-id when the module has "
+            "more than one source PDF asset"
+        )
+    return str(pdf_assets[0]["id"])
+
+
 def _load_json_object(path: Path, label: str) -> tuple[dict[str, Any], Path]:
     resolved = path.expanduser().resolve()
     value = json.loads(resolved.read_text(encoding="utf-8"))
@@ -175,6 +202,14 @@ def _arguments() -> argparse.Namespace:
         "--review-override",
         type=Path,
         help="DM-verified statblock transcription for a blocked module candidate",
+    )
+    parser.add_argument(
+        "--source-asset-id",
+        default="",
+        help=(
+            "Exact module PDF asset for a visual --review-override when the "
+            "grouped module contains more than one PDF"
+        ),
     )
     parser.add_argument(
         "--review-observation",
@@ -2241,14 +2276,10 @@ async def _prepare_statblock(args: argparse.Namespace) -> dict[str, Any]:
                             },
                         )
                     )
-                    pdf_assets = [
-                        item
-                        for item in assets
-                        if str(item.get("media_type") or "") == "application/pdf"
-                    ]
-                    if len(pdf_assets) != 1:
-                        raise RuntimeError("review override requires exactly one source PDF asset")
-                    source_asset_id = str(pdf_assets[0]["id"])
+                    source_asset_id = _review_override_asset_id(
+                        list(assets or []),
+                        str(getattr(args, "source_asset_id", "") or ""),
+                    )
                     source_chunk_ids = None
                     review_metadata = {
                         "review_method": "rendered_source_page",

@@ -27,6 +27,7 @@ from scripts.regression_campaign import (
     _prepare_rule_statblock_with_recovery,
     _prepare_statblock,
     _restore_statblock_preparation_context,
+    _review_override_asset_id,
     _review_override_page,
     _rule_statblock_operation_token,
     _statblock_creation_key,
@@ -163,6 +164,20 @@ def test_multi_page_candidate_override_requires_an_in_range_visual_page() -> Non
         _review_override_page(candidate, 197)
     with pytest.raises(ValueError, match="does not match"):
         _review_override_page({"page_start": 195, "page_end": 195}, 196)
+
+
+def test_grouped_module_review_override_selects_exact_pdf_asset() -> None:
+    assets = [
+        {"id": "campaign-book", "media_type": "application/pdf"},
+        {"id": "dm-guide", "media_type": "application/pdf"},
+        {"id": "map", "media_type": "image/png"},
+    ]
+
+    assert _review_override_asset_id(assets, "campaign-book") == "campaign-book"
+    with pytest.raises(RuntimeError, match="requires --source-asset-id"):
+        _review_override_asset_id(assets, "")
+    with pytest.raises(RuntimeError, match="must identify one PDF asset"):
+        _review_override_asset_id(assets, "map")
 
 
 def test_statblock_variant_file_requires_a_json_object(tmp_path: Path) -> None:
