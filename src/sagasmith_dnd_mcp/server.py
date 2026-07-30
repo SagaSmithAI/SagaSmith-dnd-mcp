@@ -29715,6 +29715,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 payload=payload,
                 response=relock_response,
             ),
+            active_combat_option_keys={"_core_rule_pack_lock"},
         )
         committed = idempotency.lookup(scope, str(idempotency_key), payload)
         assert committed is not None and committed.response is not None

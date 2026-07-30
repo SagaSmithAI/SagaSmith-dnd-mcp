@@ -1362,6 +1362,159 @@ def test_checkpointed_core_relock_preserves_profile_and_adopts_current_runtime(
     asyncio.run(exercise())
 
 
+def test_checkpointed_core_relock_is_allowed_during_active_combat(
+    tmp_path: Path,
+) -> None:
+    config = McpConfig(
+        home=tmp_path / "home",
+        database_url=None,
+        chroma_url=None,
+        chroma_path_override=None,
+        dnd_skills_dir=tmp_path / "dnd",
+        modulegen_skills_dir=tmp_path / "modulegen",
+    )
+
+    async def call(server, name: str, arguments: dict):
+        _, result = await server.call_tool(name, arguments)
+        return result.get("result", result) if isinstance(result, dict) else result
+
+    async def exercise() -> None:
+        server = create_server(config)
+        campaign = await call(
+            server,
+            "campaign_create",
+            {"name": "Combat Core relock", "idempotency_key": "combat-relock-campaign"},
+        )
+        actors = [
+            await call(
+                server,
+                "character_create",
+                {
+                    "campaign_id": campaign["id"],
+                    "name": name,
+                    "sheet": default_character_sheet(),
+                    "idempotency_key": f"combat-relock-{name}",
+                },
+            )
+            for name in ("Hero", "Hostile")
+        ]
+        campaign = await call(
+            server,
+            "campaign_get",
+            {"campaign_id": campaign["id"]},
+        )
+        play = await call(
+            server,
+            "game_phase",
+            {
+                "campaign_id": campaign["id"],
+                "action": "set",
+                "tool_profile": "play",
+                "expected_revision": campaign["revision"],
+                "idempotency_key": "combat-relock-play",
+            },
+        )
+        started = await call(
+            server,
+            "combat_start",
+            {
+                "campaign_id": campaign["id"],
+                "participant_ids": [item["id"] for item in actors],
+                "participant_config": [
+                    {
+                        "actor_id": actors[0]["id"],
+                        "initiative": 20,
+                        "position": {"x": 0, "y": 0},
+                        "disposition": "friendly",
+                    },
+                    {
+                        "actor_id": actors[1]["id"],
+                        "initiative": 10,
+                        "position": {"x": 1, "y": 0},
+                        "disposition": "hostile",
+                    },
+                ],
+                "expected_revision": play["campaign_revision"],
+                "idempotency_key": "combat-relock-start",
+            },
+        )
+        database = Database(sqlite_database_url(config.database_path))
+        try:
+            profiles = RuleProfileService(database)
+            profile = profiles.get(campaign["id"])
+            assert profile is not None
+            profiles.set(
+                campaign["id"],
+                edition=profile.edition,
+                locale=profile.locale,
+                publications=list(profile.publications),
+                options={
+                    **profile.options,
+                    "_core_rule_pack_lock": {
+                        "id": "dnd5e.core.2014",
+                        "version": "0.9.0",
+                        "fingerprint": "old-combat-core-fingerprint",
+                    },
+                },
+                expected_campaign_revision=started["campaign_revision"],
+                active_combat_option_keys={"_core_rule_pack_lock"},
+            )
+        finally:
+            database.dispose()
+        changed = await call(
+            server,
+            "campaign_get",
+            {"campaign_id": campaign["id"]},
+        )
+        branch = next(
+            item
+            for item in await call(
+                server,
+                "branch_list",
+                {"campaign_id": campaign["id"]},
+            )
+            if item["is_current"]
+        )
+        snapshot = await call(
+            server,
+            "snapshot_create",
+            {
+                "campaign_id": campaign["id"],
+                "label": "Mid-combat Core maintenance",
+                "expected_revision": changed["revision"],
+                "expected_head_snapshot_id": branch.get("head_snapshot_id") or "",
+                "idempotency_key": "combat-relock-snapshot",
+            },
+        )
+        relocked = await call(
+            server,
+            "campaign_rules",
+            {
+                "campaign_id": campaign["id"],
+                "action": "core_relock",
+                "payload": {
+                    "expected_core_fingerprint": "old-combat-core-fingerprint",
+                    "reason": "Adopt a tested Core fix at a verified combat checkpoint.",
+                    "expected_head_snapshot_id": snapshot["id"],
+                },
+                "branch_id": branch["id"],
+                "expected_revision": changed["revision"],
+                "idempotency_key": "combat-relock-adopt",
+            },
+        )
+
+        assert relocked["status"] == "relocked"
+        assert relocked["checkpoint_snapshot_id"] == snapshot["id"]
+        status = await call(
+            server,
+            "combat_query",
+            {"campaign_id": campaign["id"], "view": "status"},
+        )
+        assert status["active"] is True
+
+    asyncio.run(exercise())
+
+
 def test_current_core_relock_is_revision_and_snapshot_noop(tmp_path: Path) -> None:
     config = McpConfig(
         home=tmp_path / "home",
