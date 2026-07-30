@@ -689,6 +689,23 @@ def test_rule_statblock_recovers_split_text_layout_without_images(tmp_path: Path
         assert "Text-layout recovery: deterministic-text-layout-v1" in created[
             "character"
         ]["notes"]["profile"]["dm_notes"]
+        with pytest.raises(ToolError, match="no creature core headed 'Archmage'"):
+            await _call(
+                server,
+                "character_create_from",
+                {
+                    "mode": "statblock",
+                    "payload": {
+                        "campaign_id": campaign["id"],
+                        "source_id": ingested["source_id"],
+                        "chunk_ids": [item["id"] for item in chunks],
+                        "source_statblock_name": "Archmage",
+                        "name": "Wrong Card",
+                        "character_type": "monster",
+                    },
+                    "idempotency_key": "reject-wrong-card",
+                },
+            )
 
     asyncio.run(exercise())
 

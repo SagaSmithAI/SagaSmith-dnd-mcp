@@ -793,6 +793,46 @@ def test_fireball_settles_saves_and_area_enumeration(
         caster["content"]["spells"] = [fireball]
         first = default_character_sheet()
         first["combat"]["hp"] = {"value": 50, "max": 50, "temp": 0}
+        first["content"]["features"] = [
+            {
+                "id": "magic-resistance-passive",
+                "name": "Magic Resistance",
+                "choices": {
+                    "source_trait": {
+                        "kind": "magic_resistance",
+                        "trigger": "saving_throw",
+                        "save_source_kinds": ["spell", "magical_effect"],
+                        "grants": "advantage",
+                        "automatic": True,
+                        "source_excerpt": (
+                            "The creature has advantage on saving throws against "
+                            "spells and other magical effects."
+                        ),
+                    }
+                },
+            },
+            {
+                "id": "evasion-passive",
+                "name": "Evasion",
+                "choices": {
+                    "source_trait": {
+                        "kind": "evasion",
+                        "trigger": "dexterity_save_for_half_damage",
+                        "save_ability": "dexterity",
+                        "ordinary_successful_save": "half",
+                        "successful_save": "none",
+                        "failed_save": "half",
+                        "automatic": True,
+                        "source_excerpt": (
+                            "If the creature is subjected to an effect that allows "
+                            "it to make a Dexterity saving throw to take only half "
+                            "damage, it instead takes no damage on a success and "
+                            "only half damage on a failure."
+                        ),
+                    }
+                },
+            },
+        ]
         second = default_character_sheet()
         second["combat"]["hp"] = {"value": 50, "max": 50, "temp": 0}
         campaign_id, revision, actors = await _campaign_with_combat(
@@ -850,6 +890,19 @@ def test_fireball_settles_saves_and_area_enumeration(
         }
         assert result["result"]["area"]["radius_ft"] == 20
         assert result["result"]["damage_roll"]["expression"] == "8d6"
+        trait_target = next(
+            item
+            for item in result["result"]["targets"]
+            if item["target_id"] == actors[1]["id"]
+        )
+        assert trait_target["damage_reduction"] in {"none", "half"}
+        assert any(
+            receipt["mechanic_id"] == "dnd5e.core.save.magic_resistance"
+            for receipt in trait_target["save"]["rule_receipts"]
+        )
+        assert [
+            receipt["mechanic_id"] for receipt in trait_target["rule_receipts"]
+        ] == ["dnd5e.core.save.evasion"]
         assert result["combat"]["combatants"][0]["turn_budget"]["main_action"] == 0
 
     asyncio.run(exercise())

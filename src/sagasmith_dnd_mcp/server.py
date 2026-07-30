@@ -175,6 +175,7 @@ from sagasmith_dnd.combat_engine import (
     stabilize_sheet,
     stand_up,
     standard_death_trigger_for_sheet,
+    standard_save_damage_reduction,
     start_encounter,
     start_witch_bolt_tether,
     timed_condition_sources,
@@ -11966,6 +11967,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "damage_formula",
                 "damage_type",
                 "half_on_success",
+                "save_source_kind",
                 "source_excerpt",
                 "zero_hp_effect",
             }
@@ -11984,6 +11986,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             )
             damage_type = str(normalized_selection.get("damage_type") or "").strip().casefold()
             half_on_success = normalized_selection.get("half_on_success")
+            save_source_kind = (
+                str(normalized_selection.get("save_source_kind") or "")
+                .strip()
+                .casefold()
+            )
             source_excerpt = str(normalized_selection.get("source_excerpt") or "").strip()
             zero_hp_effect = normalized_selection.get("zero_hp_effect")
             if (
@@ -11994,6 +12001,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 or not damage_formula
                 or not damage_type
                 or not isinstance(half_on_success, bool)
+                or save_source_kind
+                not in {
+                    "",
+                    "spell",
+                    "magical_effect",
+                    "nonmagical_effect",
+                }
                 or not source_excerpt
                 or source_excerpt.casefold() not in effect.casefold()
             ):
@@ -12140,20 +12154,44 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         "attacker_id": str(window.get("attacker_id") or ""),
                         "weapon_id": str(window.get("weapon_id") or ""),
                         "kind": "attack_on_hit_save",
+                        **(
+                            {"save_source_kind": save_source_kind}
+                            if save_source_kind
+                            else {}
+                        ),
                     },
                 ),
             )
             rule_receipts.extend(saved.get("rule_receipts") or [])
             damage_roll = asdict(roll(damage_formula))
+            reduction_settlement = standard_save_damage_reduction(
+                target_actor,
+                ability=save_ability,
+                success=bool(saved["success"]),
+                ordinary_successful_save=(
+                    "half" if half_on_success else "none"
+                ),
+                rules=effective_rule_context(
+                    campaign_id,
+                    facts={
+                        "actor_id": target_id,
+                        "attacker_id": str(window.get("attacker_id") or ""),
+                        "weapon_id": str(window.get("weapon_id") or ""),
+                        "kind": "attack_on_hit_save",
+                        **(
+                            {"save_source_kind": save_source_kind}
+                            if save_source_kind
+                            else {}
+                        ),
+                    },
+                ),
+            )
+            rule_receipts.extend(
+                reduction_settlement.get("rule_receipts") or []
+            )
             damage_amount = damage_amount_after_reduction(
                 int(damage_roll["total"]),
-                (
-                    "half"
-                    if saved["success"] and half_on_success
-                    else "none"
-                    if saved["success"]
-                    else "full"
-                ),
+                str(reduction_settlement["damage_reduction"]),
             )
             damaged_result: dict[str, Any] | None = None
             applied_zero_hp_effect: dict[str, Any] | None = None
@@ -12252,6 +12290,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             reconcile_readied_spells(next_encounter, target_id, updated_sheet)
             settlement_result = {
                 "save": saved,
+                "damage_reduction": str(
+                    reduction_settlement["damage_reduction"]
+                ),
                 "damage_roll": damage_roll,
                 "damage_amount": damage_amount,
                 "damage": damaged_result,
@@ -16072,6 +16113,16 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "half": 2,
                     "three_quarters": 5,
                 }.get(str(target_context.get("cover") or "none"), 0)
+                target_rule_context = effective_rule_context(
+                    campaign_id,
+                    facts={
+                        "actor_id": target_id,
+                        "caster_id": actor_id,
+                        "spell_id": spell_id,
+                        "kind": "spell_save",
+                        "save_source_kind": "spell",
+                    },
+                )
                 saved = resolve_actor_check(
                     target_actor,
                     kind="save",
@@ -16079,20 +16130,22 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     dc=int(save_dc),
                     bonus=cover_bonus,
                     ruleset=str(next_encounter.get("ruleset") or "2014"),
-                    rules=effective_rule_context(
-                        campaign_id,
-                        facts={
-                            "actor_id": target_id,
-                            "caster_id": actor_id,
-                            "spell_id": spell_id,
-                            "kind": "spell_save",
-                        },
-                    ),
+                    rules=target_rule_context,
                 )
                 resolution_receipts.extend(saved.get("rule_receipts") or [])
+                reduction_settlement = standard_save_damage_reduction(
+                    target_actor,
+                    ability=str(save_spec["ability"]),
+                    success=bool(saved["success"]),
+                    ordinary_successful_save=str(save_spec["success"]),
+                    rules=target_rule_context,
+                )
+                resolution_receipts.extend(
+                    reduction_settlement.get("rule_receipts") or []
+                )
                 damage_amount = damage_amount_after_reduction(
                     int(damage_roll["total"]),
-                    str(save_spec["success"]) if saved["success"] else "full",
+                    str(reduction_settlement["damage_reduction"]),
                 )
                 damage_result: dict[str, Any] | None = None
                 if damage_amount > 0:
@@ -16142,6 +16195,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         "target_id": target_id,
                         "context": target_context,
                         "save": saved,
+                        "damage_reduction": str(
+                            reduction_settlement["damage_reduction"]
+                        ),
+                        "rule_receipts": list(
+                            reduction_settlement.get("rule_receipts") or []
+                        ),
                         "damage_amount": damage_amount,
                         "damage": damage_result,
                     }
@@ -20718,6 +20777,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "kind": "save_damage",
                 "ability": normalized_save_ability,
                 "dc": save_dc,
+                **(
+                    {"save_source_kind": "spell"}
+                    if normalized_card_kind == "spell"
+                    else {}
+                ),
             },
         )
         settled = resolve_save_damage_to_sheets(
@@ -20832,6 +20896,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     for receipt in dict(
                         target_result.get("save") or {}
                     ).get("rule_receipts", [])
+                ],
+                *[
+                    receipt
+                    for target_result in result["targets"]
+                    for receipt in target_result.get("rule_receipts", [])
                 ],
             ],
         )
@@ -21197,6 +21266,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "kind": "standard_death_burst",
                 "ability": str(recorded_trigger["save_ability"]),
                 "dc": int(recorded_trigger["save_dc"]),
+                "save_source_kind": "nonmagical_effect",
             },
         )
         if target_ids:
@@ -21334,6 +21404,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     for receipt in dict(
                         target_result.get("save") or {}
                     ).get("rule_receipts", [])
+                ],
+                *[
+                    receipt
+                    for target_result in result["targets"]
+                    for receipt in target_result.get("rule_receipts", [])
                 ],
             ],
         )
@@ -34237,21 +34312,56 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 raise ValueError("payload.source_statblock_name must contain 2 to 200 characters")
             text_layout_recovery: dict[str, Any] | None = None
             recovered_candidate: dict[str, Any] | None = None
+            parsed = None
             if source_statblock_name:
                 try:
                     recovered_candidate = normalize_2014_statblock_candidate(
                         source_statblock_name,
                         selected_chunks,
                     )
-                except StatblockImportError:
+                except StatblockImportError as recovery_error:
+                    if "multiple creature cores headed" in str(recovery_error):
+                        raise
+                    # A clean single-card Markdown source need not use the
+                    # split-layout profile.  It may use the ordinary parser
+                    # only when that parser independently proves the printed
+                    # card name.  Never let an earlier valid card silently
+                    # satisfy a different requested identity.
+                    try:
+                        identity = parse_2014_statblock(
+                            source_text,
+                            source_key=f"rule-source:{source['source_key']}",
+                            rule_refs=selected_chunk_ids,
+                        )
+                    except (StatblockImportError, ValueError) as identity_error:
+                        raise recovery_error from identity_error
+                    canonical_identity = re.sub(
+                        r"[^a-z0-9]",
+                        "",
+                        str(identity.name).casefold(),
+                    )
+                    canonical_requested = re.sub(
+                        r"[^a-z0-9]",
+                        "",
+                        source_statblock_name.casefold(),
+                    )
+                    if canonical_identity != canonical_requested:
+                        raise recovery_error
+                    parsed = parse_2014_statblock(
+                        source_text,
+                        source_key=f"rule-source:{source['source_key']}",
+                        rule_refs=selected_chunk_ids,
+                        name=actor_name or None,
+                    )
                     recovered_candidate = None
             if recovered_candidate is None:
-                parsed = parse_2014_statblock(
-                    source_text,
-                    source_key=f"rule-source:{source['source_key']}",
-                    rule_refs=selected_chunk_ids,
-                    name=actor_name or None,
-                )
+                if parsed is None:
+                    parsed = parse_2014_statblock(
+                        source_text,
+                        source_key=f"rule-source:{source['source_key']}",
+                        rule_refs=selected_chunk_ids,
+                        name=actor_name or None,
+                    )
             else:
                 recovered_chunk_ids = list(recovered_candidate["source_chunk_ids"])
                 selected_chunks = [by_chunk_id[item] for item in recovered_chunk_ids]
