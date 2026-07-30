@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-TOOL_BUDGET_VERSION = "2026-07-agent-module-context-v12"
+TOOL_BUDGET_VERSION = "2026-07-hypnotic-pattern-v13"
 
 # Captured before the conservative facade consolidation.  Keep this historical
 # baseline so a lower tool count cannot conceal a larger aggregate input schema.
@@ -28,8 +28,12 @@ TARGET_CORE_TOOL_COUNT = 12
 # Version 11 adds the hard-standard resolve_death_trigger action to the existing
 # combat choice facade. The 24-byte schema increase preserves the same public
 # and core tool counts while keeping server saves and scene facts auditable.
+# Version 12 adds related_refs to continuity_context so the Agent can receive
+# exact, non-executable module evidence without another public tool.
+# Version 13 adds the source-exact shake_hypnotic_pattern action to the existing
+# common-action facade. The 25-byte increase adds no public or core tool.
 # The aggregate remains well below the captured 92-tool baseline.
-TARGET_INPUT_SCHEMA_BYTES = 49_093
+TARGET_INPUT_SCHEMA_BYTES = 49_118
 PROFILE_TOOL_LIMITS = {
     "lobby": 62,
     "play": 47,

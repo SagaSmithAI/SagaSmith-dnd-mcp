@@ -271,7 +271,7 @@ def test_compact_public_tool_and_schema_budgets_are_locked(tmp_path: Path) -> No
                 "combat": 45,
             }
         )
-        assert schema_bytes == TARGET_INPUT_SCHEMA_BYTES == 49_093
+        assert schema_bytes == TARGET_INPUT_SCHEMA_BYTES == 49_118
         assert schema_bytes < BASELINE_INPUT_SCHEMA_BYTES
         by_name = {tool.name: tool for tool in tools}
         assert by_name["chase"].inputSchema["properties"]["action"]["enum"] == [
@@ -345,6 +345,7 @@ def test_compact_public_tool_and_schema_budgets_are_locked(tmp_path: Path) -> No
             "improvise",
             "ready",
             "search",
+            "shake_hypnotic_pattern",
             "stabilize",
             "study",
             "sustain_spell",
@@ -415,7 +416,8 @@ def test_server_capabilities_publish_the_rulebook_import_contract(tmp_path: Path
         assert capabilities["features"]["validated_module_runtime_manifest"] is True
         assert capabilities["features"]["shared_continuity_budget"] is True
         assert capabilities["features"]["continuity_diagnostics"] is True
-        assert capabilities["contract_version"] == "2026-07-agent-module-context-v6"
+        assert capabilities["contract_version"] == "2026-07-hypnotic-pattern-v7"
+        assert capabilities["features"]["source_bound_hypnotic_pattern"] is True
         assert capabilities["features"][
             "source_bound_first_use_content_solutions"
         ] is True

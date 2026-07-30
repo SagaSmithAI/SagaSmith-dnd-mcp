@@ -14,6 +14,8 @@ from sagasmith_dnd.spells import CORE_SHIELD_MECHANIC_ID, CORE_SHIELD_SPELL_ID
 from sagasmith_dnd.standard_content import build_standard2014_content
 from sagasmith_dnd.standard_spell_ids import (
     CORE_BLADE_WARD_SPELL_ID,
+    CORE_HYPNOTIC_PATTERN_MECHANIC_ID,
+    CORE_HYPNOTIC_PATTERN_SPELL_ID,
     CORE_WITCH_BOLT_SPELL_ID,
 )
 
@@ -91,6 +93,48 @@ def _shield() -> dict:
             "components": {"verbal": True, "somatic": True},
         },
         "mechanic_refs": [CORE_SHIELD_MECHANIC_ID],
+    }
+
+
+def _hypnotic_pattern() -> dict:
+    return {
+        "id": CORE_HYPNOTIC_PATTERN_SPELL_ID,
+        "name": "Hypnotic Pattern",
+        "level": 3,
+        "grant": {
+            "source_type": "class",
+            "source_key": "bard",
+            "method": "known",
+        },
+        "access": {"known": True, "prepared": True},
+        "definition": {
+            "casting_time": "1 action",
+            "range": {
+                "kind": "distance",
+                "normal_ft": 120,
+                "long_ft": 120,
+            },
+            "duration": {
+                "kind": "timed",
+                "value": 1,
+                "unit": "minute",
+                "concentration": True,
+            },
+            "components": {
+                "verbal": False,
+                "somatic": True,
+                "material": True,
+                "material_description": (
+                    "a glowing stick of incense or a crystal vial "
+                    "filled with phosphorescent material"
+                ),
+            },
+            "effect": (
+                "Each creature in the area who sees the pattern must make "
+                "a Wisdom saving throw."
+            ),
+        },
+        "mechanic_refs": [CORE_HYPNOTIC_PATTERN_MECHANIC_ID],
     }
 
 
@@ -807,6 +851,170 @@ def test_fireball_settles_saves_and_area_enumeration(
         assert result["result"]["area"]["radius_ft"] == 20
         assert result["result"]["damage_roll"]["expression"] == "8d6"
         assert result["combat"]["combatants"][0]["turn_budget"]["main_action"] == 0
+
+    asyncio.run(exercise())
+
+
+def test_hypnotic_pattern_hard_settles_cube_saves_and_every_end_condition(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        server = create_server(_config(tmp_path))
+        caster = default_character_sheet()
+        caster["abilities"]["charisma"]["score"] = 30
+        caster["spellcasting"].update(
+            ability="charisma",
+            spell_slots=_slot(3),
+        )
+        caster["content"]["spells"] = [_hypnotic_pattern()]
+        first = default_character_sheet()
+        first["abilities"]["wisdom"]["score"] = 1
+        second = default_character_sheet()
+        second["abilities"]["wisdom"]["score"] = 1
+        blinded = default_character_sheet()
+        blinded["conditions"] = ["blinded"]
+        outsider = default_character_sheet()
+        campaign_id, revision, actors = await _campaign_with_combat(
+            server,
+            [
+                ("Bard", caster),
+                ("First enemy", first),
+                ("Second enemy", second),
+                ("Blinded helper", blinded),
+                ("Outsider", outsider),
+            ],
+            positions=[(0, 0), (2, 1), (3, 1), (2, 2), (8, 8)],
+        )
+        with pytest.raises(Exception, match="exactly 6 by 6"):
+            await _raw(
+                server,
+                "combat_cast_spell",
+                {
+                    "campaign_id": campaign_id,
+                    "actor_id": actors[0]["id"],
+                    "spell_id": CORE_HYPNOTIC_PATTERN_SPELL_ID,
+                    "cast_level": 3,
+                    "declaration": {
+                        "origin": {"x": 1, "y": 0},
+                        "cube": {
+                            "min": {"x": 1, "y": 0},
+                            "max": {"x": 5, "y": 5},
+                        },
+                    },
+                    "expected_revision": revision,
+                    "idempotency_key": "invalid-hypnotic-cube",
+                },
+            )
+        arguments = {
+            "campaign_id": campaign_id,
+            "actor_id": actors[0]["id"],
+            "spell_id": CORE_HYPNOTIC_PATTERN_SPELL_ID,
+            "cast_level": 3,
+            "declaration": {
+                "origin": {"x": 1, "y": 0},
+                "cube": {
+                    "min": {"x": 1, "y": 0},
+                    "max": {"x": 6, "y": 5},
+                },
+            },
+            "expected_revision": revision,
+            "idempotency_key": "hypnotic-pattern",
+        }
+        cast = await _raw(server, "combat_cast_spell", arguments)
+        replay = await _raw(server, "combat_cast_spell", arguments)
+
+        assert replay == cast
+        assert cast["status"] == "committed"
+        assert cast["result"]["kind"] == "hypnotic_pattern"
+        assert cast["result"]["save_dc"] == 20
+        results = {
+            item["target_id"]: item for item in cast["result"]["targets"]
+        }
+        assert set(results) == {
+            actors[1]["id"],
+            actors[2]["id"],
+            actors[3]["id"],
+        }
+        assert results[actors[1]["id"]]["outcome"] == "affected"
+        assert results[actors[2]["id"]]["outcome"] == "affected"
+        assert (
+            results[actors[3]["id"]]["outcome"]
+            == "did_not_see_pattern"
+        )
+        assert results[actors[3]["id"]]["save"] is None
+
+        first_card = await _call(
+            server,
+            "character_get",
+            {"character_id": actors[1]["id"]},
+        )
+        assert {"charmed", "incapacitated"} <= set(
+            first_card["sheet"]["conditions"]
+        )
+        first_combatant = next(
+            item
+            for item in cast["combat"]["combatants"]
+            if item["actor_id"] == actors[1]["id"]
+        )
+        assert first_combatant["speed_multiplier"] == 0.0
+
+        state = cast
+        for index in range(3):
+            state = await _raw(
+                server,
+                "combat_end_turn",
+                {
+                    "campaign_id": campaign_id,
+                    "actor_id": actors[index]["id"],
+                    "expected_revision": state["campaign_revision"],
+                    "idempotency_key": f"hypnotic-end-{index}",
+                },
+            )
+        shaken = await _raw(
+            server,
+            "combat_common_action",
+            {
+                "campaign_id": campaign_id,
+                "actor_id": actors[3]["id"],
+                "action": "shake_hypnotic_pattern",
+                "target_id": actors[1]["id"],
+                "expected_revision": state["campaign_revision"],
+                "idempotency_key": "shake-first-awake",
+            },
+        )
+        assert shaken["condition_resolution"]["ended_reason"] == "shaken_awake"
+        first_card = await _call(
+            server,
+            "character_get",
+            {"character_id": actors[1]["id"]},
+        )
+        assert "charmed" not in first_card["sheet"]["conditions"]
+        assert "incapacitated" not in first_card["sheet"]["conditions"]
+
+        damaged = await _raw(
+            server,
+            "combat_apply_damage",
+            {
+                "campaign_id": campaign_id,
+                "target_id": actors[0]["id"],
+                "parts": [{"amount": 100, "damage_type": "force"}],
+                "expected_revision": shaken["campaign_revision"],
+                "idempotency_key": "break-pattern-concentration",
+            },
+        )
+        second_card = await _call(
+            server,
+            "character_get",
+            {"character_id": actors[2]["id"]},
+        )
+        assert "charmed" not in second_card["sheet"]["conditions"]
+        assert "incapacitated" not in second_card["sheet"]["conditions"]
+        links = damaged["combat"]["dependent_effects"]
+        assert links
+        assert all(link["active"] is False for link in links)
+        assert {
+            link["ended_reason"] for link in links
+        } == {"target_effect_ended", "source_effect_ended"}
 
     asyncio.run(exercise())
 

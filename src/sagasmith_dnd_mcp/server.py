@@ -121,6 +121,7 @@ from sagasmith_dnd.combat_engine import (
     ACTOR_CHECK_KINDS,
     CombatEngineError,
     NeedsRulingError,
+    active_hypnotic_pattern_effect_ids,
     add_choice_window,
     apply_attack_ac_bonus,
     apply_concentration_result,
@@ -136,6 +137,7 @@ from sagasmith_dnd.combat_engine import (
     damage_amount_after_reduction,
     detach_attachment,
     end_concentration_for_incapacitating_conditions,
+    end_hypnotic_pattern_effects,
     end_turn,
     force_move_directly_away,
     pay_activity_activation,
@@ -145,6 +147,7 @@ from sagasmith_dnd.combat_engine import (
     preflight_attack,
     preflight_spell_attack,
     queue_combatant,
+    reconcile_effect_dependencies,
     reconcile_witch_bolt_concentration,
     reconcile_witch_bolt_range,
     resolve_actor_check,
@@ -154,6 +157,7 @@ from sagasmith_dnd.combat_engine import (
     resolve_choice_window,
     resolve_common_action,
     resolve_death_save_to_sheet,
+    resolve_hypnotic_pattern_target,
     resolve_preserve_life_to_sheets,
     resolve_random_save_effects,
     resolve_readied_action_window,
@@ -314,6 +318,7 @@ from sagasmith_dnd.spells import (
     consume_shield_reaction,
     consume_spell_cast,
     end_concentration_effects,
+    is_core_hypnotic_pattern_spell,
     is_core_magic_missile_spell,
     is_core_witch_bolt_spell,
     magic_item_spell_card,
@@ -326,6 +331,8 @@ from sagasmith_dnd.spells import (
 from sagasmith_dnd.standard_content import build_standard2014_content
 from sagasmith_dnd.standard_spell_ids import (
     CORE_BLADE_WARD_MECHANIC_ID,
+    CORE_HYPNOTIC_PATTERN_MECHANIC_ID,
+    CORE_HYPNOTIC_PATTERN_SPELL_ID,
     CORE_WITCH_BOLT_MECHANIC_ID,
     STANDARD_2014_CONTENT_PACK_ID,
     STANDARD_2014_CONTENT_PACK_VERSION,
@@ -6309,6 +6316,143 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "targets": list(affected.values()),
         }
 
+    def normalize_hypnotic_pattern_declaration(
+        encounter: dict[str, Any],
+        *,
+        caster_id: str,
+        spell: dict[str, Any],
+        declaration: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Validate one grid-aligned 30-foot cube and enumerate its creatures."""
+
+        value = dict(declaration or {})
+        if set(value) != {"origin", "cube"}:
+            raise CombatEngineError(
+                "Hypnotic Pattern declaration requires exactly origin and cube"
+            )
+        origin = value.get("origin")
+        cube = value.get("cube")
+        if (
+            not isinstance(origin, dict)
+            or set(origin) != {"x", "y"}
+            or not isinstance(cube, dict)
+            or set(cube) != {"min", "max"}
+        ):
+            raise CombatEngineError(
+                "Hypnotic Pattern origin and cube min/max must be grid positions"
+            )
+        minimum = cube.get("min")
+        maximum = cube.get("max")
+        if (
+            not isinstance(minimum, dict)
+            or set(minimum) != {"x", "y"}
+            or not isinstance(maximum, dict)
+            or set(maximum) != {"x", "y"}
+        ):
+            raise CombatEngineError("Hypnotic Pattern cube requires min and max x/y")
+        coordinates = [
+            origin["x"],
+            origin["y"],
+            minimum["x"],
+            minimum["y"],
+            maximum["x"],
+            maximum["y"],
+        ]
+        if any(
+            isinstance(coordinate, bool) or not isinstance(coordinate, int)
+            for coordinate in coordinates
+        ):
+            raise CombatEngineError(
+                "Hypnotic Pattern cube positions must use integer grid cells"
+            )
+        battle_map = dict(encounter.get("battle_map") or {})
+        cell_ft = int(dict(battle_map.get("grid") or {}).get("cell_ft", 5) or 5)
+        if cell_ft <= 0 or 30 % cell_ft:
+            raise CombatEngineError(
+                "Hypnotic Pattern requires a grid that divides its 30-foot cube"
+            )
+        cells = 30 // cell_ft
+        if (
+            maximum["x"] < minimum["x"]
+            or maximum["y"] < minimum["y"]
+            or maximum["x"] - minimum["x"] + 1 != cells
+            or maximum["y"] - minimum["y"] + 1 != cells
+        ):
+            raise CombatEngineError(
+                f"Hypnotic Pattern cube must cover exactly {cells} by {cells} grid cells"
+            )
+        if not (
+            minimum["x"] <= origin["x"] <= maximum["x"]
+            and minimum["y"] <= origin["y"] <= maximum["y"]
+            and (
+                origin["x"] in {minimum["x"], maximum["x"]}
+                or origin["y"] in {minimum["y"], maximum["y"]}
+            )
+        ):
+            raise CombatEngineError(
+                "Hypnotic Pattern origin must lie on a face of the declared cube"
+            )
+        if battle_map:
+            for position in (origin, minimum, maximum):
+                validate_position(battle_map, position)
+        combatants = {
+            str(item.get("actor_id") or ""): item
+            for item in encounter.get("combatants", [])
+        }
+        caster = combatants.get(caster_id)
+        if caster is None:
+            raise CombatEngineError("Hypnotic Pattern caster is not in this encounter")
+        range_ft = int(
+            dict(dict(spell.get("definition") or {}).get("range") or {}).get(
+                "normal_ft", 0
+            )
+            or 0
+        )
+        distance_to_origin = combat_distance(
+            caster.get("position"),
+            origin,
+            cell_ft=cell_ft,
+        )
+        if distance_to_origin is None or range_ft <= 0:
+            raise CombatEngineError(
+                "Hypnotic Pattern requires caster position and executable range"
+            )
+        if distance_to_origin > range_ft:
+            raise CombatEngineError("Hypnotic Pattern origin is outside range")
+        targets: list[dict[str, Any]] = []
+        for target_id, combatant in combatants.items():
+            conditions = condition_ids(combatant.get("conditions", []))
+            if "dead" in conditions:
+                continue
+            position = combat_coordinates(combatant.get("position"))
+            if position is None:
+                raise CombatEngineError(
+                    "Hypnotic Pattern cannot enumerate living combatants "
+                    "without grid positions"
+                )
+            x, y = position
+            if (
+                minimum["x"] <= x <= maximum["x"]
+                and minimum["y"] <= y <= maximum["y"]
+            ):
+                targets.append(
+                    {
+                        "target_id": target_id,
+                        "position": {"x": x, "y": y},
+                        "saw_pattern": "blinded" not in conditions,
+                    }
+                )
+        return {
+            "origin": deepcopy(origin),
+            "cube": {
+                "min": deepcopy(minimum),
+                "max": deepcopy(maximum),
+                "size_ft": 30,
+            },
+            "distance_ft": distance_to_origin,
+            "targets": targets,
+        }
+
     def advance_spell_attack_resolution(
         encounter: dict[str, Any],
         *,
@@ -6680,6 +6824,124 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         return response
 
+    def reconcile_actor_effect_dependencies(
+        campaign: Any,
+        campaign_state: dict[str, Any] | None,
+        character_updates: list[CharacterStateUpdate] | None,
+        response_fields: dict[str, Any],
+    ) -> tuple[
+        dict[str, Any] | None,
+        list[CharacterStateUpdate],
+        dict[str, Any],
+    ]:
+        """Apply active encounter effect dependencies before one atomic commit."""
+
+        source_state = (
+            deepcopy(campaign_state)
+            if campaign_state is not None
+            else deepcopy(dict(campaign.state or {}))
+        )
+        encounter = source_state.get("combat")
+        if (
+            not isinstance(encounter, dict)
+            or not isinstance(encounter.get("dependent_effects"), list)
+            or not encounter["dependent_effects"]
+        ):
+            return campaign_state, list(character_updates or []), response_fields
+        active_links = [
+            item
+            for item in encounter["dependent_effects"]
+            if isinstance(item, dict) and item.get("active", True)
+        ]
+        if not active_links:
+            return campaign_state, list(character_updates or []), response_fields
+        updates = list(character_updates or [])
+        by_actor_id = {item.character_id: item for item in updates}
+        actor_ids = {
+            str(link.get(field) or "")
+            for link in active_links
+            for field in ("source_actor_id", "target_actor_id")
+        }
+        actor_ids.discard("")
+        current_records = {
+            actor_id_value: characters.get(actor_id_value)
+            for actor_id_value in actor_ids
+        }
+        sheets = {
+            actor_id_value: deepcopy(
+                by_actor_id[actor_id_value].sheet
+                if actor_id_value in by_actor_id
+                else current_records[actor_id_value].sheet
+            )
+            for actor_id_value in actor_ids
+        }
+        reconciled = reconcile_effect_dependencies(encounter, sheets)
+        if (
+            reconciled["encounter"] == encounter
+            and not reconciled["changed_actor_ids"]
+        ):
+            return campaign_state, updates, response_fields
+        next_encounter = reconciled["encounter"]
+        for actor_id_value in reconciled["changed_actor_ids"]:
+            sheet = reconciled["sheets"][actor_id_value]
+            sync_combatant_conditions(next_encounter, actor_id_value, sheet)
+            sheet = validate_character_sheet(sheet)
+            existing = by_actor_id.get(actor_id_value)
+            if existing is not None:
+                replacement = replace(existing, sheet=sheet)
+                updates[updates.index(existing)] = replacement
+                by_actor_id[actor_id_value] = replacement
+            else:
+                current = current_records[actor_id_value]
+                replacement = CharacterStateUpdate(
+                    character_id=actor_id_value,
+                    sheet=sheet,
+                    notes=validate_character_notes(current.notes),
+                    expected_revision=current.revision,
+                )
+                updates.append(replacement)
+                by_actor_id[actor_id_value] = replacement
+        if reconciled["ended_links"]:
+            next_encounter["log"] = [
+                *list(next_encounter.get("log") or []),
+                *[
+                    {
+                        "type": "dependent_effect_ended",
+                        "dependency_id": str(link.get("id") or ""),
+                        "mechanic_id": str(link.get("mechanic_id") or ""),
+                        "source_actor_id": str(link.get("source_actor_id") or ""),
+                        "target_actor_id": str(link.get("target_actor_id") or ""),
+                        "target_effect_id": str(link.get("target_effect_id") or ""),
+                        "reason": str(link.get("ended_reason") or ""),
+                    }
+                    for link in reconciled["ended_links"]
+                ],
+            ][-100:]
+        source_state["combat"] = next_encounter
+        next_response_fields = dict(response_fields)
+        if "combat" in next_response_fields:
+            next_response_fields["combat"] = next_encounter
+        result = next_response_fields.get("result")
+        if isinstance(result, dict) and isinstance(result.get("targets"), list):
+            ended_by_target_effect_id = {
+                str(link.get("target_effect_id") or ""): str(
+                    link.get("ended_reason") or ""
+                )
+                for link in reconciled["ended_links"]
+            }
+            result = deepcopy(result)
+            for target_result in result["targets"]:
+                if not isinstance(target_result, dict):
+                    continue
+                effect_id = str(target_result.get("effect_id") or "")
+                if effect_id in ended_by_target_effect_id:
+                    target_result["effect_active_after_commit"] = False
+                    target_result["ended_reason"] = (
+                        ended_by_target_effect_id[effect_id]
+                    )
+            next_response_fields["result"] = result
+        return source_state, updates, next_response_fields
+
     def commit_campaign_state(
         campaign: Any,
         campaign_state: dict[str, Any] | None,
@@ -6700,6 +6962,16 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     ) -> dict[str, Any]:
         """Commit one public state result and its exact retry response atomically."""
 
+        (
+            campaign_state,
+            character_updates,
+            response_fields,
+        ) = reconcile_actor_effect_dependencies(
+            campaign,
+            campaign_state,
+            character_updates,
+            response_fields,
+        )
         stream_before_commit = active_random_stream()
         persists_campaign = campaign_state is not None or (
             stream_before_commit is not None
@@ -6946,7 +7218,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     def server_capabilities() -> dict[str, Any]:
         """Describe the MCP contract and the automatic-vs-ruling combat boundary."""
         return {
-            "contract_version": "2026-07-agent-module-context-v6",
+            "contract_version": "2026-07-hypnotic-pattern-v7",
             "transport": "stdio",
             "state_owner": "sagasmith-dnd-mcp",
             "features": {
@@ -6978,6 +7250,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "combat_multi_damage": True,
                 "combat_death_saves": True,
                 "combat_concentration_checks": True,
+                "source_bound_hypnotic_pattern": True,
                 "combat_ruleset_adapter": True,
                 "combat_authoritative_attack_data": True,
                 "source_bound_encounter_conditions": True,
@@ -13996,6 +14269,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "improvise",
             "ready",
             "search",
+            "shake_hypnotic_pattern",
             "stabilize",
             "study",
             "sustain_spell",
@@ -14264,6 +14538,46 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         source_condition_record = None
         source_condition = ""
         source_condition_ruling = None
+        hypnotic_target_record = None
+        if normalized_action == "shake_hypnotic_pattern":
+            if target_id is None or target_id == actor_id:
+                raise CombatEngineError(
+                    "shaking Hypnotic Pattern requires another target creature"
+                )
+            if payload:
+                raise CombatEngineError(
+                    "shake_hypnotic_pattern does not accept a payload"
+                )
+            acting_combatant = require_encounter_combatant(
+                encounter,
+                actor_id,
+                role="shaking actor",
+            )
+            target_combatant = require_encounter_combatant(
+                encounter,
+                target_id,
+                role="Hypnotic Pattern target",
+            )
+            battle_map = dict(encounter.get("battle_map") or {})
+            cell_ft = int(
+                dict(battle_map.get("grid") or {}).get("cell_ft", 5) or 5
+            )
+            distance = combat_distance(
+                acting_combatant.get("position"),
+                target_combatant.get("position"),
+                cell_ft=cell_ft,
+            )
+            if distance is None or distance > 5:
+                raise CombatEngineError(
+                    "shaking Hypnotic Pattern requires an adjacent target"
+                )
+            hypnotic_target_record = characters.get(target_id)
+            if not active_hypnotic_pattern_effect_ids(
+                hypnotic_target_record.sheet
+            ):
+                raise CombatEngineError(
+                    "target has no active Hypnotic Pattern effect"
+                )
         if "agent_ruling_commitment" in dict(payload or {}):
             if normalized_action != "improvise":
                 raise CombatEngineError(
@@ -14440,6 +14754,45 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 trigger=trigger,
                 payload=engine_payload,
             )
+        if hypnotic_target_record is not None:
+            ended_hypnotic = end_hypnotic_pattern_effects(
+                hypnotic_target_record.sheet,
+                ended_reason="shaken_awake",
+            )
+            sync_combatant_conditions(
+                next_encounter,
+                str(target_id),
+                ended_hypnotic["sheet"],
+            )
+            character_updates.append(
+                CharacterStateUpdate(
+                    character_id=str(target_id),
+                    sheet=ended_hypnotic["sheet"],
+                    notes=validate_character_notes(
+                        hypnotic_target_record.notes
+                    ),
+                    expected_revision=hypnotic_target_record.revision,
+                )
+            )
+            condition_resolution = {
+                "kind": "hypnotic_pattern_shaken_awake",
+                "target_id": str(target_id),
+                "ended_effect_ids": ended_hypnotic[
+                    "ended_effect_ids"
+                ],
+                "ended_reason": "shaken_awake",
+            }
+            next_encounter["log"] = [
+                *list(next_encounter.get("log") or []),
+                {
+                    "type": "hypnotic_pattern_shaken_awake",
+                    "actor_id": actor_id,
+                    "target_id": str(target_id),
+                    "ended_effect_ids": ended_hypnotic[
+                        "ended_effect_ids"
+                    ],
+                },
+            ][-100:]
         if source_condition_record is not None:
             next_source_condition = next(
                 item
@@ -14587,6 +14940,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         boundary_ids: list[str] = []
         if normalized_action == "ready":
             boundary_ids.append("dnd5e.core.ready.action")
+        if normalized_action == "shake_hypnotic_pattern":
+            boundary_ids.append(CORE_HYPNOTIC_PATTERN_MECHANIC_ID)
         acting_combatant = next(
             item for item in encounter.get("combatants", []) if item.get("actor_id") == actor_id
         )
@@ -14939,6 +15294,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             )
         )
         magic_missile = is_core_magic_missile_spell(spell_entry)
+        hypnotic_pattern = is_core_hypnotic_pattern_spell(spell_entry)
         structured_resolution = (
             (
                 deepcopy(dict(spell_entry["resolution"]))
@@ -14968,7 +15324,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 raise CombatEngineError(
                     f"recorded spell resolution plan is invalid: {error}"
                 ) from error
-            if structured_resolution is not None or magic_missile:
+            if (
+                structured_resolution is not None
+                or magic_missile
+                or hypnotic_pattern
+            ):
                 raise CombatEngineError(
                     "a spell card cannot combine a semantic plan with another "
                     "effect-settlement path"
@@ -14985,6 +15345,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             )
         if magic_missile and declaration:
             raise CombatEngineError("Magic Missile uses target_allocations, not declaration")
+        if hypnotic_pattern and structured_resolution is not None:
+            raise CombatEngineError(
+                "Hypnotic Pattern cannot combine its Core mechanic with "
+                "structured damage resolution"
+            )
         semantic_plan_commitment: dict[str, Any] | None = None
         if compiled_spell_plan is not None:
             if "agent_resolution_commitment" not in dict(declaration or {}):
@@ -15033,6 +15398,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if (
             structured_resolution is None
             and compiled_spell_plan is None
+            and not hypnotic_pattern
             and declaration
         ):
             declared = dict(declaration)
@@ -15066,6 +15432,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             source_item_id is None
             and structured_resolution is None
             and compiled_spell_plan is None
+            and not hypnotic_pattern
             and str(
                 spell_entry.get("effect")
                 or dict(spell_entry.get("definition") or {}).get("effect")
@@ -15094,6 +15461,23 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "campaign_revision": campaign.revision,
             }
         structured_target: dict[str, Any] | None = None
+        hypnotic_pattern_target: dict[str, Any] | None = None
+        if hypnotic_pattern:
+            if source_item_id is not None:
+                raise CombatEngineError(
+                    "the Core Hypnotic Pattern path currently requires its "
+                    "source-bound actor spell card"
+                )
+            if str(encounter.get("ruleset") or "") != "2014":
+                raise CombatEngineError(
+                    "the source-bound Hypnotic Pattern mechanic is a 2014 rule"
+                )
+            hypnotic_pattern_target = normalize_hypnotic_pattern_declaration(
+                encounter,
+                caster_id=actor_id,
+                spell=spell_entry,
+                declaration=declaration,
+            )
         if structured_resolution is not None:
             kind = str(structured_resolution.get("kind") or "")
             if kind == "spell_attack":
@@ -15312,6 +15696,175 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             source_item_id=source_item_id,
         )
         resolved_cast_level = int(applied.get("cast_level", cast_level or spell_level) or 0)
+        if hypnotic_pattern:
+            assert hypnotic_pattern_target is not None
+            derived_caster = derive_character_sheet(applied["sheet"])
+            save_dc = dict(derived_caster.get("spellcasting") or {}).get(
+                "save_dc"
+            )
+            if save_dc is None:
+                raise CombatEngineError(
+                    "Hypnotic Pattern save DC is not derivable from the caster card"
+                )
+            concentration_effect = next(
+                (
+                    effect
+                    for effect in applied["sheet"].get("effects", [])
+                    if effect.get("active")
+                    and effect.get("concentration")
+                    and str(effect.get("source_spell_id") or "")
+                    == CORE_HYPNOTIC_PATTERN_SPELL_ID
+                ),
+                None,
+            )
+            if concentration_effect is None:
+                raise CombatEngineError(
+                    "Hypnotic Pattern did not create its required concentration effect"
+                )
+            final_sheets: dict[str, dict[str, Any]] = {
+                actor_id: deepcopy(applied["sheet"])
+            }
+            target_results: list[dict[str, Any]] = []
+            resolution_receipts = [
+                *list(applied.get("rule_receipts") or []),
+                *core_receipts(
+                    effective_rule_context(campaign_id),
+                    [
+                        CORE_HYPNOTIC_PATTERN_MECHANIC_ID,
+                        "dnd5e.core.mcp.combat_spell_boundary",
+                    ],
+                    "combat.spell.hypnotic_pattern",
+                ),
+            ]
+            dependent_effects = list(
+                next_encounter.get("dependent_effects") or []
+            )
+            for target_context in sorted(
+                hypnotic_pattern_target["targets"],
+                key=lambda item: (
+                    str(item.get("target_id") or "") != actor_id,
+                    str(item.get("target_id") or ""),
+                ),
+            ):
+                target_id = str(target_context["target_id"])
+                target_record = characters.get(target_id)
+                target_sheet = deepcopy(
+                    final_sheets.get(target_id, target_record.sheet)
+                )
+                target_actor = combat_actor_snapshot(target_id)
+                target_actor["sheet"] = target_sheet
+                target_actor["derived"] = derive_character_sheet(
+                    target_sheet
+                )
+                resolved_target = resolve_hypnotic_pattern_target(
+                    target_actor,
+                    caster_id=actor_id,
+                    spell_id=spell_id,
+                    save_dc=int(save_dc),
+                    rules=effective_rule_context(
+                        campaign_id,
+                        facts={
+                            "actor_id": target_id,
+                            "caster_id": actor_id,
+                            "spell_id": spell_id,
+                            "kind": "hypnotic_pattern_save",
+                        },
+                    ),
+                )
+                final_sheets[target_id] = resolved_target["sheet"]
+                target_result = {
+                    **resolved_target["result"],
+                    "context": deepcopy(target_context),
+                }
+                save = target_result.get("save")
+                if isinstance(save, dict):
+                    resolution_receipts.extend(
+                        save.get("rule_receipts") or []
+                    )
+                effect_id = str(target_result.get("effect_id") or "")
+                if effect_id:
+                    dependency_id = (
+                        f"effect-dependency-{uuid4().hex}"
+                    )
+                    dependent_effects.append(
+                        {
+                            "id": dependency_id,
+                            "mechanic_id": (
+                                CORE_HYPNOTIC_PATTERN_MECHANIC_ID
+                            ),
+                            "dependency": "source_effect_active",
+                            "source_actor_id": actor_id,
+                            "source_effect_id": str(
+                                concentration_effect["id"]
+                            ),
+                            "target_actor_id": target_id,
+                            "target_effect_id": effect_id,
+                            "active": True,
+                        }
+                    )
+                    target_result["dependency_id"] = dependency_id
+                    target_result["effect_active_after_commit"] = True
+                target_results.append(target_result)
+                sync_combatant_conditions(
+                    next_encounter,
+                    target_id,
+                    resolved_target["sheet"],
+                )
+            next_encounter["dependent_effects"] = dependent_effects
+            result = {
+                "kind": "hypnotic_pattern",
+                "spell_id": spell_id,
+                "cast_level": resolved_cast_level,
+                "save_dc": int(save_dc),
+                "area": hypnotic_pattern_target,
+                "targets": target_results,
+                "concentration_effect_id": str(
+                    concentration_effect["id"]
+                ),
+                "payment": deepcopy(applied.get("payment") or {}),
+            }
+            next_encounter["log"] = [
+                *list(next_encounter.get("log") or []),
+                {
+                    "type": "hypnotic_pattern",
+                    "actor_id": actor_id,
+                    "result": deepcopy(result),
+                },
+            ][-100:]
+            next_state = {
+                **dict(campaign.state or {}),
+                "combat": next_encounter,
+            }
+            response = commit_campaign_state(
+                campaign,
+                next_state,
+                operation="combat.spell.hypnotic_pattern",
+                principal_id=principal_id,
+                branch_id=resolved_branch_id,
+                idempotency_key=idempotency_key,
+                scope=scope,
+                payload=payload,
+                response_fields={
+                    "status": "committed",
+                    "result": result,
+                    "combat": next_encounter,
+                },
+                character_updates=[
+                    CharacterStateUpdate(
+                        character_id=target_actor_id,
+                        sheet=validate_character_sheet(sheet),
+                        notes=validate_character_notes(
+                            characters.get(target_actor_id).notes
+                        ),
+                        expected_revision=characters.get(
+                            target_actor_id
+                        ).revision,
+                    )
+                    for target_actor_id, sheet in final_sheets.items()
+                ],
+                rule_receipts=resolution_receipts,
+            )
+            return combat_response(campaign_id, principal_id, response)
         if structured_resolution is not None:
             structured_kind = str(structured_resolution.get("kind") or "")
             structured_receipts = [
