@@ -346,6 +346,14 @@ def _arguments() -> argparse.Namespace:
     )
     parser.add_argument("--check-advantage", action="store_true")
     parser.add_argument("--check-disadvantage", action="store_true")
+    parser.add_argument(
+        "--check-agent-ruling-json",
+        type=json.loads,
+        help=(
+            "Settled Agent-as-DM DC selection for a source-bound descriptive "
+            "situation whose module text requires a check but prints no DC."
+        ),
+    )
     parser.add_argument("--knowledge-actor-id", action="append", default=[])
     parser.add_argument("--success-knowledge", default="")
     parser.add_argument("--failure-knowledge", default="")
@@ -1809,6 +1817,7 @@ def _matching_check_progress(
     advantage: bool,
     disadvantage: bool,
     source_ref: dict[str, Any],
+    agent_ruling: dict[str, Any] | None = None,
 ) -> bool:
     if not isinstance(progress, dict):
         return False
@@ -1827,6 +1836,7 @@ def _matching_check_progress(
         and bool(check.get("advantage", False)) == advantage
         and bool(check.get("disadvantage", False)) == disadvantage
         and check.get("source_ref") == source_ref
+        and check.get("agent_ruling") == agent_ruling
     )
 
 
@@ -2461,6 +2471,24 @@ def _settled_event_agent_ruling(value: Any) -> dict[str, Any] | None:
             }
         ),
     )
+
+
+def _settled_check_agent_ruling(
+    value: Any,
+    *,
+    dc: int | None,
+) -> dict[str, Any] | None:
+    normalized = _settled_agent_ruling(
+        value,
+        label="check",
+        ruling_kinds=frozenset({"agent_dm_adjudication"}),
+        extra_fields=frozenset({"dc"}),
+    )
+    if normalized is None:
+        return None
+    if normalized.get("dc") != dc:
+        raise ValueError("check Agent ruling DC must exactly match --check-dc")
+    return normalized
 
 
 async def _register_replacement(
@@ -3544,6 +3572,7 @@ async def _resolve_check(
     knowledge_actor_ids: list[str],
     success_knowledge: str,
     failure_knowledge: str,
+    agent_ruling: dict[str, Any] | None = None,
     source_scene_id: str = "",
     defer_checkpoint: bool = False,
 ) -> dict[str, Any]:
@@ -3558,6 +3587,7 @@ async def _resolve_check(
         raise ValueError("resolve-check kind is not supported by character_check")
     if advantage and disadvantage:
         raise ValueError("resolve-check cannot apply advantage and disadvantage together")
+    normalized_agent_ruling = _settled_check_agent_ruling(agent_ruling, dc=dc)
     occurrence_scene = await client.domain(
         "module_query",
         {
@@ -3619,6 +3649,7 @@ async def _resolve_check(
         advantage=advantage,
         disadvantage=disadvantage,
         source_ref=exact_ref,
+        agent_ruling=normalized_agent_ruling,
     )
     if progress_matches:
         progress = deepcopy(progress_before)
@@ -3779,6 +3810,7 @@ async def _resolve_check(
         },
         "check": check_result,
         "check_recovered": recovered is not None,
+        "agent_ruling": normalized_agent_ruling,
         "knowledge_actor_ids": recipients,
         "continuity": committed,
         "sync": synced,
@@ -12952,6 +12984,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     knowledge_actor_ids=args.knowledge_actor_id,
                     success_knowledge=args.success_knowledge,
                     failure_knowledge=args.failure_knowledge,
+                    agent_ruling=args.check_agent_ruling_json,
                     defer_checkpoint=args.defer_checkpoint,
                 )
             elif args.action == "resolve-group-check":

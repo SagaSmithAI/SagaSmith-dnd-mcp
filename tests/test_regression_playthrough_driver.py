@@ -6758,6 +6758,23 @@ def test_check_identity_uses_explicit_occurrence_not_mutable_check_content() -> 
     assert _check_identity("armory-lock-1") != _check_identity("armory-lock-2")
 
 
+def test_check_agent_ruling_binds_the_selected_dc() -> None:
+    ruling = {
+        "default_resolver": "agent",
+        "ruling_kind": "agent_dm_adjudication",
+        "decision": "Use DC 15 for taking the sword without waking its owner.",
+        "reason": "The module establishes the sleeping occupants but prints no DC.",
+        "dc": 15,
+    }
+
+    assert regression_playthrough._settled_check_agent_ruling(ruling, dc=15) == {
+        **ruling,
+        "committed": True,
+    }
+    with pytest.raises(ValueError, match="exactly match"):
+        regression_playthrough._settled_check_agent_ruling(ruling, dc=14)
+
+
 def test_source_cited_check_rejects_unsupported_kind_before_tools() -> None:
     with pytest.raises(ValueError, match="not supported"):
         asyncio.run(
