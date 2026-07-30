@@ -16646,6 +16646,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     ability=str(save_spec["ability"]),
                     dc=int(save_dc),
                     bonus=cover_bonus,
+                    save_source_kind="spell",
+                    save_effect_conditions=[],
                     ruleset=str(next_encounter.get("ruleset") or "2014"),
                     rules=target_rule_context,
                 )

@@ -1046,6 +1046,23 @@ def test_fireball_settles_saves_and_area_enumeration(
                     }
                 },
             },
+            {
+                "id": "dark-devotion-passive",
+                "name": "Dark Devotion",
+                "choices": {
+                    "source_trait": {
+                        "kind": "save_advantage_against_conditions",
+                        "trigger": "saving_throw",
+                        "effect_conditions": ["charmed", "frightened"],
+                        "grants": "advantage",
+                        "automatic": True,
+                        "source_excerpt": (
+                            "The creature has advantage on saving throws against "
+                            "being charmed or frightened."
+                        ),
+                    }
+                },
+            },
         ]
         second = default_character_sheet()
         second["combat"]["hp"] = {"value": 50, "max": 50, "temp": 0}
