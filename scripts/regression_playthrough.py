@@ -59,6 +59,10 @@ from sagasmith_dnd.playthrough import (
     validate_playthrough_manifest,
 )
 from sagasmith_dnd.spell_resolution import scaled_roll_expression
+from sagasmith_dnd.standard_spell_ids import (
+    CORE_FLY_SPELL_ID,
+    CORE_INVISIBILITY_SPELL_ID,
+)
 from sagasmith_dnd.vocabulary import (
     ADVANCEMENT_MODES,
     CAMPAIGN_GAME_PHASES,
@@ -6960,6 +6964,17 @@ async def _cast_standard_spell(
         payload["cast_level"] = cast_level
     if component_ruling is not None:
         payload["component_ruling"] = deepcopy(component_ruling)
+    if normalized_spell_id == CORE_INVISIBILITY_SPELL_ID:
+        if not normalized_target_id:
+            raise ValueError(
+                "the engine-settled Invisibility spell requires a target"
+            )
+        payload["target_character_ids"] = [normalized_target_id]
+    elif normalized_spell_id == CORE_FLY_SPELL_ID:
+        if not normalized_target_id:
+            raise ValueError("the engine-settled Fly spell requires a target")
+        payload["target_character_ids"] = [normalized_target_id]
+        payload["willing_target_ids"] = [normalized_target_id]
     acted = await client.domain(
         "character_action",
         {

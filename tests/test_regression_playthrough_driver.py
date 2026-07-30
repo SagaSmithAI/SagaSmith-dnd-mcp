@@ -3066,6 +3066,110 @@ def test_standard_spell_driver_stops_at_precommit_ruling() -> None:
     assert raised.value.requirement["operation"] == "character_action.cast_spell"
 
 
+def test_standard_spell_driver_sends_engine_owned_invisibility_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_ref = {
+        "module_id": "module-1",
+        "scene_id": "scene-1",
+        "chunk_id": "village-chunk",
+        "page_start": 170,
+        "page_end": 170,
+        "heading_path": ["Village", "Night"],
+        "content_sha256": "a" * 64,
+    }
+
+    class Client:
+        def __init__(self) -> None:
+            self.cast_arguments: dict = {}
+
+        async def core(self, tool_id: str, arguments: dict):
+            assert tool_id == "campaign_query"
+            return {
+                "result": {
+                    "id": "campaign-1",
+                    "revision": 9,
+                    "effective_game_phase": "play",
+                }
+            }
+
+        async def domain(self, tool_id: str, arguments: dict):
+            if tool_id == "module_query":
+                return {
+                    "module_id": "module-1",
+                    "scene_id": "scene-1",
+                    "content": "At night, the yakfolk retire to their huts.",
+                    "locations": [{"key": "village"}],
+                }
+            if tool_id == "character_query":
+                actor_id = arguments["payload"]["character_id"]
+                return {
+                    "id": actor_id,
+                    "name": actor_id.title(),
+                    "campaign_id": "campaign-1",
+                    "revision": 4,
+                    "sheet": default_character_sheet(),
+                }
+            if tool_id == "character_action":
+                self.cast_arguments = deepcopy(arguments)
+                return {
+                    "status": "committed",
+                    "result": {
+                        "payment": {
+                            "economy": "slots",
+                            "level": 2,
+                            "cost": 1,
+                        },
+                        "automatic_effect": "invisibility",
+                        "target_ids": ["rogue"],
+                    },
+                }
+            if tool_id == "branch_query":
+                return [{"id": "branch-1", "is_current": True}]
+            if tool_id == "memory_change":
+                return {"event": {"id": "event-1"}}
+            raise AssertionError((tool_id, arguments))
+
+    async def manifest_mutation(*_args, **_kwargs):
+        return {"manifest": {"status": "in_progress"}}
+
+    monkeypatch.setattr(
+        regression_playthrough,
+        "_manifest_mutation",
+        manifest_mutation,
+    )
+    client = Client()
+    result = asyncio.run(
+        _cast_standard_spell(
+            client,
+            campaign_id="campaign-1",
+            run_id="run-1",
+            occurrence_id="invisibility-engine-1",
+            scene_id="scene-1",
+            source_scene_id="scene-1",
+            location_key="village",
+            source_excerpt="At night, the yakfolk retire to their huts.",
+            source_ref=source_ref,
+            actor_id="bard",
+            target_id="rogue",
+            spell_id="dnd5e.content.srd2014.spell.invisibility",
+            cast_level=2,
+            component_ruling=None,
+            agent_ruling=None,
+            reason="The bard made the rogue invisible before the infiltration.",
+            knowledge_actor_ids=[],
+            defer_checkpoint=True,
+        )
+    )
+
+    assert client.cast_arguments["payload"] == {
+        "spell_id": "dnd5e.content.srd2014.spell.invisibility",
+        "cast_level": 2,
+        "target_character_ids": ["rogue"],
+    }
+    assert result["agent_ruling"] is None
+
+
 def test_healing_spell_driver_pays_rolls_and_applies_public_healing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

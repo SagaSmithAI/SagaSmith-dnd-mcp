@@ -18,6 +18,8 @@ from sagasmith_dnd.standard_spell_ids import (
     CORE_FLY_SPELL_ID,
     CORE_HYPNOTIC_PATTERN_MECHANIC_ID,
     CORE_HYPNOTIC_PATTERN_SPELL_ID,
+    CORE_INVISIBILITY_MECHANIC_ID,
+    CORE_INVISIBILITY_SPELL_ID,
     CORE_WITCH_BOLT_SPELL_ID,
 )
 
@@ -175,6 +177,47 @@ def _fly() -> dict:
         "pack_version": "1.16.0",
         "rule_refs": [
             "bundled:srd2014/07_Spells/Spells_Each/Fly.md"
+        ],
+    }
+
+
+def _invisibility() -> dict:
+    return {
+        "id": CORE_INVISIBILITY_SPELL_ID,
+        "name": "Invisibility",
+        "level": 2,
+        "grant": {
+            "source_type": "class",
+            "source_key": "bard",
+            "method": "known",
+        },
+        "access": {"known": True, "prepared": True},
+        "definition": {
+            "casting_time": "1 action",
+            "range": {"kind": "touch"},
+            "duration": {
+                "kind": "timed",
+                "value": 1,
+                "unit": "hour",
+                "concentration": True,
+            },
+            "components": {
+                "verbal": True,
+                "somatic": True,
+                "material": True,
+                "material_description": "an eyelash encased in gum arabic",
+            },
+            "effect": (
+                "A creature you touch becomes invisible until the spell "
+                "ends. The spell ends for a target that attacks or casts "
+                "a spell."
+            ),
+        },
+        "mechanic_refs": [CORE_INVISIBILITY_MECHANIC_ID],
+        "pack_id": "dnd5e.content.srd2014",
+        "pack_version": "1.18.0",
+        "rule_refs": [
+            "bundled:srd2014/07_Spells/Spells_Each/Invisibility.md"
         ],
     }
 
@@ -801,6 +844,171 @@ def test_combat_fly_uses_touch_range_and_encounter_dependency(
             {"character_id": actors[1]["id"]},
         )
         assert target["derived"]["speed"]["fly"] == 60
+
+    asyncio.run(exercise())
+
+
+def test_noncombat_invisibility_commits_targets_and_reconciles_replacement(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        server = create_server(_config(tmp_path))
+        campaign = await _call(
+            server,
+            "campaign_create",
+            {
+                "name": "Invisibility outside combat",
+                "edition": "2014",
+                "idempotency_key": "invisibility-campaign",
+            },
+        )
+        caster_sheet = default_character_sheet()
+        caster_sheet["spellcasting"].update(
+            ability="charisma",
+            spell_slots={
+                "2": {
+                    "label": "2nd",
+                    "value": 2,
+                    "max": 2,
+                    "recovers_on": "long_rest",
+                    "source_key": "bard",
+                }
+            },
+        )
+        caster_sheet["content"]["spells"] = [_invisibility()]
+        caster = await _call(
+            server,
+            "character_create",
+            {
+                "campaign_id": campaign["id"],
+                "name": "Caster",
+                "sheet": caster_sheet,
+                "idempotency_key": "invisibility-caster",
+            },
+        )
+        target = await _call(
+            server,
+            "character_create",
+            {
+                "campaign_id": campaign["id"],
+                "name": "Target",
+                "sheet": default_character_sheet(),
+                "idempotency_key": "invisibility-target",
+            },
+        )
+        arguments = {
+            "character_id": caster["id"],
+            "action": "cast_spell",
+            "payload": {
+                "spell_id": CORE_INVISIBILITY_SPELL_ID,
+                "cast_level": 2,
+                "target_character_ids": [target["id"]],
+            },
+            "expected_revision": caster["revision"],
+            "idempotency_key": "invisibility-first",
+        }
+        first = await _call(server, "character_action", arguments)
+
+        assert first["status"] == "committed"
+        assert first["result"]["automatic_effect"] == "invisibility"
+        assert first["result"]["target_ids"] == [target["id"]]
+        assert await _call(server, "character_action", arguments) == first
+        target_invisible = await _call(
+            server,
+            "character_get",
+            {"character_id": target["id"]},
+        )
+        assert "invisible" in target_invisible["sheet"]["conditions"]
+
+        caster_after = await _call(
+            server,
+            "character_get",
+            {"character_id": caster["id"]},
+        )
+        second = await _call(
+            server,
+            "character_action",
+            {
+                "character_id": caster["id"],
+                "action": "cast_spell",
+                "payload": {
+                    "spell_id": CORE_INVISIBILITY_SPELL_ID,
+                    "cast_level": 2,
+                    "target_character_ids": [caster["id"]],
+                },
+                "expected_revision": caster_after["revision"],
+                "idempotency_key": "invisibility-second",
+            },
+        )
+
+        assert second["status"] == "committed"
+        target_visible = await _call(
+            server,
+            "character_get",
+            {"character_id": target["id"]},
+        )
+        caster_invisible = await _call(
+            server,
+            "character_get",
+            {"character_id": caster["id"]},
+        )
+        assert "invisible" not in target_visible["sheet"]["conditions"]
+        assert "invisible" in caster_invisible["sheet"]["conditions"]
+        old_effect = next(
+            effect
+            for effect in target_visible["sheet"]["effects"]
+            if effect["source_spell_id"] == CORE_INVISIBILITY_SPELL_ID
+        )
+        assert old_effect["active"] is False
+        assert old_effect["ended_reason"] == "source_effect_ended"
+
+    asyncio.run(exercise())
+
+
+def test_combat_invisibility_uses_touch_range_and_encounter_dependency(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        server = create_server(_config(tmp_path))
+        caster = default_character_sheet()
+        caster["spellcasting"].update(
+            ability="charisma",
+            spell_slots=_slot(2),
+        )
+        caster["content"]["spells"] = [_invisibility()]
+        campaign_id, revision, actors = await _campaign_with_combat(
+            server,
+            [("Caster", caster), ("Target", default_character_sheet())],
+            positions=[(0, 0), (1, 0)],
+        )
+        cast = await _raw(
+            server,
+            "combat_cast_spell",
+            {
+                "campaign_id": campaign_id,
+                "actor_id": actors[0]["id"],
+                "spell_id": CORE_INVISIBILITY_SPELL_ID,
+                "cast_level": 2,
+                "declaration": {
+                    "target_ids": [actors[1]["id"]],
+                },
+                "expected_revision": revision,
+                "idempotency_key": "combat-invisibility",
+            },
+        )
+
+        assert cast["status"] == "committed"
+        assert cast["result"]["kind"] == "invisibility"
+        assert cast["result"]["targets"][0]["condition"] == "invisible"
+        assert cast["combat"]["dependent_effects"][0][
+            "mechanic_id"
+        ] == CORE_INVISIBILITY_MECHANIC_ID
+        target = await _call(
+            server,
+            "character_get",
+            {"character_id": actors[1]["id"]},
+        )
+        assert "invisible" in target["sheet"]["conditions"]
 
     asyncio.run(exercise())
 

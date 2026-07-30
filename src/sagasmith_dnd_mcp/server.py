@@ -316,6 +316,7 @@ from sagasmith_dnd.spells import (
     CORE_MAGIC_ITEM_RECHARGE_MECHANIC_ID,
     SLOT_PAYMENT_ECONOMIES,
     apply_core_fly_effects,
+    apply_core_invisibility_effects,
     available_shield_attack_defenses,
     available_shield_magic_missile_defenses,
     consume_magic_item_spell_cast,
@@ -324,8 +325,10 @@ from sagasmith_dnd.spells import (
     consume_spell_cast,
     end_concentration_effects,
     fly_target_limit,
+    invisibility_target_limit,
     is_core_fly_spell,
     is_core_hypnotic_pattern_spell,
+    is_core_invisibility_spell,
     is_core_magic_missile_spell,
     is_core_witch_bolt_spell,
     magic_item_spell_card,
@@ -343,6 +346,8 @@ from sagasmith_dnd.standard_spell_ids import (
     CORE_FLY_SPELL_ID,
     CORE_HYPNOTIC_PATTERN_MECHANIC_ID,
     CORE_HYPNOTIC_PATTERN_SPELL_ID,
+    CORE_INVISIBILITY_MECHANIC_ID,
+    CORE_INVISIBILITY_SPELL_ID,
     CORE_WITCH_BOLT_MECHANIC_ID,
     STANDARD_2014_CONTENT_PACK_ID,
     STANDARD_2014_CONTENT_PACK_VERSION,
@@ -15634,6 +15639,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         magic_missile = is_core_magic_missile_spell(spell_entry)
         fly = is_core_fly_spell(spell_entry)
+        invisibility = is_core_invisibility_spell(spell_entry)
         hypnotic_pattern = is_core_hypnotic_pattern_spell(spell_entry)
         structured_resolution = (
             (
@@ -15668,6 +15674,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 structured_resolution is not None
                 or magic_missile
                 or fly
+                or invisibility
                 or hypnotic_pattern
             ):
                 raise CombatEngineError(
@@ -15740,6 +15747,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             structured_resolution is None
             and compiled_spell_plan is None
             and not fly
+            and not invisibility
             and not hypnotic_pattern
             and declaration
         ):
@@ -15781,6 +15789,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 or ""
             ).strip()
             and not fly
+            and not invisibility
             and not source_card_has_executable_mechanic(
                 campaign_id,
                 spell_entry,
@@ -15805,6 +15814,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             }
         structured_target: dict[str, Any] | None = None
         fly_target: dict[str, Any] | None = None
+        invisibility_target: dict[str, Any] | None = None
         hypnotic_pattern_target: dict[str, Any] | None = None
         if fly:
             if source_item_id is not None or spell_id != CORE_FLY_SPELL_ID:
@@ -15890,6 +15900,92 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             fly_target = {
                 "target_ids": fly_target_ids,
                 "willing_target_ids": fly_willing_ids,
+                "contexts": contexts,
+            }
+        if invisibility:
+            if source_item_id is not None or spell_id != CORE_INVISIBILITY_SPELL_ID:
+                raise CombatEngineError(
+                    "the Core Invisibility path requires its exact actor "
+                    "spell card"
+                )
+            if str(encounter.get("ruleset") or "") != "2014":
+                raise CombatEngineError(
+                    "the source-bound Invisibility mechanic is a 2014 rule"
+                )
+            declared = dict(declaration or {})
+            if set(declared) != {"target_ids"}:
+                raise CombatEngineError(
+                    "Invisibility declaration requires only target_ids"
+                )
+            if not isinstance(declared.get("target_ids"), list):
+                raise CombatEngineError(
+                    "Invisibility target_ids must be a list"
+                )
+            invisibility_target_ids = [
+                str(item).strip()
+                for item in list(declared.get("target_ids") or [])
+            ]
+            preview_cast_level = int(
+                cast_level
+                if cast_level is not None
+                else spell_entry.get("level", 0)
+                or 0
+            )
+            if (
+                not invisibility_target_ids
+                or any(not item for item in invisibility_target_ids)
+                or len(invisibility_target_ids)
+                != len(set(invisibility_target_ids))
+                or len(invisibility_target_ids)
+                > invisibility_target_limit(preview_cast_level)
+            ):
+                raise CombatEngineError(
+                    "Invisibility requires unique targets within its "
+                    "cast-level limit"
+                )
+            combatants = {
+                str(item.get("actor_id") or ""): item
+                for item in encounter.get("combatants", [])
+            }
+            caster_combatant = combatants.get(actor_id)
+            if caster_combatant is None:
+                raise CombatEngineError(
+                    "Invisibility caster is not in this encounter"
+                )
+            contexts: list[dict[str, Any]] = []
+            for target_id in invisibility_target_ids:
+                target_combatant = combatants.get(target_id)
+                if target_combatant is None:
+                    raise CombatEngineError(
+                        "Invisibility target is not in this encounter: "
+                        f"{target_id}"
+                    )
+                if "dead" in {
+                    str(item).casefold()
+                    for item in target_combatant.get("conditions", [])
+                }:
+                    raise CombatEngineError(
+                        "Invisibility cannot target a dead creature"
+                    )
+                distance = combat_distance(
+                    caster_combatant.get("position"),
+                    target_combatant.get("position"),
+                )
+                if distance is None or distance > 5:
+                    raise CombatEngineError(
+                        "every Invisibility target must be within touch range"
+                    )
+                target_record = characters.get(target_id)
+                if target_record.campaign_id != campaign_id:
+                    raise CombatEngineError(
+                        "every Invisibility target must belong to the "
+                        "caster's campaign"
+                    )
+                contexts.append(
+                    {"target_id": target_id, "distance_ft": distance}
+                )
+            invisibility_target = {
+                "target_ids": invisibility_target_ids,
                 "contexts": contexts,
             }
         if hypnotic_pattern:
@@ -16250,6 +16346,134 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                             "dnd5e.core.mcp.combat_spell_boundary",
                         ],
                         "combat.spell.fly",
+                    ),
+                ],
+            )
+            return combat_response(campaign_id, principal_id, response)
+        if invisibility:
+            assert invisibility_target is not None
+            concentration_effect = next(
+                (
+                    effect
+                    for effect in applied["sheet"].get("effects", [])
+                    if effect.get("active")
+                    and effect.get("concentration")
+                    and str(effect.get("source_spell_id") or "")
+                    == CORE_INVISIBILITY_SPELL_ID
+                ),
+                None,
+            )
+            if concentration_effect is None:
+                raise CombatEngineError(
+                    "Invisibility did not create its required "
+                    "concentration effect"
+                )
+            invisibility_sheets = {
+                target_id: deepcopy(characters.get(target_id).sheet)
+                for target_id in invisibility_target["target_ids"]
+            }
+            invisibility_sheets[actor_id] = deepcopy(applied["sheet"])
+            applied_invisibility = apply_core_invisibility_effects(
+                invisibility_sheets,
+                caster_id=actor_id,
+                target_ids=invisibility_target["target_ids"],
+                spell_id=spell_id,
+                cast_level=resolved_cast_level,
+                concentration_effect_id=str(concentration_effect["id"]),
+            )
+            final_sheets = applied_invisibility["sheets"]
+            dependent_effects = list(
+                next_encounter.get("dependent_effects") or []
+            )
+            dependencies: list[dict[str, Any]] = []
+            for target_id in applied_invisibility["target_ids"]:
+                dependency = {
+                    "id": f"effect-dependency-{uuid4().hex}",
+                    "mechanic_id": CORE_INVISIBILITY_MECHANIC_ID,
+                    "dependency": "source_effect_active",
+                    "source_actor_id": actor_id,
+                    "source_effect_id": str(concentration_effect["id"]),
+                    "target_actor_id": target_id,
+                    "target_effect_id": applied_invisibility["effect_ids"][
+                        target_id
+                    ],
+                    "active": True,
+                }
+                dependent_effects.append(dependency)
+                dependencies.append(dependency)
+                sync_combatant_conditions(
+                    next_encounter,
+                    target_id,
+                    final_sheets[target_id],
+                )
+            next_encounter["dependent_effects"] = dependent_effects
+            result = {
+                "kind": "invisibility",
+                "spell_id": spell_id,
+                "cast_level": resolved_cast_level,
+                "target_limit": applied_invisibility["target_limit"],
+                "targets": [
+                    {
+                        **context,
+                        "effect_id": applied_invisibility["effect_ids"][
+                            context["target_id"]
+                        ],
+                        "condition": "invisible",
+                    }
+                    for context in invisibility_target["contexts"]
+                ],
+                "concentration_effect_id": str(concentration_effect["id"]),
+                "dependencies": dependencies,
+                "payment": deepcopy(applied.get("payment") or {}),
+            }
+            next_encounter["log"] = [
+                *list(next_encounter.get("log") or []),
+                {
+                    "type": "invisibility",
+                    "actor_id": actor_id,
+                    "result": deepcopy(result),
+                },
+            ][-100:]
+            next_state = {
+                **dict(campaign.state or {}),
+                "combat": next_encounter,
+            }
+            response = commit_campaign_state(
+                campaign,
+                next_state,
+                operation="combat.spell.invisibility",
+                principal_id=principal_id,
+                branch_id=resolved_branch_id,
+                idempotency_key=idempotency_key,
+                scope=scope,
+                payload=payload,
+                response_fields={
+                    "status": "committed",
+                    "result": result,
+                    "combat": next_encounter,
+                },
+                character_updates=[
+                    CharacterStateUpdate(
+                        character_id=target_actor_id,
+                        sheet=validate_character_sheet(sheet),
+                        notes=validate_character_notes(
+                            characters.get(target_actor_id).notes
+                        ),
+                        expected_revision=characters.get(
+                            target_actor_id
+                        ).revision,
+                    )
+                    for target_actor_id, sheet in final_sheets.items()
+                ],
+                rule_receipts=[
+                    *list(applied.get("rule_receipts") or []),
+                    *core_receipts(
+                        effective_rule_context(campaign_id),
+                        [
+                            CORE_INVISIBILITY_MECHANIC_ID,
+                            "dnd5e.core.mcp.combat_spell_boundary",
+                        ],
+                        "combat.spell.invisibility",
                     ),
                 ],
             )
@@ -24113,8 +24337,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             )
         )
         fly = is_core_fly_spell(spell_entry)
+        invisibility = is_core_invisibility_spell(spell_entry)
         normalized_fly_targets: list[str] = []
         normalized_willing_targets: list[str] = []
+        normalized_invisibility_targets: list[str] = []
         if fly:
             if str(current.sheet.get("edition") or "") != "2014":
                 raise CombatEngineError(
@@ -24163,10 +24389,58 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     principal_id,
                     control=True,
                 )
+        elif invisibility:
+            if source_item_id is not None:
+                raise CombatEngineError(
+                    "the Core Invisibility path requires its actor spell card"
+                )
+            if str(current.sheet.get("edition") or "") != "2014":
+                raise CombatEngineError(
+                    "the source-bound Invisibility mechanic is a 2014 rule"
+                )
+            if spell_id != CORE_INVISIBILITY_SPELL_ID:
+                raise CombatEngineError(
+                    "the Core Invisibility path requires its exact "
+                    "source-bound SRD spell id"
+                )
+            if willing_target_ids is not None:
+                raise CombatEngineError(
+                    "Invisibility does not use willing_target_ids"
+                )
+            normalized_invisibility_targets = [
+                str(item).strip() for item in (target_character_ids or [])
+            ]
+            resolved_invisibility_level = int(
+                cast_level
+                if cast_level is not None
+                else spell_entry.get("level", 0)
+                or 0
+            )
+            if (
+                not normalized_invisibility_targets
+                or any(
+                    not item for item in normalized_invisibility_targets
+                )
+                or len(normalized_invisibility_targets)
+                != len(set(normalized_invisibility_targets))
+                or len(normalized_invisibility_targets)
+                > invisibility_target_limit(resolved_invisibility_level)
+            ):
+                raise CombatEngineError(
+                    "Invisibility requires unique targets within its "
+                    "cast-level limit"
+                )
+            for target_id in normalized_invisibility_targets:
+                target = characters.get(target_id)
+                if target.campaign_id != current.campaign_id:
+                    raise CombatEngineError(
+                        "every Invisibility target must belong to the "
+                        "caster's campaign"
+                    )
         elif target_character_ids is not None or willing_target_ids is not None:
             raise CombatEngineError(
                 "target_character_ids and willing_target_ids are currently "
-                "reserved for the Core Fly path"
+                "reserved for engine-settled target mechanics"
             )
         compiled_spell_plan = None
         if (
@@ -24186,6 +24460,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 or ""
             ).strip()
             and not fly
+            and not invisibility
             and not source_card_has_executable_mechanic(
                 current.campaign_id,
                 spell_entry,
@@ -24369,6 +24644,64 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "spell.fly",
                 )
             )
+        if invisibility:
+            concentration_effect = next(
+                (
+                    effect
+                    for effect in applied["sheet"].get("effects", [])
+                    if effect.get("active")
+                    and effect.get("concentration")
+                    and str(effect.get("source_spell_id") or "")
+                    == CORE_INVISIBILITY_SPELL_ID
+                ),
+                None,
+            )
+            if concentration_effect is None:
+                raise CombatEngineError(
+                    "Invisibility did not create its required "
+                    "concentration effect"
+                )
+            invisibility_result = apply_core_invisibility_effects(
+                timed_sheets,
+                caster_id=current.id,
+                target_ids=normalized_invisibility_targets,
+                spell_id=spell_id,
+                cast_level=int(
+                    applied.get("cast_level", cast_level or 2) or 2
+                ),
+                concentration_effect_id=str(concentration_effect["id"]),
+            )
+            timed_sheets = invisibility_result["sheets"]
+            applied["sheet"] = timed_sheets[current.id]
+            applied["automatic_effect"] = "invisibility"
+            applied["effect_ids"] = invisibility_result["effect_ids"]
+            applied["target_ids"] = invisibility_result["target_ids"]
+            applied["target_limit"] = invisibility_result["target_limit"]
+            applied["concentration_effect_id"] = invisibility_result[
+                "concentration_effect_id"
+            ]
+            applied["ruling_required"] = [
+                item
+                for item in applied.get("ruling_required") or []
+                if item != "targets_and_effect"
+            ]
+            applied["ruling_requirements"] = [
+                item
+                for item in applied.get("ruling_requirements") or []
+                if item.get("kind") != "targets_and_effect"
+            ]
+            rule_receipts.extend(
+                core_receipts(
+                    rules,
+                    [CORE_INVISIBILITY_MECHANIC_ID],
+                    "spell.invisibility",
+                )
+            )
+        reconciled_dependencies = reconcile_source_effect_dependencies(
+            timed_sheets
+        )
+        timed_sheets = reconciled_dependencies["sheets"]
+        applied["sheet"] = timed_sheets[current.id]
         rule_receipts.extend(applied.get("rule_receipts") or [])
         updates = [
             CharacterStateUpdate(
