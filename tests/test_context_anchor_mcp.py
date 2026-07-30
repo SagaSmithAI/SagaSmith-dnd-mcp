@@ -1,0 +1,325 @@
+import asyncio
+import hashlib
+from pathlib import Path
+
+import pytest
+
+from sagasmith_dnd_mcp.config import McpConfig
+from sagasmith_dnd_mcp.server import create_server
+
+
+async def _call(server, name: str, arguments: dict):
+    called = await server.call_tool(name, arguments)
+    if isinstance(called, tuple):
+        _, result = called
+        return result.get("result", result) if isinstance(result, dict) else result
+    return called
+
+
+def _config(tmp_path: Path) -> McpConfig:
+    dnd = tmp_path / "dnd"
+    modulegen = tmp_path / "modulegen"
+    (dnd / "full").mkdir(parents=True)
+    modulegen.mkdir(parents=True)
+    (dnd / "full" / "SKILL.md").write_text("# D&D Full\n", encoding="utf-8")
+    (modulegen / "SKILL.md").write_text("# Module Generator\n", encoding="utf-8")
+    return McpConfig(
+        home=tmp_path / "home",
+        database_url=None,
+        chroma_url=None,
+        chroma_path_override=None,
+        dnd_skills_dir=dnd,
+        modulegen_skills_dir=modulegen,
+        auto_seed_rules=False,
+    )
+
+
+async def _import_ironslag_context(server, campaign_id: str) -> dict:
+    content = (
+        "# Forge of the Fire Giants\n\n"
+        "## Foundry Upper Level\n\n"
+        "Zaltember is a bully and coward. If wounded, he flees to area 31. "
+        "If captured or cornered, he declares that he is the son of Duke Zalto. "
+        "Before conceding, his parents try to convince the captors to release him "
+        "as a show of good faith. If the characters refuse, the duke or duchess "
+        "gives them the conch in exchange for his safe return.\n"
+    )
+    staged = await _call(
+        server,
+        "module_import",
+        {
+            "campaign_id": campaign_id,
+            "action": "stage",
+            "payload": {
+                "name": "ironslag-context.md",
+                "content": content,
+                "source_key": "ironslag-context",
+                "title": "Ironslag Context",
+            },
+            "idempotency_key": "context-stage",
+        },
+    )
+    job_id = staged["job"]["id"]
+    for action in ("inspect", "validate", "ingest"):
+        await _call(
+            server,
+            "module_import",
+            {
+                "campaign_id": campaign_id,
+                "action": action,
+                "payload": {"job_id": job_id},
+                "idempotency_key": f"context-{action}",
+            },
+        )
+    campaign = await _call(
+        server,
+        "campaign_query",
+        {"view": "get", "payload": {"campaign_id": campaign_id}},
+    )
+    await _call(
+        server,
+        "module_import",
+        {
+            "campaign_id": campaign_id,
+            "action": "activate",
+            "payload": {"job_id": job_id},
+            "expected_revision": campaign["revision"],
+            "idempotency_key": "context-activate",
+        },
+    )
+    hits = await _call(
+        server,
+        "module_search",
+        {
+            "campaign_id": campaign_id,
+            "query": "Zaltember wounded captured conch",
+            "top_k": 3,
+        },
+    )
+    expanded = await _call(
+        server,
+        "module_expand",
+        {"chunk_id": hits[0]["id"]},
+    )
+    return {
+        "module_id": expanded["module"]["id"],
+        "scene_id": expanded["scene"]["id"],
+        "chunk_id": expanded["chunk_id"],
+        "page_start": expanded["page_start"],
+        "page_end": expanded["page_end"],
+        "heading_path": expanded["heading_path"],
+        "content_sha256": hashlib.sha256(
+            expanded["content"].encode("utf-8")
+        ).hexdigest(),
+    }
+
+
+def test_public_context_anchor_pins_exact_dm_evidence_without_a_narrative_dsl(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        server = create_server(_config(tmp_path))
+        campaign = await _call(
+            server,
+            "campaign_create",
+            {
+                "name": "Agent DM context",
+                "idempotency_key": "campaign",
+            },
+        )
+        source_ref = await _import_ironslag_context(
+            server,
+            campaign["id"],
+        )
+        source_excerpt = (
+            "Zaltember is a bully and coward. If wounded, he flees to area 31."
+        )
+        anchor = await _call(
+            server,
+            "memory_change",
+            {
+                "campaign_id": campaign["id"],
+                "action": "upsert",
+                "payload": {
+                    "fact_key": "context:actor:zaltember:ironslag",
+                    "kind": "context_anchor",
+                    "subject": "Zaltember module context",
+                    "subject_ref": "actor:zaltember",
+                    "predicate": "",
+                    "content": "Exact source context for Agent-as-DM adjudication.",
+                    "metadata": {
+                        "schema_version": 1,
+                        "purpose": "Zaltember behavior and conch negotiation",
+                        "related_refs": [
+                            "scene:ironslag-area18",
+                            "quest:obtain-fire-giant-conch",
+                            "item:fire-giant-conch",
+                        ],
+                        "source_bindings": [
+                            {
+                                "source_ref": source_ref,
+                                "source_excerpt": source_excerpt,
+                            }
+                        ],
+                    },
+                    "importance": 5,
+                    "disclosure_scope": "dm",
+                },
+                "idempotency_key": "anchor",
+            },
+        )
+        replay = await _call(
+            server,
+            "memory_change",
+            {
+                "campaign_id": campaign["id"],
+                "action": "upsert",
+                "payload": {
+                    "fact_key": "context:actor:zaltember:ironslag",
+                    "kind": "context_anchor",
+                    "subject": "Zaltember module context",
+                    "subject_ref": "actor:zaltember",
+                    "predicate": "",
+                    "content": "Exact source context for Agent-as-DM adjudication.",
+                    "metadata": {
+                        "schema_version": 1,
+                        "purpose": "Zaltember behavior and conch negotiation",
+                        "related_refs": [
+                            "scene:ironslag-area18",
+                            "quest:obtain-fire-giant-conch",
+                            "item:fire-giant-conch",
+                        ],
+                        "source_bindings": [
+                            {
+                                "source_ref": source_ref,
+                                "source_excerpt": source_excerpt,
+                            }
+                        ],
+                    },
+                    "importance": 5,
+                    "disclosure_scope": "dm",
+                },
+                "idempotency_key": "anchor",
+            },
+        )
+        context = await _call(
+            server,
+            "continuity_context",
+            {
+                "campaign_id": campaign["id"],
+                "query": "words that do not occur in the module",
+                "related_refs": ["actor:zaltember"],
+                "budget_chars": 1_000,
+            },
+        )
+
+        assert anchor["kind"] == "context_anchor"
+        assert replay == anchor
+        assert anchor["metadata"]["related_refs"][0] == "actor:zaltember"
+        assert context["facts"] == []
+        assert context["module_evidence"][0]["context_role"] == (
+            "non_executable_module_evidence"
+        )
+        assert context["module_evidence"][0]["source_ref"] == source_ref
+        assert context["module_evidence"][0]["source_excerpt"] == source_excerpt
+        assert context["retrieval"]["pinned_module_evidence_count"] == 1
+        assert context["retrieval"]["strategy"] == (
+            "lexical_structured_pinned_module_evidence_v3"
+        )
+
+        await _call(
+            server,
+            "access_grant",
+            {
+                "scope": "campaign",
+                "campaign_id": campaign["id"],
+                "principal_id": "player:one",
+                "payload": {"role": "player"},
+            },
+        )
+        player_context = await _call(
+            server,
+            "continuity_context",
+            {
+                "campaign_id": campaign["id"],
+                "audience": "player",
+                "related_refs": ["actor:zaltember"],
+                "principal_id": "player:one",
+            },
+        )
+        assert player_context["module_evidence"] == []
+
+        with pytest.raises(Exception, match="unsupported fields"):
+            await _call(
+                server,
+                "memory_change",
+                {
+                    "campaign_id": campaign["id"],
+                    "action": "upsert",
+                    "payload": {
+                        "fact_key": "context:actor:zaltember:trigger",
+                        "kind": "context_anchor",
+                        "subject_ref": "actor:zaltember",
+                        "content": "Must not become executable.",
+                        "metadata": {
+                            **anchor["metadata"],
+                            "trigger": {"event": "actor_wounded"},
+                        },
+                        "disclosure_scope": "dm",
+                    },
+                    "idempotency_key": "invalid-trigger",
+                },
+            )
+
+    asyncio.run(exercise())
+
+
+def test_public_context_anchor_rejects_a_nonverbatim_source_excerpt(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        server = create_server(_config(tmp_path))
+        campaign = await _call(
+            server,
+            "campaign_create",
+            {
+                "name": "Strict Agent context",
+                "idempotency_key": "campaign",
+            },
+        )
+        source_ref = await _import_ironslag_context(
+            server,
+            campaign["id"],
+        )
+        with pytest.raises(Exception, match="not present"):
+            await _call(
+                server,
+                "memory_change",
+                {
+                    "campaign_id": campaign["id"],
+                    "action": "upsert",
+                    "payload": {
+                        "fact_key": "context:bad-source",
+                        "kind": "context_anchor",
+                        "subject_ref": "actor:zaltember",
+                        "content": "Paraphrase must not become authority.",
+                        "metadata": {
+                            "schema_version": 1,
+                            "purpose": "Invalid paraphrased context",
+                            "related_refs": [],
+                            "source_bindings": [
+                                {
+                                    "source_ref": source_ref,
+                                    "source_excerpt": (
+                                        "Zaltember teleports directly to area 31."
+                                    ),
+                                }
+                            ],
+                        },
+                        "disclosure_scope": "dm",
+                    },
+                    "idempotency_key": "bad-anchor",
+                },
+            )
+
+    asyncio.run(exercise())

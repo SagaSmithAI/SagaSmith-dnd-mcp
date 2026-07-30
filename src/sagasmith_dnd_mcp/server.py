@@ -49,6 +49,7 @@ from sagasmith_core import (
     render_pdf_page,
 )
 from sagasmith_core.access import CAMPAIGN_DM_ROLES, LOCAL_SYSTEM_PRINCIPAL_ID
+from sagasmith_core.context_anchors import normalize_context_entity_ref
 from sagasmith_core.idempotency import request_hash
 from sagasmith_core.integrity import canonical_json
 from sagasmith_core.modules import (
@@ -6945,7 +6946,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     def server_capabilities() -> dict[str, Any]:
         """Describe the MCP contract and the automatic-vs-ruling combat boundary."""
         return {
-            "contract_version": "2026-07-content-solutions-v5",
+            "contract_version": "2026-07-agent-module-context-v6",
             "transport": "stdio",
             "state_owner": "sagasmith-dnd-mcp",
             "features": {
@@ -7013,6 +7014,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "exposure_expiry": True,
                 "stable_campaign_fact_identity": True,
                 "atomic_continuity_commit": True,
+                "source_bound_dm_context_anchors": True,
+                "pinned_non_executable_module_evidence": True,
                 "skill_manifest_checksums": True,
                 "validated_module_runtime_manifest": True,
                 "shared_continuity_budget": True,
@@ -24851,6 +24854,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "metadata": metadata or {},
             "branch_id": branch_id,
         }
+        validate_embedded_module_source_refs(
+            campaign_id,
+            request_payload,
+            field="memory_add",
+        )
         scope = f"memory-add:{campaign_id}:{branch_id}:{principal_id}"
         replay = replay_idempotent(scope, idempotency_key, request_payload)
         if replay is not None:
@@ -25678,9 +25686,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         branch_id: str | None = None,
         limit: int = 8,
         budget_chars: int = 12_000,
+        related_refs: list[str] | None = None,
         principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
     ) -> dict[str, Any]:
-        """Retrieve only current-branch facts, events, and optional actor knowledge."""
+        """Retrieve current continuity plus pinned, source-exact DM module context."""
         membership = access.require_campaign(campaign_id, principal_id)
         branch_id = readable_branch(campaign_id, branch_id, principal_id)
         if membership.role not in CAMPAIGN_DM_ROLES:
@@ -25701,6 +25710,37 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 private=True,
                 branch_id=branch_id,
             )
+        resolved_related_refs = {
+            normalize_context_entity_ref(item, field="related_refs[]")
+            for item in list(related_refs or [])
+        }
+        if membership.role in CAMPAIGN_DM_ROLES:
+            campaign = campaigns.get(campaign_id)
+            state = dict(campaign.state or {})
+            combat = dict(state.get("combat") or {})
+            if combat.get("active", False):
+                for combatant in [
+                    *list(combat.get("combatants") or []),
+                    *list(combat.get("reinforcements") or []),
+                ]:
+                    combat_actor_id = str(
+                        dict(combatant or {}).get("actor_id") or ""
+                    ).strip()
+                    if combat_actor_id:
+                        resolved_related_refs.add(f"actor:{combat_actor_id}")
+            manifest = dict(state.get("playthrough_manifest") or {})
+            current = dict(manifest.get("current") or {})
+            if current_scene_id := str(current.get("scene_id") or "").strip():
+                resolved_related_refs.add(f"scene:{current_scene_id}")
+            if current_module_id := str(current.get("module_id") or "").strip():
+                resolved_related_refs.add(f"module:{current_module_id}")
+            for quest in list(manifest.get("quests") or []):
+                quest_value = dict(quest or {})
+                if str(quest_value.get("status") or "") != "active":
+                    continue
+                quest_id = str(quest_value.get("id") or "").strip()
+                if quest_id:
+                    resolved_related_refs.add(f"quest:{quest_id}")
         return continuity.context(
             campaign_id,
             query=query,
@@ -25710,6 +25750,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             branch_id=branch_id,
             limit=limit,
             budget_chars=budget_chars,
+            related_refs=sorted(resolved_related_refs),
         )
 
     @mcp.tool()
@@ -35122,6 +35163,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "branch_id": branch_id,
         }
         data.update(facade_payload(payload))
+        validate_embedded_module_source_refs(
+            campaign_id,
+            data,
+            field=f"memory_change({action})",
+        )
         resolved_branch_id = require_current_branch(campaign_id, data.get("branch_id"))
         request_payload = {"action": action, **data, "branch_id": resolved_branch_id}
         scope = f"memory-change:{action}:{campaign_id}:{resolved_branch_id}:{principal_id}"
