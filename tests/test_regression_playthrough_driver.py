@@ -5820,6 +5820,86 @@ def test_prepared_caster_spell_hydration_does_not_consume_known_spell_quota() ->
         )
 
 
+def test_level_preflight_rejects_duplicate_known_spell_before_mutation() -> None:
+    spell_id = "dnd5e.content.srd2014.spell.heroism"
+    sheet = default_character_sheet()
+    sheet["progression"].update(
+        {
+            "level": 1,
+            "classes": [
+                {
+                    "name": "Bard",
+                    "level": 1,
+                    "subclass": "",
+                    "hit_die": 8,
+                }
+            ],
+        }
+    )
+    sheet["content"]["spells"].append({"id": spell_id})
+    actor = {"id": "bard-1", "revision": 3, "sheet": sheet}
+
+    class Client:
+        async def domain(self, tool_id: str, arguments: dict):
+            if tool_id == "character_query":
+                return {
+                    "status": "ready",
+                    "character_id": "bard-1",
+                    "character_revision": 3,
+                    "new_level": 2,
+                    "follow_up": {
+                        "feature_artifacts": [],
+                        "subclass_options": [],
+                        "spell_choices": {
+                            "cantrips_to_add": 0,
+                            "leveled_spells_to_add": 1,
+                        },
+                        "prepared_spell_event": None,
+                    },
+                    "spellcasting": {
+                        "preparation_mode": "known",
+                        "maximum_spell_level": 1,
+                    },
+                }
+            if tool_id == "rule_pack_query":
+                if arguments["payload"]["kind"] == "feature":
+                    return []
+                return [
+                    {
+                        "id": spell_id,
+                        "selection_requirements": {
+                            "level": 1,
+                            "eligible_classes": ["Bard"],
+                        },
+                    }
+                ]
+            raise AssertionError((tool_id, arguments))
+
+    with pytest.raises(
+        ValueError,
+        match="known or spellbook selections must add new spells; already present",
+    ):
+        asyncio.run(
+            _preflight_level_completion(
+                Client(),
+                campaign_id="campaign-1",
+                actor=actor,
+                class_name="Bard",
+                target_level=2,
+                subclass_artifact_id="",
+                feature_selections={},
+                spell_selections=[
+                    {
+                        "artifact_id": spell_id,
+                        "source_class": "Bard",
+                        "method": "known",
+                    }
+                ],
+                prepared_spell_ids=[],
+            )
+        )
+
+
 def test_checkpoint_uses_only_public_manifest_branch_and_snapshot_tools() -> None:
     class Client:
         def __init__(self) -> None:

@@ -10922,6 +10922,24 @@ async def _preflight_level_completion(
         preparation_mode=str(spellcasting_plan.get("preparation_mode") or "known"),
         maximum_spell_level=int(spellcasting_plan.get("maximum_spell_level", 0) or 0),
     )
+    existing_spell_ids = {
+        str(item.get("id") or "")
+        for item in dict(actor["sheet"].get("content") or {}).get("spells", [])
+    }
+    duplicate_new_spells = sorted(
+        {
+            selection["artifact_id"]
+            for selection in spell_selections
+            if selection["method"] != "class_prepared"
+            and selection["artifact_id"] in existing_spell_ids
+        }
+    )
+    if duplicate_new_spells:
+        raise ValueError(
+            "level known or spellbook selections must add new spells; "
+            "already present: "
+            + ", ".join(duplicate_new_spells)
+        )
     required_counts = (
         int(spell_choices.get("cantrips_to_add", 0) or 0),
         int(spell_choices.get("leveled_spells_to_add", 0) or 0),
