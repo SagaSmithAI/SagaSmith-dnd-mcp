@@ -1310,6 +1310,11 @@ def select_profiles(
     source_profile_name = str(profile["name"])
     if replacement_name:
         profile["name"] = replacement_name
+        for item in profile.get("items") or []:
+            mechanics = dict(item.get("mechanics") or {})
+            if mechanics.get("owner_mark") == source_profile_name:
+                mechanics["owner_mark"] = replacement_name
+                item["mechanics"] = mechanics
     return [profile], {
         "selected_size": 1,
         "purpose": "legal_replacement",

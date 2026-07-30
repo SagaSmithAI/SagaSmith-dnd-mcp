@@ -536,11 +536,20 @@ def test_one_replacement_reuses_a_legal_profile_without_inheriting_identity() ->
     assert len(selected) == 1
     assert selected[0]["name"] == "Mira Emberleaf"
     assert selected[0]["class"] == "Wizard"
+    spellbook = next(
+        item for item in selected[0]["items"] if item["name"] == "Spellbook"
+    )
+    assert spellbook["mechanics"]["owner_mark"] == "Mira Emberleaf"
     assert audit["source_profile_name"] == "Aelar Quill"
     assert audit["knowledge_inheritance"] == "none"
-    assert next(
+    source_wizard = next(
         item for item in lost_mine_party_profiles() if item["class"] == "Wizard"
-    )["name"] == "Aelar Quill"
+    )
+    assert source_wizard["name"] == "Aelar Quill"
+    source_spellbook = next(
+        item for item in source_wizard["items"] if item["name"] == "Spellbook"
+    )
+    assert source_spellbook["mechanics"]["owner_mark"] == "Aelar Quill"
 
 
 def test_replacement_phase_switch_uses_public_campaign_and_branch_tools() -> None:
