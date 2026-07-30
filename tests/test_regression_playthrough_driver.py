@@ -2518,7 +2518,7 @@ def test_source_effect_application_uses_public_character_transition(
 ) -> None:
     source_ref = {
         "module_id": "module-1",
-        "scene_id": "scene-1",
+        "scene_id": "source-scene",
         "chunk_id": "fresco-chunk",
         "page_start": 96,
         "page_end": 96,
@@ -2548,10 +2548,17 @@ def test_source_effect_application_uses_public_character_transition(
 
         async def domain(self, tool_id: str, arguments: dict):
             if tool_id == "module_query":
+                if arguments["payload"]["scene_id"] == "source-scene":
+                    return {
+                        "module_id": "module-1",
+                        "scene_id": "source-scene",
+                        "content": "A failed save charms the creature for 24 hours.",
+                        "spatial": {"locations": []},
+                    }
                 return {
                     "module_id": "module-1",
                     "scene_id": "scene-1",
-                    "content": "A failed save charms the creature for 24 hours.",
+                    "content": "The party examines the fresco.",
                     "spatial": {"locations": [{"key": "fresco", "title": "Fresco"}]},
                 }
             if tool_id == "character_query":
@@ -2597,6 +2604,7 @@ def test_source_effect_application_uses_public_character_transition(
             effect=effect,
             reason="Thalia failed the source-defined Wisdom save.",
             checkpoint_label="Fresco charm applied",
+            source_scene_id="source-scene",
             defer_checkpoint=defer_checkpoint,
         )
     )

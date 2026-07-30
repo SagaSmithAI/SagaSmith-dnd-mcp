@@ -9655,6 +9655,7 @@ async def _apply_source_effect(
     effect: dict[str, Any] | None,
     reason: str,
     checkpoint_label: str,
+    source_scene_id: str = "",
     defer_checkpoint: bool = False,
 ) -> dict[str, Any]:
     application_identity = _occurrence_identity(occurrence_id, "apply-source-effect")
@@ -9677,16 +9678,33 @@ async def _apply_source_effect(
             "an effect with id, and reason"
         )
 
-    scene = await client.domain(
+    cited_scene_id = source_scene_id.strip() or scene_id
+    source_scene = await client.domain(
         "module_query",
         {
             "campaign_id": campaign_id,
             "view": "scene",
-            "payload": {"scene_id": scene_id},
+            "payload": {"scene_id": cited_scene_id},
         },
     )
-    exact_ref = await _validate_source_ref(client, scene, source_ref, excerpt=source_excerpt)
-    if location_key not in {str(item.get("key") or "") for item in _scene_locations(scene)}:
+    exact_ref = await _validate_source_ref(
+        client, source_scene, source_ref, excerpt=source_excerpt
+    )
+    occurrence_scene = (
+        source_scene
+        if cited_scene_id == scene_id
+        else await client.domain(
+            "module_query",
+            {
+                "campaign_id": campaign_id,
+                "view": "scene",
+                "payload": {"scene_id": scene_id},
+            },
+        )
+    )
+    if location_key not in {
+        str(item.get("key") or "") for item in _scene_locations(occurrence_scene)
+    }:
         raise ValueError("apply-source-effect location is not present in the scene atlas")
     expected_source = f"module-chunk:{exact_ref['chunk_id']}"
     if str(requested_effect.get("source") or "") != expected_source:
@@ -9772,6 +9790,9 @@ async def _apply_source_effect(
         "effect_id": effect_id,
         "occurrence_id": application_identity,
         "reason": normalized_reason,
+        "scene_id": scene_id,
+        "source_scene_id": cited_scene_id,
+        "location_key": location_key,
         "source_ref": exact_ref,
         "effect": existing,
         "application": applied,
@@ -9794,6 +9815,7 @@ async def _remove_source_effect(
     effect_id: str,
     reason: str,
     checkpoint_label: str,
+    source_scene_id: str = "",
     defer_checkpoint: bool = False,
 ) -> dict[str, Any]:
     removal_identity = _occurrence_identity(occurrence_id, "remove-source-effect")
@@ -9814,16 +9836,33 @@ async def _remove_source_effect(
             "remove-source-effect requires scene, location, excerpt, character, effect, and reason"
         )
 
-    scene = await client.domain(
+    cited_scene_id = source_scene_id.strip() or scene_id
+    source_scene = await client.domain(
         "module_query",
         {
             "campaign_id": campaign_id,
             "view": "scene",
-            "payload": {"scene_id": scene_id},
+            "payload": {"scene_id": cited_scene_id},
         },
     )
-    exact_ref = await _validate_source_ref(client, scene, source_ref, excerpt=source_excerpt)
-    if location_key not in {str(item.get("key") or "") for item in _scene_locations(scene)}:
+    exact_ref = await _validate_source_ref(
+        client, source_scene, source_ref, excerpt=source_excerpt
+    )
+    occurrence_scene = (
+        source_scene
+        if cited_scene_id == scene_id
+        else await client.domain(
+            "module_query",
+            {
+                "campaign_id": campaign_id,
+                "view": "scene",
+                "payload": {"scene_id": scene_id},
+            },
+        )
+    )
+    if location_key not in {
+        str(item.get("key") or "") for item in _scene_locations(occurrence_scene)
+    }:
         raise ValueError("remove-source-effect location is not present in the scene atlas")
 
     actor = dict(
@@ -9896,6 +9935,9 @@ async def _remove_source_effect(
         "effect_id": normalized_effect_id,
         "occurrence_id": removal_identity,
         "reason": normalized_reason,
+        "scene_id": scene_id,
+        "source_scene_id": cited_scene_id,
+        "location_key": location_key,
         "source_ref": exact_ref,
         "effect": effect,
         "removal": removed,
@@ -13464,6 +13506,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     effect=args.effect_json,
                     reason=args.effect_reason,
                     checkpoint_label=args.checkpoint_label,
+                    source_scene_id=args.source_scene_id,
                     defer_checkpoint=args.defer_checkpoint,
                 )
             elif args.action == "remove-source-effect":
@@ -13483,6 +13526,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     effect_id=args.effect_id,
                     reason=args.effect_reason,
                     checkpoint_label=args.checkpoint_label,
+                    source_scene_id=args.source_scene_id,
                     defer_checkpoint=args.defer_checkpoint,
                 )
             elif args.action == "set-source-exhaustion":
