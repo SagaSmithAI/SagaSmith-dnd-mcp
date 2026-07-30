@@ -1030,6 +1030,43 @@ def test_core_relock_driver_requires_current_checkpoint_and_public_profile() -> 
     assert client.tools.count("campaign_rules") == 2
 
 
+def test_core_relock_driver_skips_current_runtime_without_snapshot_or_sync() -> None:
+    class Client:
+        def __init__(self) -> None:
+            self.tools: list[str] = []
+
+        async def domain(self, tool_id: str, arguments: dict):
+            self.tools.append(tool_id)
+            assert tool_id == "campaign_rules"
+            assert arguments["action"] == "get_profile"
+            return {
+                "profile": {
+                    "options": {
+                        "_core_rule_pack_lock": {"fingerprint": "current-core"}
+                    }
+                },
+                "available_core_pack": {
+                    "id": "dnd5e.core.2014",
+                    "fingerprint": "current-core",
+                },
+                "campaign_revision": 20,
+            }
+
+    client = Client()
+    result = asyncio.run(
+        _relock_core(
+            client,
+            campaign_id="campaign-1",
+            run_id="run-1",
+            reason="Confirm the runtime Core is already current.",
+        )
+    )
+
+    assert result["status"] == "current"
+    assert result["mutation_applied"] is False
+    assert client.tools == ["campaign_rules"]
+
+
 def test_failed_module_refresh_restores_its_entry_phase() -> None:
     class Client:
         def __init__(self) -> None:

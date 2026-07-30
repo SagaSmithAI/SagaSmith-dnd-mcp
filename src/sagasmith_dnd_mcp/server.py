@@ -29198,6 +29198,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         access.require_campaign(campaign_id, principal_id)
         profile = rule_profiles.get(campaign_id)
         campaign = campaigns.get(campaign_id)
+        available_core_pack = (
+            asdict(get_core_rule_pack(profile.edition)) if profile else None
+        )
         try:
             effective = effective_ruleset_view(campaign_id)
             effective_error = None
@@ -29209,6 +29212,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "activations": [asdict(item) for item in rule_packs.activations(campaign_id)],
             "effective": effective,
             "effective_error": effective_error,
+            "available_core_pack": available_core_pack,
             "campaign_revision": campaign.revision,
         }
 
@@ -29303,6 +29307,35 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if previous.get("fingerprint") != expected_core_fingerprint:
             raise ValueError("expected_core_fingerprint does not match the campaign lock")
         latest = get_core_rule_pack(profile.edition)
+        campaign = campaigns.get(campaign_id)
+        if campaign.revision != expected_revision:
+            raise ValueError(
+                "campaign revision conflict: "
+                f"expected {expected_revision}, found {campaign.revision}"
+            )
+        if previous.get("fingerprint") == latest.fingerprint:
+            return remember_idempotent(
+                scope,
+                idempotency_key,
+                payload,
+                {
+                    "status": "current",
+                    "reason": normalized_reason,
+                    "previous_core_pack": previous,
+                    "core_pack": {
+                        "id": latest.id,
+                        "version": latest.version,
+                        "edition": latest.edition,
+                        "fingerprint": latest.fingerprint,
+                    },
+                    "profile": asdict(profile),
+                    "branch_id": resolved_branch_id,
+                    "checkpoint_snapshot_id": expected_head_snapshot_id,
+                    "campaign_revision": campaign.revision,
+                    "mutation_applied": False,
+                },
+                campaign_id=campaign_id,
+            )
         user_options = {
             key: value for key, value in options.items() if key != "_core_rule_pack_lock"
         }
@@ -29322,6 +29355,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "branch_id": resolved_branch_id,
                 "checkpoint_snapshot_id": expected_head_snapshot_id,
                 "campaign_revision": result["campaign_revision"],
+                "mutation_applied": True,
             }
 
         rule_profiles.set(

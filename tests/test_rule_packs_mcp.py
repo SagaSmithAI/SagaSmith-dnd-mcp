@@ -1362,6 +1362,102 @@ def test_checkpointed_core_relock_preserves_profile_and_adopts_current_runtime(
     asyncio.run(exercise())
 
 
+def test_current_core_relock_is_revision_and_snapshot_noop(tmp_path: Path) -> None:
+    config = McpConfig(
+        home=tmp_path / "home",
+        database_url=None,
+        chroma_url=None,
+        chroma_path_override=None,
+        dnd_skills_dir=tmp_path / "dnd",
+        modulegen_skills_dir=tmp_path / "modulegen",
+    )
+
+    async def call(server, name: str, arguments: dict):
+        _, result = await server.call_tool(name, arguments)
+        return result.get("result", result) if isinstance(result, dict) else result
+
+    async def exercise() -> None:
+        server = create_server(config)
+        campaign = await call(
+            server,
+            "campaign_create",
+            {"name": "Current core", "idempotency_key": "current-core-campaign"},
+        )
+        profile = await call(
+            server,
+            "campaign_rule_profile_get",
+            {"campaign_id": campaign["id"]},
+        )
+        assert profile["available_core_pack"]["fingerprint"] == (
+            profile["profile"]["options"]["_core_rule_pack_lock"]["fingerprint"]
+        )
+        snapshot = await call(
+            server,
+            "snapshot_create",
+            {
+                "campaign_id": campaign["id"],
+                "label": "Existing checkpoint",
+                "expected_revision": campaign["revision"],
+                "expected_head_snapshot_id": "",
+                "idempotency_key": "current-core-checkpoint",
+            },
+        )
+        current = await call(
+            server,
+            "campaign_get",
+            {"campaign_id": campaign["id"]},
+        )
+        branch = next(
+            item
+            for item in await call(
+                server,
+                "branch_list",
+                {"campaign_id": campaign["id"]},
+            )
+            if item["is_current"]
+        )
+        snapshots_before = await call(
+            server,
+            "snapshot_list",
+            {"campaign_id": campaign["id"]},
+        )
+        arguments = {
+            "campaign_id": campaign["id"],
+            "action": "core_relock",
+            "payload": {
+                "expected_core_fingerprint": profile["available_core_pack"][
+                    "fingerprint"
+                ],
+                "reason": "Prove an already-current Core is a strict no-op.",
+                "expected_head_snapshot_id": snapshot["id"],
+            },
+            "branch_id": branch["id"],
+            "expected_revision": current["revision"],
+            "idempotency_key": "noop-core-relock",
+        }
+
+        result = await call(server, "campaign_rules", arguments)
+        replay = await call(server, "campaign_rules", arguments)
+        after = await call(
+            server,
+            "campaign_get",
+            {"campaign_id": campaign["id"]},
+        )
+        snapshots_after = await call(
+            server,
+            "snapshot_list",
+            {"campaign_id": campaign["id"]},
+        )
+
+        assert replay == result
+        assert result["status"] == "current"
+        assert result["mutation_applied"] is False
+        assert result["campaign_revision"] == current["revision"] == after["revision"]
+        assert snapshots_after == snapshots_before
+
+    asyncio.run(exercise())
+
+
 def test_snapshot_and_branch_checkout_reject_unavailable_core_lock(
     tmp_path: Path,
 ) -> None:

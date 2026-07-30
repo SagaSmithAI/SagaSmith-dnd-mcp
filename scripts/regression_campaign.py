@@ -1953,6 +1953,20 @@ async def _relock_core(args: argparse.Namespace) -> dict[str, Any]:
             old_fingerprint = str(old_lock.get("fingerprint") or "")
             if not old_fingerprint:
                 raise RuntimeError("campaign profile has no built-in Core fingerprint")
+            available_core = dict(rules_before.get("available_core_pack") or {})
+            if available_core.get("fingerprint") == old_fingerprint:
+                return {
+                    "action": "relock-core",
+                    "transport": "stdio",
+                    "campaign_id": args.campaign_id,
+                    "phase": phase,
+                    "status": "current",
+                    "reason": relock_reason,
+                    "rules_before": rules_before,
+                    "core_pack": available_core,
+                    "snapshots_created": 0,
+                    "campaign_revision": rules_before.get("campaign_revision"),
+                }
             branches_before = _facade_value(
                 await client.domain(
                     "branch_query", {"campaign_id": args.campaign_id, "view": "list"}

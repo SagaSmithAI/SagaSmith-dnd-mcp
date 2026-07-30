@@ -11958,6 +11958,15 @@ async def _relock_core(
     previous_fingerprint = str(lock.get("fingerprint") or "")
     if not previous_fingerprint:
         raise RuntimeError("campaign rule profile has no Core fingerprint lock")
+    available_core = dict(profile.get("available_core_pack") or {})
+    if available_core.get("fingerprint") == previous_fingerprint:
+        return {
+            "reason": normalized_reason,
+            "previous_core_fingerprint": previous_fingerprint,
+            "status": "current",
+            "core_pack": available_core,
+            "mutation_applied": False,
+        }
     branches = await client.domain(
         "branch_query",
         {"campaign_id": campaign_id, "view": "list"},
@@ -11987,8 +11996,16 @@ async def _relock_core(
             },
         )
     )
-    if relocked.get("status") != "relocked":
+    if relocked.get("status") not in {"current", "relocked"}:
         raise RuntimeError("Core relock did not commit")
+    if relocked.get("status") == "current":
+        return {
+            "reason": normalized_reason,
+            "previous_core_fingerprint": previous_fingerprint,
+            "checkpoint_snapshot_id": str(branch["head_snapshot_id"]),
+            "relock": relocked,
+            "mutation_applied": False,
+        }
     synced = await _manifest_mutation(
         client,
         campaign_id=campaign_id,
