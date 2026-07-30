@@ -2556,6 +2556,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         sheet: dict[str, Any],
         agent_fill: dict[str, Any] | None,
         *,
+        statblock_warnings: list[str] | tuple[str, ...] = (),
         spell_warnings: list[str] | tuple[str, ...] = (),
     ) -> dict[str, Any]:
         """Keep canonical rulebook mechanics authoritative in the engine.
@@ -2611,6 +2612,16 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "standard rule card requires engine implementation: "
                 + ", ".join(names)
             )
+        unresolved_statblock_mechanics = sorted(
+            str(warning).strip()
+            for warning in statblock_warnings
+            if str(warning).strip()
+        )
+        if unresolved_statblock_mechanics:
+            raise ValueError(
+                "standard rule statblock requires engine implementation: "
+                + "; ".join(unresolved_statblock_mechanics)
+            )
         incomplete_spells = sorted(
             warning
             for warning in spell_warnings
@@ -2647,6 +2658,27 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 for activity in multiattacks
             ],
             "available_weapons": [],
+        }
+
+    def is_canonical_standard_rule_source(source: dict[str, Any]) -> bool:
+        """Identify rule corpora whose printed mechanics must be engine-owned."""
+
+        publication_id = (
+            str(source.get("publication_id") or "")
+            .strip()
+            .casefold()
+            .replace("-", "")
+            .replace("_", "")
+        )
+        return publication_id in {
+            "srd",
+            "srd2014",
+            "mm2014",
+            "monstermanual2014",
+            "phb2014",
+            "playershandbook2014",
+            "dmg2014",
+            "dungeonmastersguide2014",
         }
 
     def is_statblock_normalization_note(reason: str) -> bool:
@@ -28363,6 +28395,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         agent_fill_requirements = require_standard_statblock_engine_support(
             parsed.sheet,
             agent_fill,
+            statblock_warnings=(
+                parsed.warnings
+                if is_canonical_standard_rule_source(source)
+                else ()
+            ),
         )
         agent_fill_evidence = reviewed_statblock_fill_evidence(
             campaign_id,
@@ -33996,6 +34033,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             require_standard_statblock_engine_support(
                 hydrated_sheet,
                 reviewed_fill,
+                statblock_warnings=(
+                    parsed.warnings
+                    if is_canonical_standard_rule_source(source)
+                    else ()
+                ),
                 spell_warnings=spell_warnings,
             )
             filled = (
@@ -34406,6 +34448,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             require_standard_statblock_engine_support(
                 hydrated_sheet,
                 None,
+                statblock_warnings=(
+                    parsed.warnings
+                    if is_canonical_standard_rule_source(source)
+                    else ()
+                ),
                 spell_warnings=spell_warnings,
             )
             variant = data.get("variant")
