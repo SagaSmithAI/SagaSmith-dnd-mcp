@@ -2869,6 +2869,7 @@ async def _restore_statblock_preparation_context(
     current = await _statblock_preparation_context(client, campaign_id)
     phase_changes: list[dict[str, Any]] = []
     checkout = None
+    recovery_snapshot = None
     if current["branch_id"] != original_branch_id:
         if current["phase"] != "lobby":
             if current["phase"] == "combat":
@@ -2899,6 +2900,43 @@ async def _restore_statblock_preparation_context(
             phase_changes.append(entered_lobby)
         await client.open()
         await client.load("lobby.campaign")
+        campaign = _facade_value(
+            await client.core(
+                "campaign_query",
+                {"view": "get", "payload": {"campaign_id": campaign_id}},
+            )
+        )
+        branches = _facade_value(
+            await client.domain(
+                "branch_query",
+                {"campaign_id": campaign_id, "view": "list"},
+            )
+        )
+        working_branch = next(
+            (
+                item
+                for item in branches
+                if str(item.get("id") or "") == current["branch_id"]
+            ),
+            None,
+        )
+        if working_branch is None:
+            raise RuntimeError("failed statblock preparation branch disappeared")
+        recovery_snapshot = await client.domain(
+            "snapshot_create",
+            {
+                "campaign_id": campaign_id,
+                "label": "Failed statblock preparation recovery checkpoint",
+                "expected_revision": campaign["revision"],
+                "expected_head_snapshot_id": (
+                    working_branch.get("head_snapshot_id") or ""
+                ),
+                "idempotency_key": (
+                    f"{token}-failure-checkpoint-"
+                    f"{_idempotency_token(current['branch_id']).lower()}"
+                ),
+            },
+        )
         campaign = _facade_value(
             await client.core(
                 "campaign_query",
@@ -2951,6 +2989,7 @@ async def _restore_statblock_preparation_context(
         phase_changes.append(restored)
     return {
         "original": dict(original),
+        "recovery_snapshot": recovery_snapshot,
         "checkout": checkout,
         "phase_changes": phase_changes,
     }

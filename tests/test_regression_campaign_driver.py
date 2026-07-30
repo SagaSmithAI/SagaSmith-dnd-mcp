@@ -1742,6 +1742,89 @@ def test_failed_statblock_preparation_restores_original_play_phase() -> None:
     )
 
 
+def test_failed_isolated_statblock_preparation_checkpoints_before_checkout() -> None:
+    class Client:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict]] = []
+            self.loaded: list[tuple[str, ...]] = []
+            self.campaign_reads = 0
+
+        async def open(self) -> None:
+            self.calls.append(("open", {}))
+
+        async def load(self, *group_ids: str) -> None:
+            self.loaded.append(group_ids)
+
+        async def core(self, tool_id: str, arguments: dict):
+            self.calls.append((tool_id, arguments))
+            if tool_id == "game_phase" and arguments["action"] == "get":
+                return {"tool_profile": "lobby"}
+            if tool_id == "campaign_query":
+                self.campaign_reads += 1
+                return {
+                    "id": "campaign-1",
+                    "revision": 11 + self.campaign_reads,
+                }
+            if tool_id == "game_phase" and arguments["action"] == "set":
+                assert arguments["tool_profile"] == "play"
+                assert arguments["branch_id"] == "branch-1"
+                assert arguments["expected_revision"] == 14
+                return {"tool_profile": "play", "campaign_revision": 15}
+            raise AssertionError((tool_id, arguments))
+
+        async def domain(self, tool_id: str, arguments: dict):
+            self.calls.append((tool_id, arguments))
+            if tool_id == "branch_query":
+                return [
+                    {
+                        "id": "branch-2",
+                        "is_current": True,
+                        "head_snapshot_id": "snapshot-2",
+                    },
+                    {
+                        "id": "branch-1",
+                        "is_current": False,
+                        "head_snapshot_id": "snapshot-1",
+                    },
+                ]
+            if tool_id == "snapshot_create":
+                assert arguments["expected_revision"] == 12
+                assert arguments["expected_head_snapshot_id"] == "snapshot-2"
+                return {"id": "failure-snapshot", "slot": 7}
+            if tool_id == "branch_change":
+                assert arguments["action"] == "checkout"
+                assert arguments["payload"] == {"branch_id": "branch-1"}
+                assert arguments["expected_revision"] == 13
+                assert arguments["expected_branch_id"] == "branch-2"
+                return {"id": "branch-1", "is_current": True}
+            raise AssertionError((tool_id, arguments))
+
+    client = Client()
+    result = asyncio.run(
+        _restore_statblock_preparation_context(
+            client,
+            campaign_id="campaign-1",
+            original={"phase": "play", "branch_id": "branch-1"},
+            token="prepare-token",
+        )
+    )
+
+    assert result["recovery_snapshot"] == {
+        "id": "failure-snapshot",
+        "slot": 7,
+    }
+    assert result["checkout"] == {"id": "branch-1", "is_current": True}
+    assert result["phase_changes"] == [
+        {"tool_profile": "play", "campaign_revision": 15}
+    ]
+    mutation_order = [
+        tool_id
+        for tool_id, _arguments in client.calls
+        if tool_id in {"snapshot_create", "branch_change"}
+    ]
+    assert mutation_order == ["snapshot_create", "branch_change"]
+
+
 def test_statblock_creation_key_scopes_repeated_source_actors_by_identity() -> None:
     common = {
         "run_id": "full-campaign",
