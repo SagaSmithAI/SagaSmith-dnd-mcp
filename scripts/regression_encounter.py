@@ -2715,8 +2715,13 @@ def _agent_spell_priorities(
                 )
             ) or (
                 target_policy == "maximize_opponents_without_allies"
-                and resolution.get("kind") == "saving_throw"
-                and area_targeting
+                and (
+                    spell_id == HYPNOTIC_PATTERN_ID
+                    or (
+                        resolution.get("kind") == "saving_throw"
+                        and area_targeting
+                    )
+                )
             )
             if (
                 choice_unknown

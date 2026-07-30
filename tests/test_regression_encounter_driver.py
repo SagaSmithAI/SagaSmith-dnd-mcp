@@ -3678,6 +3678,48 @@ def test_agent_spell_priority_accepts_reviewed_single_target_save_cantrip() -> N
     ) == ("sacred-flame", "goblin", 0)
 
 
+def test_agent_spell_priority_accepts_engine_owned_hypnotic_pattern_old_card() -> None:
+    actor = _spell_actor(HYPNOTIC_PATTERN_ID)
+    actor["sheet"]["content"]["spells"][0].update(
+        {
+            "level": 3,
+            "access": {"known": True},
+            "definition": {"range": {"normal_ft": 120}},
+            "resolution": None,
+            "mechanic_refs": [],
+        }
+    )
+
+    priorities = _agent_spell_priorities(
+        [
+            {
+                "actor_id": "bard",
+                "choices": [
+                    {
+                        "spell_id": HYPNOTIC_PATTERN_ID,
+                        "target_policy": "maximize_opponents_without_allies",
+                    }
+                ],
+                "decision": "Control the densest hostile group without catching allies.",
+                "ruling_reason": (
+                    "The engine owns Hypnotic Pattern even when a durable old card "
+                    "predates its structured resolution metadata."
+                ),
+            }
+        ],
+        participant_ids=["bard"],
+        actors={"bard": actor},
+    )
+
+    assert priorities["bard"]["choices"] == [
+        {
+            "spell_id": HYPNOTIC_PATTERN_ID,
+            "target_policy": "maximize_opponents_without_allies",
+            "cast_level_policy": "lowest_available",
+        }
+    ]
+
+
 def test_single_target_dexterity_save_requires_explicit_cover_semantics() -> None:
     spell = {
         "level": 0,
