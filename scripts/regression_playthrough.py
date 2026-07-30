@@ -5723,16 +5723,35 @@ async def _apply_source_damage(
     if branch is None:
         raise RuntimeError("campaign has no current branch")
     campaign = await _campaign(client, campaign_id)
-    rolled = await client.domain(
-        "dnd_dice_roll",
-        {
-            "campaign_id": campaign_id,
-            "expression": expression,
-            "branch_id": str(branch["id"]),
-            "expected_campaign_revision": campaign["revision"],
-            "idempotency_key": _mutation_key(run_id, "source-damage-roll", normalized_event_id),
-        },
-    )
+    normalized_expression = expression.strip()
+    fixed_damage = re.fullmatch(r"\+?(\d+)", normalized_expression)
+    if fixed_damage is not None:
+        fixed_amount = int(fixed_damage.group(1))
+        rolled = {
+            "status": "fixed",
+            "result": {
+                "expression": normalized_expression,
+                "total": fixed_amount,
+                "rolls": [],
+                "random_draws": 0,
+                "resolution": "fixed",
+            },
+        }
+    else:
+        rolled = await client.domain(
+            "dnd_dice_roll",
+            {
+                "campaign_id": campaign_id,
+                "expression": normalized_expression,
+                "branch_id": str(branch["id"]),
+                "expected_campaign_revision": campaign["revision"],
+                "idempotency_key": _mutation_key(
+                    run_id,
+                    "source-damage-roll",
+                    normalized_event_id,
+                ),
+            },
+        )
     roll_result = _dice_result(rolled)
     rolled_amount = int(roll_result["total"])
     amount = damage_amount_after_reduction(

@@ -6800,7 +6800,13 @@ def test_contest_recovery_identity_binds_both_actors_and_roll_modes() -> None:
 @pytest.mark.parametrize("defer_checkpoint", [False, True])
 @pytest.mark.parametrize("force_zero_hp", [False, True])
 @pytest.mark.parametrize(("half_damage", "expected_amount"), [(False, 4), (True, 2)])
+@pytest.mark.parametrize(
+    ("damage_expression", "expects_random_roll"),
+    [("1d6", True), ("4", False)],
+)
 def test_source_damage_rolls_then_damages_and_knocks_prone_through_public_tools(
+    damage_expression: str,
+    expects_random_roll: bool,
     half_damage: bool,
     expected_amount: int,
     force_zero_hp: bool,
@@ -6862,7 +6868,8 @@ def test_source_damage_rolls_then_damages_and_knocks_prone_through_public_tools(
             if tool_id == "branch_query":
                 return [{"id": "branch-1", "is_current": True}]
             if tool_id == "dnd_dice_roll":
-                assert arguments["expression"] == "1d6"
+                assert expects_random_roll
+                assert arguments["expression"] == damage_expression
                 assert arguments["expected_campaign_revision"] == 10
                 self.campaign_revision += 1
                 return {"status": "committed", "result": {"total": 4, "rolls": [4]}}
@@ -6944,7 +6951,7 @@ def test_source_damage_rolls_then_damages_and_knocks_prone_through_public_tools(
             source_ref=source_ref,
             actor_id="actor-1",
             damage_event_id="chimney-fall-1",
-            expression="1d6",
+            expression=damage_expression,
             damage_type="bludgeoning",
             reason="falling 10 feet in the chimney",
             half_damage=half_damage,
@@ -6968,7 +6975,21 @@ def test_source_damage_rolls_then_damages_and_knocks_prone_through_public_tools(
     assert result["knowledge_actor_ids"] == ["actor-1", "actor-2"]
     assert result["scene"]["scene_id"] == "scene-1"
     assert result["scene"]["source_scene_id"] == "source-scene-1"
-    assert _mutation_key("run-1", "source-damage-roll", "chimney-fall-1") in client.keys
+    assert ("dnd_dice_roll" in client.calls) is expects_random_roll
+    assert (
+        _mutation_key("run-1", "source-damage-roll", "chimney-fall-1") in client.keys
+    ) is expects_random_roll
+    if not expects_random_roll:
+        assert result["roll"] == {
+            "status": "fixed",
+            "result": {
+                "expression": "4",
+                "total": 4,
+                "rolls": [],
+                "random_draws": 0,
+                "resolution": "fixed",
+            },
+        }
     assert _mutation_key("run-1", "source-damage", "chimney-fall-1") in client.keys
     assert _mutation_key("run-1", "source-damage-continuity", "chimney-fall-1") in client.keys
 
