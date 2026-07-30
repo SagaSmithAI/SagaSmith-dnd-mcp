@@ -2494,7 +2494,7 @@ def test_preflight_agent_declines_unsatisfied_positional_attack_and_continues() 
         async def domain(self, tool_id: str, arguments: dict) -> dict:
             assert tool_id == "combat_preflight_attack"
             calls.append(arguments)
-            if arguments["action"]["weapon_id"] == "dagger":
+            if arguments["action"]["attack_mode"] == "melee":
                 raise RuntimeError("target is beyond melee reach")
             return {
                 "status": "pending_ruling",
@@ -2533,6 +2533,7 @@ def test_preflight_agent_declines_unsatisfied_positional_attack_and_continues() 
     assert [call["action"]["weapon_id"] for call in calls] == [
         "dagger",
         "dropped-rock",
+        "unarmed-strike",
     ]
     assert rulings == [
         {
@@ -7777,6 +7778,42 @@ def test_agent_weapon_priority_is_explicit_and_card_validated() -> None:
         priorities["goblin"]["agent_ruling"]["ruling_kind"]
         == "agent_dm_adjudication"
     )
+
+
+def test_agent_can_select_standard_unarmed_strike_with_other_weapons() -> None:
+    fighter = {
+        "id": "fighter",
+        "derived": {
+            "inventory": {
+                "weapon_attacks": [
+                    {"item_id": "longsword", "attack_type": "melee"},
+                ]
+            },
+            "multiattack_options": [],
+        },
+    }
+
+    priorities = _agent_weapon_priorities(
+        [
+            {
+                "actor_id": "fighter",
+                "choices": [
+                    {
+                        "weapon_id": "unarmed-strike",
+                        "attack_mode": "melee",
+                    }
+                ],
+                "decision": "Use the standard unarmed strike against this target.",
+                "ruling_reason": "Every character retains this engine-owned attack.",
+            }
+        ],
+        participant_ids=["fighter"],
+        actors={"fighter": fighter},
+    )
+
+    assert priorities["fighter"]["choices"] == [
+        {"weapon_id": "unarmed-strike", "attack_mode": "melee"}
+    ]
 
 
 def test_agent_multiattack_priority_must_begin_with_the_declared_attack() -> None:

@@ -2434,6 +2434,31 @@ def _weapon_attack_modes(weapon: dict[str, Any]) -> set[str]:
     return modes & ATTACK_MODES
 
 
+def _actor_weapon_attacks(actor: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return persisted attacks plus the universal standard unarmed strike."""
+    weapons = [
+        dict(item)
+        for item in (
+            dict(dict(actor.get("derived") or {}).get("inventory") or {}).get(
+                "weapon_attacks", []
+            )
+        )
+        if isinstance(item, dict) and str(item.get("item_id") or "")
+    ]
+    if not any(
+        str(item.get("item_id") or "") == "unarmed-strike"
+        for item in weapons
+    ):
+        weapons.append(
+            {
+                "item_id": "unarmed-strike",
+                "attack_type": "melee",
+                "properties": [],
+            }
+        )
+    return weapons
+
+
 def _agent_weapon_priorities(
     declarations: list[dict[str, Any]],
     *,
@@ -2480,12 +2505,7 @@ def _agent_weapon_priorities(
         actor = actors.get(actor_id)
         weapons = {
             str(item.get("item_id") or ""): dict(item)
-            for item in (
-                dict(dict(actor or {}).get("derived") or {})
-                .get("inventory", {})
-                .get("weapon_attacks", [])
-            )
-            if isinstance(item, dict) and str(item.get("item_id") or "")
+            for item in _actor_weapon_attacks(dict(actor or {}))
         }
         multiattacks = {
             str(item.get("id") or ""): dict(item)
@@ -9041,9 +9061,7 @@ async def _preflight_attack(
     combat: dict[str, Any] | None = None,
 ) -> tuple[str, dict[str, Any], dict[str, Any]] | None:
     knock_out_targets = set(knock_out_target_ids or set())
-    weapons = list(
-        dict(dict(actor.get("derived") or {}).get("inventory") or {}).get("weapon_attacks", [])
-    )
+    weapons = _actor_weapon_attacks(actor)
     weapons.sort(key=lambda item: item.get("item_id") != preferred_weapon_id)
     if require_preferred_weapon:
         weapons = [
@@ -9072,9 +9090,7 @@ async def _preflight_attack(
                     )
                 )
     else:
-        for weapon in weapons or [
-            {"item_id": "unarmed-strike", "attack_type": "melee"}
-        ]:
+        for weapon in weapons:
             for attack_mode in sorted(_weapon_attack_modes(weapon)):
                 attack_candidates.append(
                     (weapon, attack_mode, multiattack_option_id)
