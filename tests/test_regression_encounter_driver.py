@@ -830,7 +830,7 @@ def test_agent_turn_rulings_bind_source_cited_action_check_and_truce() -> None:
                 ),
                 "check_ability": "persuasion",
                 "check_dc": 18,
-                "check_action": "influence",
+                "check_action": "improvise",
                 "check_advantage": True,
                 "success_outcome": "The hostile king calms down.",
                 "failure_outcome": "The hostile king remains uncontrolled.",
@@ -853,7 +853,7 @@ def test_agent_turn_rulings_bind_source_cited_action_check_and_truce() -> None:
     assert ruling["check"] == {
         "ability": "persuasion",
         "dc": 18,
-        "action": "influence",
+        "action": "improvise",
         "advantage": True,
         "disadvantage": False,
         "success_outcome": "The hostile king calms down.",
@@ -863,6 +863,57 @@ def test_agent_turn_rulings_bind_source_cited_action_check_and_truce() -> None:
             "summary": "The party calmed the king by invoking Serissa.",
         },
     }
+
+
+def test_agent_turn_rulings_reject_cross_edition_check_action() -> None:
+    procedure_excerpt = (
+        "A character can use an action to try to persuade the king to stand down. "
+        "That character must succeed on a DC 18 Charisma (Persuasion) check."
+    )
+    declaration = {
+        "actor_id": "bard",
+        "procedure_id": "calm-hostile-king",
+        "round": 1,
+        "source_ref": {
+            "module_id": "module-1",
+            "scene_id": "scene-1",
+            "chunk_id": "chunk-1",
+            "content_sha256": "a" * 64,
+        },
+        "procedure_source_excerpt": procedure_excerpt,
+        "encounter_source_excerpt": procedure_excerpt,
+        "decision": "The bard asks the hostile king to stand down.",
+        "ruling_reason": (
+            "The exact scene procedure permits a persuasion action."
+        ),
+        "check_ability": "persuasion",
+        "check_dc": 18,
+        "check_action": "influence",
+        "success_outcome": "The hostile king calms down.",
+        "failure_outcome": "The hostile king remains uncontrolled.",
+    }
+    arguments = {
+        "participant_ids": ["bard", "king"],
+        "actors": {
+            "bard": {"sheet": {"content": {}}},
+            "king": {"sheet": {"content": {}}},
+        },
+        "scene_id": "scene-1",
+        "encounter_source_excerpt": procedure_excerpt,
+    }
+
+    with pytest.raises(
+        ValueError,
+        match="check_action='influence' is not a legal 2014 action primitive",
+    ):
+        _agent_turn_rulings([declaration], ruleset="2014", **arguments)
+
+    ruling = _agent_turn_rulings(
+        [declaration],
+        ruleset="2024",
+        **arguments,
+    )[("bard", 1)]
+    assert ruling["check"]["action"] == "influence"
 
 
 def test_agent_turn_rulings_bind_unstructured_prepared_spell() -> None:
@@ -1051,7 +1102,7 @@ def test_agent_turn_ruling_settles_action_check_and_returns_combat_outcome() -> 
         "check": {
             "ability": "persuasion",
             "dc": 18,
-            "action": "influence",
+            "action": "improvise",
             "advantage": True,
             "disadvantage": False,
             "success_outcome": "The hostile king calms down.",
@@ -1092,7 +1143,7 @@ def test_agent_turn_ruling_settles_action_check_and_returns_combat_outcome() -> 
     ]
     check_arguments = client.calls[0][1]
     assert check_arguments["kind"] == "check"
-    assert check_arguments["action"] == "influence"
+    assert check_arguments["action"] == "improvise"
     assert check_arguments["ability"] == "persuasion"
     assert check_arguments["rule_facts"] == {
         "source_ref": source_ref,

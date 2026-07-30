@@ -740,7 +740,9 @@ def _arguments() -> argparse.Namespace:
             "encounter_source_excerpt, decision, and ruling_reason. Spells pay their "
             "structured use and concentration first; scene procedures pay a normal "
             "improvised action. A scene procedure may instead provide check_ability, "
-            "check_dc, and check_action for one action-bound server-rolled check. "
+            "check_dc, and the edition-legal check_action for one action-bound "
+            "server-rolled check (2014 uses improvise for a source-authored "
+            "persuasion action; 2024 uses influence). "
             "Optional target_id plus save_ability/save_dc settle a server-rolled save; "
             "success_outcome/failure_outcome record either roll's meaning. "
             "A successful procedure check may provide success_combat_outcome to end "
@@ -3551,6 +3553,7 @@ def _agent_turn_rulings(
     actors: dict[str, dict[str, Any]],
     scene_id: str,
     encounter_source_excerpt: str,
+    ruleset: str = "2014",
 ) -> dict[tuple[str, int], dict[str, Any]]:
     """Validate reviewed descriptive actions settled by Agent-as-DM reasoning.
 
@@ -3560,6 +3563,26 @@ def _agent_turn_rulings(
     in the cited sources and Agent decision instead of becoming engine code.
     """
 
+    normalized_ruleset = str(ruleset).strip()
+    check_actions_by_ruleset = {
+        "2014": {
+            "escape",
+            "hide",
+            "improvise",
+            "search",
+            "use_object",
+        },
+        "2024": {
+            "escape",
+            "hide",
+            "influence",
+            "search",
+            "study",
+            "utilize",
+        },
+    }
+    if normalized_ruleset not in check_actions_by_ruleset:
+        raise ValueError(f"unsupported encounter ruleset: {ruleset}")
     normalized: dict[tuple[str, int], dict[str, Any]] = {}
     compact_encounter = _normalized_source_text(encounter_source_excerpt)
     save_ability_labels = {
@@ -3683,6 +3706,16 @@ def _agent_turn_rulings(
             or half_on_success is not None
         )
         if (
+            has_check
+            and check_action
+            and check_action
+            not in check_actions_by_ruleset[normalized_ruleset]
+        ):
+            raise ValueError(
+                f"Agent turn ruling {index} check_action={check_action!r} is "
+                f"not a legal {normalized_ruleset} action primitive"
+            )
+        if (
             actor_id not in participant_set
             or round_number <= 0
             or identity in normalized
@@ -3745,16 +3778,7 @@ def _agent_turn_rulings(
                     or not check_ability
                     or not 1 <= check_dc <= 40
                     or check_action
-                    not in {
-                        "escape",
-                        "hide",
-                        "improvise",
-                        "influence",
-                        "search",
-                        "study",
-                        "utilize",
-                        "use_object",
-                    }
+                    not in check_actions_by_ruleset[normalized_ruleset]
                     or not success_outcome
                     or not failure_outcome
                     or bool(target_id)
@@ -6154,6 +6178,7 @@ async def _start(
         actors=actors,
         scene_id=str(args.scene_id or ""),
         encounter_source_excerpt=str(args.source_excerpt or ""),
+        ruleset="2014",
     )
     agent_death_trigger_rulings = _agent_death_trigger_rulings(
         getattr(args, "agent_death_trigger_ruling_json", []),
@@ -10192,6 +10217,7 @@ async def _auto_run(
         actors=initial_actors,
         scene_id=str(args.scene_id or ""),
         encounter_source_excerpt=str(args.source_excerpt or ""),
+        ruleset=str(initial_combat.get("ruleset") or "2014"),
     )
     agent_death_trigger_rulings = _agent_death_trigger_rulings(
         getattr(args, "agent_death_trigger_ruling_json", []),
