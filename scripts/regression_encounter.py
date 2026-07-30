@@ -21,6 +21,7 @@ from sagasmith_dnd.conditions import (
     INCAPACITATING_STATE_IDS,
     LIVING_INCAPACITATING_STATE_IDS,
 )
+from sagasmith_dnd.spell_resolution import effective_spell_resolution
 from sagasmith_dnd.vocabulary import (
     ATTACK_MODES,
     COMBAT_OUTCOME_STATUSES,
@@ -2690,12 +2691,15 @@ def _agent_spell_priorities(
                 .casefold()
             )
             spell = spell_cards.get(spell_id)
-            resolution = dict(dict(spell or {}).get("resolution") or {})
+            resolution = dict(effective_spell_resolution(dict(spell or {})) or {})
             targeting = dict(resolution.get("targeting") or {})
             area_targeting = targeting.get("mode") == "area"
             safe_single_target_save = (
                 _safe_single_target_spell_declaration(
-                    dict(spell or {}),
+                    {
+                        **dict(spell or {}),
+                        **({"resolution": resolution} if resolution else {}),
+                    },
                     target_id="validation-target",
                 )
                 is not None
@@ -6522,7 +6526,7 @@ def _area_spell_declaration(
     """Choose a complete, observable area that hits multiple foes and no allies."""
 
     spell_id = str(spell.get("id") or "")
-    resolution = dict(spell.get("resolution") or {})
+    resolution = dict(effective_spell_resolution(spell) or {})
     targeting = dict(resolution.get("targeting") or {})
     area = dict(targeting.get("area") or {})
     hypnotic_pattern = spell_id == HYPNOTIC_PATTERN_ID
@@ -6532,14 +6536,29 @@ def _area_spell_declaration(
         or not dict(resolution.get("save") or {}).get("damage")
     ):
         return None
+    shape = str(area.get("shape") or "")
     radius_ft = int(area.get("radius_ft", 0) or 0)
+    length_ft = int(area.get("length_ft", 0) or 0)
+    width_ft = int(area.get("width_ft", 0) or 0)
     range_ft = int(
         dict(dict(spell.get("definition") or {}).get("range") or {}).get(
             "normal_ft", 0
         )
         or 0
     )
-    if (not hypnotic_pattern and radius_ft <= 0) or range_ft <= 0:
+    if (
+        not hypnotic_pattern
+        and shape == "sphere"
+        and (radius_ft <= 0 or range_ft <= 0)
+    ):
+        return None
+    if (
+        not hypnotic_pattern
+        and shape == "line"
+        and (length_ft <= 0 or width_ft <= 0)
+    ):
+        return None
+    if not hypnotic_pattern and shape not in {"sphere", "line"}:
         return None
     combatants = {
         str(item.get("actor_id") or ""): dict(item)
@@ -6661,6 +6680,60 @@ def _area_spell_declaration(
                 if best_cube is None or candidate[:3] > best_cube[:3]:
                     best_cube = candidate
         return deepcopy(best_cube[3]) if best_cube is not None else None
+
+    if shape == "line":
+        start_x = float(caster_position["x"])
+        start_y = float(caster_position["y"])
+        best_line: tuple[int, int, int, dict[str, Any]] | None = None
+        for origin_y in range(height):
+            for origin_x in range(width):
+                direction_x = origin_x - start_x
+                direction_y = origin_y - start_y
+                direction_length = (direction_x**2 + direction_y**2) ** 0.5
+                if direction_length == 0:
+                    continue
+                affected: set[str] = set()
+                for target_id, item in nondead_combatants.items():
+                    position = item.get("position")
+                    if not isinstance(position, dict):
+                        continue
+                    target_x = float(position["x"]) - start_x
+                    target_y = float(position["y"]) - start_y
+                    projection_cells = (
+                        target_x * direction_x + target_y * direction_y
+                    ) / direction_length
+                    perpendicular_cells = abs(
+                        target_x * direction_y - target_y * direction_x
+                    ) / direction_length
+                    if (
+                        0 < projection_cells * cell_ft <= length_ft
+                        and perpendicular_cells * cell_ft <= width_ft / 2
+                    ):
+                        affected.add(target_id)
+                if not affected or not affected <= observable_ids:
+                    continue
+                affected_hostiles = affected & hostile_ids
+                if (
+                    len(affected_hostiles & active_hostile_ids) < 2
+                    or affected & friendly_ids
+                ):
+                    continue
+                declaration = {
+                    "origin": {"x": origin_x, "y": origin_y},
+                    "target_contexts": [
+                        {"target_id": target_id, "cover": "none"}
+                        for target_id in sorted(affected)
+                    ],
+                }
+                candidate = (
+                    len(affected_hostiles),
+                    -origin_x,
+                    -origin_y,
+                    declaration,
+                )
+                if best_line is None or candidate[:3] > best_line[:3]:
+                    best_line = candidate
+        return deepcopy(best_line[3]) if best_line is not None else None
 
     best: tuple[int, int, int, dict[str, Any]] | None = None
     for y in range(height):

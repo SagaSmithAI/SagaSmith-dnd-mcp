@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import math
 import re
 from contextlib import nullcontext
 from copy import deepcopy
@@ -304,6 +305,7 @@ from sagasmith_dnd.spatial import (
 from sagasmith_dnd.spell_resolution import (
     SPELL_RESOLUTION_MECHANIC_ID,
     audit_spell_resolution_paths,
+    effective_spell_resolution,
     overlay_spell_attack_card,
     scaled_roll_expression,
     spell_attack_action_resolution,
@@ -6390,29 +6392,89 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         caster = combatants.get(caster_id)
         if caster is None:
             raise CombatEngineError("spell caster is not in this encounter")
-        range_ft = int(
-            dict(dict(spell.get("definition") or {}).get("range") or {}).get("normal_ft", 0) or 0
+        caster_position = caster.get("position")
+        if not isinstance(caster_position, dict):
+            raise CombatEngineError("area spell requires a caster position")
+        distance_to_origin = combat_distance(caster_position, origin)
+        if distance_to_origin is None:
+            raise CombatEngineError("area spell requires an executable origin")
+        area = dict(
+            dict(resolution.get("targeting") or {}).get("area") or {}
         )
-        distance_to_origin = combat_distance(caster.get("position"), origin)
-        if distance_to_origin is None or range_ft <= 0:
-            raise CombatEngineError("area spell requires caster position and executable range")
-        if distance_to_origin > range_ft:
-            raise CombatEngineError("area spell origin is outside range")
-        radius = int(
-            dict(dict(resolution.get("targeting") or {}).get("area") or {}).get("radius_ft", 0) or 0
+        shape = str(area.get("shape") or "")
+        radius = int(area.get("radius_ft", 0) or 0)
+        length = int(area.get("length_ft", 0) or 0)
+        width = int(area.get("width_ft", 0) or 0)
+        if shape == "sphere":
+            range_ft = int(
+                dict(dict(spell.get("definition") or {}).get("range") or {}).get(
+                    "normal_ft", 0
+                )
+                or 0
+            )
+            if range_ft <= 0:
+                raise CombatEngineError(
+                    "sphere spell requires an executable casting range"
+                )
+            if distance_to_origin > range_ft:
+                raise CombatEngineError("area spell origin is outside range")
+        elif shape == "line":
+            if distance_to_origin <= 0 or length <= 0 or width <= 0:
+                raise CombatEngineError(
+                    "line spell requires a direction, length, and width"
+                )
+        else:
+            raise CombatEngineError("unsupported structured spell area shape")
+        cell_ft = int(
+            dict(dict(encounter.get("battle_map") or {}).get("grid") or {}).get(
+                "cell_ft", 5
+            )
+            or 5
         )
+
+        def inside_area(position: dict[str, Any]) -> tuple[bool, float]:
+            if shape == "sphere":
+                distance = combat_distance(origin, position)
+                return distance is not None and distance <= radius, float(
+                    distance or 0
+                )
+            start_x = float(caster_position["x"])
+            start_y = float(caster_position["y"])
+            direction_x = float(origin["x"]) - start_x
+            direction_y = float(origin["y"]) - start_y
+            direction_length = math.hypot(direction_x, direction_y)
+            target_x = float(position["x"]) - start_x
+            target_y = float(position["y"]) - start_y
+            projection_cells = (
+                target_x * direction_x + target_y * direction_y
+            ) / direction_length
+            perpendicular_cells = abs(
+                target_x * direction_y - target_y * direction_x
+            ) / direction_length
+            projection_ft = projection_cells * cell_ft
+            perpendicular_ft = perpendicular_cells * cell_ft
+            return (
+                0 < projection_ft <= length
+                and perpendicular_ft <= width / 2,
+                projection_ft,
+            )
+
         affected: dict[str, dict[str, Any]] = {}
         for target_id, combatant in combatants.items():
             conditions = {str(item).casefold() for item in combatant.get("conditions", [])}
             if "dead" in conditions:
                 continue
-            distance = combat_distance(origin, combatant.get("position"))
-            if distance is None:
+            position = combatant.get("position")
+            if not isinstance(position, dict):
                 raise CombatEngineError(
                     "area spell cannot enumerate all living combatants without positions"
                 )
-            if distance <= radius:
-                affected[target_id] = {"target_id": target_id, "distance_ft": distance}
+            included, distance = inside_area(position)
+            if included:
+                affected[target_id] = {
+                    "target_id": target_id,
+                    "distance_ft": distance,
+                }
         contexts = value.get("target_contexts")
         if not isinstance(contexts, list):
             raise CombatEngineError("area spell target_contexts must be a list")
@@ -6440,9 +6502,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         for target_id, cover in normalized_contexts.items():
             affected[target_id]["cover"] = cover
         return {
+            "shape": shape,
             "origin": {"x": float(origin["x"]), "y": float(origin["y"])},
             "distance_ft": distance_to_origin,
-            "radius_ft": radius,
+            **({"radius_ft": radius} if shape == "sphere" else {}),
+            **(
+                {"length_ft": length, "width_ft": width}
+                if shape == "line"
+                else {}
+            ),
             "targets": list(affected.values()),
         }
 
@@ -15566,7 +15634,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 else source_spell_resolution(current.sheet, spell_id)
             )
             if isinstance(spell_entry.get("resolution"), dict)
-            else None
+            else effective_spell_resolution(spell_entry)
         )
         compiled_spell_plan = None
         if isinstance(spell_entry.get("resolution_plan"), dict):

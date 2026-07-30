@@ -908,6 +908,97 @@ def test_fireball_settles_saves_and_area_enumeration(
     asyncio.run(exercise())
 
 
+def test_legacy_lightning_bolt_card_hydrates_and_settles_exact_line(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _deterministic_rolls(monkeypatch)
+
+    async def exercise() -> None:
+        server = create_server(_config(tmp_path))
+        caster = default_character_sheet()
+        caster["abilities"]["intelligence"]["score"] = 18
+        caster["spellcasting"].update(
+            ability="intelligence",
+            spell_slots=_slot(3),
+        )
+        lightning_bolt = {
+            "id": "dnd5e.content.srd2014.spell.lightning-bolt",
+            "name": "Lightning Bolt",
+            "level": 3,
+            "grant": {
+                "source_type": "class",
+                "source_key": "wizard",
+                "method": "known",
+            },
+            "access": {"known": True, "prepared": True},
+            "definition": {
+                "casting_time": "1 action",
+                "range": {"kind": "self"},
+                "duration": {"kind": "instantaneous", "concentration": False},
+                "components": {"verbal": True, "somatic": True, "material": True},
+            },
+            "resolution": None,
+            "mechanic_refs": [],
+        }
+        caster["content"]["spells"] = [lightning_bolt]
+        first = default_character_sheet()
+        first["combat"]["hp"] = {"value": 50, "max": 50, "temp": 0}
+        second = default_character_sheet()
+        second["combat"]["hp"] = {"value": 50, "max": 50, "temp": 0}
+        off_line = default_character_sheet()
+        off_line["combat"]["hp"] = {"value": 50, "max": 50, "temp": 0}
+        campaign_id, revision, actors = await _campaign_with_combat(
+            server,
+            [
+                ("Wizard", caster),
+                ("First", first),
+                ("Second", second),
+                ("Off line", off_line),
+            ],
+            positions=[(0, 0), (2, 0), (4, 0), (2, 1)],
+        )
+
+        result = await _raw(
+            server,
+            "combat_cast_spell",
+            {
+                "campaign_id": campaign_id,
+                "actor_id": actors[0]["id"],
+                "spell_id": lightning_bolt["id"],
+                "cast_level": 3,
+                "declaration": {
+                    "origin": {"x": 11, "y": 0},
+                    "target_contexts": [
+                        {"target_id": actors[1]["id"], "cover": "none"},
+                        {"target_id": actors[2]["id"], "cover": "none"},
+                    ],
+                },
+                "expected_revision": revision,
+                "idempotency_key": "legacy-lightning-bolt",
+            },
+        )
+
+        assert result["status"] == "committed"
+        assert result["result"]["area"] == {
+            "shape": "line",
+            "origin": {"x": 11.0, "y": 0.0},
+            "distance_ft": 55.0,
+            "length_ft": 100,
+            "width_ft": 5,
+            "targets": [
+                {"target_id": actors[1]["id"], "distance_ft": 10.0, "cover": "none"},
+                {"target_id": actors[2]["id"], "distance_ft": 20.0, "cover": "none"},
+            ],
+        }
+        assert result["result"]["damage_roll"]["expression"] == "8d6"
+        assert {item["target_id"] for item in result["result"]["targets"]} == {
+            actors[1]["id"],
+            actors[2]["id"],
+        }
+
+    asyncio.run(exercise())
+
+
 def test_hypnotic_pattern_hard_settles_cube_saves_and_every_end_condition(
     tmp_path: Path,
 ) -> None:

@@ -4135,6 +4135,86 @@ def test_party_spell_tactics_choose_safe_hypnotic_pattern_cube() -> None:
     }
 
 
+def test_party_spell_tactics_hydrate_legacy_lightning_bolt_line() -> None:
+    spell_id = "dnd5e.content.srd2014.spell.lightning-bolt"
+    wizard = _spell_actor(spell_id)
+    wizard["sheet"]["content"]["spells"][0].update(
+        {
+            "level": 3,
+            "access": {"known": True},
+            "definition": {"range": {"kind": "self"}},
+            "resolution": None,
+            "mechanic_refs": [],
+        }
+    )
+    wizard["sheet"]["spellcasting"]["spell_slots"] = {
+        "3": {"value": 1, "max": 1}
+    }
+    actors = {
+        "wizard": wizard,
+        "ally": _spell_actor(slots=0),
+        "goblin-1": _spell_actor(slots=0),
+        "goblin-2": _spell_actor(slots=0),
+        "off-line": _spell_actor(slots=0),
+    }
+    positions = {
+        "wizard": {"x": 0, "y": 0},
+        "ally": {"x": 0, "y": 1},
+        "goblin-1": {"x": 2, "y": 0},
+        "goblin-2": {"x": 4, "y": 0},
+        "off-line": {"x": 2, "y": 1},
+    }
+    combat = {
+        "battle_map": {
+            "bounds": {"width_cells": 12, "height_cells": 12},
+            "grid": {"cell_ft": 5},
+        },
+        "combatants": [
+            {
+                "actor_id": actor_id,
+                "position": position,
+                "conditions": [],
+                "disposition": (
+                    "friendly" if actor_id in {"wizard", "ally"} else "hostile"
+                ),
+            }
+            for actor_id, position in positions.items()
+        ],
+    }
+    priorities = _agent_spell_priorities(
+        [
+            {
+                "actor_id": "wizard",
+                "choices": [
+                    {
+                        "spell_id": spell_id,
+                        "target_policy": "maximize_opponents_without_allies",
+                    }
+                ],
+                "decision": "Cast through the two collinear enemies.",
+                "ruling_reason": "The built-in line contract supplies exact geometry.",
+            }
+        ],
+        participant_ids=list(actors),
+        actors=actors,
+    )
+
+    choice = _choose_agent_spell(
+        "wizard",
+        party_ids=["wizard", "ally"],
+        actors=actors,
+        living_targets=["goblin-1", "goblin-2", "off-line"],
+        spell_choices=priorities["wizard"]["choices"],
+        combat=combat,
+    )
+
+    assert choice is not None
+    assert choice[:3] == (spell_id, "goblin-1", 3)
+    assert {
+        item["target_id"] for item in choice[3]["target_contexts"]
+    } == {"goblin-1", "goblin-2"}
+
+
 def test_party_tactics_do_not_target_unobserved_hidden_combatants() -> None:
     combat = {
         "combatants": [
