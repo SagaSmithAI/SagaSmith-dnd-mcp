@@ -78,7 +78,11 @@ from sagasmith_dnd.ability_generation import (
     begin_rolled_ability_generation,
     roll_ability_scores,
 )
-from sagasmith_dnd.activities import ActivityError, consume_activity
+from sagasmith_dnd.activities import (
+    ActivityError,
+    consume_activity,
+    recharge_activities_at_turn_start,
+)
 from sagasmith_dnd.actor_types import NON_PLAYER_CHARACTER_TYPES
 from sagasmith_dnd.campaign_state import (
     merge_reviewed_campaign_settings,
@@ -356,6 +360,7 @@ from sagasmith_dnd.statblocks import (
     StatblockImportError,
     apply_reviewed_statblock_fill,
     apply_statblock_variant,
+    area_save_damage_spec,
     effective_statblock_rating,
     gazer_eye_ray_spec,
     parse_2014_statblock,
@@ -425,6 +430,7 @@ ENGINE_SETTLED_CARD_MECHANIC_IDS = frozenset(
     {
         "dnd5e.core.action.multiattack_choice",
         "dnd5e.core.activity.action_surge",
+        "dnd5e.core.activity.area_save_damage",
         "dnd5e.core.activity.battle_cry",
         "dnd5e.core.activity.cunning_action",
         "dnd5e.core.activity.preserve_life",
@@ -13048,9 +13054,33 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 sheet = source_duration["sheet"]
                 source_duration_expired.extend(source_duration["expired"])
             source_sheets[target_id] = sheet
+        rule_context = effective_rule_context(campaign_id)
         started_effects_by_actor: dict[str, dict[str, Any]] = {}
+        activity_recharges: list[dict[str, Any]] = []
+        activity_recharge_receipts: list[dict[str, Any]] = []
         if next_combatant is not None:
             next_actor_id = str(next_combatant.get("actor_id") or "")
+            try:
+                recharged = recharge_activities_at_turn_start(
+                    source_sheets[next_actor_id],
+                    rules=rule_context,
+                )
+            except ActivityError as error:
+                raise CombatEngineError(str(error)) from error
+            source_sheets[next_actor_id] = recharged["sheet"]
+            activity_recharges = list(recharged["results"])
+            activity_recharge_receipts = list(
+                recharged.get("rule_receipts") or []
+            )
+            if activity_recharges:
+                next_state["combat"]["log"] = [
+                    *list(next_state["combat"].get("log") or []),
+                    {
+                        "type": "activity_recharge",
+                        "actor_id": next_actor_id,
+                        "results": activity_recharges,
+                    },
+                ][-100:]
             started_effects_by_actor[next_actor_id] = advance_effect_durations(
                 source_sheets[next_actor_id],
                 period="turn_start",
@@ -13070,13 +13100,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             *expired_attack_advantage,
             *source_duration_expired,
         }
-        rule_context = effective_rule_context(campaign_id)
         rule_receipts: list[dict[str, Any]] = core_receipts(
             rule_context,
             ["dnd5e.core.mcp.duration_clock"],
             "turn.end.duration_clock",
         )
         rule_receipts.extend(repeat_save_receipts)
+        rule_receipts.extend(activity_recharge_receipts)
         if source_turn_end:
             rule_receipts.extend(
                 core_receipts(
@@ -13203,6 +13233,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "source_turn_start": source_turn_start,
                 "source_turn_end": source_turn_end,
                 "repeat_saves": repeat_saves,
+                "activity_recharges": activity_recharges,
                 "rule_receipts": rule_receipts,
                 "ruleset_fingerprint": rule_context.fingerprint,
                 "campaign_revision": campaign.revision + 1,
@@ -17808,6 +17839,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             if compiled_activity_plan is not None
             else gazer_eye_ray_spec(current.sheet, activity_id)
         )
+        area_save_spec = (
+            None
+            if compiled_activity_plan is not None
+            else area_save_damage_spec(current.sheet, activity_id)
+        )
         source_contest_spec = (
             None
             if compiled_activity_plan is not None
@@ -17820,11 +17856,136 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         random_target_records: dict[str, Any] = {}
         random_targets: list[dict[str, Any]] = []
+        area_target_records: dict[str, Any] = {}
+        area_targets: list[dict[str, Any]] = []
+        area_origin: dict[str, int] | None = None
         source_save_target_record = None
         source_save_target: dict[str, Any] | None = None
         source_contest_target_record = None
         source_contest_target: dict[str, Any] | None = None
         source_contest_knowledge_count = 0
+        if area_save_spec is not None:
+            if not is_dm(campaign_id, principal_id):
+                raise PermissionError(
+                    "source area saving-throw settlement requires the Agent in the DM role"
+                )
+            declared = dict(declaration or {})
+            if set(declared) != {"origin"}:
+                raise CombatEngineError(
+                    "area saving-throw activity declaration requires only origin"
+                )
+            raw_origin = declared.get("origin")
+            if not isinstance(raw_origin, dict) or set(raw_origin) != {"x", "y"}:
+                raise CombatEngineError(
+                    "area saving-throw activity origin requires integer x and y"
+                )
+            if any(
+                isinstance(raw_origin[coordinate], bool)
+                or not isinstance(raw_origin[coordinate], int)
+                for coordinate in ("x", "y")
+            ):
+                raise CombatEngineError(
+                    "area saving-throw activity origin requires integer x and y"
+                )
+            area_origin = {
+                "x": int(raw_origin["x"]),
+                "y": int(raw_origin["y"]),
+            }
+            battle_map = dict(encounter.get("battle_map") or {})
+            if battle_map:
+                validate_position(battle_map, area_origin)
+            cell_ft = int(
+                dict(battle_map.get("grid") or {}).get("cell_ft", 5) or 5
+            )
+            if cell_ft <= 0:
+                raise CombatEngineError("battle-map cell_ft must be positive")
+            source_combatant = next(
+                (
+                    item
+                    for item in encounter.get("combatants", [])
+                    if str(item.get("actor_id") or "") == actor_id
+                ),
+                None,
+            )
+            if source_combatant is None:
+                raise CombatEngineError(
+                    "area saving-throw source is not a combatant"
+                )
+            source_position = dict(source_combatant.get("position") or {})
+            if set(source_position) != {"x", "y"}:
+                raise NeedsRulingError(
+                    "area saving-throw activity requires the source position",
+                    missing=("area_save_source_position",),
+                )
+            source_conditions = {
+                str(item).strip().casefold()
+                for item in source_combatant.get("conditions", [])
+            }
+            if "blinded" in source_conditions:
+                raise CombatEngineError(
+                    "a blinded source cannot choose a point it can see"
+                )
+            origin_contract = dict(area_save_spec.get("origin") or {})
+            if origin_contract.get("kind") != "visible_point":
+                raise CombatEngineError(
+                    "unsupported area saving-throw origin contract"
+                )
+            origin_distance = combat_distance(
+                source_position,
+                area_origin,
+                cell_ft=cell_ft,
+            )
+            if (
+                origin_distance is None
+                or origin_distance > int(origin_contract.get("range_ft", 0) or 0)
+            ):
+                raise CombatEngineError(
+                    "area saving-throw origin is outside the recorded range"
+                )
+            area_contract = dict(area_save_spec.get("area") or {})
+            if (
+                area_contract.get("shape") != "radius"
+                or area_save_spec.get("targets") != "each_creature"
+            ):
+                raise CombatEngineError(
+                    "unsupported area saving-throw target contract"
+                )
+            radius_ft = int(area_contract.get("radius_ft", 0) or 0)
+            if radius_ft <= 0:
+                raise CombatEngineError(
+                    "area saving-throw radius must be positive"
+                )
+            for target_combatant in encounter.get("combatants", []):
+                target_id = str(target_combatant.get("actor_id") or "")
+                target_conditions = {
+                    str(item).strip().casefold()
+                    for item in target_combatant.get("conditions", [])
+                }
+                if "dead" in target_conditions:
+                    continue
+                target_position = dict(target_combatant.get("position") or {})
+                if set(target_position) != {"x", "y"}:
+                    raise NeedsRulingError(
+                        "area saving-throw activity requires every living "
+                        "combatant position",
+                        missing=(f"area_save_target_position:{target_id}",),
+                    )
+                distance = combat_distance(
+                    area_origin,
+                    target_position,
+                    cell_ft=cell_ft,
+                )
+                if distance is None or distance > radius_ft:
+                    continue
+                target = require_campaign_actor(campaign_id, target_id)
+                access.require_actor(
+                    campaign_id,
+                    target_id,
+                    principal_id,
+                    control=True,
+                )
+                area_target_records[target_id] = target
+                area_targets.append(combat_actor_snapshot(target_id))
         if random_save_spec is not None:
             if not is_dm(campaign_id, principal_id):
                 raise PermissionError(
@@ -18325,6 +18486,89 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             declaration=declaration,
         )
         additional_updates: list[CharacterStateUpdate] = []
+        if area_save_spec is not None:
+            assert area_origin is not None
+            for target_actor in area_targets:
+                if str(target_actor.get("id") or "") != actor_id:
+                    continue
+                target_actor["sheet"] = deepcopy(applied["sheet"])
+                target_actor["derived"] = derive_character_sheet(
+                    target_actor["sheet"]
+                )
+            if area_targets:
+                settled_area = resolve_save_damage_to_sheets(
+                    area_targets,
+                    save_ability=str(area_save_spec["save_ability"]),
+                    save_dc=int(area_save_spec["save_dc"]),
+                    damage_expression=str(area_save_spec["damage_formula"]),
+                    damage_type=str(area_save_spec["damage_type"]),
+                    half_on_success=bool(
+                        area_save_spec["half_on_success"]
+                    ),
+                    source=str(activity_card.get("name") or activity_id),
+                    death_saves_by_actor_id={
+                        str(item.get("actor_id") or ""): bool(
+                            item.get("death_saves", False)
+                            or item.get("zero_hp_recovery", False)
+                        )
+                        for item in next_encounter.get("combatants", [])
+                    },
+                    ruleset=str(next_encounter.get("ruleset") or "2014"),
+                    rules=rule_context,
+                )
+                area_result = settled_area["result"]
+            else:
+                settled_area = {"sheets": {}}
+                area_result = {
+                    "kind": "save_damage",
+                    "damage_roll": None,
+                    "targets": [],
+                }
+            for target_result in area_result["targets"]:
+                target_id = str(target_result["target_id"])
+                target_sheet = validate_character_sheet(
+                    settled_area["sheets"][target_id]
+                )
+                sync_combatant_conditions(
+                    next_encounter,
+                    target_id,
+                    target_sheet,
+                )
+                concentration = dict(
+                    dict(target_result.get("damage") or {}).get(
+                        "concentration"
+                    )
+                    or {}
+                )
+                add_concentration_window(
+                    next_encounter,
+                    target_id,
+                    concentration or None,
+                    next_revision=campaign.revision + 1,
+                )
+                if target_id == actor_id:
+                    applied["sheet"] = target_sheet
+                    continue
+                target_record = area_target_records[target_id]
+                additional_updates.append(
+                    CharacterStateUpdate(
+                        character_id=target_id,
+                        sheet=target_sheet,
+                        notes=validate_character_notes(
+                            target_record.notes
+                        ),
+                        expected_revision=target_record.revision,
+                    )
+                )
+            core_effect = {
+                "kind": "area_save_damage",
+                "contract": str(area_save_spec.get("kind") or ""),
+                "origin": area_origin,
+                "damage_roll": area_result["damage_roll"],
+                "targets": area_result["targets"],
+                "activation_payment": activity_activation_payment,
+                "requires_ruling": False,
+            }
         if random_save_spec is not None:
             source_actor = combat_actor_snapshot(actor_id)
             source_actor["sheet"] = applied["sheet"]
@@ -18602,6 +18846,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             applied["core_effect"] = core_effect
             mechanic_id = {
                 "action_surge": "dnd5e.core.activity.action_surge",
+                "area_save_damage": "dnd5e.core.activity.area_save_damage",
                 "aggressive": "dnd5e.core.monster.aggressive",
                 "battle_cry": "dnd5e.core.activity.battle_cry",
                 "cunning_action": "dnd5e.core.activity.cunning_action",
