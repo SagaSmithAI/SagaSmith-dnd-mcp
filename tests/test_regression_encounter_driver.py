@@ -60,6 +60,7 @@ from scripts.regression_encounter import (
     _party_ids,
     _party_loadouts,
     _pending_agent_forced_targets,
+    _pending_resolution_made_progress,
     _postcombat_stabilization_target,
     _postcombat_unavailable_grapple_effect_ids,
     _preflight_attack,
@@ -4299,6 +4300,32 @@ def test_spell_damage_pending_concentration_blocks_turn_end() -> None:
     ]
     assert not _spell_cast_blocks_turn_progress(cast, pending_reaction=False)
     assert _spell_cast_blocks_turn_progress(cast, pending_reaction=True)
+
+
+def test_pending_resolution_must_remove_or_resolve_exact_window() -> None:
+    pending = {
+        "id": "concentration-1",
+        "kind": "concentration",
+        "status": "pending",
+    }
+
+    assert not _pending_resolution_made_progress(
+        pending,
+        {"pending": [pending]},
+    )
+    assert _pending_resolution_made_progress(
+        pending,
+        {
+            "pending": [
+                {
+                    "id": "concentration-1",
+                    "kind": "concentration",
+                    "status": "resolved",
+                }
+            ]
+        },
+    )
+    assert _pending_resolution_made_progress(pending, {"pending": []})
 
 
 def test_reaction_tactics_spend_shield_only_when_it_changes_the_attack() -> None:

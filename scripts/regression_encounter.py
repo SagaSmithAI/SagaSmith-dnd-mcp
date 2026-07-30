@@ -7301,6 +7301,33 @@ def _has_blocking_pending(combat: dict[str, Any]) -> bool:
     )
 
 
+def _pending_window(
+    combat: dict[str, Any],
+) -> dict[str, Any] | None:
+    return next(
+        (
+            item
+            for item in combat.get("pending", [])
+            if isinstance(item, dict)
+            and item.get("status", "pending") == "pending"
+        ),
+        None,
+    )
+
+
+def _pending_resolution_made_progress(
+    pending: dict[str, Any],
+    combat_after: dict[str, Any],
+) -> bool:
+    pending_id = str(pending.get("id") or "")
+    return bool(pending_id) and all(
+        not isinstance(item, dict)
+        or str(item.get("id") or "") != pending_id
+        or item.get("status", "pending") != "pending"
+        for item in combat_after.get("pending", [])
+    )
+
+
 def _spell_cast_blocks_turn_progress(
     cast: dict[str, Any],
     *,
@@ -8126,10 +8153,7 @@ async def _resolve_pending(
     branch_id: str,
     combat: dict[str, Any],
 ) -> dict[str, Any] | None:
-    pending = next(
-        (item for item in combat.get("pending", []) if item.get("status", "pending") == "pending"),
-        None,
-    )
+    pending = _pending_window(combat)
     if pending is None:
         return None
     campaign = await _campaign(client, args.campaign_id)
@@ -10219,6 +10243,7 @@ async def _auto_run(
         if outcome is not None:
             outcome_status, outcome_summary = outcome
             break
+        pending_before = _pending_window(combat)
         pending_result = await _resolve_pending(
             client,
             args,
@@ -10226,6 +10251,39 @@ async def _auto_run(
             combat,
         )
         if pending_result is not None:
+            if pending_result.get("status") == "pending_ruling":
+                raise EncounterRulingRequiredError(
+                    pending_result,
+                    operation="combat.pending.resolve",
+                    actor_id=str(dict(pending_before or {}).get("actor_id") or ""),
+                    action={
+                        "choice_id": str(
+                            dict(pending_before or {}).get("id") or ""
+                        ),
+                        "kind": str(
+                            dict(pending_before or {}).get("kind") or ""
+                        ),
+                        "trigger": str(
+                            dict(pending_before or {}).get("trigger") or ""
+                        ),
+                    },
+                    retry_hint=(
+                        "Supply the requested Agent source-or-scene fact and retry "
+                        "the same public encounter run."
+                    ),
+                )
+            combat_after_pending = await client.domain(
+                "combat_query",
+                {"campaign_id": args.campaign_id, "view": "status"},
+            )
+            if pending_before is not None and not _pending_resolution_made_progress(
+                pending_before,
+                combat_after_pending,
+            ):
+                raise RuntimeError(
+                    "public pending-window settlement returned without advancing "
+                    f"{pending_before.get('id')}; refusing to spin until max-turns"
+                )
             source_flee_observations = _record_source_flee_damage(
                 pending_result,
                 flee_actor_ids=set(args.flee_actor_id),

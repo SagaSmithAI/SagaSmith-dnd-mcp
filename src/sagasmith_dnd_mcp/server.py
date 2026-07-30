@@ -19647,6 +19647,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "kind": "save",
                     "ability": "constitution",
                     "dc": dc,
+                    "save_purpose": "concentration",
                 },
                 branch_id=resolved_branch_id,
             ),

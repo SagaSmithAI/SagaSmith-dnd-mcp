@@ -368,6 +368,25 @@ def test_magic_missile_creates_per_dart_concentration_saves_and_prunes_after_fai
         target_sheet["content"]["spells"] = [
             _spell("bless", "Bless", "test.spell.bless", "1 action")
         ]
+        target_sheet["content"]["features"] = [
+            {
+                "id": "magic-resistance-passive",
+                "name": "Magic Resistance",
+                "choices": {
+                    "source_trait": {
+                        "kind": "magic_resistance",
+                        "trigger": "saving_throw",
+                        "save_source_kinds": ["spell", "magical_effect"],
+                        "grants": "advantage",
+                        "automatic": True,
+                        "source_excerpt": (
+                            "The archmage has advantage on saving throws against "
+                            "spells and other magical effects."
+                        ),
+                    }
+                },
+            }
+        ]
         target_sheet["effects"] = [
             {
                 "id": "bless-effect",
@@ -406,16 +425,20 @@ def test_magic_missile_creates_per_dart_concentration_saves_and_prunes_after_fai
         assert len(windows) == 3
         assert {item["dc"] for item in windows} == {10}
 
-        monkeypatch.setattr(
-            server_module,
-            "resolve_actor_check",
-            lambda *args, **kwargs: {
+        def fail_concentration(*args, **kwargs):
+            assert kwargs["rules"].facts["save_purpose"] == "concentration"
+            return {
                 "kind": "save",
                 "ability": "constitution",
                 "dc": kwargs["dc"],
                 "total": 1,
                 "success": False,
-            },
+            }
+
+        monkeypatch.setattr(
+            server_module,
+            "resolve_actor_check",
+            fail_concentration,
         )
         checked = await _raw(
             server,
@@ -460,6 +483,7 @@ def test_combat_cast_accepts_numbered_bonus_action_from_imported_spell_card(
             )
         ]
         target_sheet = default_character_sheet()
+        target_sheet["combat"]["hp"] = {"value": 1, "max": 10, "temp": 0}
         campaign, actors = await _campaign_with_combat(
             server, [("Caster", caster_sheet), ("Target", target_sheet)]
         )
@@ -471,11 +495,12 @@ def test_combat_cast_accepts_numbered_bonus_action_from_imported_spell_card(
                 "actor_id": actors[0]["id"],
                 "spell_id": "dnd5e.content.srd2014.spell.healing-word",
                 "cast_level": 1,
+                "declaration": {"target_id": actors[1]["id"]},
                 "expected_revision": campaign["revision"],
                 "idempotency_key": "numbered-bonus-action",
             },
         )
-        assert cast["status"] == "pending_ruling"
+        assert cast["status"] == "committed"
         combatant = next(
             item for item in cast["combat"]["combatants"] if item["actor_id"] == actors[0]["id"]
         )
@@ -483,5 +508,7 @@ def test_combat_cast_accepts_numbered_bonus_action_from_imported_spell_card(
         assert combatant["turn_budget"]["main_action"] == 1
         caster = await _call(server, "character_get", {"character_id": actors[0]["id"]})
         assert caster["sheet"]["spellcasting"]["spell_slots"]["1"]["value"] == 0
+        target = await _call(server, "character_get", {"character_id": actors[1]["id"]})
+        assert target["sheet"]["combat"]["hp"]["value"] > 1
 
     asyncio.run(exercise())
