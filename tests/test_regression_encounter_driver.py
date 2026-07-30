@@ -1073,7 +1073,7 @@ def test_agent_turn_ruling_settles_action_check_and_returns_combat_outcome() -> 
                 return {
                     "status": "committed",
                     "result": {
-                        "kind": "check",
+                        "kind": "ability",
                         "skill": "persuasion",
                         "dc": 18,
                         "success": True,

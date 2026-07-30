@@ -9009,7 +9009,7 @@ async def _settle_agent_turn_ruling(
         check_value = dict(action_result.get("result") or {})
         if (
             action_result.get("status") != "committed"
-            or check_value.get("kind") != "check"
+            or check_value.get("kind") != "ability"
             or str(check_value.get("skill") or check_value.get("ability") or "")
             .strip()
             .casefold()
@@ -9017,8 +9017,8 @@ async def _settle_agent_turn_ruling(
             or int(check_value.get("dc", 0) or 0) != int(check_contract["dc"])
         ):
             raise RuntimeError(
-                "source-cited procedure check did not settle through the "
-                "action-bound server check"
+                "source-cited procedure check did not settle as the expected "
+                "action-bound server ability check"
             )
     else:
         action_result = await pay_action(
