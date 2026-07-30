@@ -256,6 +256,121 @@ def test_character_check_contest_is_atomic_branch_scoped_and_replayable(
     asyncio.run(exercise())
 
 
+def test_character_check_group_is_atomic_branch_scoped_and_replayable(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        server = create_server(_config(tmp_path))
+        campaign = await _call(
+            server,
+            "campaign_create",
+            {
+                "name": "Group ability check",
+                "edition": "2014",
+                "idempotency_key": "campaign",
+            },
+        )
+        actors = []
+        for index in range(6):
+            sheet = default_character_sheet()
+            sheet["abilities"]["dexterity"]["score"] = 12 + index
+            actors.append(
+                await _call(
+                    server,
+                    "character_create",
+                    {
+                        "campaign_id": campaign["id"],
+                        "name": f"Scout {index + 1}",
+                        "sheet": sheet,
+                        "idempotency_key": f"scout-{index + 1}",
+                    },
+                )
+            )
+        current = await _call(
+            server,
+            "campaign_get",
+            {"campaign_id": campaign["id"]},
+        )
+        await _call(
+            server,
+            "game_phase",
+            {
+                "campaign_id": campaign["id"],
+                "action": "set",
+                "tool_profile": "play",
+                "expected_revision": current["revision"],
+                "idempotency_key": "enter-play",
+            },
+        )
+        current = await _call(
+            server,
+            "campaign_get",
+            {"campaign_id": campaign["id"]},
+        )
+        branches = await _call(
+            server,
+            "branch_query",
+            {"campaign_id": campaign["id"], "view": "list"},
+        )
+        branch_id = next(item["id"] for item in branches if item["is_current"])
+        arguments = {
+            "campaign_id": campaign["id"],
+            "action": "group",
+            "payload": {
+                "actor_ids": [actor["id"] for actor in actors],
+                "ability": "stealth",
+                "dc": 15,
+                "advantage": True,
+            },
+            "expected_revision": current["revision"],
+            "branch_id": branch_id,
+            "idempotency_key": "group-stealth",
+        }
+
+        settled = await _call(server, "character_check", arguments)
+        replay = await _call(server, "character_check", arguments)
+
+        assert replay == settled
+        assert settled["kind"] == "ability_group_check"
+        assert settled["participant_count"] == 6
+        assert settled["required_successes"] == 3
+        assert settled["success"] is (settled["success_count"] >= 3)
+        assert {
+            participant["actor_id"] for participant in settled["participants"]
+        } == {actor["id"] for actor in actors}
+        assert all(
+            participant["check"]["roll_mode"] == "advantage"
+            for participant in settled["participants"]
+        )
+        assert [item["mechanic_id"] for item in settled["rule_receipts"]] == [
+            "dnd5e.core.check.group"
+        ]
+        after = await _call(
+            server,
+            "campaign_get",
+            {"campaign_id": campaign["id"]},
+        )
+        assert after["revision"] == current["revision"] + 1
+        assert after["state"]["resolution_log"][-1]["type"] == "ability_group_check"
+
+        with pytest.raises(Exception, match="must be unique"):
+            await _call(
+                server,
+                "character_check",
+                {
+                    **arguments,
+                    "payload": {
+                        **arguments["payload"],
+                        "actor_ids": [actors[0]["id"], actors[0]["id"]],
+                    },
+                    "expected_revision": after["revision"],
+                    "idempotency_key": "duplicate-group",
+                },
+            )
+
+    asyncio.run(exercise())
+
+
 def test_character_check_contest_rejects_2024_campaigns(tmp_path: Path) -> None:
     async def exercise() -> None:
         server = create_server(_config(tmp_path))

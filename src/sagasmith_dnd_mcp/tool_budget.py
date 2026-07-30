@@ -29,7 +29,7 @@ TARGET_CORE_TOOL_COUNT = 12
 # combat choice facade. The 24-byte schema increase preserves the same public
 # and core tool counts while keeping server saves and scene facts auditable.
 # The aggregate remains well below the captured 92-tool baseline.
-TARGET_INPUT_SCHEMA_BYTES = 48_961
+TARGET_INPUT_SCHEMA_BYTES = 48_969
 PROFILE_TOOL_LIMITS = {
     "lobby": 62,
     "play": 47,

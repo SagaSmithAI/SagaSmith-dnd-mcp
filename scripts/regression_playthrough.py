@@ -97,6 +97,7 @@ DEFERRED_CHECKPOINT_ACTIONS = frozenset(
         "apply-damage",
         "roll-source",
         "resolve-check",
+        "resolve-group-check",
         "resolve-contest",
         "initialize-source-state",
         "stand-up",
@@ -130,6 +131,7 @@ KNOWLEDGE_ACTOR_PREFLIGHT_ACTIONS = frozenset(
     {
         "register-replacement",
         "resolve-check",
+        "resolve-group-check",
         "resolve-contest",
         "apply-damage",
         "initialize-source-state",
@@ -170,6 +172,7 @@ def _arguments() -> argparse.Namespace:
             "record-event",
             "record-outcome",
             "resolve-check",
+            "resolve-group-check",
             "resolve-contest",
             "initialize-source-state",
             "apply-damage",
@@ -310,6 +313,12 @@ def _arguments() -> argparse.Namespace:
         help="Exact module source reference for the playthrough action",
     )
     parser.add_argument("--check-actor-id", default="")
+    parser.add_argument(
+        "--group-check-actor-id",
+        action="append",
+        default=[],
+        help="Participant in a standard group ability check; repeat for every member",
+    )
     parser.add_argument(
         "--check-kind",
         choices=tuple(sorted(ACTOR_CHECK_KINDS)),
@@ -1758,7 +1767,11 @@ def _committed_check_result(settled: dict[str, Any]) -> dict[str, Any]:
     )
     if settled.get("status") == "committed" and isinstance(settled.get("result"), dict):
         return dict(settled["result"])
-    if "success" in settled and ("total" in settled or settled.get("automatic_failure")):
+    if "success" in settled and (
+        "total" in settled
+        or settled.get("automatic_failure")
+        or settled.get("kind") == "ability_group_check"
+    ):
         return dict(settled)
     raise RuntimeError("source-cited character check did not commit")
 
@@ -3754,6 +3767,283 @@ async def _resolve_check(
         },
         "check": check_result,
         "check_recovered": recovered is not None,
+        "knowledge_actor_ids": recipients,
+        "continuity": committed,
+        "sync": synced,
+    }
+
+
+async def _resolve_group_check(
+    client: ExposureClient,
+    *,
+    campaign_id: str,
+    run_id: str,
+    scene_id: str,
+    location_key: str,
+    source_excerpt: str,
+    source_ref: dict[str, Any] | None,
+    occurrence_id: str,
+    actor_ids: list[str],
+    ability: str,
+    dc: int | None,
+    proficient: bool,
+    bonus: int,
+    advantage: bool,
+    disadvantage: bool,
+    knowledge_actor_ids: list[str],
+    success_knowledge: str,
+    failure_knowledge: str,
+    source_scene_id: str = "",
+    defer_checkpoint: bool = False,
+) -> dict[str, Any]:
+    group_identity = _occurrence_identity(occurrence_id, "resolve-group-check")
+    normalized_actor_ids = list(
+        dict.fromkeys(str(actor_id).strip() for actor_id in actor_ids)
+    )
+    if not all((scene_id, location_key, source_excerpt, ability)):
+        raise ValueError(
+            "resolve-group-check requires scene, location, excerpt, and ability"
+        )
+    if len(normalized_actor_ids) < 2 or any(
+        not actor_id for actor_id in normalized_actor_ids
+    ):
+        raise ValueError(
+            "resolve-group-check requires at least two non-empty --group-check-actor-id"
+        )
+    if len(normalized_actor_ids) != len(actor_ids):
+        raise ValueError("resolve-group-check actor ids must be unique")
+    if dc is None or dc < 0:
+        raise ValueError("resolve-group-check requires a non-negative --check-dc")
+    if advantage and disadvantage:
+        raise ValueError(
+            "resolve-group-check cannot apply advantage and disadvantage together"
+        )
+    occurrence_scene = await client.domain(
+        "module_query",
+        {
+            "campaign_id": campaign_id,
+            "view": "scene",
+            "payload": {"scene_id": scene_id},
+        },
+    )
+    cited_scene_id = source_scene_id.strip() or scene_id
+    cited_scene = occurrence_scene
+    if cited_scene_id != scene_id:
+        cited_scene = await client.domain(
+            "module_query",
+            {
+                "campaign_id": campaign_id,
+                "view": "scene",
+                "payload": {"scene_id": cited_scene_id},
+            },
+        )
+    exact_ref = await _validate_source_ref(
+        client,
+        cited_scene,
+        source_ref,
+        excerpt=source_excerpt,
+    )
+    location_keys = {
+        str(item.get("key") or "") for item in _scene_locations(occurrence_scene)
+    }
+    if location_key not in location_keys:
+        raise ValueError(
+            "resolve-group-check location is not present in the scene atlas"
+        )
+    actors = await _validate_campaign_actor_ids(
+        client,
+        campaign_id=campaign_id,
+        actor_ids=normalized_actor_ids,
+        operation="resolve-group-check participant",
+    )
+    if proficient and any(
+        _actor_card_has_named_skill(actor, ability) for actor in actors
+    ):
+        raise ValueError(
+            "resolve-group-check named skills derive proficiency and expertise "
+            "from each actor card; omit --check-proficient"
+        )
+    progress_rows = await client.domain(
+        "module_query",
+        {"campaign_id": campaign_id, "view": "progress"},
+    )
+    progress_before = next(
+        (item for item in progress_rows if item.get("scene_id") == scene_id),
+        None,
+    )
+    stored_group = dict(
+        dict((progress_before or {}).get("state") or {}).get(
+            "full_playthrough_group_check"
+        )
+        or {}
+    )
+    progress_matches = bool(
+        str((progress_before or {}).get("current_location_key") or "")
+        == location_key
+        and stored_group.get("run_id") == run_id
+        and stored_group.get("occurrence_id") == group_identity
+        and stored_group.get("actor_ids") == normalized_actor_ids
+        and stored_group.get("ability") == ability
+        and stored_group.get("dc") == dc
+        and bool(stored_group.get("proficient", False)) == proficient
+        and int(stored_group.get("bonus", 0) or 0) == bonus
+        and bool(stored_group.get("advantage", False)) == advantage
+        and bool(stored_group.get("disadvantage", False)) == disadvantage
+        and stored_group.get("source_ref") == exact_ref
+    )
+    if progress_matches:
+        progress = deepcopy(progress_before)
+    else:
+        progress = await client.domain(
+            "module_set_progress",
+            {
+                "campaign_id": campaign_id,
+                "scene_id": scene_id,
+                "status": _scene_progress_write_status(progress_before),
+                "progress": max(_scene_progress_percent(progress_before), 50),
+                "state": {
+                    **deepcopy(dict((progress_before or {}).get("state") or {})),
+                    "full_playthrough_group_check": {
+                        "run_id": run_id,
+                        "occurrence_id": group_identity,
+                        "actor_ids": normalized_actor_ids,
+                        "ability": ability,
+                        "dc": dc,
+                        "proficient": proficient,
+                        "bonus": bonus,
+                        "advantage": advantage,
+                        "disadvantage": disadvantage,
+                        "source_ref": exact_ref,
+                    },
+                },
+                "current_location_key": location_key,
+                "expected_state_version": int(
+                    (progress_before or {}).get("state_version", 0) or 0
+                ),
+                "idempotency_key": _mutation_key(
+                    run_id,
+                    "scene-progress",
+                    group_identity,
+                ),
+            },
+        )
+    branches = await client.domain(
+        "branch_query",
+        {"campaign_id": campaign_id, "view": "list"},
+    )
+    branch = next((item for item in branches if item.get("is_current")), None)
+    if branch is None:
+        raise RuntimeError("campaign has no current branch")
+    campaign = await _campaign(client, campaign_id)
+    settled = await client.domain(
+        "character_check",
+        {
+            "campaign_id": campaign_id,
+            "action": "group",
+            "payload": {
+                "actor_ids": normalized_actor_ids,
+                "ability": ability,
+                "dc": dc,
+                "proficient": proficient,
+                "bonus": bonus,
+                "advantage": advantage,
+                "disadvantage": disadvantage,
+            },
+            "branch_id": str(branch["id"]),
+            "expected_revision": campaign["revision"],
+            "idempotency_key": _mutation_key(
+                run_id,
+                "character-group-check",
+                group_identity,
+            ),
+        },
+    )
+    check_result = _committed_check_result(settled)
+    success = bool(check_result["success"])
+    proposition = (
+        success_knowledge.strip() if success else failure_knowledge.strip()
+    ) or (
+        f"The group {'succeeded' if success else 'failed'} on the DC {dc} "
+        f"{ability.title()} group ability check."
+    )
+    recipients = list(
+        dict.fromkeys([*normalized_actor_ids, *knowledge_actor_ids])
+    )
+    campaign = await _campaign(client, campaign_id)
+    continuity_payload = {
+        "event": {
+            "summary": (
+                f"The group {'succeeded' if success else 'failed'} on the "
+                f"source-cited {ability} group check at {location_key}."
+            ),
+            "event_type": "ability_group_check",
+            "audience_scope": "party",
+            "payload": {
+                "scene_id": scene_id,
+                "location_key": location_key,
+                "occurrence_id": group_identity,
+                "actor_ids": normalized_actor_ids,
+                "ability": ability,
+                "dc": dc,
+                "bonus": bonus,
+                "advantage": advantage,
+                "disadvantage": disadvantage,
+                "success": success,
+                "success_count": check_result["success_count"],
+                "required_successes": check_result["required_successes"],
+                "source_excerpt": source_excerpt,
+                "source_ref": exact_ref,
+            },
+        },
+        "actor_knowledge": [
+            {
+                "actor_id": recipient,
+                "knowledge_key": (
+                    f"playthrough.{_token(run_id)}.group-check."
+                    f"{_token(group_identity, length=32)}"
+                ),
+                "proposition": proposition,
+                "disclosure_scope": "owner",
+            }
+            for recipient in recipients
+        ],
+        "branch_id": str(branch["id"]),
+    }
+    if not defer_checkpoint:
+        continuity_payload["snapshot"] = {
+            "label": f"Full playthrough group check: {ability} at {location_key}"
+        }
+    committed = await _commit_roll_continuity(
+        client,
+        campaign_id=campaign_id,
+        payload=continuity_payload,
+        expected_revision=campaign["revision"],
+        idempotency_key=_mutation_key(
+            run_id,
+            "continuity",
+            group_identity,
+        ),
+    )
+    synced = await _manifest_mutation(
+        client,
+        campaign_id=campaign_id,
+        action="sync",
+        run_id=run_id,
+        identity=f"resolve-group-check-sync:{group_identity}",
+    )
+    return {
+        "scene": {
+            "scene_id": scene_id,
+            "source_scene_id": cited_scene_id,
+            "location_key": location_key,
+            "source_ref": exact_ref,
+        },
+        "actors": [
+            {"id": actor["id"], "name": actor["name"]} for actor in actors
+        ],
+        "occurrence_id": group_identity,
+        "progress": progress,
+        "check": check_result,
         "knowledge_actor_ids": recipients,
         "continuity": committed,
         "sync": synced,
@@ -12367,6 +12657,32 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     occurrence_id=args.occurrence_id,
                     actor_id=args.check_actor_id,
                     kind=args.check_kind,
+                    ability=args.check_ability,
+                    dc=args.check_dc,
+                    proficient=args.check_proficient,
+                    bonus=args.check_bonus,
+                    advantage=args.check_advantage,
+                    disadvantage=args.check_disadvantage,
+                    knowledge_actor_ids=args.knowledge_actor_id,
+                    success_knowledge=args.success_knowledge,
+                    failure_knowledge=args.failure_knowledge,
+                    defer_checkpoint=args.defer_checkpoint,
+                )
+            elif args.action == "resolve-group-check":
+                if phase != "play":
+                    raise RuntimeError("resolve-group-check requires the play phase")
+                await client.load("play.characters", "play.resolution")
+                report["result"] = await _resolve_group_check(
+                    client,
+                    campaign_id=args.campaign_id,
+                    run_id=args.run_id,
+                    scene_id=str(args.scene_id or ""),
+                    source_scene_id=args.source_scene_id,
+                    location_key=args.location_key,
+                    source_excerpt=args.source_excerpt,
+                    source_ref=args.source_ref_json,
+                    occurrence_id=args.occurrence_id,
+                    actor_ids=args.group_check_actor_id,
                     ability=args.check_ability,
                     dc=args.check_dc,
                     proficient=args.check_proficient,

@@ -148,6 +148,7 @@ from sagasmith_dnd.combat_engine import (
     reconcile_witch_bolt_range,
     resolve_actor_check,
     resolve_actor_contest,
+    resolve_actor_group_check,
     resolve_attack_damage,
     resolve_choice_window,
     resolve_common_action,
@@ -17416,6 +17417,159 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         return check_response(list(revisions_result or []))
 
+    @_agent_ruling_boundary
+    def character_group_check(
+        campaign_id: str,
+        actor_ids: list[str],
+        ability: str,
+        dc: int,
+        proficient: bool = False,
+        bonus: int = 0,
+        advantage: bool = False,
+        disadvantage: bool = False,
+        rule_facts: dict[str, Any] | None = None,
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
+        expected_revision: int | None = None,
+        branch_id: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Resolve one atomic 2014 group ability check in participant order."""
+
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
+        if (
+            not isinstance(actor_ids, list)
+            or len(actor_ids) < 2
+            or any(
+                not isinstance(actor_id_value, str) or not actor_id_value
+                for actor_id_value in actor_ids
+            )
+        ):
+            raise CombatEngineError(
+                "a group ability check requires at least two actor ids"
+            )
+        if len(actor_ids) != len(set(actor_ids)):
+            raise CombatEngineError("group ability-check actor ids must be unique")
+        actors = [
+            require_campaign_actor(campaign_id, actor_id_value)
+            for actor_id_value in actor_ids
+        ]
+        for actor in actors:
+            if narrative_only_actor(actor):
+                raise CombatEngineError(
+                    "narrative-only actors cannot make group checks without an exact "
+                    "statblock"
+                )
+        snapshots = [combat_actor_snapshot(actor_id_value) for actor_id_value in actor_ids]
+        normalized_ability = str(ability).strip().casefold().replace(" ", "_")
+        if proficient and any(
+            normalized_ability in dict(snapshot["derived"].get("skills") or {})
+            for snapshot in snapshots
+        ):
+            raise CombatEngineError(
+                "group skill checks derive proficiency and expertise from each actor "
+                "card; bonus is reserved for external rule or source modifiers"
+            )
+        campaign = campaigns.get(campaign_id)
+        if campaign_rules_edition(campaign.id) != "2014":
+            raise CombatEngineError("group ability checks are a 2014 rules procedure")
+        require_write_contract(expected_revision, idempotency_key)
+        resolved_branch_id = require_current_branch(campaign_id, branch_id)
+        settlement_facts = checked_rule_facts(rule_facts)
+        payload = {
+            "actor_ids": actor_ids,
+            "ability": ability,
+            "dc": dc,
+            "proficient": proficient,
+            "bonus": bonus,
+            "advantage": advantage,
+            "disadvantage": disadvantage,
+            "rule_facts": settlement_facts,
+            "branch_id": resolved_branch_id,
+        }
+        scope = (
+            f"character-group-check:{campaign_id}:{resolved_branch_id}:{principal_id}"
+        )
+        replay = replay_idempotent(scope, idempotency_key, payload)
+        if replay is not None:
+            return replay
+        if dict(campaign.state or {}).get("combat", {}).get("active", False):
+            raise CombatEngineError("group ability checks require non-combat play")
+        if campaign.revision != expected_revision:
+            raise ValueError(
+                "campaign revision conflict: "
+                f"expected {expected_revision}, found {campaign.revision}"
+            )
+        rules_by_actor_id = {
+            actor_id_value: effective_rule_context(
+                campaign_id,
+                facts={
+                    **settlement_facts,
+                    "actor_id": actor_id_value,
+                    "kind": "ability",
+                    "ability": ability,
+                    "dc": dc,
+                    "group_actor_ids": list(actor_ids),
+                },
+                branch_id=resolved_branch_id,
+            )
+            for actor_id_value in actor_ids
+        }
+        result = resolve_actor_group_check(
+            snapshots,
+            ability=ability,
+            dc=dc,
+            proficient=proficient,
+            bonus=bonus,
+            advantage=advantage,
+            disadvantage=disadvantage,
+            rules_by_actor_id=rules_by_actor_id,
+        )
+        next_state = dict(campaign.state or {})
+        next_state["resolution_log"] = [
+            *list(next_state.get("resolution_log") or []),
+            {
+                "type": "ability_group_check",
+                "actor_ids": list(actor_ids),
+                "result": result,
+            },
+        ][-100:]
+
+        def group_check_response(revisions: list[Any]) -> dict[str, Any]:
+            response = {
+                "status": "committed",
+                "result": result,
+                "campaign_revision": campaign.revision + 1,
+                "revisions": [asdict(item) for item in revisions],
+            }
+            stream = active_random_stream()
+            if stream is not None and stream.draw_count > 0:
+                response["random_stream_receipt"] = stream.receipt()
+            return response
+
+        revisions_result = StateMutationService(storage.database).replace(
+            campaign_id,
+            campaign_state=validate_party_state(next_state),
+            expected_campaign_revision=campaign.revision,
+            operation="character.ability_group_check",
+            actor=principal_id,
+            branch_id=resolved_branch_id,
+            idempotency_key=idempotency_key,
+            idempotency_write=IdempotencyWrite(
+                scope=scope,
+                payload=payload,
+                response=group_check_response,
+            ),
+            rule_receipts=[
+                *list(result.get("rule_receipts") or []),
+                *[
+                    receipt
+                    for participant in result["participants"]
+                    for receipt in participant["check"].get("rule_receipts") or []
+                ],
+            ],
+        )
+        return group_check_response(list(revisions_result or []))
+
     @mcp.tool()
     @_agent_ruling_boundary
     def character_contest(
@@ -31587,15 +31741,46 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     @mcp.tool()
     def character_check(
         campaign_id: str,
-        action: Literal["check", "contest"] = "check",
+        action: Literal["check", "group", "contest"] = "check",
         payload: dict[str, Any] | None = None,
         principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         branch_id: str | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
-        """Resolve one non-combat check or atomic 2014 contest in the Play phase."""
+        """Resolve an individual, group, or contested check in the Play phase."""
         require_facade_phase(campaign_id, f"character_check({action})", PROFILE_PLAY)
+        if action == "group":
+            data = strict_facade_payload(
+                payload,
+                action="character_check(group)",
+                allowed={
+                    "actor_ids",
+                    "ability",
+                    "dc",
+                    "proficient",
+                    "bonus",
+                    "advantage",
+                    "disadvantage",
+                    "rule_facts",
+                },
+                required_names=("actor_ids", "ability", "dc"),
+            )
+            return character_group_check(
+                campaign_id,
+                data["actor_ids"],
+                data["ability"],
+                data["dc"],
+                data.get("proficient", False),
+                data.get("bonus", 0),
+                data.get("advantage", False),
+                data.get("disadvantage", False),
+                data.get("rule_facts"),
+                principal_id,
+                expected_revision,
+                branch_id,
+                idempotency_key,
+            )
         if action == "contest":
             data = strict_facade_payload(
                 payload,

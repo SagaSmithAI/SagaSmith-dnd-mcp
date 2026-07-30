@@ -6620,9 +6620,16 @@ def test_named_skill_check_rejects_client_proficiency_override() -> None:
 
 def test_character_check_accepts_full_and_compact_exposure_shapes() -> None:
     result = {"success": False, "total": 7, "natural": 4}
+    group = {
+        "kind": "ability_group_check",
+        "success": True,
+        "success_count": 5,
+        "required_successes": 3,
+    }
 
     assert _committed_check_result({"status": "committed", "result": result}) == result
     assert _committed_check_result(result) == result
+    assert _committed_check_result(group) == group
     with pytest.raises(RegressionRulingRequiredError, match="did not commit") as raised:
         _committed_check_result({"status": "pending_ruling"})
     assert raised.value.requirement["ruling"]["default_resolver"] == "agent"
@@ -6987,9 +6994,10 @@ def test_knowledge_recipient_preflight_covers_every_mutating_driver_action() -> 
     assert regression_playthrough._knowledge_preflight_actor_ids(event) == ["event-actor"]
     assert regression_playthrough._knowledge_preflight_actor_ids(unrelated) == []
     assert {
-        "register-replacement",
-        "resolve-check",
-        "resolve-contest",
+            "register-replacement",
+            "resolve-check",
+            "resolve-group-check",
+            "resolve-contest",
         "apply-damage",
         "initialize-source-state",
         "stand-up",
