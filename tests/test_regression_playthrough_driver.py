@@ -638,6 +638,18 @@ def test_advance_scene_identity_supports_exact_retry_and_later_revisit() -> None
         "chunk_id": "chunk-sibling-transition",
         "content_sha256": "b" * 64,
     }
+    transition_ruling = {
+        "default_resolver": "agent",
+        "ruling_kind": "agent_dm_adjudication",
+        "decision": (
+            "The survivors take the established road from the current "
+            "scene to Town."
+        ),
+        "reason": (
+            "The cited source establishes the destination but not the "
+            "descriptive route."
+        ),
+    }
     client.manifest["current"]["scene_id"] = "scene-old"
     asyncio.run(
         _advance_scene(
@@ -653,6 +665,7 @@ def test_advance_scene_identity_supports_exact_retry_and_later_revisit() -> None
             mark_visited=True,
             reachable_scene_ids=[],
             excluded_scenes=[],
+            agent_ruling=transition_ruling,
             occurrence_scene_id="scene-old",
         )
     )
@@ -661,6 +674,10 @@ def test_advance_scene_identity_supports_exact_retry_and_later_revisit() -> None
         "to_scene_id": "scene-town",
         "source_excerpt": "The survivors carry the Stone to Town.",
         "source_ref": citation_ref,
+        "agent_ruling": {
+            **transition_ruling,
+            "committed": True,
+        },
     }
     assert len(client.progress_calls) == 4
 

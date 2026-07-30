@@ -319,6 +319,14 @@ def _arguments() -> argparse.Namespace:
         type=json.loads,
         help="Exact module source reference for the playthrough action",
     )
+    parser.add_argument(
+        "--scene-agent-ruling-json",
+        type=json.loads,
+        help=(
+            "Committed Agent DM adjudication for a descriptive transition "
+            "not fully specified by the cited module text"
+        ),
+    )
     parser.add_argument("--check-actor-id", default="")
     parser.add_argument(
         "--group-check-actor-id",
@@ -2838,6 +2846,7 @@ async def _advance_scene(
     mark_visited: bool,
     reachable_scene_ids: list[str],
     excluded_scenes: list[dict[str, Any]],
+    agent_ruling: dict[str, Any] | None = None,
     occurrence_scene_id: str = "",
     location_key: str = "",
 ) -> dict[str, Any]:
@@ -2887,6 +2896,11 @@ async def _advance_scene(
         source_ref,
         excerpt=source_excerpt,
     )
+    normalized_agent_ruling = _settled_agent_ruling(
+        agent_ruling,
+        label="scene transition",
+        ruling_kinds=frozenset({"agent_dm_adjudication"}),
+    )
     scene_locations = {
         str(item.get("key") or "") for item in _scene_locations(scene) if item.get("key")
     }
@@ -2910,6 +2924,11 @@ async def _advance_scene(
         "to_scene_id": scene_id,
         "source_excerpt": source_excerpt,
         "source_ref": exact_ref,
+        **(
+            {"agent_ruling": normalized_agent_ruling}
+            if normalized_agent_ruling is not None
+            else {}
+        ),
     }
     existing_transition = transitions.get(scene_identity)
     progress_state = deepcopy(dict((progress_before or {}).get("state") or {}))
@@ -12892,6 +12911,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     mark_visited=args.mark_visited,
                     reachable_scene_ids=args.reachable_scene_id,
                     excluded_scenes=args.excluded_scene_json,
+                    agent_ruling=args.scene_agent_ruling_json,
                     occurrence_scene_id=args.occurrence_scene_id,
                     location_key=args.location_key,
                 )
