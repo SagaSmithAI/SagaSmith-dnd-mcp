@@ -4871,6 +4871,17 @@ def _source_extra_damage_rulings(
                 f"source extra-damage ruling {index} "
                 "max_applications_per_turn must be a positive integer"
             )
+        applicability_mode = str(
+            trigger_facts.get("applicability_mode") or ""
+        ).strip()
+        if applicability_mode not in {
+            "",
+            "attack_advantage_or_target_adjacent_to_ally_without_disadvantage",
+        }:
+            raise ValueError(
+                f"source extra-damage ruling {index} has an unsupported "
+                "applicability_mode"
+            )
         actor = actors[actor_id]
         features = [
             dict(item)
@@ -5017,6 +5028,8 @@ def _source_extra_damage_action_rulings(
     round_number: int,
     applications: dict[tuple[str, str], int],
     turn_applications: dict[tuple[str, str, int], int] | None = None,
+    plan: dict[str, Any] | None = None,
+    combat: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     rulings: list[dict[str, Any]] = []
     for declaration in declarations.get(actor_id, []):
@@ -5037,6 +5050,68 @@ def _source_extra_damage_action_rulings(
             )
         ):
             continue
+        trigger_facts = deepcopy(declaration["trigger_facts"])
+        applicability_mode = str(
+            trigger_facts.get("applicability_mode") or ""
+        )
+        if applicability_mode:
+            if plan is None or combat is None:
+                continue
+            trigger_facts.pop("applicability_mode", None)
+            if bool(plan.get("advantage")) and not bool(plan.get("disadvantage")):
+                trigger_facts.update(
+                    {
+                        "applicability_mode": applicability_mode,
+                        "applicability_branch": "attack_advantage",
+                        "requires_attack_advantage": True,
+                    }
+                )
+            elif not bool(plan.get("disadvantage")):
+                combatants = {
+                    str(item.get("actor_id") or ""): dict(item)
+                    for item in combat.get("combatants", [])
+                    if isinstance(item, dict)
+                }
+                attacker = combatants.get(actor_id)
+                target = combatants.get(target_id)
+                target_position = dict((target or {}).get("position") or {})
+                qualifying_ally_ids = sorted(
+                    candidate_id
+                    for candidate_id, candidate in combatants.items()
+                    if candidate_id not in {actor_id, target_id}
+                    and attacker is not None
+                    and candidate.get("disposition")
+                    == attacker.get("disposition")
+                    and candidate.get("departed") is None
+                    and not (
+                        {
+                            str(condition).strip().casefold()
+                            for condition in candidate.get("conditions", [])
+                        }
+                        & INCAPACITATING_STATE_IDS
+                    )
+                    and set(target_position) == {"x", "y"}
+                    and set(dict(candidate.get("position") or {})) == {"x", "y"}
+                    and _distance(
+                        dict(candidate["position"]),
+                        target_position,
+                    )
+                    * 5
+                    <= 5
+                )
+                if not qualifying_ally_ids:
+                    continue
+                trigger_facts.update(
+                    {
+                        "applicability_mode": applicability_mode,
+                        "applicability_branch": "adjacent_ally",
+                        "requires_no_attack_disadvantage": True,
+                        "target_adjacent_to_nonincapacitated_ally": True,
+                        "qualifying_ally_actor_ids": qualifying_ally_ids,
+                    }
+                )
+            else:
+                continue
         rulings.append(
             {
                 "source": "dm_ruling",
@@ -5054,7 +5129,7 @@ def _source_extra_damage_action_rulings(
                 "damage_expression": declaration["damage_expression"],
                 "damage_type": declaration["damage_type"],
                 "condition_satisfied": True,
-                "trigger_facts": deepcopy(declaration["trigger_facts"]),
+                "trigger_facts": trigger_facts,
                 "default_resolver": "agent",
                 "ruling_kind": "agent_dm_adjudication",
                 "decision": declaration["decision"],
@@ -8963,6 +9038,7 @@ async def _preflight_attack(
     require_preferred_weapon: bool = False,
     preflight_rejections: list[dict[str, str]] | None = None,
     round_number: int = 1,
+    combat: dict[str, Any] | None = None,
 ) -> tuple[str, dict[str, Any], dict[str, Any]] | None:
     knock_out_targets = set(knock_out_target_ids or set())
     weapons = list(
@@ -9092,6 +9168,8 @@ async def _preflight_attack(
                         turn_applications=(
                             source_extra_damage_turn_applications or {}
                         ),
+                        plan=plan,
+                        combat=combat,
                     )
                     extra_damage = [
                         ruling
@@ -9199,6 +9277,7 @@ async def _preflight_attack(
             require_preferred_weapon=False,
             preflight_rejections=preflight_rejections,
             round_number=round_number,
+            combat=combat,
         )
     return None
 
@@ -11626,6 +11705,7 @@ async def _auto_run(
             require_preferred_weapon=required_source_opening_weapon is not None,
             preflight_rejections=preflight_rejections,
             round_number=int(combat.get("round", 1) or 1),
+            combat=combat,
         )
         source_separation_target = _source_separation_target(
             actor_id,
@@ -11709,6 +11789,7 @@ async def _auto_run(
                     require_preferred_weapon=required_source_opening_weapon is not None,
                     preflight_rejections=preflight_rejections,
                     round_number=int(combat.get("round", 1) or 1),
+                    combat=movement_combat,
                 )
         if plan is None and required_source_opening_weapon is not None:
             raise RuntimeError(

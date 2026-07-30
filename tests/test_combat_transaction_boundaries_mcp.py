@@ -414,6 +414,34 @@ def test_agent_source_damage_is_authorized_and_settled_in_one_attack(
                     },
                 },
             )
+        with pytest.raises(Exception, match="qualifying ally conflicts"):
+            await _call(
+                server,
+                "combat_preflight_attack",
+                {
+                    "campaign_id": campaign["id"],
+                    "actor_id": attacker["id"],
+                    "target_id": target["id"],
+                    "action": {
+                        **action,
+                        "rulings": [
+                            {
+                                **ruling,
+                                "trigger_facts": {
+                                    "applicability_mode": (
+                                        "attack_advantage_or_target_adjacent_to_ally_"
+                                        "without_disadvantage"
+                                    ),
+                                    "applicability_branch": "adjacent_ally",
+                                    "requires_no_attack_disadvantage": True,
+                                    "target_adjacent_to_nonincapacitated_ally": True,
+                                    "qualifying_ally_actor_ids": [attacker["id"]],
+                                },
+                            }
+                        ],
+                    },
+                },
+            )
         plan = await _call(
             server,
             "combat_preflight_attack",

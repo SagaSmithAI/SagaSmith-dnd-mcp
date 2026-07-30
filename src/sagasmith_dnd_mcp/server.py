@@ -4357,6 +4357,105 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 raise CombatEngineError(
                     "source conditional extra damage requires this attack to have advantage"
                 )
+            applicability_mode = str(
+                trigger_facts.get("applicability_mode") or ""
+            ).strip()
+            if applicability_mode:
+                if applicability_mode != (
+                    "attack_advantage_or_target_adjacent_to_ally_without_disadvantage"
+                ):
+                    raise CombatEngineError(
+                        "source conditional extra damage has an unsupported "
+                        "applicability mode"
+                    )
+                applicability_branch = str(
+                    trigger_facts.get("applicability_branch") or ""
+                )
+                if applicability_branch == "attack_advantage":
+                    if (
+                        requires_advantage is not True
+                        or not bool(result.get("advantage"))
+                        or bool(result.get("disadvantage"))
+                    ):
+                        raise CombatEngineError(
+                            "source conditional extra damage advantage branch "
+                            "conflicts with this attack"
+                        )
+                elif applicability_branch == "adjacent_ally":
+                    qualifying_ally_actor_ids = trigger_facts.get(
+                        "qualifying_ally_actor_ids"
+                    )
+                    if (
+                        trigger_facts.get("requires_no_attack_disadvantage")
+                        is not True
+                        or trigger_facts.get(
+                            "target_adjacent_to_nonincapacitated_ally"
+                        )
+                        is not True
+                        or bool(result.get("disadvantage"))
+                        or not isinstance(qualifying_ally_actor_ids, list)
+                        or not qualifying_ally_actor_ids
+                        or any(
+                            not isinstance(item, str) or not item.strip()
+                            for item in qualifying_ally_actor_ids
+                        )
+                        or len(qualifying_ally_actor_ids)
+                        != len(
+                            {
+                                str(item).strip()
+                                for item in qualifying_ally_actor_ids
+                            }
+                        )
+                    ):
+                        raise CombatEngineError(
+                            "source conditional extra damage adjacent-ally "
+                            "branch is incomplete"
+                        )
+                    attacker_combatant = require_encounter_combatant(
+                        encounter,
+                        str(result.get("attacker_id") or ""),
+                        role="source conditional extra-damage attacker",
+                    )
+                    target_combatant = require_encounter_combatant(
+                        encounter,
+                        str(result.get("target_id") or ""),
+                        role="source conditional extra-damage target",
+                    )
+                    for ally_actor_id in qualifying_ally_actor_ids:
+                        ally = require_encounter_combatant(
+                            encounter,
+                            str(ally_actor_id).strip(),
+                            role="source conditional extra-damage qualifying ally",
+                        )
+                        if (
+                            str(ally.get("actor_id") or "")
+                            in {
+                                str(result.get("attacker_id") or ""),
+                                str(result.get("target_id") or ""),
+                            }
+                            or ally.get("disposition")
+                            != attacker_combatant.get("disposition")
+                            or ally.get("departed") is not None
+                            or INCAPACITATING_STATE_IDS
+                            & {
+                                str(condition).strip().casefold()
+                                for condition in ally.get("conditions", [])
+                            }
+                            or combat_distance(
+                                ally.get("position"),
+                                target_combatant.get("position"),
+                            )
+                            not in {0, 5}
+                        ):
+                            raise CombatEngineError(
+                                "source conditional extra damage qualifying "
+                                "ally conflicts with current combat state"
+                            )
+                else:
+                    raise CombatEngineError(
+                        "source conditional extra damage requires one settled "
+                        "applicability branch"
+                    )
             max_per_turn = trigger_facts.get("max_applications_per_turn")
             if (
                 max_per_turn is not None

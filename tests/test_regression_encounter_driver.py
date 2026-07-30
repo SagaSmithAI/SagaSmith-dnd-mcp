@@ -1,5 +1,6 @@
 import asyncio
 import json
+from copy import deepcopy
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -2074,6 +2075,83 @@ def test_source_extra_damage_ruling_binds_exact_agent_passive_and_application() 
     assert action_rulings[0]["damage_expression"] == "2d8"
     assert action_rulings[0]["solution_plan_fingerprint"] == "a" * 64
     assert action_rulings[0]["trigger_facts"]["straight_dive_ft"] == 30
+    conditional_declarations = deepcopy(normalized)
+    conditional_declarations[actor["id"]][0]["trigger_facts"] = {
+        "applicability_mode": (
+            "attack_advantage_or_target_adjacent_to_ally_without_disadvantage"
+        ),
+        "max_applications_per_turn": 1,
+    }
+    adjacent = _source_extra_damage_action_rulings(
+        conditional_declarations,
+        actor_id=actor["id"],
+        target_id="target-1",
+        weapon_id="gore",
+        round_number=1,
+        applications={},
+        plan={"advantage": False, "disadvantage": False},
+        combat={
+            "combatants": [
+                {
+                    "actor_id": actor["id"],
+                    "disposition": "hostile",
+                    "position": {"x": 0, "y": 0},
+                    "conditions": [],
+                },
+                {
+                    "actor_id": "target-1",
+                    "disposition": "friendly",
+                    "position": {"x": 2, "y": 0},
+                    "conditions": [],
+                },
+                {
+                    "actor_id": "ally-1",
+                    "disposition": "hostile",
+                    "position": {"x": 1, "y": 0},
+                    "conditions": [],
+                },
+            ]
+        },
+    )
+    assert adjacent[0]["trigger_facts"]["applicability_branch"] == "adjacent_ally"
+    assert adjacent[0]["trigger_facts"]["qualifying_ally_actor_ids"] == ["ally-1"]
+    incapacitated_combat = {
+        "combatants": deepcopy(
+            [
+                {
+                    "actor_id": actor["id"],
+                    "disposition": "hostile",
+                    "position": {"x": 0, "y": 0},
+                    "conditions": [],
+                },
+                {
+                    "actor_id": "target-1",
+                    "disposition": "friendly",
+                    "position": {"x": 2, "y": 0},
+                    "conditions": [],
+                },
+                {
+                    "actor_id": "ally-1",
+                    "disposition": "hostile",
+                    "position": {"x": 1, "y": 0},
+                    "conditions": ["unconscious"],
+                },
+            ]
+        )
+    }
+    assert (
+        _source_extra_damage_action_rulings(
+            conditional_declarations,
+            actor_id=actor["id"],
+            target_id="target-1",
+            weapon_id="gore",
+            round_number=1,
+            applications={},
+            plan={"advantage": False, "disadvantage": False},
+            combat=incapacitated_combat,
+        )
+        == []
+    )
     assert (
         _source_extra_damage_action_rulings(
             normalized,
