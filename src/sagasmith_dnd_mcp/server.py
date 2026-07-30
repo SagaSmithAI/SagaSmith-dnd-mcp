@@ -18944,6 +18944,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "armor_class",
             "hit_points",
             "damage_immunities",
+            "damage_filter",
         }
         if unknown:
             raise ValueError(f"unsupported source object fields: {sorted(unknown)}")
@@ -18958,6 +18959,54 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 for item in requested.get("damage_immunities") or []
                 if str(item).strip()
             }
+        )
+        raw_damage_filter = requested.get("damage_filter") or {}
+        if not isinstance(raw_damage_filter, dict):
+            raise ValueError("source object damage_filter must be an object")
+        damage_filter_unknown = set(raw_damage_filter) - {
+            "allowed_damage_types",
+            "required_any_weapon_traits",
+        }
+        if damage_filter_unknown:
+            raise ValueError(
+                "unsupported source object damage_filter fields: "
+                f"{sorted(damage_filter_unknown)}"
+            )
+        allowed_damage_types = sorted(
+            {
+                str(item).strip().casefold()
+                for item in raw_damage_filter.get("allowed_damage_types") or []
+                if str(item).strip()
+            }
+        )
+        required_any_weapon_traits = sorted(
+            {
+                str(item).strip().casefold()
+                for item in raw_damage_filter.get("required_any_weapon_traits") or []
+                if str(item).strip()
+            }
+        )
+        invalid_damage_types = sorted(set(allowed_damage_types) - set(DAMAGE_TYPES))
+        if invalid_damage_types:
+            raise ValueError(
+                "source object damage_filter has invalid damage types: "
+                f"{invalid_damage_types}"
+            )
+        invalid_weapon_traits = sorted(
+            set(required_any_weapon_traits) - {"adamantine", "magical"}
+        )
+        if invalid_weapon_traits:
+            raise ValueError(
+                "source object damage_filter has unsupported weapon traits: "
+                f"{invalid_weapon_traits}"
+            )
+        damage_filter = (
+            {
+                "allowed_damage_types": allowed_damage_types,
+                "required_any_weapon_traits": required_any_weapon_traits,
+            }
+            if allowed_damage_types or required_any_weapon_traits
+            else {}
         )
         if not object_id or not object_name or not scene_id:
             raise ValueError("source object requires id, name, and scene_id")
@@ -19017,6 +19066,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "armor_class": armor_class,
             "hit_point_maximum": hit_point_maximum,
             "damage_immunities": immunities,
+            "damage_filter": damage_filter,
             "source_ref": exact_source,
         }
         if existing:
@@ -19039,7 +19089,41 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "temp": 0,
         }
         object_sheet["combat"]["ac"]["override"] = armor_class
-        object_sheet["traits"]["immunities"] = immunities
+        weapon = next(
+            (
+                item
+                for item in attacker["sheet"]["inventory"]["items"]
+                if str(item.get("id") or "") == str(weapon_id)
+                and str(item.get("kind") or "") == "weapon"
+            ),
+            None,
+        )
+        if weapon is None:
+            raise ValueError("source object attack weapon is absent from the actor")
+        weapon_mechanics = dict(weapon.get("mechanics") or {})
+        weapon_traits = set()
+        if (
+            str(weapon.get("attunement") or "") == "attuned"
+            or int(weapon_mechanics.get("magic_bonus", 0) or 0) != 0
+            or bool(weapon_mechanics.get("additional_damage"))
+            or bool(weapon_mechanics.get("on_hit_effect"))
+            or bool(weapon_mechanics.get("on_hit_resolution"))
+        ):
+            weapon_traits.add("magical")
+        if "adamantine" in {
+            str(item).strip().casefold()
+            for item in weapon_mechanics.get("materials") or []
+        }:
+            weapon_traits.add("adamantine")
+        weapon_trait_requirement_met = not required_any_weapon_traits or bool(
+            weapon_traits.intersection(required_any_weapon_traits)
+        )
+        effective_immunities = set(immunities)
+        if allowed_damage_types:
+            effective_immunities.update(set(DAMAGE_TYPES) - set(allowed_damage_types))
+        if not weapon_trait_requirement_met:
+            effective_immunities.update(allowed_damage_types or DAMAGE_TYPES)
+        object_sheet["traits"]["immunities"] = sorted(effective_immunities)
         target = {
             "id": f"scene-object:{scene_id}:{object_id}",
             "name": object_name,
@@ -19097,6 +19181,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "reason": normalized_reason,
                 "attack": deepcopy(attack_roll),
                 "damage": deepcopy(settled.get("damage")),
+                "damage_filter": deepcopy(damage_filter),
+                "weapon_traits": sorted(weapon_traits),
+                "weapon_trait_requirement_met": weapon_trait_requirement_met,
             },
         }
         scene_state[object_id] = object_after

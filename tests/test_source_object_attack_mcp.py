@@ -120,9 +120,26 @@ def test_public_character_action_attacks_and_persists_a_source_object(
                     "properties": [],
                     "proficient": True,
                 },
-            }
+            },
+            {
+                "id": "magic-mace",
+                "name": "Attuned Magic Mace",
+                "kind": "weapon",
+                "equipped": True,
+                "equipped_slot": "off_hand",
+                "attunement": "attuned",
+                "mechanics": {
+                    "attack_type": "melee",
+                    "attack_ability": "strength",
+                    "damage_formula": "1d6",
+                    "damage_type": "bludgeoning",
+                    "properties": [],
+                    "proficient": True,
+                },
+            },
         ]
         sheet["inventory"]["equipment_slots"]["main_hand"] = "mace"
+        sheet["inventory"]["equipment_slots"]["off_hand"] = "magic-mace"
         actor = await call(
             server,
             "character_create",
@@ -153,6 +170,10 @@ def test_public_character_action_attacks_and_persists_a_source_object(
             "armor_class": 17,
             "hit_points": 5,
             "damage_immunities": ["poison", "psychic"],
+            "damage_filter": {
+                "allowed_damage_types": ["bludgeoning"],
+                "required_any_weapon_traits": ["magical"],
+            },
         }
         current_campaign = await call(
             server,
@@ -177,7 +198,7 @@ def test_public_character_action_attacks_and_persists_a_source_object(
                     "idempotency_key": "invalid-source",
                 },
             )
-        result = None
+        mundane_result = None
         last_arguments = None
         for index in range(100):
             campaign = await call(
@@ -208,6 +229,45 @@ def test_public_character_action_attacks_and_persists_a_source_object(
                 "character_action",
                 last_arguments,
             )
+            if result["attack"]["hit"]:
+                mundane_result = result
+                break
+
+        assert mundane_result is not None
+        assert mundane_result["object"]["hit_points"] == 5
+        assert mundane_result["object"]["destroyed"] is False
+        assert mundane_result["object"]["last_attack"]["weapon_traits"] == []
+        assert (
+            mundane_result["object"]["last_attack"]["weapon_trait_requirement_met"]
+            is False
+        )
+
+        result = None
+        for index in range(100):
+            campaign = await call(
+                server,
+                "campaign_query",
+                {"view": "get", "payload": {"campaign_id": campaign["id"]}},
+            )
+            actor = await call(
+                server,
+                "character_query",
+                {"view": "get", "payload": {"character_id": actor["id"]}},
+            )
+            last_arguments = {
+                "character_id": actor["id"],
+                "action": "attack_source_object",
+                "payload": {
+                    "object": source_object,
+                    "weapon_id": "magic-mace",
+                    "source_ref": source_ref,
+                    "reason": "The source-defined object is within melee reach.",
+                    "expected_campaign_revision": campaign["revision"],
+                },
+                "expected_revision": actor["revision"],
+                "idempotency_key": f"magic-attack-{index}",
+            }
+            result = await call(server, "character_action", last_arguments)
             if result["object"]["destroyed"]:
                 break
 
@@ -216,6 +276,11 @@ def test_public_character_action_attacks_and_persists_a_source_object(
         assert result["object"]["destroyed"] is True
         assert result["object"]["hit_points"] == 0
         assert result["object"]["damage_immunities"] == ["poison", "psychic"]
+        assert result["object"]["damage_filter"] == {
+            "allowed_damage_types": ["bludgeoning"],
+            "required_any_weapon_traits": ["magical"],
+        }
+        assert result["object"]["last_attack"]["weapon_traits"] == ["magical"]
         replay = await call(server, "character_action", last_arguments)
         assert replay["object"] == result["object"]
 
