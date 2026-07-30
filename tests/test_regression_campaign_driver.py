@@ -667,6 +667,110 @@ def test_prepare_module_statblock_honors_actor_count(
     assert report["created"]["character"]["id"] == "actor-1"
 
 
+def test_prepare_blocked_module_statblock_uses_text_only_ocr(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class ModuleOcrClient(_ModuleStatblockClient):
+        async def domain(self, tool_id: str, arguments: dict):
+            if tool_id == "module_query":
+                self.calls.append(("domain", tool_id, arguments))
+                if arguments["view"] == "list":
+                    return [{"id": "module-1"}]
+                if arguments["view"] == "candidates":
+                    return [
+                        {
+                            "id": "candidate:blocked",
+                            "name": "Damaged Commoner Heading",
+                            "module_id": "module-1",
+                            "scene_id": "scene-1",
+                            "page_start": 1,
+                            "page_end": 1,
+                            "source_chunk_ids": ["chunk-1"],
+                            "execution_state": "blocked",
+                            "review_error": "statblock WIS score is ambiguous",
+                        }
+                    ]
+                if arguments["view"] == "assets":
+                    return [
+                        {
+                            "id": "module-pdf",
+                            "media_type": "application/pdf",
+                        }
+                    ]
+            if tool_id == "module_review":
+                self.calls.append(("domain", tool_id, arguments))
+                assert arguments["action"] == "recover_statblock"
+                return {
+                    "review": {
+                        "id": "review-1",
+                        "content_kind": "dnd5e_2014_statblock",
+                        "scene_id": "scene-1",
+                        "content_key": "damaged-commoner-heading-blocked",
+                        "checksum": "checksum-1",
+                        "content_preview": "Commoner",
+                        "evidence": {"confidence": "reviewed_image"},
+                    },
+                    "name": "Commoner",
+                    "attempted_pages": [1],
+                    "page_number": 1,
+                    "provider": "rapidocr",
+                    "corroboration_mode": "dual_layout_ocr",
+                    "corroboration_scales": [2.0, 3.0],
+                }
+            return await super().domain(tool_id, arguments)
+
+    client = ModuleOcrClient()
+    _patch_rule_statblock_transport(monkeypatch, client)
+    args = argparse.Namespace(
+        campaign_id="campaign-1",
+        review_id=None,
+        candidate_id="candidate:blocked",
+        review_override=None,
+        source_page=1,
+        source_asset_id="",
+        source_statblock_name="Commoner",
+        review_observation="",
+        agent_statblock_fill=None,
+        statblock_variant=None,
+        actor_name="Village Commoner",
+        actor_type="npc",
+        actor_count=1,
+        replace_actor_id=None,
+        defer_checkpoint=True,
+        isolate_branch=False,
+        run_id="module-ocr",
+        home=tmp_path,
+        module_root=None,
+    )
+
+    report = asyncio.run(_prepare_statblock(args))
+
+    recovery_call = next(
+        arguments
+        for scope, tool_id, arguments in client.calls
+        if scope == "domain" and tool_id == "module_review"
+    )
+    assert recovery_call["payload"] == {
+        "module_id": "module-1",
+        "scene_id": "scene-1",
+        "content_key": "damaged-commoner-heading-blocked",
+        "name": "Commoner",
+        "page_number": 1,
+        "source_asset_id": "module-pdf",
+        "agent_fill": None,
+    }
+    assert report["ocr_recovery"] == {
+        "name": "Commoner",
+        "attempted_pages": [1],
+        "page_number": 1,
+        "provider": "rapidocr",
+        "corroboration_mode": "dual_layout_ocr",
+        "corroboration_scales": [2.0, 3.0],
+    }
+    assert report["created"]["character"]["name"] == "Village Commoner"
+
+
 def test_prepare_rule_statblock_can_defer_scene_batch_checkpoint(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

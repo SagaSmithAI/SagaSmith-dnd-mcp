@@ -46,6 +46,7 @@ from sagasmith_core import (
     SnapshotService,
     default_local_principal,
     extract_pdf_page_text,
+    file_sha256,
     normalize_document,
     render_pdf_page,
 )
@@ -7562,6 +7563,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "module_import(attach_asset)",
                     "module_query(assets)",
                     "module_review(render_page)",
+                    "module_review(recover_statblock)",
                     "module_review(submit_content)",
                     "module_set_progress(spatial_review)",
                 ],
@@ -28426,17 +28428,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         }
         return response
 
-    @mcp.tool()
-    def module_page_render(
+    def module_pdf_asset(
         campaign_id: str,
         module_id: str,
-        page_number: int,
         source_asset_id: str | None = None,
-        scale: float = 1.5,
-        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
-    ) -> Any:
-        """Render one imported PDF page as visual evidence for maps or handouts."""
-        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
+    ) -> dict[str, Any]:
+        """Resolve the one checksum-bound PDF used by module page workflows."""
+
         assets = modules.list_assets(campaign_id, module_id)
         if source_asset_id:
             source_asset = modules.get_asset(campaign_id, source_asset_id)
@@ -28448,7 +28446,23 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 raise ValueError("source_asset_id is required unless the module has one PDF asset")
             source_asset = candidates[0]
         if source_asset["media_type"] != "application/pdf":
-            raise ValueError("module page rendering requires a PDF source asset")
+            raise ValueError("module page workflow requires a PDF source asset")
+        if file_sha256(source_asset["source_path"]) != source_asset["checksum"]:
+            raise RuntimeError("module PDF no longer matches its imported checksum")
+        return source_asset
+
+    @mcp.tool()
+    def module_page_render(
+        campaign_id: str,
+        module_id: str,
+        page_number: int,
+        source_asset_id: str | None = None,
+        scale: float = 1.5,
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
+    ) -> Any:
+        """Render one imported PDF page as visual evidence for maps or handouts."""
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
+        source_asset = module_pdf_asset(campaign_id, module_id, source_asset_id)
         rendered = render_pdf_page(source_asset["source_path"], page_number, scale=scale)
         if rendered.source_checksum != source_asset["checksum"]:
             raise RuntimeError("module PDF no longer matches its imported checksum")
@@ -28486,6 +28500,105 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             },
             Image(path=target),
         ]
+
+    def module_statblock_ocr_recover(
+        campaign_id: str,
+        module_id: str,
+        scene_id: str,
+        content_key: str,
+        name: str,
+        page_number: int,
+        source_asset_id: str | None = None,
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
+        idempotency_key: str | None = None,
+        agent_fill: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Recover and review one module statblock without requiring model vision."""
+
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
+        if not idempotency_key:
+            raise ValueError("idempotency_key is required for OCR statblock recovery")
+        target_name = str(name or "").strip()
+        if not 2 <= len(target_name) <= 200:
+            raise ValueError("name must contain 2 to 200 characters")
+        if isinstance(page_number, bool) or not isinstance(page_number, int) or page_number < 1:
+            raise ValueError("page_number must be a positive integer")
+        scene = modules.read_scene(campaign_id, scene_id)
+        if str(scene.get("module_id") or "") != module_id:
+            raise ValueError("OCR statblock recovery scene must belong to the module")
+        source_asset = module_pdf_asset(campaign_id, module_id, source_asset_id)
+        provider = storage.module_ocr_provider()
+        if provider is None or not hasattr(provider, "extract_layout"):
+            raise RuntimeError("layout OCR recovery requires the configured RapidOCR provider")
+
+        request_payload = {
+            "module_id": module_id,
+            "scene_id": scene_id,
+            "content_key": content_key,
+            "name": target_name,
+            "page_number": page_number,
+            "source_asset_id": source_asset["id"],
+            "source_asset_checksum": source_asset["checksum"],
+            "agent_fill": deepcopy(agent_fill),
+        }
+        scope = f"module-statblock-ocr-recover:{campaign_id}:{principal_id}"
+        replay = replay_idempotent(scope, idempotency_key, request_payload)
+        if replay is not None:
+            return replay
+
+        recovered_result = recover_pdf_statblock_layout(
+            source_path=source_asset["source_path"],
+            target_name=target_name,
+            candidate_pages=[page_number],
+            provider=provider,
+        )
+        recovered_page = int(recovered_result["page_number"])
+        recovered = dict(recovered_result["recovery"])
+        reviewed = module_content_review(
+            campaign_id,
+            module_id,
+            scene_id,
+            content_key,
+            str(recovered["normalized_content"]),
+            str(recovered_result["observation"]),
+            source_asset_id=str(source_asset["id"]),
+            page_number=recovered_page,
+            content_kind="dnd5e_2014_statblock",
+            metadata={
+                "text_layout_recovery": {
+                    "profile": (
+                        "rapidocr-layout-"
+                        f"v{int(dict(recovered['evidence'])['recovery_version'])}"
+                    ),
+                    "provider": str(recovered_result["provider"]),
+                    "corroboration_mode": str(recovered_result["corroboration_mode"]),
+                    "corroboration_scales": list(recovered_result["corroboration_scales"]),
+                    "text_only": True,
+                }
+            },
+            principal_id=principal_id,
+            idempotency_key=idempotency_key,
+            agent_fill=agent_fill,
+        )
+        response = {
+            "campaign_id": campaign_id,
+            "module_id": module_id,
+            "scene_id": scene_id,
+            "source_asset_id": source_asset["id"],
+            **{
+                key: value
+                for key, value in recovered_result.items()
+                if key != "observation"
+            },
+            **reviewed,
+        }
+        return remember_idempotent(
+            scope,
+            idempotency_key,
+            request_payload,
+            response,
+            campaign_id=campaign_id,
+        )
 
     @mcp.tool()
     def module_content_review(
@@ -29082,6 +29195,170 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             Image(data=rendered.content, format="png"),
         ]
 
+    def recover_pdf_statblock_layout(
+        *,
+        source_path: str | Path,
+        target_name: str,
+        candidate_pages: list[int],
+        provider: RapidOcrProvider,
+    ) -> dict[str, Any]:
+        """Recover and independently corroborate one printed 2014 statblock."""
+
+        target_key = compact_ascii_key(target_name)
+        selected_layout = None
+        recovered = None
+        attempted_pages: list[int] = []
+        for candidate in candidate_pages:
+            attempted_pages.append(candidate)
+            layout = provider.extract_layout(source_path, page_numbers=[candidate])[0]
+            if not any(
+                compact_ascii_key(block.text) == target_key
+                for block in layout.blocks
+            ):
+                continue
+            try:
+                candidate_recovery = recover_2014_statblock_from_ocr(
+                    layout.as_dict(),
+                    name=target_name,
+                    minimum_confidence=0.5,
+                )
+            except StatblockImportError:
+                continue
+            selected_layout = layout
+            recovered = candidate_recovery
+            break
+        if selected_layout is None:
+            raise RuntimeError(
+                "layout OCR did not find one structurally unambiguous target statblock "
+                "on candidate pages " + ", ".join(str(value) for value in attempted_pages)
+            )
+        assert recovered is not None
+        evidence = dict(recovered["evidence"])
+        recovered_page = int(evidence["page_number"])
+        page_text = extract_pdf_page_text(source_path, recovered_page)
+        critical_facts = dict(recovered["critical_facts"])
+        identity_key = compact_ascii_key(critical_facts["identity"])
+        page_lines = [
+            line.strip(" \t#>*_-")
+            for line in page_text.splitlines()
+            if line.strip(" \t#>*_-")
+        ]
+        identity_indexes = [
+            index
+            for index, line in enumerate(page_lines)
+            if compact_ascii_key(line) == identity_key
+        ]
+        corroboration_pairs = [
+            ("Identity", str(critical_facts["identity"])),
+            ("Armor Class", f"Armor Class {critical_facts['armor_class']}"),
+            ("Hit Points", f"Hit Points {critical_facts['hit_points']}"),
+            ("Speed", f"Speed {critical_facts['speed']}"),
+            ("Challenge", f"Challenge {critical_facts['challenge']}"),
+            *[
+                (label, f"{label} {value}")
+                for label, value in dict(critical_facts["fields"]).items()
+            ],
+            *[
+                (
+                    ability.upper(),
+                    f"{ability.upper()} {score}",
+                )
+                for ability, score in dict(critical_facts["abilities"]).items()
+            ],
+        ]
+        corroboration_mode = "dual_layout_ocr"
+        corroboration_scales = [float(getattr(provider, "scale", 2.0))]
+        corroborated = [
+            {"field": label, "value": fact}
+            for label, fact in corroboration_pairs
+        ]
+        if len(identity_indexes) == 1:
+            segment_start = identity_indexes[0]
+            segment_end = len(page_lines)
+            identity_pattern = re.compile(
+                r"(?i)^(Tiny|Small|Medium|Large|Huge|Gargantuan)\s+[^,]+,\s*.+$"
+            )
+            for index in range(segment_start + 1, len(page_lines)):
+                if identity_pattern.fullmatch(page_lines[index]):
+                    segment_end = index
+                    break
+            normalized_segment = compact_ascii_key(
+                "\n".join(page_lines[segment_start:segment_end])
+            )
+            embedded_mismatches = [
+                label
+                for label, fact in corroboration_pairs
+                if compact_ascii_key(fact) not in normalized_segment
+            ]
+            if not embedded_mismatches:
+                corroboration_mode = "embedded_text"
+        if corroboration_mode != "embedded_text":
+            primary_scale = float(getattr(provider, "scale", 2.0))
+
+            def critical_fingerprint(value: Any) -> Any:
+                if isinstance(value, dict):
+                    return {
+                        str(key): critical_fingerprint(item)
+                        for key, item in value.items()
+                    }
+                return compact_ascii_key(value)
+
+            primary_fingerprint = critical_fingerprint(critical_facts)
+            secondary_scale = None
+            secondary_failures: list[str] = []
+            for candidate_scale in (3.0, 2.5, 1.5, 3.5, 4.0, 2.0):
+                if abs(primary_scale - candidate_scale) < 0.01:
+                    continue
+                try:
+                    secondary_layout = RapidOcrProvider(
+                        scale=candidate_scale
+                    ).extract_layout(
+                        source_path,
+                        page_numbers=[recovered_page],
+                    )[0]
+                    secondary = recover_2014_statblock_from_ocr(
+                        secondary_layout.as_dict(),
+                        name=target_name,
+                        minimum_confidence=0.5,
+                    )
+                except StatblockImportError as exc:
+                    secondary_failures.append(f"{candidate_scale:.1f}: {exc}")
+                    continue
+                if primary_fingerprint == critical_fingerprint(
+                    dict(secondary["critical_facts"])
+                ):
+                    secondary_scale = candidate_scale
+                    break
+                secondary_failures.append(
+                    f"{candidate_scale:.1f}: critical facts disagree"
+                )
+            if secondary_scale is None:
+                raise RuntimeError(
+                    "no independent layout OCR scale corroborated all critical "
+                    "statblock facts; " + "; ".join(secondary_failures)
+                )
+            corroboration_scales.append(secondary_scale)
+        observation = (
+            f"Text-only layout OCR v{int(evidence['recovery_version'])} recovered "
+            f"{target_name} from PDF page "
+            f"{recovered_page}; heading confidence "
+            f"{float(evidence['heading_confidence']):.5f}, minimum core confidence "
+            f"{float(evidence['minimum_core_confidence']):.5f}. Independent "
+            f"{corroboration_mode.replace('_', ' ')} corroborated identity, Armor Class, "
+            "Hit Points, Speed, all six ability scores, and Challenge."
+        )
+        return {
+            "name": target_name,
+            "attempted_pages": attempted_pages,
+            "page_number": recovered_page,
+            "provider": provider.name,
+            "corroboration_mode": corroboration_mode,
+            "corroboration_scales": corroboration_scales,
+            "corroborated_facts": corroborated,
+            "observation": observation,
+            "recovery": recovered,
+        }
+
     def rule_statblock_ocr_recover(
         campaign_id: str,
         job_id: str,
@@ -29137,148 +29414,21 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     if 1 <= candidate <= page_count and candidate not in candidate_pages:
                         candidate_pages.append(candidate)
 
-        target_key = compact_ascii_key(target_name)
-        selected_layout = None
-        recovered = None
-        attempted_pages: list[int] = []
-        for candidate in candidate_pages:
-            attempted_pages.append(candidate)
-            layout = provider.extract_layout(source_path, page_numbers=[candidate])[0]
-            if not any(
-                compact_ascii_key(block.text) == target_key
-                for block in layout.blocks
-            ):
-                continue
-            try:
-                candidate_recovery = recover_2014_statblock_from_ocr(
-                    layout.as_dict(),
-                    name=target_name,
-                    minimum_confidence=0.5,
-                )
-            except StatblockImportError:
-                continue
-            selected_layout = layout
-            recovered = candidate_recovery
-            break
-        if selected_layout is None:
-            raise RuntimeError(
-                "layout OCR did not find one structurally unambiguous target statblock "
-                "on candidate pages " + ", ".join(str(value) for value in attempted_pages)
-            )
-        assert recovered is not None
-        evidence = dict(recovered["evidence"])
-        recovered_page = int(evidence["page_number"])
-        page_text = extract_pdf_page_text(source_path, recovered_page)
-        content = str(recovered["normalized_content"])
-        critical_facts = dict(recovered["critical_facts"])
-        identity_key = compact_ascii_key(critical_facts["identity"])
-        page_lines = [
-            line.strip(" \t#>*_-") for line in page_text.splitlines() if line.strip(" \t#>*_-")
-        ]
-        identity_indexes = [
-            index
-            for index, line in enumerate(page_lines)
-            if compact_ascii_key(line) == identity_key
-        ]
-        corroboration_pairs = [
-            ("Identity", str(critical_facts["identity"])),
-            ("Armor Class", f"Armor Class {critical_facts['armor_class']}"),
-            ("Hit Points", f"Hit Points {critical_facts['hit_points']}"),
-            ("Speed", f"Speed {critical_facts['speed']}"),
-            ("Challenge", f"Challenge {critical_facts['challenge']}"),
-            *[
-                (label, f"{label} {value}")
-                for label, value in dict(critical_facts["fields"]).items()
-            ],
-            *[
-                (
-                    ability.upper(),
-                    f"{ability.upper()} {score}",
-                )
-                for ability, score in dict(critical_facts["abilities"]).items()
-            ],
-        ]
-        corroboration_mode = "dual_layout_ocr"
-        corroboration_scales = [float(getattr(provider, "scale", 2.0))]
-        corroborated = [{"field": label, "value": fact} for label, fact in corroboration_pairs]
-        if len(identity_indexes) == 1:
-            segment_start = identity_indexes[0]
-            segment_end = len(page_lines)
-            identity_pattern = re.compile(
-                r"(?i)^(Tiny|Small|Medium|Large|Huge|Gargantuan)\s+[^,]+,\s*.+$"
-            )
-            for index in range(segment_start + 1, len(page_lines)):
-                if identity_pattern.fullmatch(page_lines[index]):
-                    segment_end = index
-                    break
-            normalized_segment = compact_ascii_key(
-                "\n".join(page_lines[segment_start:segment_end])
-            )
-            embedded_mismatches = [
-                label
-                for label, fact in corroboration_pairs
-                if compact_ascii_key(fact) not in normalized_segment
-            ]
-            if not embedded_mismatches:
-                corroboration_mode = "embedded_text"
-        if corroboration_mode != "embedded_text":
-            primary_scale = float(getattr(provider, "scale", 2.0))
-
-            def critical_fingerprint(value: Any) -> Any:
-                if isinstance(value, dict):
-                    return {str(key): critical_fingerprint(item) for key, item in value.items()}
-                return compact_ascii_key(value)
-
-            primary_fingerprint = critical_fingerprint(critical_facts)
-            secondary_scale = None
-            secondary_failures: list[str] = []
-            for candidate_scale in (3.0, 2.5, 1.5, 3.5, 4.0, 2.0):
-                if abs(primary_scale - candidate_scale) < 0.01:
-                    continue
-                try:
-                    secondary_layout = RapidOcrProvider(
-                        scale=candidate_scale
-                    ).extract_layout(
-                        source_path,
-                        page_numbers=[recovered_page],
-                    )[0]
-                    secondary = recover_2014_statblock_from_ocr(
-                        secondary_layout.as_dict(),
-                        name=target_name,
-                        minimum_confidence=0.5,
-                    )
-                except StatblockImportError as exc:
-                    secondary_failures.append(f"{candidate_scale:.1f}: {exc}")
-                    continue
-                if primary_fingerprint == critical_fingerprint(
-                    dict(secondary["critical_facts"])
-                ):
-                    secondary_scale = candidate_scale
-                    break
-                secondary_failures.append(
-                    f"{candidate_scale:.1f}: critical facts disagree"
-                )
-            if secondary_scale is None:
-                raise RuntimeError(
-                    "no independent layout OCR scale corroborated all critical "
-                    "statblock facts; " + "; ".join(secondary_failures)
-                )
-            corroboration_scales.append(secondary_scale)
-        observation = (
-            f"Text-only layout OCR v{int(evidence['recovery_version'])} recovered "
-            f"{target_name} from PDF page "
-            f"{recovered_page}; heading confidence "
-            f"{float(evidence['heading_confidence']):.5f}, minimum core confidence "
-            f"{float(evidence['minimum_core_confidence']):.5f}. Independent "
-            f"{corroboration_mode.replace('_', ' ')} corroborated identity, Armor Class, "
-            "Hit Points, Speed, all six ability scores, and Challenge."
+        recovered_result = recover_pdf_statblock_layout(
+            source_path=source_path,
+            target_name=target_name,
+            candidate_pages=candidate_pages,
+            provider=provider,
         )
+        recovered_page = int(recovered_result["page_number"])
+        recovered = dict(recovered_result["recovery"])
+        content = str(recovered["normalized_content"])
         reviewed = rule_statblock_review(
             campaign_id,
             job_id,
             recovered_page,
             content,
-            observation,
+            str(recovered_result["observation"]),
             principal_id=principal_id,
             idempotency_key=idempotency_key,
             agent_fill=agent_fill,
@@ -29286,14 +29436,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         return {
             "campaign_id": campaign_id,
             "job_id": job_id,
-            "name": target_name,
-            "attempted_pages": attempted_pages,
-            "page_number": recovered_page,
-            "provider": provider.name,
-            "corroboration_mode": corroboration_mode,
-            "corroboration_scales": corroboration_scales,
-            "corroborated_facts": corroborated,
-            "recovery": recovered,
+            **{
+                key: value
+                for key, value in recovered_result.items()
+                if key != "observation"
+            },
             **reviewed,
         }
 
@@ -34502,12 +34649,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     @mcp.tool()
     def module_review(
         campaign_id: str,
-        action: Literal["render_page", "submit_content"],
+        action: Literal["render_page", "recover_statblock", "submit_content"],
         payload: dict[str, Any],
         principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
-        """Render managed module evidence or submit a DM-only content review."""
+        """Render, text-only recover, or submit managed module evidence."""
         if action == "render_page":
             require_facade_phase(
                 campaign_id,
@@ -34535,6 +34682,47 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     data.get("scale", 1.5),
                     principal_id,
                 )
+            )
+        if action == "recover_statblock":
+            require_facade_phase(
+                campaign_id,
+                "module_review(recover_statblock)",
+                PROFILE_LOBBY,
+            )
+            data = strict_facade_payload(
+                payload,
+                action="module_review(recover_statblock)",
+                allowed={
+                    "module_id",
+                    "scene_id",
+                    "content_key",
+                    "name",
+                    "page_number",
+                    "source_asset_id",
+                    "agent_fill",
+                },
+                required_names=(
+                    "module_id",
+                    "scene_id",
+                    "content_key",
+                    "name",
+                    "page_number",
+                ),
+            )
+            return facade_result(
+                action,
+                module_statblock_ocr_recover(
+                    campaign_id,
+                    data["module_id"],
+                    data["scene_id"],
+                    data["content_key"],
+                    data["name"],
+                    data["page_number"],
+                    data.get("source_asset_id"),
+                    principal_id,
+                    idempotency_key,
+                    data.get("agent_fill"),
+                ),
             )
         require_facade_phase(
             campaign_id,

@@ -2,9 +2,11 @@ import asyncio
 import json
 from pathlib import Path
 
+import pytest
 from mcp.types import CallToolResult, ImageContent, TextContent
 from pypdf import PdfReader, PdfWriter
 from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
+from sagasmith_core import OcrPageLayout, OcrTextBlock, RapidOcrProvider
 
 from sagasmith_dnd_mcp.config import McpConfig
 from sagasmith_dnd_mcp.server import create_server
@@ -305,5 +307,184 @@ def test_pdf_page_review_becomes_snapshot_managed_scene_atlas(tmp_path: Path) ->
         assert attacks["Claws of the Grave"]["attack_bonus"] == 5
         assert attacks["Claws of the Grave"]["damage_expression"] == "2d4 + 3"
         assert created["statblock"]["settlement"] == "automatic"
+
+    asyncio.run(exercise())
+
+
+def test_module_statblock_ocr_recovery_supports_text_only_agent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import_root = tmp_path / "modules"
+    import_root.mkdir()
+    source = import_root / "text-only-review.pdf"
+    _write_text_pdf(source)
+
+    def block(
+        text: str,
+        x0: int,
+        y0: int,
+        x1: int,
+        y1: int,
+        confidence: float = 0.99,
+    ) -> OcrTextBlock:
+        return OcrTextBlock(text, confidence, x0, y0, x1, y1)
+
+    layout = OcrPageLayout(
+        page_number=1,
+        width=600,
+        height=400,
+        blocks=(
+            block("COMMONER", 30, 20, 180, 45),
+            block("Medium humanoid, any alignment", 30, 45, 250, 65),
+            block("Armor Class 10", 30, 75, 160, 95),
+            block("Hit Points 4 (1d8)", 30, 95, 190, 115),
+            block("Speed 30 ft.", 30, 115, 150, 135),
+            *tuple(
+                block(label, 30 + index * 70, 145, 70 + index * 70, 165)
+                for index, label in enumerate(("STR", "DEX", "CON", "INT", "WIS", "CHA"))
+            ),
+            *tuple(
+                block("10 (+0)", 25 + index * 70, 165, 80 + index * 70, 185)
+                for index in range(6)
+            ),
+            block("Senses passive Perception 10", 30, 200, 250, 220),
+            block("Languages Common", 30, 220, 180, 240),
+            block("Challenge 0 (10 XP)", 30, 240, 200, 260),
+            block("ACTIONS", 30, 275, 130, 295),
+            block(
+                "Club. Melee Weapon Attack: +2 to hit, reach 5 ft., one target.",
+                30,
+                305,
+                480,
+                325,
+            ),
+            block("Hit: 2 (1d4) bludgeoning damage.", 30, 325, 310, 345),
+            block("COMMONER", 30, 355, 180, 380),
+        ),
+    )
+    ocr_calls = 0
+
+    def extract_layout(
+        provider: RapidOcrProvider,
+        path: Path,
+        *,
+        page_numbers: list[int] | None = None,
+    ) -> list[OcrPageLayout]:
+        nonlocal ocr_calls
+        ocr_calls += 1
+        return [layout]
+
+    monkeypatch.setattr(RapidOcrProvider, "extract_layout", extract_layout)
+    monkeypatch.setattr(
+        "sagasmith_dnd_mcp.server.extract_pdf_page_text",
+        lambda path, page_number: (
+            "Medium humanoid, any alignment\n"
+            "Armor Class 10\n"
+            "Hit Points 4 (1d8)\n"
+            "Speed 30 ft.\n"
+            "STR 10 (+0) DEX 10 (+0) CON 10 (+0) "
+            "INT 10 (+0) WIS 10 (+0) CHA 10 (+0)\n"
+            "Senses passive Perception 10\n"
+            "Languages Common\n"
+            "Challenge 0 (10 XP)"
+        ),
+    )
+    config = McpConfig(
+        home=tmp_path / "home",
+        database_url=None,
+        chroma_url=None,
+        chroma_path_override=None,
+        dnd_skills_dir=tmp_path / "dnd",
+        modulegen_skills_dir=tmp_path / "modulegen",
+        auto_seed_rules=False,
+        module_import_roots=(import_root,),
+    )
+
+    async def exercise() -> None:
+        server = create_server(config)
+        campaign = await _call(
+            server,
+            "campaign_create",
+            {"name": "Module OCR", "edition": "2014", "idempotency_key": "campaign"},
+        )
+        staged = await _call(
+            server,
+            "module_import",
+            {
+                "campaign_id": campaign["id"],
+                "action": "stage",
+                "payload": {
+                    "source_path": str(source),
+                    "source_key": "module-ocr",
+                    "title": "Module OCR",
+                },
+                "idempotency_key": "stage",
+            },
+        )
+        job_id = staged["job"]["id"]
+        for action in ("inspect", "validate", "ingest"):
+            ingested = await _call(
+                server,
+                "module_import",
+                {
+                    "campaign_id": campaign["id"],
+                    "action": action,
+                    "payload": {"job_id": job_id},
+                    "idempotency_key": action,
+                },
+            )
+        current = await _call(
+            server,
+            "campaign_query",
+            {"view": "get", "payload": {"campaign_id": campaign["id"]}},
+        )
+        await _call(
+            server,
+            "module_import",
+            {
+                "campaign_id": campaign["id"],
+                "action": "activate",
+                "payload": {"job_id": job_id},
+                "expected_revision": current["revision"],
+                "idempotency_key": "activate",
+            },
+        )
+        module_id = ingested["module_id"]
+        scene_id = (
+            await _call(
+                server,
+                "module_query",
+                {
+                    "campaign_id": campaign["id"],
+                    "view": "index",
+                    "payload": {"module_id": module_id},
+                },
+            )
+        )[0]["scene_id"]
+        arguments = {
+            "campaign_id": campaign["id"],
+            "action": "recover_statblock",
+            "payload": {
+                "module_id": module_id,
+                "scene_id": scene_id,
+                "content_key": "commoner",
+                "name": "Commoner",
+                "page_number": 1,
+            },
+            "idempotency_key": "recover-commoner",
+        }
+        recovered = await _call(server, "module_review", arguments)
+        replayed = await _call(server, "module_review", arguments)
+
+        assert replayed == recovered
+        assert ocr_calls == 1
+        assert recovered["provider"] == "rapidocr"
+        assert recovered["corroboration_mode"] == "embedded_text"
+        assert recovered["recovery"]["evidence"]["text_only"] is True
+        assert recovered["review"]["evidence"]["confidence"] == "reviewed_image"
+        assert recovered["review"]["metadata"]["text_layout_recovery"]["text_only"] is True
+        assert recovered["validation"]["name"] == "Commoner"
+        assert recovered["validation"]["settlement"] == "automatic"
 
     asyncio.run(exercise())

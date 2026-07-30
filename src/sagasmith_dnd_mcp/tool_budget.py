@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-TOOL_BUDGET_VERSION = "2026-07-hypnotic-pattern-v13"
+TOOL_BUDGET_VERSION = "2026-07-module-ocr-v14"
 
 # Captured before the conservative facade consolidation.  Keep this historical
 # baseline so a lower tool count cannot conceal a larger aggregate input schema.
@@ -32,8 +32,10 @@ TARGET_CORE_TOOL_COUNT = 12
 # exact, non-executable module evidence without another public tool.
 # Version 13 adds the source-exact shake_hypnotic_pattern action to the existing
 # common-action facade. The 25-byte increase adds no public or core tool.
+# Version 14 adds text-only module statblock recovery to the existing review
+# facade. The 20-byte increase adds no public or core tool.
 # The aggregate remains well below the captured 92-tool baseline.
-TARGET_INPUT_SCHEMA_BYTES = 49_118
+TARGET_INPUT_SCHEMA_BYTES = 49_138
 PROFILE_TOOL_LIMITS = {
     "lobby": 62,
     "play": 47,

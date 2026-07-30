@@ -273,8 +273,8 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument(
         "--source-statblock-name",
         help=(
-            "Exact printed creature heading for OCR recovery when the campaign actor "
-            "uses a different instance name"
+            "Exact printed creature heading for rule or module OCR recovery when "
+            "the campaign actor or text candidate uses a different instance name"
         ),
     )
     parser.add_argument(
@@ -2322,6 +2322,7 @@ async def _prepare_statblock(args: argparse.Namespace) -> dict[str, Any]:
             if rules.get("effective_error"):
                 raise RuntimeError(str(rules["effective_error"]))
             candidate: dict[str, Any] | None = None
+            ocr_recovery: dict[str, Any] | None = None
             if args.candidate_id:
                 module_sources = _facade_value(
                     await client.domain(
@@ -2349,13 +2350,6 @@ async def _prepare_statblock(args: argparse.Namespace) -> dict[str, Any]:
                         f"candidate id must resolve exactly once; found {len(matches)}"
                     )
                 candidate = matches[0]
-                if (
-                    candidate.get("execution_state") != "review_ready"
-                    and args.review_override is None
-                ):
-                    raise RuntimeError(
-                        str(candidate.get("review_error") or "candidate is not review-ready")
-                    )
                 fill_requirements = dict(
                     candidate.get("agent_fill_requirements") or {}
                 )
@@ -2368,20 +2362,14 @@ async def _prepare_statblock(args: argparse.Namespace) -> dict[str, Any]:
                         "module statblock requires --agent-statblock-fill for "
                         f"Multiattack activities: {required_ids}"
                     )
-                normalized_content = str(candidate.get("normalized_content") or "")
-                source_asset_id = None
-                page_number = None
-                source_chunk_ids = candidate["source_chunk_ids"]
-                review_metadata = None
-                observation = (
-                    "The regression Agent acting as DM reviewed the normalized statblock against "
-                    "every cited module text chunk."
+                content_key = (
+                    f"{_idempotency_token(str(candidate['name'])).lower()}-"
+                    f"{str(candidate['id']).split(':')[-1][:10]}"
                 )
-                if args.review_override is not None:
-                    normalized_content, observation, override_path = _load_review_override(
-                        args.review_override,
-                        args.review_observation,
-                    )
+                if (
+                    candidate.get("execution_state") != "review_ready"
+                    and args.review_override is None
+                ):
                     page_number = _review_override_page(
                         candidate,
                         args.source_page,
@@ -2400,41 +2388,107 @@ async def _prepare_statblock(args: argparse.Namespace) -> dict[str, Any]:
                         list(assets or []),
                         str(getattr(args, "source_asset_id", "") or ""),
                     )
-                    source_chunk_ids = None
-                    review_metadata = {
-                        "review_method": "rendered_source_page",
-                        "candidate_id": candidate["id"],
-                        "override_path": str(override_path),
-                    }
-                reviewed = _facade_value(
-                    await client.domain(
-                        "module_review",
-                        {
-                            "campaign_id": args.campaign_id,
-                            "action": "submit_content",
-                            "payload": {
-                                "module_id": candidate["module_id"],
-                                "scene_id": candidate["scene_id"],
-                                "content_key": (
-                                    f"{_idempotency_token(str(candidate['name'])).lower()}-"
-                                    f"{str(candidate['id']).split(':')[-1][:10]}"
+                    recovered = _facade_value(
+                        await client.domain(
+                            "module_review",
+                            {
+                                "campaign_id": args.campaign_id,
+                                "action": "recover_statblock",
+                                "payload": {
+                                    "module_id": candidate["module_id"],
+                                    "scene_id": candidate["scene_id"],
+                                    "content_key": content_key,
+                                    "name": str(
+                                        args.source_statblock_name or candidate["name"]
+                                    ),
+                                    "page_number": page_number,
+                                    "source_asset_id": source_asset_id,
+                                    "agent_fill": agent_fill,
+                                },
+                                "idempotency_key": _candidate_review_idempotency_key(
+                                    token,
+                                    str(candidate["id"]),
                                 ),
-                                "normalized_content": normalized_content,
-                                "source_chunk_ids": source_chunk_ids,
-                                "source_asset_id": source_asset_id,
-                                "page_number": page_number,
-                                "observation": observation,
-                                "metadata": review_metadata,
-                                "agent_fill": agent_fill,
                             },
-                            "idempotency_key": _candidate_review_idempotency_key(
-                                token,
-                                str(candidate["id"]),
-                            ),
-                        },
+                        )
                     )
-                )
-                review = dict(reviewed["review"])
+                    review = dict(recovered["review"])
+                    ocr_recovery = {
+                        key: recovered.get(key)
+                        for key in (
+                            "name",
+                            "attempted_pages",
+                            "page_number",
+                            "provider",
+                            "corroboration_mode",
+                            "corroboration_scales",
+                        )
+                    }
+                else:
+                    normalized_content = str(candidate.get("normalized_content") or "")
+                    source_asset_id = None
+                    page_number = None
+                    source_chunk_ids = candidate["source_chunk_ids"]
+                    review_metadata = None
+                    observation = (
+                        "The regression Agent acting as DM reviewed the normalized statblock "
+                        "against every cited module text chunk."
+                    )
+                    if args.review_override is not None:
+                        normalized_content, observation, override_path = _load_review_override(
+                            args.review_override,
+                            args.review_observation,
+                        )
+                        page_number = _review_override_page(
+                            candidate,
+                            args.source_page,
+                        )
+                        assets = _facade_value(
+                            await client.domain(
+                                "module_query",
+                                {
+                                    "campaign_id": args.campaign_id,
+                                    "view": "assets",
+                                    "payload": {"module_id": candidate["module_id"]},
+                                },
+                            )
+                        )
+                        source_asset_id = _review_override_asset_id(
+                            list(assets or []),
+                            str(getattr(args, "source_asset_id", "") or ""),
+                        )
+                        source_chunk_ids = None
+                        review_metadata = {
+                            "review_method": "rendered_source_page",
+                            "candidate_id": candidate["id"],
+                            "override_path": str(override_path),
+                        }
+                    reviewed = _facade_value(
+                        await client.domain(
+                            "module_review",
+                            {
+                                "campaign_id": args.campaign_id,
+                                "action": "submit_content",
+                                "payload": {
+                                    "module_id": candidate["module_id"],
+                                    "scene_id": candidate["scene_id"],
+                                    "content_key": content_key,
+                                    "normalized_content": normalized_content,
+                                    "source_chunk_ids": source_chunk_ids,
+                                    "source_asset_id": source_asset_id,
+                                    "page_number": page_number,
+                                    "observation": observation,
+                                    "metadata": review_metadata,
+                                    "agent_fill": agent_fill,
+                                },
+                                "idempotency_key": _candidate_review_idempotency_key(
+                                    token,
+                                    str(candidate["id"]),
+                                ),
+                            },
+                        )
+                    )
+                    review = dict(reviewed["review"])
             else:
                 review = _facade_value(
                     await client.domain(
@@ -2753,6 +2807,7 @@ async def _prepare_statblock(args: argparse.Namespace) -> dict[str, Any]:
                     if candidate is not None
                     else None
                 ),
+                "ocr_recovery": ocr_recovery,
                 "created": {
                     "statblock": created.get("statblock"),
                     "spell_warnings": created.get("spell_warnings"),
