@@ -26176,15 +26176,16 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             normalized_segment = compact_ascii_key(
                 "\n".join(page_lines[segment_start:segment_end])
             )
-            for label, fact in corroboration_pairs:
-                if compact_ascii_key(fact) not in normalized_segment:
-                    raise RuntimeError(
-                        f"OCR-recovered {label} is not corroborated by the target "
-                        "embedded-text segment"
-                    )
-            corroboration_mode = "embedded_text"
-        else:
+            embedded_mismatches = [
+                label
+                for label, fact in corroboration_pairs
+                if compact_ascii_key(fact) not in normalized_segment
+            ]
+            if not embedded_mismatches:
+                corroboration_mode = "embedded_text"
+        if corroboration_mode != "embedded_text":
             primary_scale = float(getattr(provider, "scale", 2.0))
+
             def critical_fingerprint(value: Any) -> Any:
                 if isinstance(value, dict):
                     return {str(key): critical_fingerprint(item) for key, item in value.items()}

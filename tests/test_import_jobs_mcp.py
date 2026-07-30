@@ -609,11 +609,15 @@ def test_rule_import_renders_a_checksum_bound_review_page(
     asyncio.run(exercise())
 
 
-@pytest.mark.parametrize("embedded_text", [True, False])
+@pytest.mark.parametrize(
+    ("embedded_text", "corrupt_embedded_text"),
+    [(True, False), (False, False), (True, True)],
+)
 def test_rule_import_recovers_statblock_for_text_only_agent(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     embedded_text: bool,
+    corrupt_embedded_text: bool,
 ) -> None:
     import_root = tmp_path / "imports"
     import_root.mkdir()
@@ -637,8 +641,12 @@ def test_rule_import_recovers_statblock_for_text_only_agent(
             b"BT /F1 8 Tf 10 370 Td 10 TL "
             b"(Medium humanoid, any alignment) Tj T* "
             b"(Armor Class 10) Tj T* "
-            b"(Hit Points 4 [1d8]) Tj T* "
-            b"(Speed 30 ft.) Tj T* "
+            + (
+                b"(Hit Points 4 [ld8]) Tj T* "
+                if corrupt_embedded_text
+                else b"(Hit Points 4 [1d8]) Tj T* "
+            )
+            + b"(Speed 30 ft.) Tj T* "
             b"(STR) Tj T* (10 [+0]) Tj T* "
             b"(DEX) Tj T* (10 [+0]) Tj T* "
             b"(CON) Tj T* (10 [+0]) Tj T* "
@@ -803,10 +811,16 @@ def test_rule_import_recovers_statblock_for_text_only_agent(
         assert result["page_number"] == 1
         assert result["provider"] == "rapidocr"
         assert result["corroboration_mode"] == (
-            "embedded_text" if embedded_text else "dual_layout_ocr"
+            "embedded_text"
+            if embedded_text and not corrupt_embedded_text
+            else "dual_layout_ocr"
         )
         assert result["corroboration_scales"] == (
-            [2.0] if embedded_text else [2.0, 2.5]
+            [2.0]
+            if embedded_text and not corrupt_embedded_text
+            else [2.0, 3.0]
+            if corrupt_embedded_text
+            else [2.0, 2.5]
         )
         assert result["recovery"]["evidence"]["text_only"] is True
         assert result["recovery"]["evidence"]["matching_heading_count"] == 2
