@@ -2992,8 +2992,6 @@ def test_standard_spell_driver_pays_resources_and_records_agent_semantics(
     assert client.cast_arguments["payload"] == {
         "spell_id": "invisibility",
         "cast_level": 2,
-        "target_character_ids": ["rogue"],
-        "willing_target_ids": ["rogue"],
     }
     assert result["agent_ruling"] == {**ruling, "committed": True}
     event = client.continuity_payload["event"]

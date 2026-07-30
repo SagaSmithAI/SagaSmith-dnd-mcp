@@ -6960,9 +6960,6 @@ async def _cast_standard_spell(
         payload["cast_level"] = cast_level
     if component_ruling is not None:
         payload["component_ruling"] = deepcopy(component_ruling)
-    if normalized_target_id:
-        payload["target_character_ids"] = [normalized_target_id]
-        payload["willing_target_ids"] = [normalized_target_id]
     acted = await client.domain(
         "character_action",
         {
