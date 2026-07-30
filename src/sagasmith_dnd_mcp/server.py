@@ -168,6 +168,7 @@ from sagasmith_dnd.combat_engine import (
     spend_movement,
     stabilize_sheet,
     stand_up,
+    standard_death_trigger_for_sheet,
     start_encounter,
     start_witch_bolt_tether,
     timed_condition_sources,
@@ -4523,11 +4524,180 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         flags["agent_extra_damage_applications"] = usage
         combatant["turn_flags"] = flags
 
+    def add_standard_death_trigger_window(
+        encounter: dict[str, Any],
+        *,
+        source_actor_id: str,
+        sheet: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Open one engine-owned area-save window for a standard death trigger."""
+
+        trigger = standard_death_trigger_for_sheet(sheet)
+        if trigger is None:
+            return None
+        if any(
+            isinstance(item, dict)
+            and item.get("status", "pending") == "pending"
+            and item.get("trigger") == "standard_death_burst"
+            and str(item.get("source_actor_id") or "") == source_actor_id
+            for item in encounter.get("pending", [])
+        ):
+            raise CombatEngineError(
+                "this standard Death Burst already has a pending resolution"
+            )
+        source = require_encounter_combatant(
+            encounter,
+            source_actor_id,
+            role="standard death-trigger source",
+        )
+        source_position = source.get("position")
+        if combat_coordinates(source_position) is None:
+            raise NeedsRulingError(
+                "standard Death Burst requires the source's combat position",
+                missing=("death_burst_source_position",),
+                ruling_kind="source_or_scene_fact",
+            )
+        battle_map = dict(encounter.get("battle_map") or {})
+        cell_ft = int(dict(battle_map.get("grid") or {}).get("cell_ft", 5) or 5)
+        targets: list[str] = []
+        for combatant in encounter.get("combatants", []):
+            target_id = str(combatant.get("actor_id") or "")
+            if target_id == source_actor_id or "dead" in {
+                str(item).strip().casefold()
+                for item in combatant.get("conditions", [])
+            }:
+                continue
+            target_position = combatant.get("position")
+            if combat_coordinates(target_position) is None:
+                raise NeedsRulingError(
+                    "standard Death Burst requires every living combatant's position",
+                    missing=(f"death_burst_target_position:{target_id}",),
+                    ruling_kind="source_or_scene_fact",
+                )
+            distance = combat_distance(
+                source_position,
+                target_position,
+                cell_ft=cell_ft,
+            )
+            if distance is not None and distance <= int(trigger["range_ft"]):
+                targets.append(target_id)
+        next_encounter = add_choice_window(
+            encounter,
+            kind="save",
+            actor_id_value=source_actor_id,
+            event="creature.death.standard_trigger",
+            candidates=[
+                {
+                    "id": "resolve",
+                    "name": "Resolve the standard Death Burst",
+                }
+            ],
+        )
+        window = next_encounter["pending"][-1]
+        window.update(
+            trigger="standard_death_burst",
+            source_actor_id=source_actor_id,
+            target_ids=targets,
+            standard_trigger=deepcopy(trigger),
+            environment_ruling_required={
+                "default_resolver": "agent",
+                "ruling_kind": "source_or_scene_fact",
+                "question": (
+                    "Which flammable objects in the recorded area are neither "
+                    "worn nor carried?"
+                ),
+                "rule_outcome": "qualifying objects are ignited",
+                "source_excerpt": str(trigger["source_excerpt"]),
+            },
+        )
+        encounter["pending"] = next_encounter["pending"]
+        encounter["log"] = [
+            *list(encounter.get("log") or []),
+            {
+                "type": "standard_death_trigger",
+                "source_actor_id": source_actor_id,
+                "choice_id": str(window["id"]),
+                "target_ids": targets,
+                "mechanic_id": str(trigger["mechanic_id"]),
+            },
+        ][-100:]
+        return window
+
+    def record_standard_weapon_ongoing_effect(
+        encounter: dict[str, Any],
+        *,
+        attacker_id: str,
+        target_id: str,
+        weapon_id: str,
+        attack_result: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Persist one non-stacking standard on-hit ongoing effect."""
+
+        structured = dict(attack_result.get("structured_on_hit") or {})
+        effect_contract = dict(structured.get("ongoing_effect") or {})
+        if (
+            attack_result.get("hit") is not True
+            or structured.get("kind") != "ignition_ongoing_damage"
+            or effect_contract.get("kind") != "source_ongoing_damage"
+            or effect_contract.get("mechanic_id")
+            != "dnd5e.core.monster.ignition_ongoing_damage"
+        ):
+            return None
+        existing = next(
+            (
+                item
+                for item in encounter.get("ongoing_effects", [])
+                if isinstance(item, dict)
+                and item.get("active", True)
+                and item.get("mechanic_id")
+                == "dnd5e.core.monster.ignition_ongoing_damage"
+                and str(item.get("target_id") or "") == target_id
+            ),
+            None,
+        )
+        if existing is None:
+            existing = {
+                **deepcopy(effect_contract),
+                "id": f"standard-ignition-{uuid4().hex}",
+                "source_actor_id": attacker_id,
+                "target_id": target_id,
+                "weapon_id": weapon_id,
+                "started_round": int(encounter.get("round", 1) or 1),
+            }
+            encounter["ongoing_effects"] = [
+                *list(encounter.get("ongoing_effects") or []),
+                existing,
+            ]
+            event_type = "standard_ignition_started"
+        else:
+            existing.update(
+                source_actor_id=attacker_id,
+                weapon_id=weapon_id,
+                source_excerpt=str(effect_contract["source_excerpt"]),
+            )
+            existing.pop("last_resolution_turn_token", None)
+            event_type = "standard_ignition_refreshed"
+        encounter["log"] = [
+            *list(encounter.get("log") or []),
+            {
+                "type": event_type,
+                "effect_id": str(existing["id"]),
+                "source_actor_id": attacker_id,
+                "target_id": target_id,
+                "weapon_id": weapon_id,
+            },
+        ][-100:]
+        return deepcopy(existing)
+
     def sync_combatant_conditions(
         encounter: dict[str, Any], actor_id: str, sheet: dict[str, Any]
     ) -> None:
         for combatant in encounter.get("combatants", []):
             if combatant.get("actor_id") == actor_id:
+                before_conditions = {
+                    str(item).strip().casefold()
+                    for item in combatant.get("conditions", [])
+                }
                 body_thief = dict(combatant.get("body_thief_host") or {})
                 hp = int(dict(dict(sheet.get("combat") or {}).get("hp") or {}).get("value", 0) or 0)
                 if body_thief and hp <= 0:
@@ -4636,6 +4806,19 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     actor_id,
                     sheet,
                 )
+                after_conditions = {
+                    str(item).strip().casefold()
+                    for item in combatant.get("conditions", [])
+                }
+                if (
+                    "dead" not in before_conditions
+                    and "dead" in after_conditions
+                ):
+                    add_standard_death_trigger_window(
+                        encounter,
+                        source_actor_id=actor_id,
+                        sheet=sheet,
+                    )
                 return
 
     def combatant_zero_hp_buffered(combatant: dict[str, Any]) -> bool:
@@ -5049,6 +5232,98 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 ended.append(str(effect.get("id") or ""))
         return ended
 
+    def encounter_turn_token(encounter: dict[str, Any]) -> str:
+        current = current_combatant(encounter)
+        return (
+            f"{int(encounter.get('round', 1) or 1)}:"
+            f"{int(encounter.get('turn_index', 0) or 0)}:"
+            f"{str((current or {}).get('actor_id') or '')}"
+        )
+
+    def settle_source_ongoing_damage(
+        encounter: dict[str, Any],
+        *,
+        actor_id: str,
+        sheets: dict[str, dict[str, Any]],
+        trigger_timing: str,
+        next_revision: int,
+    ) -> list[dict[str, Any]]:
+        """Settle each recorded standard/source ongoing damage effect once per turn."""
+
+        if trigger_timing not in {"turn_start", "turn_end"}:
+            raise CombatEngineError("source ongoing-damage timing is unsupported")
+        turn_token = encounter_turn_token(encounter)
+        settlements: list[dict[str, Any]] = []
+        for effect in encounter.get("ongoing_effects", []):
+            if (
+                not isinstance(effect, dict)
+                or not effect.get("active", True)
+                or effect.get("kind") != "source_ongoing_damage"
+                or str(effect.get("target_id") or "") != actor_id
+                or effect.get("trigger_timing") != trigger_timing
+                or effect.get("last_resolution_turn_token") == turn_token
+            ):
+                continue
+            combatant = require_encounter_combatant(
+                encounter,
+                actor_id,
+                role="source ongoing-damage target",
+            )
+            if "dead" in {
+                str(item).strip().casefold()
+                for item in combatant.get("conditions", [])
+            }:
+                effect["active"] = False
+                effect["ended_reason"] = "target_dead"
+                continue
+            damage_roll = asdict(roll(str(effect["damage_formula"])))
+            damaged = apply_damage_to_sheet(
+                sheets[actor_id],
+                amount=int(damage_roll["total"]),
+                damage_type=str(effect["damage_type"]),
+                source=str(effect.get("weapon_id") or "source-ongoing-damage"),
+                ruleset=str(encounter.get("ruleset") or "2014"),
+                death_saves=combatant_zero_hp_buffered(combatant),
+            )
+            sheets[actor_id] = damaged["sheet"]
+            effect["last_resolution_turn_token"] = turn_token
+            record_source_trait_damage(
+                encounter,
+                target_id=actor_id,
+                damage=damaged,
+            )
+            add_concentration_window(
+                encounter,
+                actor_id,
+                damaged.get("concentration"),
+                next_revision=next_revision,
+            )
+            sync_combatant_conditions(encounter, actor_id, sheets[actor_id])
+            reconcile_readied_spells(encounter, actor_id, sheets[actor_id])
+            reconcile_source_attachments(
+                encounter,
+                actor_id=actor_id,
+                sheet=sheets[actor_id],
+            )
+            settlement = {
+                "kind": "source_ongoing_damage",
+                "effect_id": str(effect.get("id") or ""),
+                "source_actor_id": str(effect.get("source_actor_id") or ""),
+                "target_id": actor_id,
+                "trigger_timing": trigger_timing,
+                "source_excerpt": str(effect.get("source_excerpt") or ""),
+                "roll": damage_roll,
+                "result": {
+                    key: value for key, value in damaged.items() if key != "sheet"
+                },
+            }
+            settlements.append(settlement)
+            encounter["log"] = [
+                *list(encounter.get("log") or []),
+                settlement,
+            ][-100:]
+        return settlements
+
     def settle_source_start_turn(
         encounter: dict[str, Any],
         *,
@@ -5098,64 +5373,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 sheet=sheets[actor_id],
             )
 
-        for effect in encounter.get("ongoing_effects", []):
-            if (
-                not isinstance(effect, dict)
-                or not effect.get("active", True)
-                or effect.get("kind") != "source_ongoing_damage"
-                or str(effect.get("target_id") or "") != actor_id
-                or effect.get("trigger_timing") != "turn_start"
-            ):
-                continue
-            damage_roll = asdict(roll(str(effect["damage_formula"])))
-            combatant = require_encounter_combatant(
-                encounter,
-                actor_id,
-                role="source ongoing-damage target",
-            )
-            damaged = apply_damage_to_sheet(
-                sheets[actor_id],
-                amount=int(damage_roll["total"]),
-                damage_type=str(effect["damage_type"]),
-                source=str(effect.get("weapon_id") or "source-ongoing-damage"),
-                ruleset=str(encounter.get("ruleset") or "2014"),
-                death_saves=combatant_zero_hp_buffered(combatant),
-            )
-            sheets[actor_id] = damaged["sheet"]
-            record_source_trait_damage(
-                encounter,
-                target_id=actor_id,
-                damage=damaged,
-            )
-            add_concentration_window(
-                encounter,
-                actor_id,
-                damaged.get("concentration"),
-                next_revision=next_revision,
-            )
-            sync_combatant_conditions(encounter, actor_id, sheets[actor_id])
-            reconcile_readied_spells(encounter, actor_id, sheets[actor_id])
-            reconcile_source_attachments(
+        settlements.extend(
+            settle_source_ongoing_damage(
                 encounter,
                 actor_id=actor_id,
-                sheet=sheets[actor_id],
+                sheets=sheets,
+                trigger_timing="turn_start",
+                next_revision=next_revision,
             )
-            settlement = {
-                "kind": "source_ongoing_damage",
-                "effect_id": str(effect.get("id") or ""),
-                "source_actor_id": str(effect.get("source_actor_id") or ""),
-                "target_id": actor_id,
-                "source_excerpt": str(effect.get("source_excerpt") or ""),
-                "roll": damage_roll,
-                "result": {
-                    key: value for key, value in damaged.items() if key != "sheet"
-                },
-            }
-            settlements.append(settlement)
-            encounter["log"] = [
-                *list(encounter.get("log") or []),
-                settlement,
-            ][-100:]
+        )
 
         for effect in encounter.get("ongoing_effects", []):
             if (
@@ -5188,6 +5414,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 zero_hp_recovery=bool(target_combatant.get("zero_hp_recovery", False)),
             )
             sheets[target_id] = drained["sheet"]
+            sync_combatant_conditions(
+                encounter,
+                target_id,
+                sheets[target_id],
+            )
             effect["drained_hit_points"] = int(effect.get("drained_hit_points", 0) or 0) + int(
                 drained["hit_point_loss"]
             )
@@ -5639,7 +5870,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             return float(position[0]), float(position[1])
         return None
 
-    def combat_distance(left: Any, right: Any) -> int | None:
+    def combat_distance(
+        left: Any,
+        right: Any,
+        *,
+        cell_ft: int = 5,
+    ) -> int | None:
         left_coordinates = combat_coordinates(left)
         right_coordinates = combat_coordinates(right)
         if left_coordinates is None or right_coordinates is None:
@@ -5649,7 +5885,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 abs(left_coordinates[0] - right_coordinates[0]),
                 abs(left_coordinates[1] - right_coordinates[1]),
             )
-            * 5
+            * int(cell_ft)
         )
 
     def source_spell_resolution(sheet: dict[str, Any], spell_id: str) -> dict[str, Any]:
@@ -9989,6 +10225,34 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 helper["turn_flags"] = helper_flags
         sync_combatant_conditions(next_encounter, actor_id, updated_attacker["sheet"])
         sync_combatant_conditions(next_encounter, target_id, updated_target["sheet"])
+        target_combatant = require_encounter_combatant(
+            next_encounter,
+            target_id,
+            role="attack target",
+        )
+        if "dead" not in {
+            str(item).strip().casefold()
+            for item in target_combatant.get("conditions", [])
+        }:
+            standard_ongoing_effect = record_standard_weapon_ongoing_effect(
+                next_encounter,
+                attacker_id=actor_id,
+                target_id=target_id,
+                weapon_id=str(plan.get("weapon_id") or ""),
+                attack_result=result,
+            )
+            if standard_ongoing_effect is not None:
+                result.setdefault("structured_on_hit", {})[
+                    "ongoing_effect_instance"
+                ] = standard_ongoing_effect
+                result["rule_receipts"] = [
+                    *list(result.get("rule_receipts") or []),
+                    *core_receipts(
+                        rule_context,
+                        ["dnd5e.core.monster.ignition_ongoing_damage"],
+                        "attack.hit.standard_ignition",
+                    ),
+                ]
         reconcile_readied_spells(next_encounter, target_id, updated_target["sheet"])
         damage_result = result.get("damage")
         if isinstance(damage_result, dict):
@@ -11808,6 +12072,85 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         current = characters.get(actor_id)
         current_sheet = deepcopy(current.sheet)
         next_encounter = deepcopy(encounter)
+        require_no_blocking_pending(next_encounter)
+        turn_end_sheets = {actor_id: current_sheet}
+        source_turn_end = settle_source_ongoing_damage(
+            next_encounter,
+            actor_id=actor_id,
+            sheets=turn_end_sheets,
+            trigger_timing="turn_end",
+            next_revision=campaign.revision + 1,
+        )
+        current_sheet = turn_end_sheets[actor_id]
+        if any(
+            item.get("status", "pending") == "pending"
+            for item in next_encounter.get("pending", [])
+        ):
+            next_state = {
+                **dict(campaign.state or {}),
+                "combat": next_encounter,
+            }
+            interrupt_context = effective_rule_context(campaign_id)
+            interrupt_receipts = core_receipts(
+                interrupt_context,
+                [
+                    "dnd5e.core.monster.ignition_ongoing_damage",
+                    *(
+                        ["dnd5e.core.monster.death_burst"]
+                        if any(
+                            item.get("trigger") == "standard_death_burst"
+                            for item in next_encounter.get("pending", [])
+                        )
+                        else []
+                    ),
+                ],
+                "combat.turn_end.standard_trigger",
+            )
+
+            def turn_end_interrupt_response(
+                revisions: list[Any],
+            ) -> dict[str, Any]:
+                response = {
+                    "status": "pending_trigger",
+                    "combat": next_encounter,
+                    "source_turn_end": source_turn_end,
+                    "campaign_revision": campaign.revision + 1,
+                    "revisions": [asdict(item) for item in revisions],
+                    "rule_receipts": interrupt_receipts,
+                }
+                stream = active_random_stream()
+                if stream is not None and stream.draw_count > 0:
+                    response["random_stream_receipt"] = stream.receipt()
+                return response
+
+            revisions_result = StateMutationService(storage.database).replace(
+                campaign_id,
+                campaign_state=validate_party_state(next_state),
+                character_updates=[
+                    CharacterStateUpdate(
+                        character_id=actor_id,
+                        sheet=validate_character_sheet(current_sheet),
+                        notes=validate_character_notes(current.notes),
+                        expected_revision=current.revision,
+                    )
+                ],
+                expected_campaign_revision=campaign.revision,
+                operation="combat.turn.end.standard_trigger",
+                actor=principal_id,
+                branch_id=resolved_branch_id,
+                idempotency_key=idempotency_key,
+                idempotency_write=IdempotencyWrite(
+                    scope=scope,
+                    payload=payload,
+                    response=turn_end_interrupt_response,
+                ),
+                rule_receipts=interrupt_receipts,
+            )
+            return combat_response(
+                campaign_id,
+                principal_id,
+                turn_end_interrupt_response(list(revisions_result or [])),
+            )
         repeat_saves: list[dict[str, Any]] = []
         repeat_save_receipts: list[dict[str, Any]] = []
         for ongoing in next_encounter.get("ongoing_effects", []):
@@ -11981,6 +12324,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "turn.end.duration_clock",
         )
         rule_receipts.extend(repeat_save_receipts)
+        if source_turn_end:
+            rule_receipts.extend(
+                core_receipts(
+                    rule_context,
+                    ["dnd5e.core.monster.ignition_ongoing_damage"],
+                    "combat.turn_end.ongoing_damage",
+                )
+            )
         for combatant in next_state["combat"].get("combatants", []):
             target_id = str(combatant.get("actor_id"))
             target = characters.get(target_id)
@@ -12097,6 +12448,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "world_expired": list(dict.fromkeys(world_expired)),
                 "readied_spells_expired": sorted(str(item.get("id")) for item in expired_readied),
                 "source_turn_start": source_turn_start,
+                "source_turn_end": source_turn_end,
                 "repeat_saves": repeat_saves,
                 "rule_receipts": rule_receipts,
                 "ruleset_fingerprint": rule_context.fingerprint,
@@ -12783,6 +13135,33 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             result["ammunition"] = ammunition
         sync_combatant_conditions(next_encounter, actor_id, updated_attacker["sheet"])
         sync_combatant_conditions(next_encounter, target_id, updated_target["sheet"])
+        if "dead" not in {
+            str(item).strip().casefold()
+            for item in require_encounter_combatant(
+                next_encounter,
+                target_id,
+                role="opportunity-attack target",
+            ).get("conditions", [])
+        }:
+            standard_ongoing_effect = record_standard_weapon_ongoing_effect(
+                next_encounter,
+                attacker_id=actor_id,
+                target_id=target_id,
+                weapon_id=str(plan.get("weapon_id") or ""),
+                attack_result=result,
+            )
+            if standard_ongoing_effect is not None:
+                result.setdefault("structured_on_hit", {})[
+                    "ongoing_effect_instance"
+                ] = standard_ongoing_effect
+                result["rule_receipts"] = [
+                    *list(result.get("rule_receipts") or []),
+                    *core_receipts(
+                        rule_context,
+                        ["dnd5e.core.monster.ignition_ongoing_damage"],
+                        "attack.hit.standard_ignition",
+                    ),
+                ]
         reconcile_readied_spells(next_encounter, target_id, updated_target["sheet"])
         damage_result = result.get("damage")
         if isinstance(damage_result, dict):
@@ -13059,6 +13438,33 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             reveal_attacker_to_target(next_encounter, attacker_id, actor_id)
         sync_combatant_conditions(next_encounter, attacker_id, updated_attacker["sheet"])
         sync_combatant_conditions(next_encounter, actor_id, updated_target["sheet"])
+        if "dead" not in {
+            str(item).strip().casefold()
+            for item in require_encounter_combatant(
+                next_encounter,
+                actor_id,
+                role="defended attack target",
+            ).get("conditions", [])
+        }:
+            standard_ongoing_effect = record_standard_weapon_ongoing_effect(
+                next_encounter,
+                attacker_id=attacker_id,
+                target_id=actor_id,
+                weapon_id=str(plan.get("weapon_id") or ""),
+                attack_result=result,
+            )
+            if standard_ongoing_effect is not None:
+                result.setdefault("structured_on_hit", {})[
+                    "ongoing_effect_instance"
+                ] = standard_ongoing_effect
+                result["rule_receipts"] = [
+                    *list(result.get("rule_receipts") or []),
+                    *core_receipts(
+                        rule_context,
+                        ["dnd5e.core.monster.ignition_ongoing_damage"],
+                        "attack.hit.standard_ignition",
+                    ),
+                ]
         reconcile_readied_spells(next_encounter, actor_id, updated_target["sheet"])
         damage_result = result.get("damage")
         if isinstance(damage_result, dict):
@@ -19733,6 +20139,302 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         return combat_response(campaign_id, principal_id, response)
 
+    def combat_standard_death_trigger_resolve(
+        campaign_id: str,
+        actor_id: str,
+        choice_id: str,
+        environment_ruling: dict[str, Any],
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
+        expected_revision: int | None = None,
+        branch_id: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Resolve one hard standard Death Burst and record only its scene facts."""
+
+        access.require_campaign(
+            campaign_id,
+            principal_id,
+            roles=CAMPAIGN_DM_ROLES,
+        )
+        require_write_contract(expected_revision, idempotency_key)
+        resolved_branch_id = require_current_branch(campaign_id, branch_id)
+        ruling = deepcopy(dict(environment_ruling or {}))
+        allowed_ruling_fields = {
+            "default_resolver",
+            "ruling_kind",
+            "decision",
+            "reason",
+            "ignited_objects",
+        }
+        if set(ruling) != allowed_ruling_fields:
+            raise CombatEngineError(
+                "Death Burst environment_ruling requires exactly "
+                "default_resolver, ruling_kind, decision, reason, and "
+                "ignited_objects"
+            )
+        ignited_objects = ruling.get("ignited_objects")
+        if not isinstance(ignited_objects, list) or len(ignited_objects) > 50:
+            raise CombatEngineError(
+                "Death Burst ignited_objects must be a bounded list"
+            )
+        normalized_objects: list[dict[str, str]] = []
+        seen_object_ids: set[str] = set()
+        for item in ignited_objects:
+            if not isinstance(item, dict) or set(item) != {"id", "description"}:
+                raise CombatEngineError(
+                    "each ignited object requires exactly id and description"
+                )
+            object_id = str(item.get("id") or "").strip()
+            description = " ".join(str(item.get("description") or "").split())
+            if (
+                not object_id
+                or object_id in seen_object_ids
+                or not description
+                or len(description) > 300
+            ):
+                raise CombatEngineError(
+                    "ignited object ids must be unique and descriptions bounded"
+                )
+            seen_object_ids.add(object_id)
+            normalized_objects.append(
+                {"id": object_id, "description": description}
+            )
+        decision = " ".join(str(ruling.get("decision") or "").split())
+        reason = " ".join(str(ruling.get("reason") or "").split())
+        if (
+            ruling.get("default_resolver") != "agent"
+            or ruling.get("ruling_kind") != "source_or_scene_fact"
+            or not decision
+            or len(decision) > 1_000
+            or not reason
+            or len(reason) > 500
+        ):
+            raise CombatEngineError(
+                "Death Burst environment_ruling must be a bounded Agent "
+                "source_or_scene_fact decision"
+            )
+        normalized_ruling = {
+            "default_resolver": "agent",
+            "ruling_kind": "source_or_scene_fact",
+            "decision": decision,
+            "reason": reason,
+            "ignited_objects": normalized_objects,
+            "committed": True,
+        }
+        request_payload = {
+            "actor_id": actor_id,
+            "choice_id": choice_id,
+            "environment_ruling": normalized_ruling,
+            "branch_id": resolved_branch_id,
+        }
+        scope = (
+            f"combat-standard-death-trigger:{campaign_id}:"
+            f"{resolved_branch_id}:{principal_id}"
+        )
+        replay = replay_idempotent(scope, idempotency_key, request_payload)
+        if replay is not None:
+            return combat_response(campaign_id, principal_id, replay)
+        campaign, encounter = active_encounter(campaign_id)
+        if campaign.revision != expected_revision:
+            raise ValueError(
+                "campaign revision conflict: "
+                f"expected {expected_revision}, found {campaign.revision}"
+            )
+        window = next(
+            (
+                item
+                for item in encounter.get("pending", [])
+                if str(item.get("id") or "") == choice_id
+            ),
+            None,
+        )
+        if (
+            not isinstance(window, dict)
+            or window.get("status", "pending") != "pending"
+            or window.get("kind") != "save"
+            or window.get("trigger") != "standard_death_burst"
+            or str(window.get("source_actor_id") or "") != actor_id
+            or str(window.get("actor_id") or "") != actor_id
+        ):
+            raise CombatEngineError(
+                "choice_id is not this actor's standard Death Burst window"
+            )
+        source_record = characters.get(actor_id)
+        recorded_trigger = standard_death_trigger_for_sheet(
+            source_record.sheet
+        )
+        if (
+            recorded_trigger is None
+            or recorded_trigger != dict(window.get("standard_trigger") or {})
+        ):
+            raise CombatEngineError(
+                "pending Death Burst no longer matches the standard actor card"
+            )
+        target_ids = [str(item) for item in window.get("target_ids", [])]
+        if (
+            any(not item for item in target_ids)
+            or len(target_ids) != len(set(target_ids))
+        ):
+            raise CombatEngineError("pending Death Burst targets are malformed")
+        target_combatants = {
+            target_id: require_encounter_combatant(
+                encounter,
+                target_id,
+                role="standard Death Burst target",
+            )
+            for target_id in target_ids
+        }
+        rule_context = effective_rule_context(
+            campaign_id,
+            branch_id=resolved_branch_id,
+            facts={
+                "source_actor_id": actor_id,
+                "actor_ids": target_ids,
+                "kind": "standard_death_burst",
+                "ability": str(recorded_trigger["save_ability"]),
+                "dc": int(recorded_trigger["save_dc"]),
+            },
+        )
+        if target_ids:
+            settled = resolve_save_damage_to_sheets(
+                [combat_actor_snapshot(target_id) for target_id in target_ids],
+                save_ability=str(recorded_trigger["save_ability"]),
+                save_dc=int(recorded_trigger["save_dc"]),
+                damage_expression=str(recorded_trigger["damage_formula"]),
+                damage_type=str(recorded_trigger["damage_type"]),
+                half_on_success=True,
+                source=f"standard-death-burst:{actor_id}",
+                death_saves_by_actor_id={
+                    target_id: combatant_zero_hp_buffered(combatant)
+                    for target_id, combatant in target_combatants.items()
+                },
+                ruleset=encounter_rules_edition(campaign_id, encounter),
+                rules=rule_context,
+            )
+            updated_sheets = {
+                target_id: validate_character_sheet(sheet)
+                for target_id, sheet in dict(settled["sheets"]).items()
+            }
+            result = {
+                **dict(settled["result"]),
+                "source_actor_id": actor_id,
+                "mechanic_id": str(recorded_trigger["mechanic_id"]),
+                "environment_ruling": normalized_ruling,
+            }
+        else:
+            updated_sheets = {}
+            result = {
+                "kind": "save_damage",
+                "damage_roll": None,
+                "targets": [],
+                "source_actor_id": actor_id,
+                "mechanic_id": str(recorded_trigger["mechanic_id"]),
+                "environment_ruling": normalized_ruling,
+            }
+        next_encounter = resolve_choice_window(
+            encounter,
+            choice_id=choice_id,
+            actor_id_value=actor_id,
+            selection={"id": "resolve"},
+        )
+        for target_result in result["targets"]:
+            target_id = str(target_result["target_id"])
+            updated_sheet = updated_sheets[target_id]
+            damage = dict(target_result.get("damage") or {})
+            if damage:
+                record_source_trait_damage(
+                    next_encounter,
+                    target_id=target_id,
+                    damage={**damage, "sheet": updated_sheet},
+                )
+                add_concentration_window(
+                    next_encounter,
+                    target_id,
+                    damage.get("concentration"),
+                    next_revision=campaign.revision + 1,
+                )
+            reconcile_source_attachments(
+                next_encounter,
+                actor_id=target_id,
+                sheet=updated_sheet,
+            )
+            sync_combatant_conditions(
+                next_encounter,
+                target_id,
+                updated_sheet,
+            )
+            reconcile_readied_spells(
+                next_encounter,
+                target_id,
+                updated_sheet,
+            )
+        next_encounter["log"] = [
+            *list(next_encounter.get("log") or []),
+            {
+                "type": "standard_death_burst_resolved",
+                "choice_id": choice_id,
+                "source_actor_id": actor_id,
+                "target_ids": target_ids,
+                "result": result,
+            },
+        ][-100:]
+        current_records = {
+            target_id: characters.get(target_id) for target_id in target_ids
+        }
+        response = commit_campaign_state(
+            campaign,
+            {**dict(campaign.state or {}), "combat": next_encounter},
+            operation="combat.standard_death_burst.resolve",
+            principal_id=principal_id,
+            branch_id=resolved_branch_id,
+            idempotency_key=idempotency_key,
+            scope=scope,
+            payload=request_payload,
+            response_fields={
+                "status": (
+                    "pending_chain"
+                    if any(
+                        item.get("trigger") == "standard_death_burst"
+                        for item in next_encounter.get("pending", [])
+                    )
+                    else "committed"
+                ),
+                "result": result,
+                "combat": next_encounter,
+            },
+            character_updates=[
+                CharacterStateUpdate(
+                    character_id=target_id,
+                    sheet=updated_sheets[target_id],
+                    notes=validate_character_notes(
+                        current_records[target_id].notes
+                    ),
+                    expected_revision=current_records[target_id].revision,
+                )
+                for target_id in target_ids
+                if updated_sheets[target_id]
+                != current_records[target_id].sheet
+            ],
+            rule_receipts=[
+                *core_receipts(
+                    rule_context,
+                    [
+                        "dnd5e.core.monster.death_burst",
+                        "dnd5e.core.mcp.save_damage_atomicity",
+                    ],
+                    "combat.standard_death_burst",
+                ),
+                *[
+                    receipt
+                    for target_result in result["targets"]
+                    for receipt in dict(
+                        target_result.get("save") or {}
+                    ).get("rule_receipts", [])
+                ],
+            ],
+        )
+        return combat_response(campaign_id, principal_id, response)
+
     @mcp.tool()
     def combat_choice_open(
         campaign_id: str,
@@ -19834,6 +20536,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if pending_choice and pending_choice.get("trigger") == "attack_hit_defense":
             raise CombatEngineError(
                 "attack-defense windows must use combat_choice(action=resolve_defense)"
+            )
+        if pending_choice and pending_choice.get("trigger") == "standard_death_burst":
+            raise CombatEngineError(
+                "standard Death Burst windows must use "
+                "combat_choice(action=resolve_death_trigger)"
             )
         next_encounter = resolve_choice_window(
             encounter,
@@ -34710,6 +35417,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "on_hit_ruling",
             "compile_solution",
             "execute_plan",
+            "resolve_death_trigger",
         ],
         payload: dict[str, Any],
         actor_id: str | None = None,
@@ -34719,7 +35427,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Open or resolve a validated choice window during active combat."""
-        if action in {"on_hit_ruling", "compile_solution", "execute_plan"}:
+        if action in {
+            "on_hit_ruling",
+            "compile_solution",
+            "execute_plan",
+            "resolve_death_trigger",
+        }:
             access.require_campaign(
                 campaign_id,
                 principal_id,
@@ -34731,7 +35444,24 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             PROFILE_COMBAT,
         )
         resolved_actor_id = str(required({"actor_id": actor_id}, "actor_id"))
-        if action == "compile_solution":
+        if action == "resolve_death_trigger":
+            data = strict_facade_payload(
+                payload,
+                action="combat_choice(resolve_death_trigger)",
+                allowed={"choice_id", "environment_ruling"},
+                required_names=("choice_id", "environment_ruling"),
+            )
+            result = combat_standard_death_trigger_resolve(
+                campaign_id,
+                resolved_actor_id,
+                str(required(data, "choice_id")),
+                required(data, "environment_ruling"),
+                principal_id,
+                expected_revision,
+                branch_id,
+                idempotency_key,
+            )
+        elif action == "compile_solution":
             data = strict_facade_payload(
                 payload,
                 action="combat_choice(compile_solution)",

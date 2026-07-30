@@ -194,6 +194,432 @@ def test_public_regeneration_recovers_then_fire_suppression_kills_at_turn_start(
     asyncio.run(exercise())
 
 
+def test_public_standard_death_burst_uses_server_saves_and_agent_scene_facts(
+    tmp_path: Path,
+) -> None:
+    death_burst = (
+        "When the magmin dies, it explodes in a burst of fire and magma. "
+        "Each creature within 10 ft. of it must make a DC 11 Dexterity saving "
+        "throw, taking 7 (2d6) fire damage on a failed save, or half as much "
+        "damage on a successful one. Flammable objects that aren't being worn "
+        "or carried in that area are ignited."
+    )
+
+    async def exercise() -> None:
+        server = create_server(_config(tmp_path))
+        campaign = await _call(
+            server,
+            "campaign_create",
+            {
+                "name": "Standard Death Burst",
+                "edition": "2014",
+                "idempotency_key": "campaign",
+            },
+        )
+        magmin = await _call(
+            server,
+            "character_create",
+            {
+                "campaign_id": campaign["id"],
+                "name": "Magmin",
+                "character_type": "monster",
+                "idempotency_key": "magmin",
+            },
+        )
+        hero = await _call(
+            server,
+            "character_create",
+            {
+                "campaign_id": campaign["id"],
+                "name": "Hero",
+                "character_type": "pc",
+                "idempotency_key": "hero",
+            },
+        )
+        magmin_sheet = default_character_sheet()
+        magmin_sheet["combat"]["hp"] = {"value": 9, "max": 9, "temp": 0}
+        magmin_sheet["content"]["features"] = [
+            {
+                "id": "dnd5e.core.monster.death-burst",
+                "name": "Death Burst",
+                "description": death_burst,
+                "activation": {
+                    "type": "passive",
+                    "cost": 0,
+                    "trigger": "when it dies",
+                },
+                "choices": {
+                    "source_trait": {
+                        "kind": "death_burst",
+                        "trigger": "death",
+                        "range_ft": 10,
+                        "target": "each_creature_in_range",
+                        "save_ability": "dexterity",
+                        "save_dc": 11,
+                        "damage_formula": "2d6",
+                        "average_damage": 7,
+                        "damage_type": "fire",
+                        "failed_save": "full",
+                        "successful_save": "half",
+                        "ignite_flammable_unworn_objects": True,
+                        "automatic": True,
+                        "source_excerpt": death_burst,
+                    }
+                },
+                "rule_refs": ["monster-manual-2014:p212"],
+            }
+        ]
+        hero_sheet = default_character_sheet()
+        hero_sheet["combat"]["hp"] = {"value": 30, "max": 30, "temp": 0}
+        for actor, sheet, key in (
+            (magmin, magmin_sheet, "magmin-sheet"),
+            (hero, hero_sheet, "hero-sheet"),
+        ):
+            await _call(
+                server,
+                "character_sheet_replace",
+                {
+                    "character_id": actor["id"],
+                    "sheet": sheet,
+                    "expected_revision": actor["revision"],
+                    "idempotency_key": key,
+                },
+            )
+        current = await _call(
+            server,
+            "campaign_get",
+            {"campaign_id": campaign["id"]},
+        )
+        started = await _raw(
+            server,
+            "combat_start",
+            {
+                "campaign_id": campaign["id"],
+                "participant_ids": [magmin["id"], hero["id"]],
+                "participant_config": [
+                    {
+                        "actor_id": magmin["id"],
+                        "initiative": 20,
+                        "position": {"x": 0, "y": 0},
+                        "death_saves": False,
+                    },
+                    {
+                        "actor_id": hero["id"],
+                        "initiative": 10,
+                        "position": {"x": 1, "y": 0},
+                        "death_saves": True,
+                    },
+                ],
+                "expected_revision": current["revision"],
+                "idempotency_key": "start",
+            },
+        )
+        killed = await _call(
+            server,
+            "combat_hp_change",
+            {
+                "campaign_id": campaign["id"],
+                "target_id": magmin["id"],
+                "action": "damage",
+                "payload": {
+                    "parts": [{"amount": 9, "damage_type": "cold"}],
+                },
+                "expected_revision": started["campaign_revision"],
+                "idempotency_key": "kill",
+            },
+        )
+        death_window = next(
+            item
+            for item in killed["combat"]["pending"]
+            if item.get("trigger") == "standard_death_burst"
+        )
+        assert death_window["target_ids"] == [hero["id"]]
+        assert death_window["standard_trigger"]["mechanic_id"] == (
+            "dnd5e.core.monster.death_burst"
+        )
+
+        resolved = await _call(
+            server,
+            "combat_choice",
+            {
+                "campaign_id": campaign["id"],
+                "action": "resolve_death_trigger",
+                "actor_id": magmin["id"],
+                "payload": {
+                    "choice_id": death_window["id"],
+                    "environment_ruling": {
+                        "default_resolver": "agent",
+                        "ruling_kind": "source_or_scene_fact",
+                        "decision": "The loose straw pile catches fire.",
+                        "reason": (
+                            "It is flammable, inside the recorded burst area, "
+                            "and neither worn nor carried."
+                        ),
+                        "ignited_objects": [
+                            {
+                                "id": "straw-pile",
+                                "description": "A loose straw pile beside the combatants.",
+                            }
+                        ],
+                    },
+                },
+                "expected_revision": killed["campaign_revision"],
+                "idempotency_key": "resolve-burst",
+            },
+        )
+        hero_after = await _call(
+            server,
+            "character_get",
+            {"character_id": hero["id"]},
+        )
+
+        assert resolved["result"]["mechanic_id"] == (
+            "dnd5e.core.monster.death_burst"
+        )
+        assert resolved["result"]["targets"][0]["target_id"] == hero["id"]
+        assert resolved["result"]["environment_ruling"]["committed"] is True
+        assert hero_after["sheet"]["combat"]["hp"]["value"] < 30
+        assert not any(
+            item.get("trigger") == "standard_death_burst"
+            for item in resolved["combat"]["pending"]
+        )
+
+    asyncio.run(exercise())
+
+
+def test_public_magmin_touch_ignites_once_ticks_at_turn_end_and_can_be_doused(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    original_attack_roll = server_module.roll_attack_action
+
+    def forced_hit(*, plan, rng=None):
+        result = original_attack_roll(plan=plan, rng=rng)
+        result.update(
+            natural=10,
+            total=max(int(plan["target_ac"]), 20),
+            armor_class=int(plan["target_ac"]),
+            hit=True,
+            critical=False,
+            fumble=False,
+        )
+        return result
+
+    monkeypatch.setattr(server_module, "roll_attack_action", forced_hit)
+    source_excerpt = (
+        "If the target is a creature or a flammable object, it ignites. "
+        "Until a creature takes an action to douse the fire, the creature "
+        "takes 3 (1d6) fire damage at the end of each of its turns."
+    )
+
+    async def exercise() -> None:
+        server = create_server(_config(tmp_path))
+        campaign = await _call(
+            server,
+            "campaign_create",
+            {
+                "name": "Standard Magmin ignition",
+                "edition": "2014",
+                "idempotency_key": "campaign",
+            },
+        )
+        magmin = await _call(
+            server,
+            "character_create",
+            {
+                "campaign_id": campaign["id"],
+                "name": "Magmin",
+                "character_type": "monster",
+                "idempotency_key": "magmin",
+            },
+        )
+        hero = await _call(
+            server,
+            "character_create",
+            {
+                "campaign_id": campaign["id"],
+                "name": "Hero",
+                "character_type": "pc",
+                "idempotency_key": "hero",
+            },
+        )
+        magmin_sheet = default_character_sheet()
+        magmin_sheet["combat"]["hp"] = {"value": 9, "max": 9, "temp": 0}
+        magmin_sheet["inventory"]["items"] = [
+            {
+                "id": "touch",
+                "name": "Touch",
+                "kind": "weapon",
+                "description": source_excerpt,
+                "equipped": True,
+                "equipped_slot": "main_hand",
+                "mechanics": {
+                    "attack_type": "melee",
+                    "attack_ability": "strength",
+                    "damage_formula": "2d6",
+                    "damage_type": "fire",
+                    "attack_bonus_override": 4,
+                    "damage_bonus_override": 0,
+                    "reach_ft": 5,
+                    "always_available": True,
+                    "on_hit_effect": "",
+                    "on_hit_resolution": {
+                        "kind": "ignition_ongoing_damage",
+                        "trigger": "weapon_hit",
+                        "creature_target_automatic": True,
+                        "flammable_object_requires_scene_fact": True,
+                        "damage_formula": "1d6",
+                        "average_damage": 3,
+                        "damage_type": "fire",
+                        "trigger_timing": "turn_end",
+                        "end_action": "use_object",
+                        "end_action_description": "douse the fire",
+                        "automatic": True,
+                        "source_excerpt": source_excerpt,
+                    },
+                },
+            }
+        ]
+        magmin_sheet["inventory"]["equipment_slots"]["main_hand"] = "touch"
+        hero_sheet = default_character_sheet()
+        hero_sheet["combat"]["hp"] = {"value": 50, "max": 50, "temp": 0}
+        for actor, sheet, key in (
+            (magmin, magmin_sheet, "magmin-sheet"),
+            (hero, hero_sheet, "hero-sheet"),
+        ):
+            await _call(
+                server,
+                "character_sheet_replace",
+                {
+                    "character_id": actor["id"],
+                    "sheet": sheet,
+                    "expected_revision": actor["revision"],
+                    "idempotency_key": key,
+                },
+            )
+        current = await _call(
+            server,
+            "campaign_get",
+            {"campaign_id": campaign["id"]},
+        )
+        started = await _raw(
+            server,
+            "combat_start",
+            {
+                "campaign_id": campaign["id"],
+                "participant_ids": [magmin["id"], hero["id"]],
+                "participant_config": [
+                    {
+                        "actor_id": magmin["id"],
+                        "initiative": 20,
+                        "position": {"x": 0, "y": 0},
+                    },
+                    {
+                        "actor_id": hero["id"],
+                        "initiative": 10,
+                        "position": {"x": 1, "y": 0},
+                        "death_saves": True,
+                    },
+                ],
+                "expected_revision": current["revision"],
+                "idempotency_key": "start",
+            },
+        )
+        attacked = await _raw(
+            server,
+            "combat_resolve_attack",
+            {
+                "campaign_id": campaign["id"],
+                "actor_id": magmin["id"],
+                "target_id": hero["id"],
+                "action": {"weapon_id": "touch", "attack_mode": "melee"},
+                "expected_revision": started["campaign_revision"],
+                "idempotency_key": "touch",
+            },
+        )
+        ignition = attacked["result"]["structured_on_hit"][
+            "ongoing_effect_instance"
+        ]
+        assert any(
+            item.get("mechanic_id")
+            == "dnd5e.core.monster.ignition_ongoing_damage"
+            for item in attacked["result"]["rule_receipts"]
+        )
+        assert ignition["mechanic_id"] == (
+            "dnd5e.core.monster.ignition_ongoing_damage"
+        )
+        assert len(
+            [
+                item
+                for item in attacked["combat"]["ongoing_effects"]
+                if item.get("active")
+                and item.get("mechanic_id")
+                == "dnd5e.core.monster.ignition_ongoing_damage"
+            ]
+        ) == 1
+        ended_magmin = await _raw(
+            server,
+            "combat_end_turn",
+            {
+                "campaign_id": campaign["id"],
+                "actor_id": magmin["id"],
+                "expected_revision": attacked["campaign_revision"],
+                "idempotency_key": "end-magmin",
+            },
+        )
+        hero_before_tick = await _call(
+            server,
+            "character_get",
+            {"character_id": hero["id"]},
+        )
+        ended_hero = await _raw(
+            server,
+            "combat_end_turn",
+            {
+                "campaign_id": campaign["id"],
+                "actor_id": hero["id"],
+                "expected_revision": ended_magmin["campaign_revision"],
+                "idempotency_key": "end-hero",
+            },
+        )
+        hero_after_tick = await _call(
+            server,
+            "character_get",
+            {"character_id": hero["id"]},
+        )
+        assert ended_hero["source_turn_end"][0]["trigger_timing"] == "turn_end"
+        assert hero_after_tick["sheet"]["combat"]["hp"]["value"] < (
+            hero_before_tick["sheet"]["combat"]["hp"]["value"]
+        )
+
+        doused = await _raw(
+            server,
+            "combat_common_action",
+            {
+                "campaign_id": campaign["id"],
+                "actor_id": magmin["id"],
+                "action": "use_object",
+                "target_id": hero["id"],
+                "payload": {
+                    "end_ongoing_effect_id": ignition["id"],
+                    "end_action_description": "douse the fire",
+                    "source_excerpt": source_excerpt,
+                },
+                "expected_revision": ended_hero["campaign_revision"],
+                "idempotency_key": "douse",
+            },
+        )
+        ended_effect = next(
+            item
+            for item in doused["combat"]["ongoing_effects"]
+            if item.get("id") == ignition["id"]
+        )
+        assert ended_effect["active"] is False
+        assert ended_effect["ended_reason"] == "source_end_action"
+
+    asyncio.run(exercise())
+
+
 def test_queued_source_regeneration_is_preserved_until_reinforcement_turn(
     tmp_path: Path,
 ) -> None:

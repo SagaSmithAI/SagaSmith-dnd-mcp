@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-TOOL_BUDGET_VERSION = "2026-07-standard-spell-actions-v10"
+TOOL_BUDGET_VERSION = "2026-07-standard-death-trigger-v11"
 
 # Captured before the conservative facade consolidation.  Keep this historical
 # baseline so a lower tool count cannot conceal a larger aggregate input schema.
@@ -25,8 +25,11 @@ TARGET_CORE_TOOL_COUNT = 12
 # and from paid combat settlement.
 # Version 10 adds the hard-standard sustain_spell action to the existing common
 # action facade; no public or core tool is added.
+# Version 11 adds the hard-standard resolve_death_trigger action to the existing
+# combat choice facade. The 24-byte schema increase preserves the same public
+# and core tool counts while keeping server saves and scene facts auditable.
 # The aggregate remains well below the captured 92-tool baseline.
-TARGET_INPUT_SCHEMA_BYTES = 48_937
+TARGET_INPUT_SCHEMA_BYTES = 48_961
 PROFILE_TOOL_LIMITS = {
     "lobby": 62,
     "play": 47,
