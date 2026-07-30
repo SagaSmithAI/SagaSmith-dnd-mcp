@@ -31,6 +31,7 @@ from scripts.regression_encounter import (
     _apply_party_loadouts,
     _apply_source_casualty_rolls,
     _apply_source_separations,
+    _area_spell_target_ids,
     _body_thief_sides,
     _body_thief_target_ids,
     _captured_hostile_ids,
@@ -4134,6 +4135,17 @@ def test_party_spell_tactics_choose_safe_hypnotic_pattern_cube() -> None:
             "max": {"x": 6, "y": 5},
         },
     }
+    assert _area_spell_target_ids(
+        choice[3],
+        {
+            "result": {
+                "targets": [
+                    {"target_id": "ogre-1"},
+                    {"target_id": "ogre-2"},
+                ]
+            }
+        },
+    ) == ["ogre-1", "ogre-2"]
 
 
 def test_party_spell_tactics_hydrate_legacy_lightning_bolt_line() -> None:

@@ -6952,6 +6952,31 @@ def _choose_agent_spell(
     return None
 
 
+def _area_spell_target_ids(
+    declaration: dict[str, Any],
+    cast: dict[str, Any],
+) -> list[str]:
+    """Read area targets from the declaration or authoritative cast result."""
+
+    declared = [
+        str(item.get("target_id") or "")
+        for item in declaration.get("target_contexts", [])
+        if isinstance(item, dict)
+    ]
+    if declared and all(declared):
+        return declared
+    settled = [
+        str(item.get("target_id") or "")
+        for item in dict(cast.get("result") or {}).get("targets", [])
+        if isinstance(item, dict)
+    ]
+    if settled and all(settled):
+        return settled
+    raise RuntimeError(
+        "committed area spell did not report its complete affected target set"
+    )
+
+
 def _distance(left: dict[str, Any], right: dict[str, Any]) -> int:
     return max(abs(int(left["x"]) - int(right["x"])), abs(int(left["y"]) - int(right["y"])))
 
@@ -11788,6 +11813,11 @@ async def _auto_run(
                 spell_result["agent_forced_target_consumption"] = (
                     forced_target_consumption
                 )
+            area_target_ids = (
+                _area_spell_target_ids(area_declaration, cast)
+                if area_declaration is not None
+                else []
+            )
             turns.append(
                 {
                     "sequence": sequence,
@@ -11798,10 +11828,7 @@ async def _auto_run(
                     "target_id": spell_target_id,
                     **(
                         {
-                            "target_ids": [
-                                str(item["target_id"])
-                                for item in area_declaration["target_contexts"]
-                            ],
+                            "target_ids": area_target_ids,
                             "area_declaration": deepcopy(area_declaration),
                         }
                         if area_declaration is not None
