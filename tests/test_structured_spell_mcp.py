@@ -14,6 +14,8 @@ from sagasmith_dnd.spells import CORE_SHIELD_MECHANIC_ID, CORE_SHIELD_SPELL_ID
 from sagasmith_dnd.standard_content import build_standard2014_content
 from sagasmith_dnd.standard_spell_ids import (
     CORE_BLADE_WARD_SPELL_ID,
+    CORE_FLY_MECHANIC_ID,
+    CORE_FLY_SPELL_ID,
     CORE_HYPNOTIC_PATTERN_MECHANIC_ID,
     CORE_HYPNOTIC_PATTERN_SPELL_ID,
     CORE_WITCH_BOLT_SPELL_ID,
@@ -135,6 +137,45 @@ def _hypnotic_pattern() -> dict:
             ),
         },
         "mechanic_refs": [CORE_HYPNOTIC_PATTERN_MECHANIC_ID],
+    }
+
+
+def _fly() -> dict:
+    return {
+        "id": CORE_FLY_SPELL_ID,
+        "name": "Fly",
+        "level": 3,
+        "grant": {
+            "source_type": "class",
+            "source_key": "wizard",
+            "method": "known",
+        },
+        "access": {"known": True, "prepared": True},
+        "definition": {
+            "casting_time": "1 action",
+            "range": {"kind": "touch"},
+            "duration": {
+                "kind": "timed",
+                "value": 10,
+                "unit": "minute",
+                "concentration": True,
+            },
+            "components": {
+                "verbal": True,
+                "somatic": True,
+                "material": True,
+                "material_description": "a wing feather from any bird",
+            },
+            "effect": (
+                "The target gains a flying speed of 60 feet for the duration."
+            ),
+        },
+        "mechanic_refs": [CORE_FLY_MECHANIC_ID],
+        "pack_id": "dnd5e.content.srd2014",
+        "pack_version": "1.16.0",
+        "rule_refs": [
+            "bundled:srd2014/07_Spells/Spells_Each/Fly.md"
+        ],
     }
 
 
@@ -587,6 +628,179 @@ def test_blade_ward_cast_uses_hard_standard_mechanic_without_agent_fill(
         assert effect["active"] is True
         assert effect["concentration"] is False
         assert effect["duration"] == {"period": "turn_end", "remaining": 2}
+
+    asyncio.run(exercise())
+
+
+def test_noncombat_fly_commits_willing_targets_and_reconciles_replacement(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        server = create_server(_config(tmp_path))
+        campaign = await _call(
+            server,
+            "campaign_create",
+            {
+                "name": "Fly outside combat",
+                "edition": "2014",
+                "idempotency_key": "fly-campaign",
+            },
+        )
+        caster_sheet = default_character_sheet()
+        caster_sheet["spellcasting"].update(
+            ability="intelligence",
+            spell_slots={
+                "3": {
+                    "label": "3rd",
+                    "value": 2,
+                    "max": 2,
+                    "recovers_on": "long_rest",
+                    "source_key": "wizard",
+                }
+            },
+        )
+        caster_sheet["content"]["spells"] = [_fly()]
+        caster = await _call(
+            server,
+            "character_create",
+            {
+                "campaign_id": campaign["id"],
+                "name": "Caster",
+                "sheet": caster_sheet,
+                "idempotency_key": "fly-caster",
+            },
+        )
+        target = await _call(
+            server,
+            "character_create",
+            {
+                "campaign_id": campaign["id"],
+                "name": "Target",
+                "sheet": default_character_sheet(),
+                "idempotency_key": "fly-target",
+            },
+        )
+        first_arguments = {
+            "character_id": caster["id"],
+            "action": "cast_spell",
+            "payload": {
+                "spell_id": CORE_FLY_SPELL_ID,
+                "cast_level": 3,
+                "target_character_ids": [target["id"]],
+                "willing_target_ids": [target["id"]],
+            },
+            "expected_revision": caster["revision"],
+            "idempotency_key": "fly-first",
+        }
+        first = await _call(
+            server,
+            "character_action",
+            first_arguments,
+        )
+        assert first["status"] == "committed"
+        assert first["result"]["automatic_effect"] == "fly"
+        assert first["result"]["target_ids"] == [target["id"]]
+        assert (
+            await _call(server, "character_action", first_arguments)
+            == first
+        )
+        target_flying = await _call(
+            server,
+            "character_get",
+            {"character_id": target["id"]},
+        )
+        assert target_flying["derived"]["speed"]["fly"] == 60
+
+        caster_after = await _call(
+            server,
+            "character_get",
+            {"character_id": caster["id"]},
+        )
+        second = await _call(
+            server,
+            "character_action",
+            {
+                "character_id": caster["id"],
+                "action": "cast_spell",
+                "payload": {
+                    "spell_id": CORE_FLY_SPELL_ID,
+                    "cast_level": 3,
+                    "target_character_ids": [caster["id"]],
+                    "willing_target_ids": [caster["id"]],
+                },
+                "expected_revision": caster_after["revision"],
+                "idempotency_key": "fly-second",
+            },
+        )
+        assert second["status"] == "committed"
+        target_grounded = await _call(
+            server,
+            "character_get",
+            {"character_id": target["id"]},
+        )
+        caster_flying = await _call(
+            server,
+            "character_get",
+            {"character_id": caster["id"]},
+        )
+        assert target_grounded["derived"]["speed"]["fly"] == 0
+        assert caster_flying["derived"]["speed"]["fly"] == 60
+        old_effect = next(
+            effect
+            for effect in target_grounded["sheet"]["effects"]
+            if effect["kind"] == "spell_fly"
+        )
+        assert old_effect["active"] is False
+        assert old_effect["ended_reason"] == "source_effect_ended"
+
+    asyncio.run(exercise())
+
+
+def test_combat_fly_uses_touch_range_and_encounter_dependency(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        server = create_server(_config(tmp_path))
+        caster = default_character_sheet()
+        caster["spellcasting"].update(
+            ability="intelligence",
+            spell_slots=_slot(3),
+        )
+        caster["content"]["spells"] = [_fly()]
+        campaign_id, revision, actors = await _campaign_with_combat(
+            server,
+            [("Caster", caster), ("Willing ally", default_character_sheet())],
+            positions=[(0, 0), (1, 0)],
+        )
+        cast = await _raw(
+            server,
+            "combat_cast_spell",
+            {
+                "campaign_id": campaign_id,
+                "actor_id": actors[0]["id"],
+                "spell_id": CORE_FLY_SPELL_ID,
+                "cast_level": 3,
+                "declaration": {
+                    "target_ids": [actors[1]["id"]],
+                    "willing_target_ids": [actors[1]["id"]],
+                },
+                "expected_revision": revision,
+                "idempotency_key": "combat-fly",
+            },
+        )
+
+        assert cast["status"] == "committed"
+        assert cast["result"]["kind"] == "fly"
+        assert cast["result"]["targets"][0]["flying_speed_ft"] == 60
+        assert cast["combat"]["dependent_effects"][0][
+            "mechanic_id"
+        ] == CORE_FLY_MECHANIC_ID
+        target = await _call(
+            server,
+            "character_get",
+            {"character_id": actors[1]["id"]},
+        )
+        assert target["derived"]["speed"]["fly"] == 60
 
     asyncio.run(exercise())
 

@@ -5927,6 +5927,8 @@ def test_source_authored_precombat_and_attack_tactics_are_structured() -> None:
                 "spell_id": "invisibility",
                 "cast_level": 2,
                 "source_excerpt": "Nezznar casts invisibility on himself.",
+                "target_actor_ids": ["nezznar"],
+                "willing_target_ids": ["nezznar"],
             }
         ],
         participant_ids=["nezznar", "spider-1"],
@@ -6091,6 +6093,8 @@ def test_source_authored_precombat_and_attack_tactics_are_structured() -> None:
     )
 
     assert precombat[0]["cast_level"] == 2
+    assert precombat[0]["target_actor_ids"] == ["nezznar"]
+    assert precombat[0]["willing_target_ids"] == ["nezznar"]
     assert openings["spider-1"]["weapon_id"] == "web"
     assert rulings[("spider-1", "web")]["escape_dc"] == 12
     assert rulings[("spider-1", "bite")]["id"] == "saving_throw_damage"

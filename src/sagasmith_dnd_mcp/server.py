@@ -315,6 +315,7 @@ from sagasmith_dnd.spells import (
     CORE_MAGIC_ITEM_LAST_CHARGE_MECHANIC_ID,
     CORE_MAGIC_ITEM_RECHARGE_MECHANIC_ID,
     SLOT_PAYMENT_ECONOMIES,
+    apply_core_fly_effects,
     available_shield_attack_defenses,
     available_shield_magic_missile_defenses,
     consume_magic_item_spell_cast,
@@ -322,11 +323,14 @@ from sagasmith_dnd.spells import (
     consume_shield_reaction,
     consume_spell_cast,
     end_concentration_effects,
+    fly_target_limit,
+    is_core_fly_spell,
     is_core_hypnotic_pattern_spell,
     is_core_magic_missile_spell,
     is_core_witch_bolt_spell,
     magic_item_spell_card,
     recharge_magic_item_charges,
+    reconcile_source_effect_dependencies,
     replace_prepared_spells,
     resolve_magic_item_last_charge,
     validate_magic_missile_allocations,
@@ -335,6 +339,8 @@ from sagasmith_dnd.spells import (
 from sagasmith_dnd.standard_content import build_standard2014_content
 from sagasmith_dnd.standard_spell_ids import (
     CORE_BLADE_WARD_MECHANIC_ID,
+    CORE_FLY_MECHANIC_ID,
+    CORE_FLY_SPELL_ID,
     CORE_HYPNOTIC_PATTERN_MECHANIC_ID,
     CORE_HYPNOTIC_PATTERN_SPELL_ID,
     CORE_WITCH_BOLT_MECHANIC_ID,
@@ -425,6 +431,7 @@ ENGINE_SETTLED_CARD_MECHANIC_IDS = frozenset(
         "dnd5e.core.item.healing_potion",
         "dnd5e.core.magic_ammunition.slaying",
         CORE_BLADE_WARD_MECHANIC_ID,
+        CORE_FLY_MECHANIC_ID,
         "dnd5e.core.spell.mage_armor",
         "dnd5e.core.spell.magic_missile",
         "dnd5e.core.spell.raise_dead",
@@ -15626,6 +15633,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             )
         )
         magic_missile = is_core_magic_missile_spell(spell_entry)
+        fly = is_core_fly_spell(spell_entry)
         hypnotic_pattern = is_core_hypnotic_pattern_spell(spell_entry)
         structured_resolution = (
             (
@@ -15659,6 +15667,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             if (
                 structured_resolution is not None
                 or magic_missile
+                or fly
                 or hypnotic_pattern
             ):
                 raise CombatEngineError(
@@ -15730,6 +15739,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if (
             structured_resolution is None
             and compiled_spell_plan is None
+            and not fly
             and not hypnotic_pattern
             and declaration
         ):
@@ -15770,6 +15780,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 or dict(spell_entry.get("definition") or {}).get("effect")
                 or ""
             ).strip()
+            and not fly
             and not source_card_has_executable_mechanic(
                 campaign_id,
                 spell_entry,
@@ -15793,7 +15804,94 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "campaign_revision": campaign.revision,
             }
         structured_target: dict[str, Any] | None = None
+        fly_target: dict[str, Any] | None = None
         hypnotic_pattern_target: dict[str, Any] | None = None
+        if fly:
+            if source_item_id is not None or spell_id != CORE_FLY_SPELL_ID:
+                raise CombatEngineError(
+                    "the Core Fly path requires its exact actor spell card"
+                )
+            if str(encounter.get("ruleset") or "") != "2014":
+                raise CombatEngineError(
+                    "the source-bound Fly mechanic is a 2014 rule"
+                )
+            declared = dict(declaration or {})
+            if set(declared) != {"target_ids", "willing_target_ids"}:
+                raise CombatEngineError(
+                    "Fly declaration requires target_ids and willing_target_ids"
+                )
+            if not isinstance(
+                declared.get("target_ids"), list
+            ) or not isinstance(declared.get("willing_target_ids"), list):
+                raise CombatEngineError(
+                    "Fly target_ids and willing_target_ids must be lists"
+                )
+            fly_target_ids = [
+                str(item).strip()
+                for item in list(declared.get("target_ids") or [])
+            ]
+            fly_willing_ids = [
+                str(item).strip()
+                for item in list(declared.get("willing_target_ids") or [])
+            ]
+            preview_cast_level = int(
+                cast_level
+                if cast_level is not None
+                else spell_entry.get("level", 0)
+                or 0
+            )
+            if (
+                not fly_target_ids
+                or any(not item for item in fly_target_ids)
+                or len(fly_target_ids) != len(set(fly_target_ids))
+                or set(fly_willing_ids) != set(fly_target_ids)
+                or len(fly_willing_ids) != len(set(fly_willing_ids))
+                or len(fly_target_ids) > fly_target_limit(preview_cast_level)
+            ):
+                raise CombatEngineError(
+                    "Fly requires unique willing targets within its cast-level limit"
+                )
+            combatants = {
+                str(item.get("actor_id") or ""): item
+                for item in encounter.get("combatants", [])
+            }
+            caster_combatant = combatants.get(actor_id)
+            if caster_combatant is None:
+                raise CombatEngineError("Fly caster is not in this encounter")
+            contexts: list[dict[str, Any]] = []
+            for target_id in fly_target_ids:
+                target_combatant = combatants.get(target_id)
+                if target_combatant is None:
+                    raise CombatEngineError(
+                        f"Fly target is not in this encounter: {target_id}"
+                    )
+                if "dead" in {
+                    str(item).casefold()
+                    for item in target_combatant.get("conditions", [])
+                }:
+                    raise CombatEngineError("Fly cannot target a dead creature")
+                distance = combat_distance(
+                    caster_combatant.get("position"),
+                    target_combatant.get("position"),
+                )
+                if distance is None or distance > 5:
+                    raise CombatEngineError(
+                        "every Fly target must be within touch range"
+                    )
+                access.require_actor(
+                    campaign_id,
+                    target_id,
+                    principal_id,
+                    control=True,
+                )
+                contexts.append(
+                    {"target_id": target_id, "distance_ft": distance}
+                )
+            fly_target = {
+                "target_ids": fly_target_ids,
+                "willing_target_ids": fly_willing_ids,
+                "contexts": contexts,
+            }
         if hypnotic_pattern:
             if source_item_id is not None:
                 raise CombatEngineError(
@@ -16028,6 +16126,134 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             source_item_id=source_item_id,
         )
         resolved_cast_level = int(applied.get("cast_level", cast_level or spell_level) or 0)
+        if fly:
+            assert fly_target is not None
+            concentration_effect = next(
+                (
+                    effect
+                    for effect in applied["sheet"].get("effects", [])
+                    if effect.get("active")
+                    and effect.get("concentration")
+                    and str(effect.get("source_spell_id") or "")
+                    == CORE_FLY_SPELL_ID
+                ),
+                None,
+            )
+            if concentration_effect is None:
+                raise CombatEngineError(
+                    "Fly did not create its required concentration effect"
+                )
+            fly_sheets = {
+                target_id: deepcopy(characters.get(target_id).sheet)
+                for target_id in fly_target["target_ids"]
+            }
+            fly_sheets[actor_id] = deepcopy(applied["sheet"])
+            applied_fly = apply_core_fly_effects(
+                fly_sheets,
+                caster_id=actor_id,
+                target_ids=fly_target["target_ids"],
+                willing_target_ids=fly_target["willing_target_ids"],
+                spell_id=spell_id,
+                cast_level=resolved_cast_level,
+                concentration_effect_id=str(concentration_effect["id"]),
+            )
+            final_sheets = applied_fly["sheets"]
+            dependent_effects = list(
+                next_encounter.get("dependent_effects") or []
+            )
+            dependencies: list[dict[str, Any]] = []
+            for target_id in applied_fly["target_ids"]:
+                dependency = {
+                    "id": f"effect-dependency-{uuid4().hex}",
+                    "mechanic_id": CORE_FLY_MECHANIC_ID,
+                    "dependency": "source_effect_active",
+                    "source_actor_id": actor_id,
+                    "source_effect_id": str(concentration_effect["id"]),
+                    "target_actor_id": target_id,
+                    "target_effect_id": applied_fly["effect_ids"][
+                        target_id
+                    ],
+                    "active": True,
+                }
+                dependent_effects.append(dependency)
+                dependencies.append(dependency)
+                sync_combatant_conditions(
+                    next_encounter,
+                    target_id,
+                    final_sheets[target_id],
+                )
+            next_encounter["dependent_effects"] = dependent_effects
+            result = {
+                "kind": "fly",
+                "spell_id": spell_id,
+                "cast_level": resolved_cast_level,
+                "target_limit": applied_fly["target_limit"],
+                "targets": [
+                    {
+                        **context,
+                        "effect_id": applied_fly["effect_ids"][
+                            context["target_id"]
+                        ],
+                        "flying_speed_ft": 60,
+                    }
+                    for context in fly_target["contexts"]
+                ],
+                "concentration_effect_id": str(concentration_effect["id"]),
+                "dependencies": dependencies,
+                "payment": deepcopy(applied.get("payment") or {}),
+            }
+            next_encounter["log"] = [
+                *list(next_encounter.get("log") or []),
+                {
+                    "type": "fly",
+                    "actor_id": actor_id,
+                    "result": deepcopy(result),
+                },
+            ][-100:]
+            next_state = {
+                **dict(campaign.state or {}),
+                "combat": next_encounter,
+            }
+            response = commit_campaign_state(
+                campaign,
+                next_state,
+                operation="combat.spell.fly",
+                principal_id=principal_id,
+                branch_id=resolved_branch_id,
+                idempotency_key=idempotency_key,
+                scope=scope,
+                payload=payload,
+                response_fields={
+                    "status": "committed",
+                    "result": result,
+                    "combat": next_encounter,
+                },
+                character_updates=[
+                    CharacterStateUpdate(
+                        character_id=target_actor_id,
+                        sheet=validate_character_sheet(sheet),
+                        notes=validate_character_notes(
+                            characters.get(target_actor_id).notes
+                        ),
+                        expected_revision=characters.get(
+                            target_actor_id
+                        ).revision,
+                    )
+                    for target_actor_id, sheet in final_sheets.items()
+                ],
+                rule_receipts=[
+                    *list(applied.get("rule_receipts") or []),
+                    *core_receipts(
+                        effective_rule_context(campaign_id),
+                        [
+                            CORE_FLY_MECHANIC_ID,
+                            "dnd5e.core.mcp.combat_spell_boundary",
+                        ],
+                        "combat.spell.fly",
+                    ),
+                ],
+            )
+            return combat_response(campaign_id, principal_id, response)
         if hypnotic_pattern:
             assert hypnotic_pattern_target is not None
             derived_caster = derive_character_sheet(applied["sheet"])
@@ -23739,6 +23965,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         signature_free_cast: bool = False,
         component_ruling: dict[str, Any] | None = None,
         source_item_id: str | None = None,
+        target_character_ids: list[str] | None = None,
+        willing_target_ids: list[str] | None = None,
         principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
         idempotency_key: str | None = None,
@@ -23760,6 +23988,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "signature_free_cast": signature_free_cast,
             "component_ruling": component_ruling or {},
             "source_item_id": source_item_id,
+            "target_character_ids": target_character_ids,
+            "willing_target_ids": willing_target_ids,
         }
         scope = f"character-cast:{current.campaign_id}:{branch_id}:{principal_id}"
         replay = replay_idempotent(scope, idempotency_key, payload)
@@ -23787,6 +24017,62 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 if item.get("id") == spell_id
             )
         )
+        fly = is_core_fly_spell(spell_entry)
+        normalized_fly_targets: list[str] = []
+        normalized_willing_targets: list[str] = []
+        if fly:
+            if str(current.sheet.get("edition") or "") != "2014":
+                raise CombatEngineError(
+                    "the source-bound Fly mechanic is a 2014 rule"
+                )
+            if spell_id != CORE_FLY_SPELL_ID:
+                raise CombatEngineError(
+                    "the Core Fly path requires its exact source-bound SRD spell id"
+                )
+            normalized_fly_targets = [
+                str(item).strip() for item in (target_character_ids or [])
+            ]
+            normalized_willing_targets = [
+                str(item).strip() for item in (willing_target_ids or [])
+            ]
+            resolved_fly_level = int(
+                cast_level
+                if cast_level is not None
+                else spell_entry.get("level", 0)
+                or 0
+            )
+            if (
+                not normalized_fly_targets
+                or any(not item for item in normalized_fly_targets)
+                or len(normalized_fly_targets)
+                != len(set(normalized_fly_targets))
+                or set(normalized_willing_targets)
+                != set(normalized_fly_targets)
+                or len(normalized_willing_targets)
+                != len(set(normalized_willing_targets))
+                or len(normalized_fly_targets)
+                > fly_target_limit(resolved_fly_level)
+            ):
+                raise CombatEngineError(
+                    "Fly requires unique willing targets within its cast-level limit"
+                )
+            for target_id in normalized_fly_targets:
+                target = characters.get(target_id)
+                if target.campaign_id != current.campaign_id:
+                    raise CombatEngineError(
+                        "every Fly target must belong to the caster's campaign"
+                    )
+                access.require_actor(
+                    current.campaign_id,
+                    target_id,
+                    principal_id,
+                    control=True,
+                )
+        elif target_character_ids is not None or willing_target_ids is not None:
+            raise CombatEngineError(
+                "target_character_ids and willing_target_ids are currently "
+                "reserved for the Core Fly path"
+            )
         compiled_spell_plan = None
         if (
             source_item_id is None
@@ -23804,6 +24090,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 or dict(spell_entry.get("definition") or {}).get("effect")
                 or ""
             ).strip()
+            and not fly
             and not source_card_has_executable_mechanic(
                 current.campaign_id,
                 spell_entry,
@@ -23931,6 +24218,62 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "character": character_view(current),
             }
         timed_sheets[current.id] = applied["sheet"]
+        if fly:
+            concentration_effect = next(
+                (
+                    effect
+                    for effect in applied["sheet"].get("effects", [])
+                    if effect.get("active")
+                    and effect.get("concentration")
+                    and str(effect.get("source_spell_id") or "")
+                    == CORE_FLY_SPELL_ID
+                ),
+                None,
+            )
+            if concentration_effect is None:
+                raise CombatEngineError(
+                    "Fly did not create its required concentration effect"
+                )
+            fly_result = apply_core_fly_effects(
+                timed_sheets,
+                caster_id=current.id,
+                target_ids=normalized_fly_targets,
+                willing_target_ids=normalized_willing_targets,
+                spell_id=spell_id,
+                cast_level=int(
+                    applied.get("cast_level", cast_level or 3) or 3
+                ),
+                concentration_effect_id=str(concentration_effect["id"]),
+            )
+            reconciled = reconcile_source_effect_dependencies(
+                fly_result["sheets"]
+            )
+            timed_sheets = reconciled["sheets"]
+            applied["sheet"] = timed_sheets[current.id]
+            applied["automatic_effect"] = "fly"
+            applied["effect_ids"] = fly_result["effect_ids"]
+            applied["target_ids"] = fly_result["target_ids"]
+            applied["target_limit"] = fly_result["target_limit"]
+            applied["concentration_effect_id"] = fly_result[
+                "concentration_effect_id"
+            ]
+            applied["ruling_required"] = [
+                item
+                for item in applied.get("ruling_required") or []
+                if item != "targets_and_effect"
+            ]
+            applied["ruling_requirements"] = [
+                item
+                for item in applied.get("ruling_requirements") or []
+                if item.get("kind") != "targets_and_effect"
+            ]
+            rule_receipts.extend(
+                core_receipts(
+                    rules,
+                    [CORE_FLY_MECHANIC_ID],
+                    "spell.fly",
+                )
+            )
         rule_receipts.extend(applied.get("rule_receipts") or [])
         updates = [
             CharacterStateUpdate(
@@ -35260,6 +35603,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 signature_free_cast=data.get("signature_free_cast", False),
                 component_ruling=data.get("component_ruling"),
                 source_item_id=data.get("source_item_id"),
+                target_character_ids=data.get("target_character_ids"),
+                willing_target_ids=data.get("willing_target_ids"),
                 principal_id=principal_id,
                 expected_revision=expected_revision,
                 idempotency_key=idempotency_key,

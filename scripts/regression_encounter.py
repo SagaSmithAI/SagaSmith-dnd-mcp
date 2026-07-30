@@ -2937,6 +2937,8 @@ def _source_precombat_casts(
         "cast_level",
         "source_excerpt",
         "component_ruling",
+        "target_actor_ids",
+        "willing_target_ids",
     }
     normalized: list[dict[str, Any]] = []
     seen: set[tuple[str, str]] = set()
@@ -2954,6 +2956,8 @@ def _source_precombat_casts(
         source_excerpt = str(raw.get("source_excerpt") or "").strip()
         cast_level = raw.get("cast_level")
         component_ruling = raw.get("component_ruling")
+        target_actor_ids = raw.get("target_actor_ids")
+        willing_target_ids = raw.get("willing_target_ids")
         identity = (actor_id, spell_id)
         if (
             actor_id not in participant_ids
@@ -2964,6 +2968,36 @@ def _source_precombat_casts(
             or cast_level < 0
             or cast_level > 9
             or (component_ruling is not None and not isinstance(component_ruling, dict))
+            or (
+                target_actor_ids is not None
+                and (
+                    not isinstance(target_actor_ids, list)
+                    or any(
+                        not isinstance(item, str)
+                        or not item.strip()
+                        or item.strip() not in participant_ids
+                        for item in target_actor_ids
+                    )
+                    or len(target_actor_ids)
+                    != len({item.strip() for item in target_actor_ids})
+                )
+            )
+            or (
+                willing_target_ids is not None
+                and (
+                    not isinstance(willing_target_ids, list)
+                    or any(
+                        not isinstance(item, str) or not item.strip()
+                        for item in willing_target_ids
+                    )
+                    or len(willing_target_ids)
+                    != len({item.strip() for item in willing_target_ids})
+                )
+            )
+            or (
+                {item.strip() for item in (target_actor_ids or [])}
+                != {item.strip() for item in (willing_target_ids or [])}
+            )
             or identity in seen
         ):
             raise ValueError(
@@ -2979,6 +3013,12 @@ def _source_precombat_casts(
                 "cast_level": cast_level,
                 "source_excerpt": source_excerpt,
                 "component_ruling": dict(component_ruling or {}),
+                "target_actor_ids": [
+                    item.strip() for item in (target_actor_ids or [])
+                ],
+                "willing_target_ids": [
+                    item.strip() for item in (willing_target_ids or [])
+                ],
             }
         )
     return normalized
@@ -6115,6 +6155,13 @@ async def _start(
         }
         if cast["component_ruling"]:
             cast_payload["component_ruling"] = cast["component_ruling"]
+        if cast["target_actor_ids"]:
+            cast_payload["target_character_ids"] = cast[
+                "target_actor_ids"
+            ]
+            cast_payload["willing_target_ids"] = cast[
+                "willing_target_ids"
+            ]
         settled = await client.domain(
             "character_action",
             {
