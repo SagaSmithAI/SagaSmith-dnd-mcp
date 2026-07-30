@@ -39,6 +39,7 @@ from scripts.regression_encounter import (
     _characters,
     _choose_agent_spell,
     _choose_destination,
+    _completed_agent_turn_combat_outcome,
     _completed_source_opening_weapon_actor_ids,
     _consume_agent_forced_target,
     _consume_agent_target_reaction,
@@ -797,6 +798,73 @@ def test_agent_turn_rulings_bind_source_cited_scene_procedure() -> None:
     assert ruling["agent_ruling"]["procedure_source_excerpt"] == procedure_excerpt
 
 
+def test_agent_turn_rulings_bind_source_cited_action_check_and_truce() -> None:
+    procedure_excerpt = (
+        "A character can use an action to try to persuade the king to stand down. "
+        "That character must succeed on a DC 18 Charisma (Persuasion) check to "
+        "calm down the king. If the character mentions Serissa by name, the check "
+        "is made with advantage."
+    )
+    source_ref = {
+        "module_id": "module-1",
+        "scene_id": "scene-1",
+        "chunk_id": "chunk-1",
+        "content_sha256": "a" * 64,
+    }
+
+    rulings = _agent_turn_rulings(
+        [
+            {
+                "actor_id": "bard",
+                "procedure_id": "calm-hostile-king",
+                "round": 1,
+                "source_ref": source_ref,
+                "procedure_source_excerpt": procedure_excerpt,
+                "encounter_source_excerpt": procedure_excerpt,
+                "decision": (
+                    "The bard names Serissa and asks the king to stand down."
+                ),
+                "ruling_reason": (
+                    "The exact scene procedure permits this action and grants "
+                    "advantage when Serissa is named."
+                ),
+                "check_ability": "persuasion",
+                "check_dc": 18,
+                "check_action": "influence",
+                "check_advantage": True,
+                "success_outcome": "The hostile king calms down.",
+                "failure_outcome": "The hostile king remains uncontrolled.",
+                "success_combat_outcome": {
+                    "status": "truce",
+                    "summary": "The party calmed the king by invoking Serissa.",
+                },
+            }
+        ],
+        participant_ids=["bard", "king"],
+        actors={
+            "bard": {"sheet": {"content": {}}},
+            "king": {"sheet": {"content": {}}},
+        },
+        scene_id="scene-1",
+        encounter_source_excerpt=procedure_excerpt,
+    )
+
+    ruling = rulings[("bard", 1)]
+    assert ruling["check"] == {
+        "ability": "persuasion",
+        "dc": 18,
+        "action": "influence",
+        "advantage": True,
+        "disadvantage": False,
+        "success_outcome": "The hostile king calms down.",
+        "failure_outcome": "The hostile king remains uncontrolled.",
+        "success_combat_outcome": {
+            "status": "truce",
+            "summary": "The party calmed the king by invoking Serissa.",
+        },
+    }
+
+
 def test_agent_turn_rulings_bind_unstructured_prepared_spell() -> None:
     spell_excerpt = (
         "You create a seismic disturbance at a point on the ground that you "
@@ -941,6 +1009,135 @@ def test_agent_turn_ruling_pays_action_rolls_save_and_persists_world_patch() -> 
     assert patch_value["application_id"] == "turn-ruling-1"
     assert patch_value["procedure_id"] == "scene-compulsion"
     assert patch_value["ends_if_source_incapacitated"] is True
+
+
+def test_agent_turn_ruling_settles_action_check_and_returns_combat_outcome() -> None:
+    class Client:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict]] = []
+
+        async def domain(self, tool_id: str, arguments: dict) -> dict:
+            self.calls.append((tool_id, arguments))
+            if tool_id == "combat_check":
+                return {
+                    "status": "committed",
+                    "result": {
+                        "kind": "check",
+                        "skill": "persuasion",
+                        "dc": 18,
+                        "success": True,
+                    },
+                }
+            if tool_id == "combat_map_patch":
+                return {"status": "committed", "world_patches": arguments["patches"]}
+            raise AssertionError(tool_id)
+
+    source_ref = {
+        "module_id": "module-1",
+        "scene_id": "scene-1",
+        "chunk_id": "chunk-1",
+        "content_sha256": "a" * 64,
+    }
+    ruling = {
+        "application_id": "turn-ruling-calm-king",
+        "actor_id": "bard",
+        "feature_id": "",
+        "activity_id": "",
+        "spell_id": "",
+        "procedure_id": "calm-hostile-king",
+        "round": 1,
+        "target_id": "",
+        "target_ids": [],
+        "check": {
+            "ability": "persuasion",
+            "dc": 18,
+            "action": "influence",
+            "advantage": True,
+            "disadvantage": False,
+            "success_outcome": "The hostile king calms down.",
+            "failure_outcome": "The hostile king remains uncontrolled.",
+            "success_combat_outcome": {
+                "status": "truce",
+                "summary": "The party calmed the king by invoking Serissa.",
+            },
+        },
+        "agent_ruling": {
+            "default_resolver": "agent",
+            "ruling_kind": "agent_dm_adjudication",
+            "decision": "The bard names Serissa and asks the king to stand down.",
+            "reason": (
+                "The exact scene procedure permits the action with advantage."
+            ),
+            "source_ref": source_ref,
+        },
+    }
+    client = Client()
+    with patch(
+        "scripts.regression_encounter.campaign_view",
+        new=AsyncMock(side_effect=[{"revision": 10}, {"revision": 11}]),
+    ):
+        result = asyncio.run(
+            _settle_agent_turn_ruling(
+                client,
+                SimpleNamespace(campaign_id="campaign-1", run_id="run-1"),
+                branch_id="branch-1",
+                ruling=ruling,
+                sequence=1,
+            )
+        )
+
+    assert [name for name, _arguments in client.calls] == [
+        "combat_check",
+        "combat_map_patch",
+    ]
+    check_arguments = client.calls[0][1]
+    assert check_arguments["kind"] == "check"
+    assert check_arguments["action"] == "influence"
+    assert check_arguments["ability"] == "persuasion"
+    assert check_arguments["rule_facts"] == {
+        "source_ref": source_ref,
+        "agent_ruling_id": "turn-ruling-calm-king",
+    }
+    assert result["check_success"] is True
+    assert result["outcome"] == "The hostile king calms down."
+    assert result["combat_outcome"] == {
+        "status": "truce",
+        "summary": "The party calmed the king by invoking Serissa.",
+    }
+    patch_value = client.calls[-1][1]["patches"][0]["value"]
+    assert patch_value["check_success"] is True
+    assert patch_value["combat_outcome"]["status"] == "truce"
+
+
+def test_completed_agent_turn_combat_outcome_requires_successful_server_check() -> None:
+    combat = {
+        "battle_map": {
+            "world_patches": [
+                {
+                    "key": "agent_turn_ruling:turn-ruling-calm-king",
+                    "value": {
+                        "check_success": True,
+                        "combat_outcome": {
+                            "status": "truce",
+                            "summary": "The party calmed the king.",
+                        },
+                    },
+                }
+            ]
+        }
+    }
+
+    assert _completed_agent_turn_combat_outcome(combat) == {
+        "status": "truce",
+        "summary": "The party calmed the king.",
+    }
+
+    combat["battle_map"]["world_patches"][0]["value"]["check_success"] = False
+    with pytest.raises(
+        RuntimeError,
+        match="not backed by a successful server check",
+    ):
+        _completed_agent_turn_combat_outcome(combat)
 
 
 def test_agent_turn_ruling_settles_area_save_damage_atomically() -> None:

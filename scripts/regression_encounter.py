@@ -739,8 +739,12 @@ def _arguments() -> argparse.Namespace:
             "source_ref, exact card or procedure source excerpt, exact "
             "encounter_source_excerpt, decision, and ruling_reason. Spells pay their "
             "structured use and concentration first; scene procedures pay a normal "
-            "improvised action. Optional target_id plus save_ability/save_dc settle "
-            "a server-rolled save; success_outcome/failure_outcome record its meaning. "
+            "improvised action. A scene procedure may instead provide check_ability, "
+            "check_dc, and check_action for one action-bound server-rolled check. "
+            "Optional target_id plus save_ability/save_dc settle a server-rolled save; "
+            "success_outcome/failure_outcome record either roll's meaning. "
+            "A successful procedure check may provide success_combat_outcome to end "
+            "the encounter with the Agent-selected, source-grounded result. "
             "A failed save may include forced_target_id to direct the target's next "
             "attack without inventing a creature-specific rule."
         ),
@@ -3585,8 +3589,14 @@ def _agent_turn_rulings(
         "save_dc",
         "save_advantage",
         "save_disadvantage",
+        "check_ability",
+        "check_dc",
+        "check_action",
+        "check_advantage",
+        "check_disadvantage",
         "success_outcome",
         "failure_outcome",
+        "success_combat_outcome",
         "forced_target_id",
         "ends_if_source_incapacitated",
         "damage_expression",
@@ -3630,8 +3640,30 @@ def _agent_turn_rulings(
         save_dc = int(raw.get("save_dc", 0) or 0)
         save_advantage = raw.get("save_advantage", False)
         save_disadvantage = raw.get("save_disadvantage", False)
+        check_ability = str(raw.get("check_ability") or "").strip().casefold()
+        check_dc = int(raw.get("check_dc", 0) or 0)
+        check_action = (
+            str(raw.get("check_action") or "").strip().casefold().replace("-", "_")
+        )
+        check_advantage = raw.get("check_advantage", False)
+        check_disadvantage = raw.get("check_disadvantage", False)
         success_outcome = " ".join(str(raw.get("success_outcome") or "").split())
         failure_outcome = " ".join(str(raw.get("failure_outcome") or "").split())
+        raw_success_combat_outcome = raw.get("success_combat_outcome")
+        success_combat_outcome = (
+            {
+                "status": str(
+                    dict(raw_success_combat_outcome).get("status") or ""
+                ).strip().casefold(),
+                "summary": " ".join(
+                    str(
+                        dict(raw_success_combat_outcome).get("summary") or ""
+                    ).split()
+                ),
+            }
+            if isinstance(raw_success_combat_outcome, dict)
+            else None
+        )
         forced_target_id = str(raw.get("forced_target_id") or "").strip()
         ends_if_source_incapacitated = raw.get(
             "ends_if_source_incapacitated", False
@@ -3644,6 +3676,7 @@ def _agent_turn_rulings(
         identity = (actor_id, round_number)
         save_target_ids = target_ids or ([target_id] if target_id else [])
         has_save = bool(save_target_ids or save_ability or save_dc)
+        has_check = bool(check_ability or check_dc or check_action)
         has_damage = bool(
             damage_expression
             or damage_type
@@ -3681,8 +3714,12 @@ def _agent_turn_rulings(
             or len(ruling_reason) < 10
             or not isinstance(save_advantage, bool)
             or not isinstance(save_disadvantage, bool)
+            or not isinstance(check_advantage, bool)
+            or not isinstance(check_disadvantage, bool)
             or not isinstance(ends_if_source_incapacitated, bool)
             or (save_advantage and save_disadvantage)
+            or (check_advantage and check_disadvantage)
+            or (has_save and has_check)
             or (raw_target_ids is not None and not isinstance(raw_target_ids, list))
             or (bool(target_id) and bool(target_ids))
             or any(
@@ -3701,7 +3738,47 @@ def _agent_turn_rulings(
                     or not failure_outcome
                 )
             )
-            or (not has_save and (success_outcome or failure_outcome or forced_target_id))
+            or (
+                has_check
+                and (
+                    not procedure_id
+                    or not check_ability
+                    or not 1 <= check_dc <= 40
+                    or check_action
+                    not in {
+                        "escape",
+                        "hide",
+                        "improvise",
+                        "influence",
+                        "search",
+                        "study",
+                        "utilize",
+                        "use_object",
+                    }
+                    or not success_outcome
+                    or not failure_outcome
+                    or bool(target_id)
+                    or bool(target_ids)
+                )
+            )
+            or (
+                not has_save
+                and not has_check
+                and (success_outcome or failure_outcome or forced_target_id)
+            )
+            or (
+                raw_success_combat_outcome is not None
+                and (
+                    not has_check
+                    or not isinstance(raw_success_combat_outcome, dict)
+                    or set(raw_success_combat_outcome) != {"status", "summary"}
+                    or success_combat_outcome is None
+                    or success_combat_outcome["status"]
+                    not in COMBAT_OUTCOME_STATUSES
+                    or not success_combat_outcome["summary"]
+                    or len(success_combat_outcome["summary"]) > 2000
+                )
+            )
             or (forced_target_id and forced_target_id not in participant_set)
             or (forced_target_id and forced_target_id == target_id)
             or (
@@ -3723,7 +3800,7 @@ def _agent_turn_rulings(
                 f"Agent turn ruling {index} requires one reviewed descriptive card "
                 "or source-cited scene procedure, a current-scene source_ref and "
                 "exact excerpts, concrete Agent reasoning, and a complete optional "
-                "server save contract"
+                "server check or save contract"
             )
         actor = actors.get(actor_id)
         content = dict(dict(actor or {}).get("sheet") or {}).get("content", {})
@@ -3825,6 +3902,29 @@ def _agent_turn_rulings(
                 "as a combat action; use its trigger-specific Agent ruling boundary"
             )
         ruling_source_excerpt = procedure_excerpt or actor_excerpt
+        if has_check:
+            printed_check = re.search(
+                rf"(?is)\bDC\s*{check_dc}\b[^.]*"
+                rf"\b{re.escape(check_ability)}\b[^.]*\bcheck\b",
+                ruling_source_excerpt,
+            )
+            if (
+                printed_check is None
+                or (
+                    check_advantage
+                    and re.search(r"(?i)\badvantage\b", ruling_source_excerpt)
+                    is None
+                )
+                or (
+                    check_disadvantage
+                    and re.search(r"(?i)\bdisadvantage\b", ruling_source_excerpt)
+                    is None
+                )
+            ):
+                raise ValueError(
+                    f"Agent turn ruling {index} check DC, ability or skill, and "
+                    "roll mode must match the source-cited procedure"
+                )
         if has_damage:
             ability_pattern = "|".join(
                 re.escape(item) for item in save_ability_labels[save_ability]
@@ -3872,6 +3972,12 @@ def _agent_turn_rulings(
                         "decision": decision,
                         "target_id": target_id,
                         "target_ids": target_ids,
+                        "check_ability": check_ability,
+                        "check_dc": check_dc,
+                        "check_action": check_action,
+                        "check_advantage": check_advantage,
+                        "check_disadvantage": check_disadvantage,
+                        "success_combat_outcome": success_combat_outcome,
                         "damage_expression": damage_expression,
                         "damage_type": damage_type,
                         "half_on_success": half_on_success,
@@ -3927,6 +4033,20 @@ def _agent_turn_rulings(
             "round": round_number,
             "target_id": target_id,
             "target_ids": target_ids,
+            "check": (
+                {
+                    "ability": check_ability,
+                    "dc": check_dc,
+                    "action": check_action,
+                    "advantage": check_advantage,
+                    "disadvantage": check_disadvantage,
+                    "success_outcome": success_outcome,
+                    "failure_outcome": failure_outcome,
+                    "success_combat_outcome": deepcopy(success_combat_outcome),
+                }
+                if has_check
+                else None
+            ),
             "save": (
                 {
                     "ability": save_ability,
@@ -8508,6 +8628,7 @@ async def _settle_agent_turn_ruling(
         for item in ruling.get("target_ids") or ([target_id] if target_id else [])
     ]
     save_contract = dict(ruling.get("save") or {})
+    check_contract = dict(ruling.get("check") or {})
     damage_contract = dict(save_contract.get("damage") or {})
     source_card_kind = (
         "activity"
@@ -8829,6 +8950,51 @@ async def _settle_agent_turn_ruling(
                 "reviewed innate spell did not pay its source-authored use, "
                 "settle concentration, and enter its Agent ruling boundary"
             )
+    elif check_contract:
+        action_result = await client.domain(
+            "combat_check",
+            {
+                "campaign_id": args.campaign_id,
+                "actor_id": actor_id,
+                "kind": "check",
+                "ability": str(check_contract["ability"]),
+                "action": str(check_contract["action"]),
+                "dc": int(check_contract["dc"]),
+                "advantage": bool(check_contract["advantage"]),
+                "disadvantage": bool(check_contract["disadvantage"]),
+                "rule_facts": {
+                    "source_ref": deepcopy(
+                        ruling["agent_ruling"]["source_ref"]
+                    ),
+                    "agent_ruling_id": str(ruling["application_id"]),
+                },
+                "branch_id": branch_id,
+                "expected_revision": campaign["revision"],
+                "idempotency_key": (
+                    "encounter-agent-turn-check-"
+                    + _agent_turn_transaction_token(
+                        args,
+                        branch_id=branch_id,
+                        application_id=str(ruling["application_id"]),
+                        parts=("check",),
+                    )
+                ),
+            },
+        )
+        check_value = dict(action_result.get("result") or {})
+        if (
+            action_result.get("status") != "committed"
+            or check_value.get("kind") != "check"
+            or str(check_value.get("skill") or check_value.get("ability") or "")
+            .strip()
+            .casefold()
+            != str(check_contract["ability"]).strip().casefold()
+            or int(check_value.get("dc", 0) or 0) != int(check_contract["dc"])
+        ):
+            raise RuntimeError(
+                "source-cited procedure check did not settle through the "
+                "action-bound server check"
+            )
     else:
         action_result = await pay_action(
             "combat_common_action",
@@ -8902,6 +9068,23 @@ async def _settle_agent_turn_ruling(
     damage_roll = None
     damage_results: list[dict[str, Any]] = []
     atomic_save_damage = None
+    check_result = action_result if check_contract else None
+    check_success = (
+        bool(dict(action_result.get("result") or {}).get("success"))
+        if check_contract
+        else None
+    )
+    combat_outcome = (
+        deepcopy(check_contract.get("success_combat_outcome"))
+        if check_contract and check_success
+        else None
+    )
+    if check_contract:
+        outcome = str(
+            check_contract["success_outcome"]
+            if check_success
+            else check_contract["failure_outcome"]
+        )
     if save_contract:
         if damage_contract:
             damage_roll = await recover_legacy_transaction(
@@ -9151,6 +9334,9 @@ async def _settle_agent_turn_ruling(
         "target_ids": target_ids,
         "agent_ruling": deepcopy(ruling["agent_ruling"]),
         "action_result": action_result,
+        "check_result": check_result,
+        "check_success": check_success,
+        "combat_outcome": combat_outcome,
         "save_result": save_result,
         "save_results": save_results,
         "save_success": save_success,
@@ -9180,6 +9366,7 @@ async def _settle_agent_turn_ruling(
                         if key
                         not in {
                             "action_result",
+                            "check_result",
                             "save_result",
                             "save_results",
                             "damage_roll",
@@ -9241,6 +9428,44 @@ def _pending_agent_forced_targets(combat: dict[str, Any]) -> dict[str, dict[str,
                 ),
             }
     return pending
+
+
+def _completed_agent_turn_combat_outcome(
+    combat: dict[str, Any],
+) -> dict[str, str] | None:
+    """Recover a successful procedure outcome after a driver interruption."""
+
+    outcomes: list[dict[str, str]] = []
+    for item in dict(combat.get("battle_map") or {}).get("world_patches", []):
+        if (
+            not isinstance(item, dict)
+            or not str(item.get("key") or "").startswith("agent_turn_ruling:")
+        ):
+            continue
+        value = dict(item.get("value") or {})
+        outcome = dict(value.get("combat_outcome") or {})
+        if not outcome:
+            continue
+        normalized = {
+            "status": str(outcome.get("status") or "").strip().casefold(),
+            "summary": " ".join(str(outcome.get("summary") or "").split()),
+        }
+        if (
+            value.get("check_success") is not True
+            or normalized["status"] not in COMBAT_OUTCOME_STATUSES
+            or not normalized["summary"]
+        ):
+            raise RuntimeError(
+                "persisted Agent procedure combat outcome is incomplete or "
+                "not backed by a successful server check"
+            )
+        outcomes.append(normalized)
+    distinct = {(item["status"], item["summary"]) for item in outcomes}
+    if len(distinct) > 1:
+        raise RuntimeError(
+            "encounter contains conflicting successful Agent procedure outcomes"
+        )
+    return outcomes[0] if outcomes else None
 
 
 async def _consume_agent_forced_target(
@@ -10093,6 +10318,18 @@ async def _auto_run(
             "combat_query",
             {"campaign_id": args.campaign_id, "view": "status"},
         )
+        recovered_agent_outcome = _completed_agent_turn_combat_outcome(combat)
+        if recovered_agent_outcome is not None:
+            outcome_status = recovered_agent_outcome["status"]
+            outcome_summary = recovered_agent_outcome["summary"]
+            turns.append(
+                {
+                    "sequence": sequence,
+                    "kind": "recovered_agent_turn_combat_outcome",
+                    "outcome": deepcopy(recovered_agent_outcome),
+                }
+            )
+            break
         actors = await _characters(
             client,
             args.campaign_id,
@@ -10620,6 +10857,14 @@ async def _auto_run(
                     "end_turn": ended_turn,
                 }
             )
+            if settled_ruling.get("combat_outcome"):
+                outcome_status = str(
+                    settled_ruling["combat_outcome"]["status"]
+                )
+                outcome_summary = str(
+                    settled_ruling["combat_outcome"]["summary"]
+                )
+                break
             continue
         passive_ally = passive_allies.get(actor_id)
         if passive_ally is not None and _hit_points(actor) > 0:
