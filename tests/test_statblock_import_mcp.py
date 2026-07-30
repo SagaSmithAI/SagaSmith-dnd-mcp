@@ -581,7 +581,10 @@ def test_rule_statblock_recovers_split_text_layout_without_images(tmp_path: Path
     import_root = tmp_path / "rules"
     import_root.mkdir()
     source_path = import_root / "split-guard.md"
-    source_path.write_text(SPLIT_GUARD_LAYOUT, encoding="utf-8")
+    source_path.write_text(
+        COMMONER + "\n\n" + SPLIT_GUARD_LAYOUT,
+        encoding="utf-8",
+    )
     config = McpConfig(
         home=tmp_path / "home",
         database_url=None,

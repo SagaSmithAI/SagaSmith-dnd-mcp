@@ -34236,20 +34236,23 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             if source_statblock_name and not 2 <= len(source_statblock_name) <= 200:
                 raise ValueError("payload.source_statblock_name must contain 2 to 200 characters")
             text_layout_recovery: dict[str, Any] | None = None
-            try:
+            recovered_candidate: dict[str, Any] | None = None
+            if source_statblock_name:
+                try:
+                    recovered_candidate = normalize_2014_statblock_candidate(
+                        source_statblock_name,
+                        selected_chunks,
+                    )
+                except StatblockImportError:
+                    recovered_candidate = None
+            if recovered_candidate is None:
                 parsed = parse_2014_statblock(
                     source_text,
                     source_key=f"rule-source:{source['source_key']}",
                     rule_refs=selected_chunk_ids,
                     name=actor_name or None,
                 )
-            except StatblockImportError:
-                if not source_statblock_name:
-                    raise
-                recovered_candidate = normalize_2014_statblock_candidate(
-                    source_statblock_name,
-                    selected_chunks,
-                )
+            else:
                 recovered_chunk_ids = list(recovered_candidate["source_chunk_ids"])
                 selected_chunks = [by_chunk_id[item] for item in recovered_chunk_ids]
                 selected_chunk_ids = recovered_chunk_ids
