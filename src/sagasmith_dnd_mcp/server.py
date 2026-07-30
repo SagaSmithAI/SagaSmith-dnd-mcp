@@ -140,9 +140,12 @@ from sagasmith_dnd.combat_engine import (
     pay_activity_activation,
     pay_attack_action,
     pay_multiattack_activity,
+    pay_witch_bolt_sustain_action,
     preflight_attack,
     preflight_spell_attack,
     queue_combatant,
+    reconcile_witch_bolt_concentration,
+    reconcile_witch_bolt_range,
     resolve_actor_check,
     resolve_actor_contest,
     resolve_attack_damage,
@@ -166,6 +169,7 @@ from sagasmith_dnd.combat_engine import (
     stabilize_sheet,
     stand_up,
     start_encounter,
+    start_witch_bolt_tether,
     timed_condition_sources,
     trigger_readied_action,
     trigger_readied_spell,
@@ -306,13 +310,22 @@ from sagasmith_dnd.spells import (
     consume_readied_spell,
     consume_shield_reaction,
     consume_spell_cast,
+    end_concentration_effects,
     is_core_magic_missile_spell,
+    is_core_witch_bolt_spell,
     magic_item_spell_card,
     recharge_magic_item_charges,
     replace_prepared_spells,
     resolve_magic_item_last_charge,
     validate_magic_missile_allocations,
     validate_spell_grant,
+)
+from sagasmith_dnd.standard_content import build_standard2014_content
+from sagasmith_dnd.standard_spell_ids import (
+    CORE_BLADE_WARD_MECHANIC_ID,
+    CORE_WITCH_BOLT_MECHANIC_ID,
+    STANDARD_2014_CONTENT_PACK_ID,
+    STANDARD_2014_CONTENT_PACK_VERSION,
 )
 from sagasmith_dnd.statblocks import (
     StatblockImportError,
@@ -397,11 +410,13 @@ ENGINE_SETTLED_CARD_MECHANIC_IDS = frozenset(
         "dnd5e.core.activity.turn_undead",
         "dnd5e.core.item.healing_potion",
         "dnd5e.core.magic_ammunition.slaying",
+        CORE_BLADE_WARD_MECHANIC_ID,
         "dnd5e.core.spell.mage_armor",
         "dnd5e.core.spell.magic_missile",
         "dnd5e.core.spell.raise_dead",
         "dnd5e.core.spell.shield",
         "dnd5e.core.spell.structured_resolution",
+        CORE_WITCH_BOLT_MECHANIC_ID,
     }
 )
 
@@ -1648,7 +1663,42 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if result.status == "validated":
             rule_packs.install(CORE_CONTENT_PACK_ID, CORE_CONTENT_PACK_VERSION)
 
+    def ensure_standard2014_content_pack() -> None:
+        """Install mechanics-only standard cards that are not part of the SRD."""
+
+        try:
+            existing = rule_packs.get_version(
+                STANDARD_2014_CONTENT_PACK_ID,
+                STANDARD_2014_CONTENT_PACK_VERSION,
+            )
+            if existing.status == "installed":
+                return
+        except LookupError:
+            pass
+        manifest, artifacts = build_standard2014_content()
+        manifest, native_errors = bind_native_mechanic_contract(
+            manifest,
+            artifacts,
+            [],
+        )
+        result = rule_packs.save_draft(
+            manifest=manifest,
+            artifacts=artifacts,
+            provenance={
+                "source": "built-in-standard2014-mechanics",
+                "structured": True,
+                "copyrighted_prose_embedded": False,
+            },
+            additional_errors=native_errors,
+        )
+        if result.status == "validated":
+            rule_packs.install(
+                STANDARD_2014_CONTENT_PACK_ID,
+                STANDARD_2014_CONTENT_PACK_VERSION,
+            )
+
     ensure_core_content_pack()
+    ensure_standard2014_content_pack()
 
     def checked_rule_facts(value: dict[str, Any] | None) -> dict[str, Any]:
         facts = dict(value or {})
@@ -3313,7 +3363,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     ) -> dict[str, Any]:
         """Route standard gaps to engine work and custom gaps to Agent compilation."""
 
-        if str(source_card.get("pack_id") or "") == CORE_CONTENT_PACK_ID:
+        if str(source_card.get("pack_id") or "") in {
+            CORE_CONTENT_PACK_ID,
+            STANDARD_2014_CONTENT_PACK_ID,
+        }:
             return {
                 "status": "engine_implementation_required",
                 "source_card_id": source_card_id,
@@ -4578,6 +4631,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 combatant["speed_multiplier"] = source_speed_multiplier(sheet)
                 if "turned" not in {str(item).casefold() for item in combatant["conditions"]}:
                     combatant.pop("turned", None)
+                reconcile_actor_witch_bolt_concentration(
+                    encounter,
+                    actor_id,
+                    sheet,
+                )
                 return
 
     def combatant_zero_hp_buffered(combatant: dict[str, Any]) -> bool:
@@ -5613,6 +5671,83 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         }:
             raise CombatEngineError("spell resolution is not bound to the Core executor")
         return resolution
+
+    def newly_ended_witch_bolt_tethers(
+        before: dict[str, Any],
+        after: dict[str, Any],
+        *,
+        source_actor_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Find exact tether transitions that require concentration cleanup."""
+
+        active_before = {
+            str(item.get("id") or "")
+            for item in before.get("ongoing_effects", [])
+            if (
+                isinstance(item, dict)
+                and item.get("active", True)
+                and item.get("mechanic_id") == CORE_WITCH_BOLT_MECHANIC_ID
+            )
+        }
+        return [
+            deepcopy(item)
+            for item in after.get("ongoing_effects", [])
+            if (
+                isinstance(item, dict)
+                and str(item.get("id") or "") in active_before
+                and not item.get("active", True)
+                and item.get("mechanic_id") == CORE_WITCH_BOLT_MECHANIC_ID
+                and (
+                    source_actor_id is None
+                    or str(item.get("source_actor_id") or "") == source_actor_id
+                )
+            )
+        ]
+
+    def end_tether_concentrations(
+        sheet: dict[str, Any],
+        tethers: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        effect_ids = [
+            str(item.get("concentration_effect_id") or "")
+            for item in tethers
+            if str(item.get("concentration_effect_id") or "")
+        ]
+        reason = next(
+            (
+                str(item.get("ended_reason") or "")
+                for item in tethers
+                if str(item.get("ended_reason") or "")
+            ),
+            "witch_bolt_ended",
+        )
+        return end_concentration_effects(
+            sheet,
+            effect_ids=effect_ids,
+            ended_reason=reason,
+        )
+
+    def reconcile_actor_witch_bolt_concentration(
+        encounter: dict[str, Any],
+        actor_id_value: str,
+        sheet: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        """Synchronize a caster tether with its exact character concentration."""
+
+        active_ids = {
+            str(effect.get("id") or "")
+            for effect in sheet.get("effects", [])
+            if effect.get("active") and effect.get("concentration")
+        }
+        reconciled = reconcile_witch_bolt_concentration(
+            encounter,
+            actor_id_value=actor_id_value,
+            active_concentration_effect_ids=active_ids,
+        )
+        if reconciled["ended"]:
+            encounter.clear()
+            encounter.update(reconciled["encounter"])
+        return list(reconciled["ended"])
 
     def validate_spell_creature_target(
         encounter: dict[str, Any],
@@ -9733,6 +9868,96 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             *list(result.get("rule_receipts") or []),
             *attack_payment_receipts,
         ]
+        witch_bolt_spell = None
+        if spell_resolution is not None:
+            witch_bolt_spell = next(
+                (
+                    item
+                    for item in attacker_record.sheet.get("content", {}).get(
+                        "spells", []
+                    )
+                    if str(item.get("id") or "")
+                    == str(spell_resolution.get("spell_id") or "")
+                    and is_core_witch_bolt_spell(item)
+                ),
+                None,
+            )
+        if witch_bolt_spell is not None:
+            concentration_effect = next(
+                (
+                    item
+                    for item in reversed(
+                        updated_attacker["sheet"].get("effects", [])
+                    )
+                    if (
+                        item.get("active")
+                        and item.get("concentration")
+                        and str(item.get("source_spell_id") or "")
+                        == str(spell_resolution["spell_id"])
+                    )
+                ),
+                None,
+            )
+            if concentration_effect is None:
+                raise CombatEngineError(
+                    "Witch Bolt attack has no exact active concentration effect"
+                )
+            if attack_roll.get("hit"):
+                tethered = start_witch_bolt_tether(
+                    next_encounter,
+                    caster_id=actor_id,
+                    target_id=target_id,
+                    spell_id=str(spell_resolution["spell_id"]),
+                    concentration_effect_id=str(concentration_effect["id"]),
+                )
+                next_encounter = tethered["encounter"]
+                result["witch_bolt"] = {
+                    "status": "tethered",
+                    "effect": tethered["effect"],
+                }
+            else:
+                ended = end_concentration_effects(
+                    updated_attacker["sheet"],
+                    effect_ids=[str(concentration_effect["id"])],
+                    ended_reason="witch_bolt_initial_attack_missed",
+                )
+                updated_attacker["sheet"] = ended["sheet"]
+                result["witch_bolt"] = {
+                    "status": "ended",
+                    "reason": "initial_attack_missed",
+                    "ended_concentration_effect_ids": ended[
+                        "ended_effect_ids"
+                    ],
+                }
+            result["rule_receipts"] = [
+                *list(result.get("rule_receipts") or []),
+                *core_receipts(
+                    rule_context,
+                    [CORE_WITCH_BOLT_MECHANIC_ID],
+                    "combat.spell.witch_bolt.initial_attack",
+                ),
+            ]
+        action_ended_tethers = newly_ended_witch_bolt_tethers(
+            encounter,
+            next_encounter,
+            source_actor_id=actor_id,
+        )
+        if action_ended_tethers:
+            ended = end_tether_concentrations(
+                updated_attacker["sheet"],
+                action_ended_tethers,
+            )
+            updated_attacker["sheet"] = ended["sheet"]
+            result["ended_witch_bolt_tethers"] = [
+                {
+                    "effect_id": str(item.get("id") or ""),
+                    "reason": str(item.get("ended_reason") or ""),
+                    "concentration_effect_id": str(
+                        item.get("concentration_effect_id") or ""
+                    ),
+                }
+                for item in action_ended_tethers
+            ]
         current = next(
             item for item in next_encounter["combatants"] if item.get("actor_id") == actor_id
         )
@@ -9837,7 +10062,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             custom_item_solution = bool(
                 isinstance(item_card, dict)
                 and str(item_card.get("pack_id") or "")
-                != CORE_CONTENT_PACK_ID
+                not in {CORE_CONTENT_PACK_ID, STANDARD_2014_CONTENT_PACK_ID}
                 and not source_card_has_executable_mechanic(
                     campaign_id,
                     item_card,
@@ -12996,6 +13221,45 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             movement_mode=movement_mode,
             crawl=crawl,
         )
+        range_reconciliation = reconcile_witch_bolt_range(next_encounter)
+        next_encounter = range_reconciliation["encounter"]
+        ended_tethers = newly_ended_witch_bolt_tethers(
+            encounter,
+            next_encounter,
+        )
+        concentration_updates: list[CharacterStateUpdate] = []
+        for caster_id in sorted(
+            {
+                str(item.get("source_actor_id") or "")
+                for item in ended_tethers
+                if str(item.get("source_actor_id") or "")
+            }
+        ):
+            caster = characters.get(caster_id)
+            caster_tethers = [
+                item
+                for item in ended_tethers
+                if str(item.get("source_actor_id") or "") == caster_id
+            ]
+            ended = end_tether_concentrations(
+                caster.sheet,
+                caster_tethers,
+            )
+            if ended["sheet"] == caster.sheet:
+                continue
+            sync_combatant_conditions(
+                next_encounter,
+                caster_id,
+                ended["sheet"],
+            )
+            concentration_updates.append(
+                CharacterStateUpdate(
+                    character_id=caster_id,
+                    sheet=validate_character_sheet(ended["sheet"]),
+                    notes=validate_character_notes(caster.notes),
+                    expected_revision=caster.revision,
+                )
+            )
         movement_boundary_ids: list[str] = []
         if "prone" in moving_conditions:
             movement_boundary_ids.append("dnd5e.core.movement.prone_crawl_stand")
@@ -13021,6 +13285,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             for item in next_encounter.get("pending", [])
         ):
             movement_boundary_ids.append("dnd5e.core.reaction.opportunity_path")
+        if ended_tethers:
+            movement_boundary_ids.append(CORE_WITCH_BOLT_MECHANIC_ID)
         movement_receipts = core_receipts(
             effective_rule_context(campaign_id),
             movement_boundary_ids,
@@ -13039,7 +13305,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             response_fields={
                 "status": "committed",
                 "combat": next_encounter,
+                "ended_witch_bolt_tether_ids": [
+                    str(item.get("id") or "")
+                    for item in ended_tethers
+                ],
             },
+            character_updates=concentration_updates,
             rule_receipts=movement_receipts,
         )
         return combat_response(campaign_id, principal_id, response)
@@ -13123,6 +13394,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "search",
             "stabilize",
             "study",
+            "sustain_spell",
             "use_object",
             "utilize",
             "detach_attachment",
@@ -13163,6 +13435,225 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if target_id is not None:
             require_campaign_actor(campaign_id, target_id)
         normalized_action = str(action).strip().lower().replace("-", "_")
+        if normalized_action == "sustain_spell":
+            access.require_campaign(
+                campaign_id,
+                principal_id,
+                roles=CAMPAIGN_DM_ROLES,
+            )
+            sustain_payload = dict(payload or {})
+            if set(sustain_payload) != {
+                "effect_id",
+                "target_total_cover",
+                "agent_ruling",
+            }:
+                raise CombatEngineError(
+                    "sustain_spell requires exactly effect_id, "
+                    "target_total_cover, and agent_ruling"
+                )
+            total_cover = sustain_payload["target_total_cover"]
+            raw_ruling = sustain_payload["agent_ruling"]
+            if not isinstance(total_cover, bool) or not isinstance(
+                raw_ruling, dict
+            ):
+                raise CombatEngineError(
+                    "sustain_spell requires a boolean cover fact and Agent ruling"
+                )
+            if set(raw_ruling) != {
+                "default_resolver",
+                "ruling_kind",
+                "decision",
+                "reason",
+            }:
+                raise CombatEngineError(
+                    "Witch Bolt cover adjudication requires exactly "
+                    "default_resolver, ruling_kind, decision, and reason"
+                )
+            decision = " ".join(
+                str(raw_ruling.get("decision") or "").split()
+            )
+            reason = " ".join(str(raw_ruling.get("reason") or "").split())
+            if (
+                raw_ruling.get("default_resolver") != "agent"
+                or raw_ruling.get("ruling_kind") != "agent_dm_adjudication"
+                or not decision
+                or len(decision) > 1_000
+                or not reason
+                or len(reason) > 500
+            ):
+                raise CombatEngineError(
+                    "Witch Bolt cover must be a bounded Agent-as-DM scene fact"
+                )
+            caster_record = characters.get(actor_id)
+            reconcile_actor_witch_bolt_concentration(
+                encounter,
+                actor_id,
+                caster_record.sheet,
+            )
+            sustained = pay_witch_bolt_sustain_action(
+                encounter,
+                actor_id_value=actor_id,
+                effect_id=str(sustain_payload["effect_id"]),
+                target_total_cover=total_cover,
+            )
+            next_encounter = sustained["encounter"]
+            effect = sustained["effect"]
+            character_updates: list[CharacterStateUpdate] = []
+            result: dict[str, Any] = {
+                "kind": "witch_bolt_sustain",
+                "effect_id": str(effect.get("id") or ""),
+                "spell_id": str(effect.get("source_spell_id") or ""),
+                "target_id": str(effect.get("target_id") or ""),
+                "status": sustained["status"],
+                "payment": sustained["payment"],
+                "target_total_cover": total_cover,
+                "agent_ruling": {
+                    "default_resolver": "agent",
+                    "ruling_kind": "agent_dm_adjudication",
+                    "decision": decision,
+                    "reason": reason,
+                    "committed": True,
+                },
+            }
+            if sustained["status"] == "spell_ended":
+                ended_tethers = newly_ended_witch_bolt_tethers(
+                    encounter,
+                    next_encounter,
+                    source_actor_id=actor_id,
+                )
+                ended = end_tether_concentrations(
+                    caster_record.sheet,
+                    ended_tethers,
+                )
+                result["ended_reason"] = str(
+                    effect.get("ended_reason") or ""
+                )
+                result["ended_concentration_effect_ids"] = ended[
+                    "ended_effect_ids"
+                ]
+                if ended["sheet"] != caster_record.sheet:
+                    character_updates.append(
+                        CharacterStateUpdate(
+                            character_id=actor_id,
+                            sheet=validate_character_sheet(ended["sheet"]),
+                            notes=validate_character_notes(
+                                caster_record.notes
+                            ),
+                            expected_revision=caster_record.revision,
+                        )
+                    )
+            else:
+                concentration_effect_id = str(
+                    effect.get("concentration_effect_id") or ""
+                )
+                if not any(
+                    item.get("active")
+                    and item.get("concentration")
+                    and str(item.get("id") or "")
+                    == concentration_effect_id
+                    for item in caster_record.sheet.get("effects", [])
+                ):
+                    raise CombatEngineError(
+                        "Witch Bolt tether has no matching active concentration"
+                    )
+                target_actor_id = str(effect.get("target_id") or "")
+                target_record = require_campaign_actor(
+                    campaign_id,
+                    target_actor_id,
+                )
+                damage_roll = asdict(roll("1d12"))
+                target_combatant = require_encounter_combatant(
+                    next_encounter,
+                    target_actor_id,
+                    role="Witch Bolt target",
+                )
+                damaged = apply_damage_to_sheet(
+                    target_record.sheet,
+                    amount=int(damage_roll["total"]),
+                    damage_type="lightning",
+                    source=str(effect.get("source_spell_id") or ""),
+                    ruleset=str(
+                        next_encounter.get("ruleset") or "2014"
+                    ),
+                    death_saves=combatant_zero_hp_buffered(
+                        target_combatant
+                    ),
+                )
+                sync_combatant_conditions(
+                    next_encounter,
+                    target_actor_id,
+                    damaged["sheet"],
+                )
+                record_source_trait_damage(
+                    next_encounter,
+                    target_id=target_actor_id,
+                    damage=damaged,
+                )
+                reconcile_source_attachments(
+                    next_encounter,
+                    actor_id=target_actor_id,
+                    sheet=damaged["sheet"],
+                )
+                reconcile_readied_spells(
+                    next_encounter,
+                    target_actor_id,
+                    damaged["sheet"],
+                )
+                add_concentration_window(
+                    next_encounter,
+                    target_actor_id,
+                    damaged.get("concentration"),
+                    next_revision=campaign.revision + 1,
+                )
+                character_updates.append(
+                    CharacterStateUpdate(
+                        character_id=target_actor_id,
+                        sheet=validate_character_sheet(damaged["sheet"]),
+                        notes=validate_character_notes(
+                            target_record.notes
+                        ),
+                        expected_revision=target_record.revision,
+                    )
+                )
+                result.update(
+                    damage_roll=damage_roll,
+                    damage={
+                        key: item
+                        for key, item in damaged.items()
+                        if key != "sheet"
+                    },
+                )
+            next_state = {
+                **dict(campaign.state or {}),
+                "combat": next_encounter,
+            }
+            response = commit_campaign_state(
+                campaign,
+                next_state,
+                operation="combat.spell.witch_bolt.sustain",
+                principal_id=principal_id,
+                branch_id=resolved_branch_id,
+                idempotency_key=idempotency_key,
+                scope=scope,
+                payload=payload_value,
+                response_fields={
+                    "status": "committed",
+                    "action": action,
+                    "result": result,
+                    "combat": next_encounter,
+                },
+                character_updates=character_updates,
+                rule_receipts=core_receipts(
+                    effective_rule_context(campaign_id),
+                    [CORE_WITCH_BOLT_MECHANIC_ID],
+                    "combat.spell.witch_bolt.sustain",
+                ),
+            )
+            return combat_response(
+                campaign_id,
+                principal_id,
+                response,
+            )
         condition_resolution = None
         character_updates: list[CharacterStateUpdate] = []
         engine_payload = payload
@@ -13442,6 +13933,53 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "source_excerpt": str(effect["source_excerpt"]),
                 },
             ][-100:]
+        action_ended_tethers = newly_ended_witch_bolt_tethers(
+            encounter,
+            next_encounter,
+            source_actor_id=actor_id,
+        )
+        if action_ended_tethers:
+            existing_update = next(
+                (
+                    item
+                    for item in character_updates
+                    if item.character_id == actor_id
+                ),
+                None,
+            )
+            current_character = characters.get(actor_id)
+            base_sheet = (
+                existing_update.sheet
+                if existing_update is not None
+                else current_character.sheet
+            )
+            ended = end_tether_concentrations(
+                base_sheet,
+                action_ended_tethers,
+            )
+            sync_combatant_conditions(
+                next_encounter,
+                actor_id,
+                ended["sheet"],
+            )
+            if existing_update is not None:
+                character_updates[
+                    character_updates.index(existing_update)
+                ] = replace(
+                    existing_update,
+                    sheet=validate_character_sheet(ended["sheet"]),
+                )
+            elif ended["sheet"] != current_character.sheet:
+                character_updates.append(
+                    CharacterStateUpdate(
+                        character_id=actor_id,
+                        sheet=validate_character_sheet(ended["sheet"]),
+                        notes=validate_character_notes(
+                            current_character.notes
+                        ),
+                        expected_revision=current_character.revision,
+                    )
+                )
         boundary_ids: list[str] = []
         if normalized_action == "ready":
             boundary_ids.append("dnd5e.core.ready.action")
@@ -14133,6 +14671,16 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             },
             payment=payment,
         )
+        cast_ended_tethers = newly_ended_witch_bolt_tethers(
+            encounter,
+            next_encounter,
+            source_actor_id=actor_id,
+        )
+        if cast_ended_tethers:
+            applied["sheet"] = end_tether_concentrations(
+                applied["sheet"],
+                cast_ended_tethers,
+            )["sheet"]
         apply_cast_visibility_ruling(
             next_encounter,
             campaign_id,
@@ -15801,6 +16349,16 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "kind": "activity",
                 "activation_type": activation_type,
             }
+        activity_ended_tethers = newly_ended_witch_bolt_tethers(
+            encounter,
+            next_encounter,
+            source_actor_id=actor_id,
+        )
+        if activity_ended_tethers:
+            applied["sheet"] = end_tether_concentrations(
+                applied["sheet"],
+                activity_ended_tethers,
+            )["sheet"]
         next_encounter, core_effect = settle_core_activity_effect(
             next_encounter,
             actor_id_value=actor_id,
@@ -15824,6 +16382,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 },
                 rules=rule_context,
             )
+            before_forced_movement = deepcopy(next_encounter)
             for target_result in settled_random["targets"]:
                 movement = target_result.get("forced_movement")
                 if not isinstance(movement, dict):
@@ -15839,6 +16398,43 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 target_result["movement"] = {
                     key: value for key, value in moved.items() if key != "encounter"
                 }
+            movement_ended_by_caster: dict[str, list[dict[str, Any]]] = {}
+            for tether in newly_ended_witch_bolt_tethers(
+                before_forced_movement,
+                next_encounter,
+            ):
+                movement_ended_by_caster.setdefault(
+                    str(tether.get("source_actor_id") or ""),
+                    [],
+                ).append(tether)
+            forced_movement_updates: list[CharacterStateUpdate] = []
+            for caster_id, tethers in movement_ended_by_caster.items():
+                if caster_id == actor_id:
+                    applied["sheet"] = end_tether_concentrations(
+                        applied["sheet"],
+                        tethers,
+                    )["sheet"]
+                    continue
+                if caster_id in settled_random["sheets"]:
+                    settled_random["sheets"][caster_id] = end_tether_concentrations(
+                        settled_random["sheets"][caster_id],
+                        tethers,
+                    )["sheet"]
+                    continue
+                caster_record = characters.get(caster_id)
+                ended = end_tether_concentrations(
+                    caster_record.sheet,
+                    tethers,
+                )
+                if ended["sheet"] != caster_record.sheet:
+                    forced_movement_updates.append(
+                        CharacterStateUpdate(
+                            character_id=caster_id,
+                            sheet=validate_character_sheet(ended["sheet"]),
+                            notes=validate_character_notes(caster_record.notes),
+                            expected_revision=caster_record.revision,
+                        )
+                    )
             for target_id, target_record in random_target_records.items():
                 target_sheet = validate_character_sheet(settled_random["sheets"][target_id])
                 sync_combatant_conditions(next_encounter, target_id, target_sheet)
@@ -15865,6 +16461,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         expected_revision=target_record.revision,
                     )
                 )
+            additional_updates.extend(forced_movement_updates)
             core_effect = {
                 "kind": "random_save_effects",
                 "contract": str(random_save_spec.get("kind") or ""),
@@ -17173,6 +17770,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         current = characters.get(target_id)
         next_state = dict(campaign.state or {})
         if isinstance(encounter, dict):
+            reconcile_actor_witch_bolt_concentration(
+                encounter,
+                target_id,
+                updated_sheet,
+            )
             reconcile_readied_spells(encounter, target_id, updated_sheet)
             active_effect_ids = {
                 str(effect.get("id"))
@@ -17396,7 +17998,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "item",
         )
         if (
-            str(source_card.get("pack_id") or "") == CORE_CONTENT_PACK_ID
+            str(source_card.get("pack_id") or "")
+            in {CORE_CONTENT_PACK_ID, STANDARD_2014_CONTENT_PACK_ID}
             or source_card_has_executable_mechanic(
                 campaign_id,
                 source_card,
@@ -17638,6 +18241,28 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     actor_id,
                     normalized,
                 )
+
+            def reconcile_movement_tethers(
+                self,
+                before: dict[str, Any],
+            ) -> list[str]:
+                ended = newly_ended_witch_bolt_tethers(
+                    before,
+                    self.encounter,
+                )
+                by_caster: dict[str, list[dict[str, Any]]] = {}
+                for tether in ended:
+                    by_caster.setdefault(
+                        str(tether.get("source_actor_id") or ""),
+                        [],
+                    ).append(tether)
+                for caster_id, tethers in by_caster.items():
+                    ended_concentration = end_tether_concentrations(
+                        self.sheet(caster_id),
+                        tethers,
+                    )
+                    self.set_sheet(caster_id, ended_concentration["sheet"])
+                return [str(item.get("id") or "") for item in ended]
 
             def execute(
                 self,
@@ -18239,6 +18864,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         "value": int(resource["value"]),
                     }
                 if opcode == "movement.force":
+                    before_movement = deepcopy(self.encounter)
                     moved = force_move_directly_away(
                         self.encounter,
                         source_actor_id=str(
@@ -18250,19 +18876,26 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         distance_ft=int(arguments["distance_ft"]),
                     )
                     self.encounter = moved["encounter"]
+                    ended_tether_ids = self.reconcile_movement_tethers(
+                        before_movement,
+                    )
                     return {
                         key: value
                         for key, value in moved.items()
                         if key != "encounter"
-                    }
+                    } | {"ended_witch_bolt_tether_ids": ended_tether_ids}
                 if opcode == "movement.move":
                     actor_id = str(arguments["actor_id"])
+                    before_movement = deepcopy(self.encounter)
                     self.encounter = spend_movement(
                         self.encounter,
                         actor_id,
                         int(arguments.get("distance_ft", 0) or 0),
                         destination=arguments.get("destination"),
                         path=arguments.get("path"),
+                    )
+                    ended_tether_ids = self.reconcile_movement_tethers(
+                        before_movement,
                     )
                     combatant = require_encounter_combatant(
                         self.encounter,
@@ -18275,6 +18908,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         "turn_budget": deepcopy(
                             combatant.get("turn_budget")
                         ),
+                        "ended_witch_bolt_tether_ids": ended_tether_ids,
                     }
                 if opcode in {"actor.link", "actor.unlink"}:
                     links = self.encounter.setdefault(
@@ -26858,6 +27492,18 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 core = None
             if core is not None:
                 values.extend((core.pack_id, core.version, dict(item)) for item in core.artifacts)
+            try:
+                standard = rule_packs.get_version(
+                    STANDARD_2014_CONTENT_PACK_ID,
+                    STANDARD_2014_CONTENT_PACK_VERSION,
+                )
+            except LookupError:
+                standard = None
+            if standard is not None:
+                values.extend(
+                    (standard.pack_id, standard.version, dict(item))
+                    for item in standard.artifacts
+                )
         for activation in rule_packs.activations(campaign_id, branch_id=branch_id):
             if not activation.enabled:
                 continue
@@ -33963,7 +34609,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if replay is not None:
             return facade_result(action, replay)
         if (
-            str(source_card.get("pack_id") or "") == CORE_CONTENT_PACK_ID
+            str(source_card.get("pack_id") or "")
+            in {CORE_CONTENT_PACK_ID, STANDARD_2014_CONTENT_PACK_ID}
             or source_card_has_executable_mechanic(
                 campaign_id,
                 source_card,

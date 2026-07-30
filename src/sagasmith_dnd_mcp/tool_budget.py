@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-TOOL_BUDGET_VERSION = "2026-07-content-solutions-v9"
+TOOL_BUDGET_VERSION = "2026-07-standard-spell-actions-v10"
 
 # Captured before the conservative facade consolidation.  Keep this historical
 # baseline so a lower tool count cannot conceal a larger aggregate input schema.
@@ -23,8 +23,10 @@ TARGET_CORE_TOOL_COUNT = 12
 # Version 9 deliberately adds one DM-only, cross-phase content_solution tool.
 # This keeps reusable recipe compilation separate from character replacement
 # and from paid combat settlement.
+# Version 10 adds the hard-standard sustain_spell action to the existing common
+# action facade; no public or core tool is added.
 # The aggregate remains well below the captured 92-tool baseline.
-TARGET_INPUT_SCHEMA_BYTES = 48_921
+TARGET_INPUT_SCHEMA_BYTES = 48_937
 PROFILE_TOOL_LIMITS = {
     "lobby": 62,
     "play": 47,

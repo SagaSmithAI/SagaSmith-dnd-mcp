@@ -77,6 +77,22 @@ def test_core_srd_content_catalog_is_structured_and_selectable(tmp_path: Path) -
             "wizard",
         ]
         assert fireball["selection_requirements"]["level"] == 3
+        standard_spells = await call(
+            server,
+            "content_catalog_list",
+            {
+                "campaign_id": campaign["id"],
+                "kind": "spell",
+                "query": "Witch Bolt",
+            },
+        )
+        witch_bolt = next(
+            item for item in standard_spells if item["name"] == "Witch Bolt"
+        )
+        assert witch_bolt["pack_id"] == "dnd5e.content.standard2014"
+        assert witch_bolt["rule_refs"] == [
+            "book:players-handbook-2014:p289"
+        ]
         sheet = default_character_sheet()
         sheet["progression"].update(
             {

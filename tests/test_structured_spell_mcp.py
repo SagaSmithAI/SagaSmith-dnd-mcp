@@ -11,6 +11,11 @@ from sagasmith_dnd.spell_resolution import (
     known_spell_resolution,
 )
 from sagasmith_dnd.spells import CORE_SHIELD_MECHANIC_ID, CORE_SHIELD_SPELL_ID
+from sagasmith_dnd.standard_content import build_standard2014_content
+from sagasmith_dnd.standard_spell_ids import (
+    CORE_BLADE_WARD_SPELL_ID,
+    CORE_WITCH_BOLT_SPELL_ID,
+)
 
 import sagasmith_dnd_mcp.server as server_module
 from sagasmith_dnd_mcp.config import McpConfig
@@ -87,6 +92,31 @@ def _shield() -> dict:
         },
         "mechanic_refs": [CORE_SHIELD_MECHANIC_ID],
     }
+
+
+def _standard_spell(spell_id: str) -> dict:
+    _manifest, artifacts = build_standard2014_content()
+    artifact = next(item for item in artifacts if item["id"] == spell_id)
+    card = dict(artifact["card"])
+    card.pop("classes", None)
+    card.update(
+        id=artifact["id"],
+        pack_id="dnd5e.content.standard2014",
+        pack_version="1.0.0",
+        rule_refs=list(artifact["rule_refs"]),
+        mechanic_refs=list(artifact["mechanic_refs"]),
+    )
+    card["access"] = {
+        **dict(card["access"]),
+        "known": True,
+        "prepared": True,
+    }
+    card["grant"] = {
+        "source_type": "class",
+        "source_key": "wizard",
+        "method": "known",
+    }
+    return card
 
 
 async def _campaign_with_combat(
@@ -301,6 +331,327 @@ def test_scorching_ray_cast_locks_then_settles_each_source_bound_attack(
         )
         caster_after = await _call(server, "character_get", {"character_id": actors[0]["id"]})
         assert caster_after["sheet"]["spellcasting"]["spell_slots"]["2"]["value"] == 0
+
+    asyncio.run(exercise())
+
+
+def test_witch_bolt_hard_runtime_tethers_sustains_and_breaks_on_range(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _deterministic_rolls(monkeypatch)
+
+    async def exercise() -> None:
+        server = create_server(_config(tmp_path))
+        caster = default_character_sheet()
+        caster["abilities"]["intelligence"]["score"] = 18
+        caster["combat"]["hp"] = {"value": 100, "max": 100, "temp": 0}
+        caster["spellcasting"].update(
+            ability="intelligence",
+            spell_slots=_slot(1),
+        )
+        witch_bolt = _standard_spell(CORE_WITCH_BOLT_SPELL_ID)
+        caster["content"]["spells"] = [witch_bolt]
+        target = default_character_sheet()
+        target["combat"]["hp"] = {"value": 50, "max": 50, "temp": 0}
+        target["combat"]["ac"] = {"base": 1, "override": 1}
+        campaign_id, revision, actors = await _campaign_with_combat(
+            server,
+            [("Wizard", caster), ("Target", target)],
+            positions=[(0, 0), (4, 0)],
+        )
+
+        cast = await _raw(
+            server,
+            "combat_cast_spell",
+            {
+                "campaign_id": campaign_id,
+                "actor_id": actors[0]["id"],
+                "spell_id": witch_bolt["id"],
+                "cast_level": 1,
+                "expected_revision": revision,
+                "idempotency_key": "witch-bolt-cast",
+            },
+        )
+        resolved = await _raw(
+            server,
+            "combat_resolve_attack",
+            {
+                "campaign_id": campaign_id,
+                "actor_id": actors[0]["id"],
+                "target_id": actors[1]["id"],
+                "action": {
+                    "spell_resolution_id": cast["result"]["resolution_id"]
+                },
+                "expected_revision": cast["campaign_revision"],
+                "idempotency_key": "witch-bolt-hit",
+            },
+        )
+
+        assert resolved["status"] == "committed"
+        tether = resolved["result"]["witch_bolt"]["effect"]
+        assert tether["active"] is True
+        assert tether["repeat_damage"] == "1d12"
+        caster_after_hit = await _call(
+            server,
+            "character_get",
+            {"character_id": actors[0]["id"]},
+        )
+        assert any(
+            item.get("active")
+            and item.get("concentration")
+            and item.get("id") == tether["concentration_effect_id"]
+            for item in caster_after_hit["sheet"]["effects"]
+        )
+
+        caster_end = await _raw(
+            server,
+            "combat_end_turn",
+            {
+                "campaign_id": campaign_id,
+                "actor_id": actors[0]["id"],
+                "expected_revision": resolved["campaign_revision"],
+                "idempotency_key": "witch-caster-end",
+            },
+        )
+        target_end = await _raw(
+            server,
+            "combat_end_turn",
+            {
+                "campaign_id": campaign_id,
+                "actor_id": actors[1]["id"],
+                "expected_revision": caster_end["campaign_revision"],
+                "idempotency_key": "witch-target-end",
+            },
+        )
+        target_before = await _call(
+            server,
+            "character_get",
+            {"character_id": actors[1]["id"]},
+        )
+        sustained = await _raw(
+            server,
+            "combat_common_action",
+            {
+                "campaign_id": campaign_id,
+                "actor_id": actors[0]["id"],
+                "action": "sustain_spell",
+                "payload": {
+                    "effect_id": tether["id"],
+                    "target_total_cover": False,
+                    "agent_ruling": {
+                        "default_resolver": "agent",
+                        "ruling_kind": "agent_dm_adjudication",
+                        "decision": "The target has no total cover.",
+                        "reason": "Both tokens remain in an unobstructed line on the combat map.",
+                    },
+                },
+                "expected_revision": target_end["campaign_revision"],
+                "idempotency_key": "witch-sustain",
+            },
+        )
+        assert sustained["status"] == "committed"
+        assert sustained["result"]["kind"] == "witch_bolt_sustain"
+        assert sustained["result"]["damage_roll"]["expression"] == "1d12"
+        target_after = await _call(
+            server,
+            "character_get",
+            {"character_id": actors[1]["id"]},
+        )
+        assert (
+            target_after["sheet"]["combat"]["hp"]["value"]
+            < target_before["sheet"]["combat"]["hp"]["value"]
+        )
+
+        next_turn = await _raw(
+            server,
+            "combat_end_turn",
+            {
+                "campaign_id": campaign_id,
+                "actor_id": actors[0]["id"],
+                "expected_revision": sustained["campaign_revision"],
+                "idempotency_key": "witch-caster-second-end",
+            },
+        )
+        moved = await _raw(
+            server,
+            "combat_move",
+            {
+                "campaign_id": campaign_id,
+                "actor_id": actors[1]["id"],
+                "distance": 15,
+                "destination": {"x": 7, "y": 0},
+                "expected_revision": next_turn["campaign_revision"],
+                "idempotency_key": "witch-target-out-of-range",
+            },
+        )
+        assert moved["ended_witch_bolt_tether_ids"] == [tether["id"]]
+        caster_after_move = await _call(
+            server,
+            "character_get",
+            {"character_id": actors[0]["id"]},
+        )
+        concentration = next(
+            item
+            for item in caster_after_move["sheet"]["effects"]
+            if item["id"] == tether["concentration_effect_id"]
+        )
+        assert concentration["active"] is False
+        assert concentration["ended_reason"] == "target_outside_spell_range"
+
+    asyncio.run(exercise())
+
+
+def test_blade_ward_cast_uses_hard_standard_mechanic_without_agent_fill(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        server = create_server(_config(tmp_path))
+        caster = default_character_sheet()
+        blade_ward = _standard_spell(CORE_BLADE_WARD_SPELL_ID)
+        caster["content"]["spells"] = [blade_ward]
+        target = default_character_sheet()
+        campaign_id, revision, actors = await _campaign_with_combat(
+            server,
+            [("Wizard", caster), ("Target", target)],
+        )
+
+        cast = await _raw(
+            server,
+            "combat_cast_spell",
+            {
+                "campaign_id": campaign_id,
+                "actor_id": actors[0]["id"],
+                "spell_id": blade_ward["id"],
+                "expected_revision": revision,
+                "idempotency_key": "blade-ward-cast",
+            },
+        )
+
+        assert cast["status"] == "committed"
+        assert cast["result"]["automatic_effect"] == "blade_ward"
+        assert "semantic_solution" not in cast["result"]
+        actor = await _call(
+            server,
+            "character_get",
+            {"character_id": actors[0]["id"]},
+        )
+        effect = next(
+            item
+            for item in actor["sheet"]["effects"]
+            if item["id"] == cast["result"]["effect_id"]
+        )
+        assert effect["active"] is True
+        assert effect["concentration"] is False
+        assert effect["duration"] == {"period": "turn_end", "remaining": 2}
+
+    asyncio.run(exercise())
+
+
+def test_witch_bolt_stale_tether_ends_without_spending_action(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _deterministic_rolls(monkeypatch)
+
+    async def exercise() -> None:
+        server = create_server(_config(tmp_path))
+        caster = default_character_sheet()
+        caster["abilities"]["intelligence"]["score"] = 18
+        caster["combat"]["hp"] = {"value": 100, "max": 100, "temp": 0}
+        caster["spellcasting"].update(
+            ability="intelligence",
+            spell_slots=_slot(1),
+        )
+        witch_bolt = _standard_spell(CORE_WITCH_BOLT_SPELL_ID)
+        caster["content"]["spells"] = [witch_bolt]
+        target = default_character_sheet()
+        target["combat"]["ac"] = {"base": 1, "override": 1}
+        campaign_id, revision, actors = await _campaign_with_combat(
+            server,
+            [("Wizard", caster), ("Target", target)],
+            positions=[(0, 0), (4, 0)],
+        )
+        cast = await _raw(
+            server,
+            "combat_cast_spell",
+            {
+                "campaign_id": campaign_id,
+                "actor_id": actors[0]["id"],
+                "spell_id": witch_bolt["id"],
+                "cast_level": 1,
+                "expected_revision": revision,
+                "idempotency_key": "stale-witch-cast",
+            },
+        )
+        resolved = await _raw(
+            server,
+            "combat_resolve_attack",
+            {
+                "campaign_id": campaign_id,
+                "actor_id": actors[0]["id"],
+                "target_id": actors[1]["id"],
+                "action": {
+                    "spell_resolution_id": cast["result"]["resolution_id"]
+                },
+                "expected_revision": cast["campaign_revision"],
+                "idempotency_key": "stale-witch-hit",
+            },
+        )
+        tether = resolved["result"]["witch_bolt"]["effect"]
+        damaged = await _raw(
+            server,
+            "combat_apply_damage",
+            {
+                "campaign_id": campaign_id,
+                "target_id": actors[0]["id"],
+                "parts": [{"amount": 60, "damage_type": "force"}],
+                "expected_revision": resolved["campaign_revision"],
+                "idempotency_key": "damage-witch-concentration",
+            },
+        )
+        concentration = next(
+            item
+            for item in damaged["combat"]["pending"]
+            if item["kind"] == "concentration"
+        )
+        checked = await _raw(
+            server,
+            "combat_concentration_check",
+            {
+                "campaign_id": campaign_id,
+                "target_id": actors[0]["id"],
+                "dc": concentration["dc"],
+                "effect_ids": concentration["effect_ids"],
+                "expected_revision": damaged["campaign_revision"],
+                "idempotency_key": "fail-witch-concentration",
+            },
+        )
+        assert checked["result"]["success"] is False
+        sustained = await _raw(
+            server,
+            "combat_common_action",
+            {
+                "campaign_id": campaign_id,
+                "actor_id": actors[0]["id"],
+                "action": "sustain_spell",
+                "payload": {
+                    "effect_id": tether["id"],
+                    "target_total_cover": False,
+                    "agent_ruling": {
+                        "default_resolver": "agent",
+                        "ruling_kind": "agent_dm_adjudication",
+                        "decision": "The target has no total cover.",
+                        "reason": "The stale tether is checked before any action payment.",
+                    },
+                },
+                "expected_revision": checked["campaign_revision"],
+                "idempotency_key": "stale-witch-sustain",
+            },
+        )
+
+        assert sustained["result"]["status"] == "spell_ended"
+        assert sustained["result"]["payment"] is None
+        assert sustained["result"]["ended_reason"] == "concentration_ended"
 
     asyncio.run(exercise())
 
