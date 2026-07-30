@@ -10385,6 +10385,39 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 helper_flags = dict(helper.get("turn_flags") or {})
                 helper_flags.pop("helping", None)
                 helper["turn_flags"] = helper_flags
+        reactive_damage = next(
+            (
+                damage
+                for damage in (
+                    dict(dict(result.get("heated_body") or {}).get("fire_damage") or {}),
+                    dict(
+                        dict(result.get("corrosive_form") or {}).get(
+                            "acid_damage"
+                        )
+                        or {}
+                    ),
+                )
+                if damage
+            ),
+            None,
+        )
+        if reactive_damage is not None:
+            record_source_trait_damage(
+                next_encounter,
+                target_id=actor_id,
+                damage=reactive_damage,
+            )
+            reconcile_source_attachments(
+                next_encounter,
+                actor_id=actor_id,
+                sheet=updated_attacker["sheet"],
+            )
+            add_concentration_window(
+                next_encounter,
+                actor_id,
+                reactive_damage.get("concentration"),
+                next_revision=campaign.revision + 1,
+            )
         sync_combatant_conditions(next_encounter, actor_id, updated_attacker["sheet"])
         sync_combatant_conditions(next_encounter, target_id, updated_target["sheet"])
         target_combatant = require_encounter_combatant(

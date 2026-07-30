@@ -620,6 +620,193 @@ def test_public_magmin_touch_ignites_once_ticks_at_turn_end_and_can_be_doused(
     asyncio.run(exercise())
 
 
+def test_public_heated_body_is_atomic_server_rolled_retaliation(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    original_attack_roll = server_module.roll_attack_action
+
+    def forced_hit(*, plan, rng=None):
+        result = original_attack_roll(plan=plan, rng=rng)
+        result.update(
+            natural=10,
+            total=max(int(plan["target_ac"]), 20),
+            armor_class=int(plan["target_ac"]),
+            hit=True,
+            critical=False,
+            fumble=False,
+        )
+        return result
+
+    monkeypatch.setattr(server_module, "roll_attack_action", forced_hit)
+    heated_body_excerpt = (
+        "A creature that touches the salamander or hits it with a melee attack "
+        "while within 5 feet of it takes 7 (2d6) fire damage."
+    )
+
+    async def exercise() -> None:
+        server = create_server(_config(tmp_path))
+        campaign = await _call(
+            server,
+            "campaign_create",
+            {
+                "name": "Standard Heated Body",
+                "edition": "2014",
+                "idempotency_key": "campaign",
+            },
+        )
+        hero = await _call(
+            server,
+            "character_create",
+            {
+                "campaign_id": campaign["id"],
+                "name": "Hero",
+                "character_type": "pc",
+                "idempotency_key": "hero",
+            },
+        )
+        salamander = await _call(
+            server,
+            "character_create",
+            {
+                "campaign_id": campaign["id"],
+                "name": "Salamander",
+                "character_type": "monster",
+                "idempotency_key": "salamander",
+            },
+        )
+        hero_sheet = default_character_sheet()
+        hero_sheet["combat"]["hp"] = {"value": 50, "max": 50, "temp": 0}
+        hero_sheet["inventory"]["items"] = [
+            {
+                "id": "longsword",
+                "name": "Longsword",
+                "kind": "weapon",
+                "equipped": True,
+                "equipped_slot": "main_hand",
+                "mechanics": {
+                    "attack_type": "melee",
+                    "attack_ability": "strength",
+                    "damage_formula": "1d8",
+                    "damage_type": "slashing",
+                    "reach_ft": 5,
+                    "proficient": True,
+                },
+            }
+        ]
+        hero_sheet["inventory"]["equipment_slots"]["main_hand"] = "longsword"
+        salamander_sheet = default_character_sheet()
+        salamander_sheet["combat"]["hp"] = {
+            "value": 90,
+            "max": 90,
+            "temp": 0,
+        }
+        salamander_sheet["combat"]["ac"] = {"base": 15, "override": None}
+        salamander_sheet["content"]["features"] = [
+            {
+                "id": "heated-body",
+                "name": "Heated Body",
+                "description": heated_body_excerpt,
+                "activation": {
+                    "type": "passive",
+                    "cost": 0,
+                    "trigger": "contact or a melee hit within range",
+                },
+                "choices": {
+                    "source_trait": {
+                        "kind": "heated_body",
+                        "trigger": "contact_or_melee_hit",
+                        "melee_range_ft": 5,
+                        "contact_damage_formula": "2d6",
+                        "average_damage": 7,
+                        "contact_damage_type": "fire",
+                        "automatic": True,
+                        "source_excerpt": heated_body_excerpt,
+                    }
+                },
+            }
+        ]
+        for actor, sheet, key in (
+            (hero, hero_sheet, "hero-sheet"),
+            (salamander, salamander_sheet, "salamander-sheet"),
+        ):
+            await _call(
+                server,
+                "character_sheet_replace",
+                {
+                    "character_id": actor["id"],
+                    "sheet": sheet,
+                    "expected_revision": actor["revision"],
+                    "idempotency_key": key,
+                },
+            )
+        current = await _call(
+            server,
+            "campaign_get",
+            {"campaign_id": campaign["id"]},
+        )
+        started = await _raw(
+            server,
+            "combat_start",
+            {
+                "campaign_id": campaign["id"],
+                "participant_ids": [hero["id"], salamander["id"]],
+                "participant_config": [
+                    {
+                        "actor_id": hero["id"],
+                        "initiative": 20,
+                        "position": {"x": 0, "y": 0},
+                        "disposition": "friendly",
+                        "death_saves": True,
+                    },
+                    {
+                        "actor_id": salamander["id"],
+                        "initiative": 10,
+                        "position": {"x": 1, "y": 0},
+                        "disposition": "hostile",
+                        "death_saves": False,
+                    },
+                ],
+                "expected_revision": current["revision"],
+                "idempotency_key": "start",
+            },
+        )
+        attacked = await _raw(
+            server,
+            "combat_resolve_attack",
+            {
+                "campaign_id": campaign["id"],
+                "actor_id": hero["id"],
+                "target_id": salamander["id"],
+                "action": {
+                    "weapon_id": "longsword",
+                    "attack_mode": "melee",
+                },
+                "expected_revision": started["campaign_revision"],
+                "idempotency_key": "attack",
+            },
+        )
+        hero_after = await _call(
+            server,
+            "character_get",
+            {"character_id": hero["id"]},
+        )
+
+        assert attacked["result"]["heated_body"]["fire_damage"][
+            "applied_amount"
+        ] > 0
+        assert hero_after["sheet"]["combat"]["hp"]["value"] < 50
+        assert any(
+            receipt.get("mechanic_id") == "dnd5e.core.monster.heated_body"
+            for receipt in attacked["result"]["rule_receipts"]
+        )
+        assert len(
+            attacked["result"]["heated_body"]["fire_damage"]["rolls"]
+        ) == 2
+
+    asyncio.run(exercise())
+
+
 def test_queued_source_regeneration_is_preserved_until_reinforcement_turn(
     tmp_path: Path,
 ) -> None:
