@@ -10,6 +10,7 @@ from scripts.regression_encounter import (
     GUIDING_BOLT_ID,
     GUIDING_BOLT_ON_HIT,
     HEALING_WORD_ID,
+    HYPNOTIC_PATTERN_ID,
     MAGIC_MISSILE_ID,
     EncounterRulingRequiredError,
     _agent_attack_contexts,
@@ -4015,6 +4016,81 @@ def test_area_spell_tactics_exclude_dead_combatants_from_target_contexts() -> No
     assert {
         item["target_id"] for item in choice[3]["target_contexts"]
     } == {"goblin-1", "goblin-2"}
+
+
+def test_party_spell_tactics_choose_safe_hypnotic_pattern_cube() -> None:
+    bard = _spell_actor(HYPNOTIC_PATTERN_ID, slots=0)
+    bard["sheet"]["spellcasting"].update(
+        {
+            "preparation": {},
+            "spell_slots": {"3": {"value": 1, "max": 3}},
+        }
+    )
+    bard["sheet"]["content"]["spells"][0].update(
+        {
+            "level": 3,
+            "access": {"known": True},
+            "definition": {"range": {"normal_ft": 120}},
+            # Historical campaign cards may predate the Core mechanic ref.
+            "resolution": None,
+            "mechanic_refs": [],
+        }
+    )
+    actors = {
+        "bard": bard,
+        "ally": _spell_actor(slots=0),
+        "ogre-1": _spell_actor(slots=0),
+        "ogre-2": _spell_actor(slots=0),
+        "giant": _spell_actor(slots=0),
+    }
+    positions = {
+        "bard": {"x": 0, "y": 0},
+        "ally": {"x": 0, "y": 1},
+        "ogre-1": {"x": 5, "y": 4},
+        "ogre-2": {"x": 6, "y": 5},
+        "giant": {"x": 11, "y": 11},
+    }
+    combat = {
+        "battle_map": {
+            "bounds": {"width_cells": 12, "height_cells": 12},
+            "grid": {"cell_ft": 5},
+        },
+        "combatants": [
+            {
+                "actor_id": actor_id,
+                "position": position,
+                "conditions": [],
+                "disposition": (
+                    "friendly" if actor_id in {"bard", "ally"} else "hostile"
+                ),
+            }
+            for actor_id, position in positions.items()
+        ],
+    }
+
+    choice = _choose_agent_spell(
+        "bard",
+        party_ids=["bard", "ally"],
+        actors=actors,
+        living_targets=["ogre-1", "ogre-2", "giant"],
+        spell_choices=[
+            {
+                "spell_id": HYPNOTIC_PATTERN_ID,
+                "target_policy": "maximize_opponents_without_allies",
+            }
+        ],
+        combat=combat,
+    )
+
+    assert choice is not None
+    assert choice[:3] == (HYPNOTIC_PATTERN_ID, "ogre-1", 3)
+    assert choice[3] == {
+        "origin": {"x": 1, "y": 0},
+        "cube": {
+            "min": {"x": 1, "y": 0},
+            "max": {"x": 6, "y": 5},
+        },
+    }
 
 
 def test_party_tactics_do_not_target_unobserved_hidden_combatants() -> None:

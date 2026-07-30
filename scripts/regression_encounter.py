@@ -46,6 +46,7 @@ GUIDING_BOLT_ON_HIT = (
     "The next attack against the target before the end of the caster's next turn has advantage."
 )
 HEALING_WORD_ID = "dnd5e.content.srd2014.spell.healing-word"
+HYPNOTIC_PATTERN_ID = "dnd5e.content.srd2014.spell.hypnotic-pattern"
 MAGIC_MISSILE_ID = "dnd5e.content.srd2014.spell.magic-missile"
 
 
@@ -6515,10 +6516,12 @@ def _area_spell_declaration(
 ) -> dict[str, Any] | None:
     """Choose a complete, observable area that hits multiple foes and no allies."""
 
+    spell_id = str(spell.get("id") or "")
     resolution = dict(spell.get("resolution") or {})
     targeting = dict(resolution.get("targeting") or {})
     area = dict(targeting.get("area") or {})
-    if (
+    hypnotic_pattern = spell_id == HYPNOTIC_PATTERN_ID
+    if not hypnotic_pattern and (
         resolution.get("kind") != "saving_throw"
         or targeting.get("mode") != "area"
         or not dict(resolution.get("save") or {}).get("damage")
@@ -6531,7 +6534,7 @@ def _area_spell_declaration(
         )
         or 0
     )
-    if radius_ft <= 0 or range_ft <= 0:
+    if (not hypnotic_pattern and radius_ft <= 0) or range_ft <= 0:
         return None
     combatants = {
         str(item.get("actor_id") or ""): dict(item)
@@ -6547,6 +6550,9 @@ def _area_spell_declaration(
     width = int(bounds.get("width_cells", 0) or 0)
     height = int(bounds.get("height_cells", 0) or 0)
     if width <= 0 or height <= 0:
+        return None
+    cell_ft = int(dict(battle_map.get("grid") or {}).get("cell_ft", 5) or 5)
+    if cell_ft <= 0:
         return None
     nondead_combatants = {
         target_id: item
@@ -6577,6 +6583,80 @@ def _area_spell_declaration(
         hostile_ids = set(party_ids)
         friendly_ids = set(nondead_combatants) - hostile_ids
     active_hostile_ids = set(living_targets)
+    if hypnotic_pattern:
+        if 30 % cell_ft:
+            return None
+        cube_cells = 30 // cell_ft
+        if width < cube_cells or height < cube_cells:
+            return None
+        best_cube: tuple[int, int, int, dict[str, Any]] | None = None
+        for minimum_y in range(height - cube_cells + 1):
+            for minimum_x in range(width - cube_cells + 1):
+                maximum_x = minimum_x + cube_cells - 1
+                maximum_y = minimum_y + cube_cells - 1
+                affected = {
+                    target_id
+                    for target_id, item in nondead_combatants.items()
+                    if isinstance(item.get("position"), dict)
+                    and minimum_x <= int(item["position"]["x"]) <= maximum_x
+                    and minimum_y <= int(item["position"]["y"]) <= maximum_y
+                }
+                if not affected or not affected <= observable_ids:
+                    continue
+                affected_hostiles = affected & hostile_ids
+                if (
+                    len(affected_hostiles & active_hostile_ids) < 2
+                    or affected & friendly_ids
+                ):
+                    continue
+                boundary = [
+                    {"x": x, "y": y}
+                    for y in range(minimum_y, maximum_y + 1)
+                    for x in range(minimum_x, maximum_x + 1)
+                    if x in {minimum_x, maximum_x}
+                    or y in {minimum_y, maximum_y}
+                ]
+                in_range = [
+                    position
+                    for position in boundary
+                    if max(
+                        abs(int(caster_position["x"]) - position["x"]),
+                        abs(int(caster_position["y"]) - position["y"]),
+                    )
+                    * cell_ft
+                    <= range_ft
+                ]
+                if not in_range:
+                    continue
+                origin = min(
+                    in_range,
+                    key=lambda position: (
+                        max(
+                            abs(int(caster_position["x"]) - position["x"]),
+                            abs(int(caster_position["y"]) - position["y"]),
+                        ),
+                        position["x"],
+                        position["y"],
+                    ),
+                )
+                declaration = {
+                    "origin": origin,
+                    "cube": {
+                        "min": {"x": minimum_x, "y": minimum_y},
+                        "max": {"x": maximum_x, "y": maximum_y},
+                    },
+                    "_target_ids": sorted(affected),
+                }
+                candidate = (
+                    len(affected_hostiles),
+                    -minimum_x,
+                    -minimum_y,
+                    declaration,
+                )
+                if best_cube is None or candidate[:3] > best_cube[:3]:
+                    best_cube = candidate
+        return deepcopy(best_cube[3]) if best_cube is not None else None
+
     best: tuple[int, int, int, dict[str, Any]] | None = None
     for y in range(height):
         for x in range(width):
@@ -6737,8 +6817,11 @@ def _choose_agent_spell(
             )
             if declaration is not None:
                 affected_ids = [
+                    str(target_id)
+                    for target_id in declaration.pop("_target_ids", [])
+                ] or [
                     str(item["target_id"])
-                    for item in declaration["target_contexts"]
+                    for item in declaration.get("target_contexts", [])
                 ]
                 return spell_id, affected_ids[0], cast_level, declaration
     return None
