@@ -26,6 +26,7 @@ from scripts.regression_campaign import (
     _prepare_rule_statblock,
     _prepare_rule_statblock_with_recovery,
     _prepare_statblock,
+    _recover_exact_snapshot_checkpoint,
     _restore_statblock_preparation_context,
     _review_override_asset_id,
     _review_override_page,
@@ -34,6 +35,68 @@ from scripts.regression_campaign import (
     _statblock_replacement_fields,
     _validate_noncombat_scene,
 )
+
+
+def test_core_relock_recovers_only_the_exact_unchanged_checkpoint() -> None:
+    class Client:
+        def __init__(self, *, captured_revision: int = 17) -> None:
+            self.captured_revision = captured_revision
+
+        async def domain(self, tool_id: str, arguments: dict):
+            if tool_id == "snapshot_query" and arguments["view"] == "list":
+                return [
+                    {
+                        "id": "snapshot-17",
+                        "slot": 17,
+                        "label": "Before explicit built-in Core relock",
+                        "branch_id": "branch-1",
+                        "is_head": True,
+                    }
+                ]
+            if tool_id == "combat_query":
+                assert arguments["view"] == "transaction_receipt"
+                return {
+                    "branch_id": None,
+                    "response": {"id": "snapshot-17", "slot": 17},
+                }
+            if tool_id == "snapshot_query" and arguments["view"] == "verify":
+                return {
+                    "valid": True,
+                    "captured_campaign_revision": self.captured_revision,
+                }
+            raise AssertionError((tool_id, arguments))
+
+    recovered = asyncio.run(
+        _recover_exact_snapshot_checkpoint(
+            Client(),
+            campaign_id="campaign-1",
+            phase="combat",
+            branch={
+                "id": "branch-1",
+                "head_snapshot_id": "snapshot-17",
+            },
+            campaign_revision=17,
+            label="Before explicit built-in Core relock",
+            idempotency_key="run-pre-core-relock",
+        )
+    )
+
+    assert recovered == {"id": "snapshot-17", "slot": 17}
+    with pytest.raises(RuntimeError, match="campaign changed"):
+        asyncio.run(
+            _recover_exact_snapshot_checkpoint(
+                Client(captured_revision=16),
+                campaign_id="campaign-1",
+                phase="combat",
+                branch={
+                    "id": "branch-1",
+                    "head_snapshot_id": "snapshot-17",
+                },
+                campaign_revision=17,
+                label="Before explicit built-in Core relock",
+                idempotency_key="run-pre-core-relock",
+            )
+        )
 
 
 def test_campaign_phase_lock_serializes_same_campaign(tmp_path: Path) -> None:

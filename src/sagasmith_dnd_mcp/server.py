@@ -22512,10 +22512,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     @mcp.tool()
     def snapshot_verify(
         campaign_id: str, slot: int, principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID
-    ) -> dict[str, bool]:
+    ) -> dict[str, bool | int]:
         """Verify that a saved snapshot has an internally consistent payload."""
         access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
-        return {"valid": snapshots.verify(campaign_id, slot)}
+        document = snapshots.get(campaign_id, slot)
+        campaign = dict(document.get("payload", {}).get("campaign") or {})
+        return {
+            "valid": snapshots.verify(campaign_id, slot),
+            "captured_campaign_revision": int(campaign.get("revision") or 0),
+        }
 
     @mcp.tool()
     def snapshot_lineage(

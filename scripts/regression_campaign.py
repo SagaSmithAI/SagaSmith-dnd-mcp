@@ -1988,16 +1988,29 @@ async def _relock_core(args: argparse.Namespace) -> dict[str, Any]:
                 )
             )
             token = _idempotency_token(args.run_id)
-            pre_snapshot = await client.domain(
-                "snapshot_create",
-                {
-                    "campaign_id": args.campaign_id,
-                    "label": "Before explicit built-in Core relock",
-                    "expected_revision": campaign_before["revision"],
-                    "expected_head_snapshot_id": current_branch.get("head_snapshot_id") or "",
-                    "idempotency_key": f"{token}-pre-core-relock",
-                },
+            pre_snapshot_label = "Before explicit built-in Core relock"
+            pre_snapshot_key = f"{token}-pre-core-relock"
+            pre_snapshot = await _recover_exact_snapshot_checkpoint(
+                client,
+                campaign_id=args.campaign_id,
+                phase=phase,
+                branch=current_branch,
+                campaign_revision=int(campaign_before["revision"]),
+                label=pre_snapshot_label,
+                idempotency_key=pre_snapshot_key,
             )
+            pre_snapshot_recovered = pre_snapshot is not None
+            if pre_snapshot is None:
+                pre_snapshot = await client.domain(
+                    "snapshot_create",
+                    {
+                        "campaign_id": args.campaign_id,
+                        "label": pre_snapshot_label,
+                        "expected_revision": campaign_before["revision"],
+                        "expected_head_snapshot_id": current_branch.get("head_snapshot_id") or "",
+                        "idempotency_key": pre_snapshot_key,
+                    },
+                )
             campaign_at_relock = _facade_value(
                 await client.core(
                     "campaign_query",
@@ -2079,6 +2092,7 @@ async def _relock_core(args: argparse.Namespace) -> dict[str, Any]:
                 "branch_id": current_branch["id"],
                 "rules_before": rules_before,
                 "pre_snapshot": pre_snapshot,
+                "pre_snapshot_recovered": pre_snapshot_recovered,
                 "pre_snapshot_verification": pre_verified,
                 "reason": relock_reason,
                 "relock": relocked,
@@ -2086,6 +2100,98 @@ async def _relock_core(args: argparse.Namespace) -> dict[str, Any]:
                 "post_snapshot": post_snapshot,
                 "post_snapshot_verification": post_verified,
             }
+
+
+async def _recover_exact_snapshot_checkpoint(
+    client: CampaignMcp,
+    *,
+    campaign_id: str,
+    phase: str,
+    branch: dict[str, Any],
+    campaign_revision: int,
+    label: str,
+    idempotency_key: str,
+) -> dict[str, Any] | None:
+    """Recover only an unchanged checkpoint committed by this exact operation."""
+
+    head_snapshot_id = str(branch.get("head_snapshot_id") or "")
+    if not head_snapshot_id:
+        return None
+    snapshots = _facade_value(
+        await client.domain(
+            "snapshot_query",
+            {"campaign_id": campaign_id, "view": "list"},
+        )
+    )
+    head = next(
+        (
+            dict(item)
+            for item in snapshots
+            if str(item.get("id") or "") == head_snapshot_id
+        ),
+        None,
+    )
+    if (
+        head is None
+        or str(head.get("label") or "") != label
+        or str(head.get("branch_id") or "") != str(branch.get("id") or "")
+        or not bool(head.get("is_head"))
+    ):
+        return None
+    if phase == "combat":
+        receipt = _facade_value(
+            await client.domain(
+                "combat_query",
+                {
+                    "campaign_id": campaign_id,
+                    "view": "transaction_receipt",
+                    "payload": {
+                        "idempotency_key": idempotency_key,
+                        "branch_id": branch["id"],
+                    },
+                },
+            )
+        )
+    else:
+        receipt = _facade_value(
+            await client.domain(
+                "state_revision",
+                {
+                    "campaign_id": campaign_id,
+                    "action": "receipt",
+                    "payload": {
+                        "idempotency_key": idempotency_key,
+                        "branch_id": branch["id"],
+                    },
+                },
+            )
+    )
+    committed = dict(receipt.get("response") or {})
+    receipt_branch_id = str(receipt.get("branch_id") or "")
+    if (
+        (receipt_branch_id and receipt_branch_id != str(branch["id"]))
+        or str(committed.get("id") or "") != head_snapshot_id
+        or int(committed.get("slot") or 0) != int(head.get("slot") or 0)
+    ):
+        raise RuntimeError("pre-Core-relock checkpoint receipt does not match branch head")
+    verification = _facade_value(
+        await client.domain(
+            "snapshot_query",
+            {
+                "campaign_id": campaign_id,
+                "view": "verify",
+                "payload": {"slot": head["slot"]},
+            },
+        )
+    )
+    if not bool(verification.get("valid")):
+        raise RuntimeError("pre-Core-relock checkpoint failed integrity verification")
+    if int(verification.get("captured_campaign_revision") or -1) != campaign_revision:
+        raise RuntimeError(
+            "campaign changed after the pre-Core-relock checkpoint; "
+            "refusing unsafe recovery"
+        )
+    return committed
 
 
 async def _prepare_statblock(args: argparse.Namespace) -> dict[str, Any]:

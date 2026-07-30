@@ -1265,6 +1265,19 @@ def test_checkpointed_core_relock_preserves_profile_and_adopts_current_runtime(
                 "idempotency_key": "before-relock",
             },
         )
+        verification = await call(
+            server,
+            "snapshot_query",
+            {
+                "campaign_id": campaign["id"],
+                "view": "verify",
+                "payload": {"slot": snapshot["slot"]},
+            },
+        )
+        assert verification == {
+            "valid": True,
+            "captured_campaign_revision": changed["revision"],
+        }
         branch = next(
             item
             for item in await call(server, "branch_list", {"campaign_id": campaign["id"]})
