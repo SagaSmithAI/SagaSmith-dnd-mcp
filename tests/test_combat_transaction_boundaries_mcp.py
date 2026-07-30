@@ -6,7 +6,15 @@ from copy import deepcopy
 from pathlib import Path
 
 import pytest
-from sagasmith_dnd.character_schema import default_character_sheet
+from sagasmith_dnd.character_schema import (
+    default_character_sheet,
+    validate_character_sheet,
+)
+from sagasmith_dnd.content_solution import build_content_solution
+from sagasmith_dnd.resolution_plan import (
+    compile_resolution_plan,
+    resolution_plan_template,
+)
 
 import sagasmith_dnd_mcp.server as server_module
 from sagasmith_dnd_mcp.config import McpConfig
@@ -200,20 +208,64 @@ def test_agent_source_damage_is_authorized_and_settled_in_one_attack(
             },
         )
         attacker_sheet = default_character_sheet()
-        attacker_sheet["content"]["features"] = [
+        source_feature = {
+            "id": "dive-attack-passive",
+            "name": "Dive Attack",
+            "description": source_excerpt,
+            "choices": {
+                "manual_ruling": {
+                    "kind": "descriptive_passive",
+                    "default_resolver": "agent",
+                    "source_excerpt": source_excerpt,
+                }
+            },
+        }
+        compiled_plan = compile_resolution_plan(
             {
-                "id": "dive-attack-passive",
-                "name": "Dive Attack",
-                "description": source_excerpt,
-                "choices": {
-                    "manual_ruling": {
-                        "kind": "descriptive_passive",
-                        "default_resolver": "agent",
+                "schema_version": 2,
+                "id": "custom.peryton.dive-attack",
+                "source_card_id": "dive-attack-passive",
+                "source_card_kind": "feature",
+                "trigger": "attack.after_hit",
+                "trigger_filter": {"hit": True},
+                "slots": {},
+                "steps": [
+                    {
+                        "id": "extra-damage",
+                        "op": "damage.apply",
+                        "args": {
+                            "target_ids": ["semantic-target"],
+                            "expression": "2d8",
+                            "damage_type": "piercing",
+                            "source": "Dive Attack",
+                            "critical": True,
+                        },
+                    }
+                ],
+                "citations": [
+                    {
+                        "source": "unit-test",
+                        "source_ref": {"chunk_id": "unit-test"},
                         "source_excerpt": source_excerpt,
                     }
-                },
+                ],
             }
-        ]
+        )
+        source_feature["resolution_plan"] = resolution_plan_template(compiled_plan)
+        attacker_sheet["content"]["features"] = [source_feature]
+        attacker_sheet = validate_character_sheet(attacker_sheet)
+        source_feature = attacker_sheet["content"]["features"][0]
+        source_feature["resolution_solution"] = build_content_solution(
+            compiled_plan,
+            source_card=source_feature,
+            application_id="content:feature:peryton-dive-test",
+            agent_ruling={
+                "default_resolver": "agent",
+                "ruling_kind": "agent_dm_adjudication",
+                "decision": "Persist the exact Dive Attack extra-damage solution.",
+                "reason": "The source card records the condition and damage dice.",
+            },
+        )
         attacker_sheet["content"]["activities"] = [
             {
                 "id": "peryton-multiattack",
@@ -305,6 +357,8 @@ def test_agent_source_damage_is_authorized_and_settled_in_one_attack(
             "kind": "source_conditional_extra_damage",
             "application_id": "peryton:dive:round-1",
             "feature_id": "dive-attack-passive",
+            "target_actor_ids": [target["id"]],
+            "solution_plan_fingerprint": compiled_plan.fingerprint,
             "source_excerpt": source_excerpt,
             "damage_expression": "2d8",
             "damage_type": "weapon",
@@ -338,6 +392,25 @@ def test_agent_source_damage_is_authorized_and_settled_in_one_attack(
                     "action": {
                         **action,
                         "context": {},
+                    },
+                },
+            )
+        with pytest.raises(Exception, match="does not apply to this target"):
+            await _call(
+                server,
+                "combat_preflight_attack",
+                {
+                    "campaign_id": campaign["id"],
+                    "actor_id": attacker["id"],
+                    "target_id": target["id"],
+                    "action": {
+                        **action,
+                        "rulings": [
+                            {
+                                **ruling,
+                                "target_actor_ids": [attacker["id"]],
+                            }
+                        ],
                     },
                 },
             )

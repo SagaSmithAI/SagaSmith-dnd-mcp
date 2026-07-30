@@ -2005,6 +2005,23 @@ def test_source_extra_damage_ruling_binds_exact_agent_passive_and_application() 
                                 "source_excerpt": PERYTON_DIVE_ATTACK,
                             }
                         },
+                        "resolution_plan": {
+                            "schema_version": 2,
+                            "source_card_id": "dive-attack-passive",
+                            "source_card_kind": "feature",
+                            "trigger": "attack.after_hit",
+                            "steps": [
+                                {
+                                    "op": "damage.apply",
+                                    "args": {"expression": "2d8"},
+                                }
+                            ],
+                            "fingerprint": "a" * 64,
+                        },
+                        "resolution_solution": {
+                            "status": "compiled",
+                            "plan_fingerprint": "a" * 64,
+                        },
                     }
                 ]
             }
@@ -2013,7 +2030,7 @@ def test_source_extra_damage_ruling_binds_exact_agent_passive_and_application() 
             "inventory": {
                 "weapon_attacks": [
                     {"item_id": "gore", "attack_type": "melee"},
-                    {"item_id": "talons", "attack_type": "melee"},
+                    {"item_id": "shortbow", "attack_type": "ranged"},
                 ]
             }
         },
@@ -2021,7 +2038,8 @@ def test_source_extra_damage_ruling_binds_exact_agent_passive_and_application() 
     declaration = {
         "actor_id": actor["id"],
         "feature_id": "dive-attack-passive",
-        "weapon_ids": ["gore", "talons"],
+        "weapon_ids": ["gore", "shortbow"],
+        "target_actor_ids": ["target-1"],
         "rounds": [1],
         "max_applications": 1,
         "damage_expression": "2d8",
@@ -2039,13 +2057,14 @@ def test_source_extra_damage_ruling_binds_exact_agent_passive_and_application() 
 
     normalized = _source_extra_damage_rulings(
         [declaration],
-        participant_ids=[actor["id"]],
+        participant_ids=[actor["id"], "target-1"],
         actors={actor["id"]: actor},
     )
     action_rulings = _source_extra_damage_action_rulings(
         normalized,
         actor_id=actor["id"],
-        weapon_id="gore",
+        target_id="target-1",
+        weapon_id="shortbow",
         round_number=1,
         applications={},
     )
@@ -2053,11 +2072,13 @@ def test_source_extra_damage_ruling_binds_exact_agent_passive_and_application() 
     assert len(action_rulings) == 1
     assert action_rulings[0]["source"] == "dm_ruling"
     assert action_rulings[0]["damage_expression"] == "2d8"
+    assert action_rulings[0]["solution_plan_fingerprint"] == "a" * 64
     assert action_rulings[0]["trigger_facts"]["straight_dive_ft"] == 30
     assert (
         _source_extra_damage_action_rulings(
             normalized,
             actor_id=actor["id"],
+            target_id="target-1",
             weapon_id="gore",
             round_number=1,
             applications={(actor["id"], "dive-attack-passive"): 1},
@@ -2068,6 +2089,7 @@ def test_source_extra_damage_ruling_binds_exact_agent_passive_and_application() 
         _source_extra_damage_action_rulings(
             normalized,
             actor_id=actor["id"],
+            target_id="target-1",
             weapon_id="gore",
             round_number=1,
             applications={},
@@ -2081,8 +2103,28 @@ def test_source_extra_damage_ruling_binds_exact_agent_passive_and_application() 
     with pytest.raises(ValueError, match="exact Agent-owned passive"):
         _source_extra_damage_rulings(
             [{**declaration, "source_excerpt": "It dives and deals 2d8."}],
-            participant_ids=[actor["id"]],
+            participant_ids=[actor["id"], "target-1"],
             actors={actor["id"]: actor},
+        )
+    unresolved_actor = {
+        **actor,
+        "sheet": {
+            "content": {
+                "features": [
+                    {
+                        key: value
+                        for key, value in actor["sheet"]["content"]["features"][0].items()
+                        if key not in {"resolution_plan", "resolution_solution"}
+                    }
+                ]
+            }
+        },
+    }
+    with pytest.raises(ValueError, match="persisted first-use attack solution"):
+        _source_extra_damage_rulings(
+            [declaration],
+            participant_ids=[actor["id"], "target-1"],
+            actors={actor["id"]: unresolved_actor},
         )
 
     different_excerpt = PERYTON_DIVE_ATTACK.replace("(2d8)", "(12d8)")
@@ -2101,6 +2143,16 @@ def test_source_extra_damage_ruling_binds_exact_agent_passive_and_application() 
                                 "source_excerpt": different_excerpt,
                             }
                         },
+                        "resolution_plan": {
+                            **actor["sheet"]["content"]["features"][0][
+                                "resolution_plan"
+                            ],
+                        },
+                        "resolution_solution": {
+                            **actor["sheet"]["content"]["features"][0][
+                                "resolution_solution"
+                            ],
+                        },
                     }
                 ]
             }
@@ -2115,7 +2167,7 @@ def test_source_extra_damage_ruling_binds_exact_agent_passive_and_application() 
                     "damage_expression": "2d8",
                 }
             ],
-            participant_ids=[actor["id"]],
+            participant_ids=[actor["id"], "target-1"],
             actors={actor["id"]: different_actor},
         )
 

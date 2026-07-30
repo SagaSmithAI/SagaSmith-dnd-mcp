@@ -802,9 +802,9 @@ def _arguments() -> argparse.Namespace:
         default=[],
         help=(
             "Agent-as-DM conditional extra-damage ruling bound to an exact actor "
-            "feature: actor_id, feature_id, weapon_ids, rounds, max_applications, "
-            "damage_expression, damage_type, source_excerpt, trigger_facts, "
-            "decision, and reason"
+            "feature: actor_id, feature_id, weapon_ids, target_actor_ids, rounds, "
+            "max_applications, damage_expression, damage_type, source_excerpt, "
+            "trigger_facts, decision, and reason"
         ),
     )
     parser.add_argument(
@@ -4772,6 +4772,7 @@ def _source_extra_damage_rulings(
         "actor_id",
         "feature_id",
         "weapon_ids",
+        "target_actor_ids",
         "rounds",
         "max_applications",
         "damage_expression",
@@ -4799,6 +4800,11 @@ def _source_extra_damage_rulings(
             for item in raw.get("weapon_ids") or []
             if str(item).strip()
         ]
+        target_actor_ids = [
+            str(item).strip()
+            for item in raw.get("target_actor_ids") or []
+            if str(item).strip()
+        ]
         rounds = list(raw.get("rounds") or [])
         max_applications = raw.get("max_applications")
         expression = str(raw.get("damage_expression") or "").strip()
@@ -4815,6 +4821,13 @@ def _source_extra_damage_rulings(
             or identity in identities
             or not weapon_ids
             or len(weapon_ids) != len(set(weapon_ids))
+            or not target_actor_ids
+            or len(target_actor_ids) != len(set(target_actor_ids))
+            or any(
+                target_actor_id not in participant_ids
+                or target_actor_id == actor_id
+                for target_actor_id in target_actor_ids
+            )
             or not rounds
             or any(
                 isinstance(value, bool) or not isinstance(value, int) or value < 1
@@ -4834,8 +4847,8 @@ def _source_extra_damage_rulings(
         ):
             raise ValueError(
                 f"source extra-damage ruling {index} requires one participant "
-                "feature, unique weapons/rounds, a positive limit, exact source "
-                "terms, trigger facts, and an Agent decision"
+                "feature, unique weapons/targets/rounds, a positive limit, exact "
+                "source terms, trigger facts, and an Agent decision"
             )
         requires_advantage = trigger_facts.get("requires_attack_advantage")
         if requires_advantage is not None and not isinstance(
@@ -4899,6 +4912,35 @@ def _source_extra_damage_rulings(
                 f"source extra-damage ruling {index} is not bound to the exact "
                 "Agent-owned passive excerpt"
             )
+        resolution_plan = dict(feature.get("resolution_plan") or {})
+        resolution_solution = dict(feature.get("resolution_solution") or {})
+        plan_fingerprint = str(resolution_plan.get("fingerprint") or "")
+        if (
+            resolution_plan.get("schema_version") != 2
+            or resolution_plan.get("source_card_id") != feature_id
+            or resolution_plan.get("source_card_kind") not in {"feature", "trait"}
+            or resolution_plan.get("trigger") != "attack.after_hit"
+            or resolution_solution.get("status") != "compiled"
+            or resolution_solution.get("plan_fingerprint") != plan_fingerprint
+            or not plan_fingerprint
+        ):
+            raise ValueError(
+                f"source extra-damage ruling {index} feature {feature_id!r} "
+                "requires one persisted first-use attack solution"
+            )
+        if not any(
+            isinstance(step, dict)
+            and step.get("op") == "damage.apply"
+            and "".join(
+                str(dict(step.get("args") or {}).get("expression") or "").split()
+            ).casefold()
+            == "".join(expression.split()).casefold()
+            for step in resolution_plan.get("steps") or []
+        ):
+            raise ValueError(
+                f"source extra-damage ruling {index} is not represented by "
+                "the persisted first-use attack solution"
+            )
         if (
             re.search(
                 (
@@ -4926,11 +4968,12 @@ def _source_extra_damage_rulings(
         }
         if any(
             weapon_id not in attacks_by_id
-            or str(attacks_by_id[weapon_id].get("attack_type") or "") != "melee"
+            or str(attacks_by_id[weapon_id].get("attack_type") or "")
+            not in {"melee", "ranged"}
             for weapon_id in weapon_ids
         ):
             raise ValueError(
-                f"source extra-damage ruling {index} requires recorded melee weapon ids"
+                f"source extra-damage ruling {index} requires recorded weapon ids"
             )
         if (
             damage_type != "weapon"
@@ -4950,6 +4993,8 @@ def _source_extra_damage_rulings(
                 "actor_id": actor_id,
                 "feature_id": feature_id,
                 "weapon_ids": weapon_ids,
+                "target_actor_ids": target_actor_ids,
+                "solution_plan_fingerprint": plan_fingerprint,
                 "rounds": sorted(rounds),
                 "max_applications": max_applications,
                 "damage_expression": expression,
@@ -4967,6 +5012,7 @@ def _source_extra_damage_action_rulings(
     declarations: dict[str, list[dict[str, Any]]],
     *,
     actor_id: str,
+    target_id: str,
     weapon_id: str,
     round_number: int,
     applications: dict[tuple[str, str], int],
@@ -4981,6 +5027,7 @@ def _source_extra_damage_action_rulings(
         )
         if (
             weapon_id not in declaration["weapon_ids"]
+            or target_id not in declaration["target_actor_ids"]
             or round_number not in declaration["rounds"]
             or applications.get(identity, 0) >= int(declaration["max_applications"])
             or (
@@ -4999,6 +5046,10 @@ def _source_extra_damage_action_rulings(
                     f"{applications.get(identity, 0) + 1}"
                 ),
                 "feature_id": declaration["feature_id"],
+                "target_actor_ids": deepcopy(declaration["target_actor_ids"]),
+                "solution_plan_fingerprint": declaration[
+                    "solution_plan_fingerprint"
+                ],
                 "source_excerpt": declaration["source_excerpt"],
                 "damage_expression": declaration["damage_expression"],
                 "damage_type": declaration["damage_type"],
@@ -9034,6 +9085,7 @@ async def _preflight_attack(
                     extra_damage = _source_extra_damage_action_rulings(
                         source_extra_damage_rulings or {},
                         actor_id=str(actor["id"]),
+                        target_id=target_id,
                         weapon_id=str(weapon.get("item_id") or ""),
                         round_number=round_number,
                         applications=source_extra_damage_applications or {},

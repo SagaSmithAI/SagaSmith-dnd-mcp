@@ -4255,6 +4255,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "kind",
             "application_id",
             "feature_id",
+            "target_actor_ids",
+            "solution_plan_fingerprint",
             "source_excerpt",
             "damage_expression",
             "damage_type",
@@ -4291,6 +4293,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 )
             application_id = str(raw.get("application_id") or "").strip()
             feature_id = str(raw.get("feature_id") or "").strip()
+            target_actor_ids = raw.get("target_actor_ids")
+            solution_plan_fingerprint = str(
+                raw.get("solution_plan_fingerprint") or ""
+            ).strip()
             source_excerpt = str(raw.get("source_excerpt") or "").strip()
             expression = str(raw.get("damage_expression") or "").strip()
             damage_type = str(raw.get("damage_type") or "").strip().casefold()
@@ -4306,6 +4312,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 or application_id in application_ids
                 or not feature_id
                 or feature_id in feature_ids
+                or not isinstance(target_actor_ids, list)
+                or not target_actor_ids
+                or any(
+                    not isinstance(item, str) or not item.strip()
+                    for item in target_actor_ids
+                )
+                or len(target_actor_ids)
+                != len({str(item).strip() for item in target_actor_ids})
+                or not solution_plan_fingerprint
                 or not source_excerpt
                 or not expression
                 or not isinstance(trigger_facts, dict)
@@ -4315,6 +4330,20 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             ):
                 raise CombatEngineError(
                     f"source conditional extra-damage ruling {index} is incomplete"
+                )
+            normalized_target_actor_ids = [
+                str(item).strip() for item in target_actor_ids
+            ]
+            target_id = str(result.get("target_id") or "").strip()
+            if target_id not in normalized_target_actor_ids:
+                raise CombatEngineError(
+                    "source conditional extra damage does not apply to this target"
+                )
+            for target_actor_id in normalized_target_actor_ids:
+                require_encounter_combatant(
+                    encounter,
+                    target_actor_id,
+                    role="source conditional extra-damage target",
                 )
             requires_advantage = trigger_facts.get("requires_attack_advantage")
             if requires_advantage is not None and not isinstance(requires_advantage, bool):
@@ -4388,6 +4417,38 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 raise CombatEngineError(
                     "source conditional extra-damage feature is absent from the attacker card"
                 )
+            resolution_plan = dict(feature.get("resolution_plan") or {})
+            resolution_solution = dict(feature.get("resolution_solution") or {})
+            if (
+                resolution_plan.get("schema_version") != 2
+                or resolution_plan.get("source_card_id") != feature_id
+                or resolution_plan.get("source_card_kind") not in {"feature", "trait"}
+                or resolution_plan.get("trigger") != "attack.after_hit"
+                or resolution_plan.get("fingerprint")
+                != solution_plan_fingerprint
+                or resolution_solution.get("status") != "compiled"
+                or resolution_solution.get("plan_fingerprint")
+                != solution_plan_fingerprint
+            ):
+                raise CombatEngineError(
+                    "source conditional extra damage requires its persisted "
+                    "first-use attack solution"
+                )
+            if not any(
+                isinstance(step, dict)
+                and step.get("op") == "damage.apply"
+                and "".join(
+                    str(
+                        dict(step.get("args") or {}).get("expression") or ""
+                    ).split()
+                ).casefold()
+                == "".join(expression.split()).casefold()
+                for step in resolution_plan.get("steps") or []
+            ):
+                raise CombatEngineError(
+                    "source conditional extra damage is absent from its "
+                    "persisted first-use attack solution"
+                )
             manual_ruling = dict(dict(feature.get("choices") or {}).get("manual_ruling") or {})
             recorded_excerpt = str(manual_ruling.get("source_excerpt") or "").strip()
 
@@ -4450,6 +4511,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             normalized_rulings.append(
                 {
                     **deepcopy(raw),
+                    "target_actor_ids": normalized_target_actor_ids,
                     "damage_type": resolved_damage_type,
                 }
             )
