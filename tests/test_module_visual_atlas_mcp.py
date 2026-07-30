@@ -363,6 +363,32 @@ def test_module_statblock_ocr_recovery_supports_text_only_agent(
             block("COMMONER", 30, 355, 180, 380),
         ),
     )
+    multiattack_layout = OcrPageLayout(
+        page_number=1,
+        width=600,
+        height=400,
+        blocks=(
+            *layout.blocks[:20],
+            block("ACTIONS", 30, 265, 130, 285),
+            block(
+                "Multiattack. The commoner makes two attacks with its club.",
+                30,
+                290,
+                500,
+                310,
+            ),
+            block(
+                "Club. Melee Weapon Attack: +2 to hit, reach 5 ft., one target.",
+                30,
+                315,
+                480,
+                335,
+            ),
+            block("Hit: 2 (1d4) bludgeoning damage.", 30, 335, 310, 355),
+            block("COMMONER", 30, 370, 180, 390),
+        ),
+    )
+    active_layout = [layout]
     ocr_calls = 0
 
     def extract_layout(
@@ -373,7 +399,7 @@ def test_module_statblock_ocr_recovery_supports_text_only_agent(
     ) -> list[OcrPageLayout]:
         nonlocal ocr_calls
         ocr_calls += 1
-        return [layout]
+        return [active_layout[0]]
 
     monkeypatch.setattr(RapidOcrProvider, "extract_layout", extract_layout)
     monkeypatch.setattr(
@@ -486,5 +512,76 @@ def test_module_statblock_ocr_recovery_supports_text_only_agent(
         assert recovered["review"]["metadata"]["text_layout_recovery"]["text_only"] is True
         assert recovered["validation"]["name"] == "Commoner"
         assert recovered["validation"]["settlement"] == "automatic"
+        assert recovered["requires_agent_fill"] is False
+
+        active_layout[0] = multiattack_layout
+        preview_arguments = {
+            **arguments,
+            "payload": {
+                **arguments["payload"],
+                "content_key": "commoner-multiattack",
+            },
+            "idempotency_key": "recover-commoner-multiattack-preview",
+        }
+        preview = await _call(server, "module_review", preview_arguments)
+        replayed_preview = await _call(server, "module_review", preview_arguments)
+        assert replayed_preview == preview
+        assert preview["review"] is None
+        assert preview["requires_agent_fill"] is True
+        requirements = preview["validation"]["agent_fill_requirements"]
+        assert requirements["required"] is True
+        assert requirements["parser_authoritative"] is False
+        activity = requirements["multiattack_options"][0]
+        club = next(
+            item for item in requirements["available_weapons"] if item["name"] == "Club"
+        )
+
+        filled_arguments = {
+            **preview_arguments,
+            "payload": {
+                **preview_arguments["payload"],
+                "agent_fill": {
+                    "multiattack_options": [
+                        {
+                            "activity_id": activity["activity_id"],
+                            "source_excerpt": activity["source_excerpt"],
+                            "reason": (
+                                "The printed module action explicitly says the "
+                                "commoner makes two attacks with its club."
+                            ),
+                            "options": [
+                                {
+                                    "id": "two-club-attacks",
+                                    "attacks": [
+                                        {
+                                            "weapon_id": club["weapon_id"],
+                                            "attack_mode": "melee",
+                                            "count": 2,
+                                        }
+                                    ],
+                                }
+                            ],
+                        }
+                    ]
+                },
+            },
+            "idempotency_key": "recover-commoner-multiattack-filled",
+        }
+        filled = await _call(server, "module_review", filled_arguments)
+        assert filled["requires_agent_fill"] is False
+        assert filled["review"]["id"]
+        assert filled["validation"]["agent_fill"]["multiattack_options"][0]["options"] == [
+            {
+                "id": "two-club-attacks",
+                "attacks": [
+                    {
+                        "weapon_id": club["weapon_id"],
+                        "attack_mode": "melee",
+                        "count": 2,
+                    }
+                ],
+            }
+        ]
+        assert ocr_calls == 3
 
     asyncio.run(exercise())

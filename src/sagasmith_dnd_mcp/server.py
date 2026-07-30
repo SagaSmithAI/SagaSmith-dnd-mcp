@@ -28554,12 +28554,49 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         recovered_page = int(recovered_result["page_number"])
         recovered = dict(recovered_result["recovery"])
+        normalized_content = str(recovered["normalized_content"])
+        parsed = parse_2014_statblock(
+            normalized_content,
+            source_key=f"module-review:{module_id}:{content_key}",
+            name=None,
+        )
+        agent_fill_requirements = statblock_agent_fill_requirements(parsed.sheet)
+        if agent_fill_requirements["required"] and agent_fill is None:
+            response = {
+                "campaign_id": campaign_id,
+                "module_id": module_id,
+                "scene_id": scene_id,
+                "source_asset_id": source_asset["id"],
+                **{
+                    key: value
+                    for key, value in recovered_result.items()
+                    if key != "observation"
+                },
+                "review": None,
+                "requires_agent_fill": True,
+                "validation": {
+                    "name": parsed.name,
+                    "challenge_rating": parsed.challenge_rating,
+                    "experience_points": parsed.experience_points,
+                    **statblock_settlement(parsed.warnings),
+                    "agent_fill": None,
+                    "resolved_warnings": [],
+                    "agent_fill_requirements": agent_fill_requirements,
+                },
+            }
+            return remember_idempotent(
+                scope,
+                idempotency_key,
+                request_payload,
+                response,
+                campaign_id=campaign_id,
+            )
         reviewed = module_content_review(
             campaign_id,
             module_id,
             scene_id,
             content_key,
-            str(recovered["normalized_content"]),
+            normalized_content,
             str(recovered_result["observation"]),
             source_asset_id=str(source_asset["id"]),
             page_number=recovered_page,
@@ -28590,6 +28627,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 for key, value in recovered_result.items()
                 if key != "observation"
             },
+            "requires_agent_fill": False,
             **reviewed,
         }
         return remember_idempotent(

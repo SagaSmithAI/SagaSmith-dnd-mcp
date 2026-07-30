@@ -2412,6 +2412,18 @@ async def _prepare_statblock(args: argparse.Namespace) -> dict[str, Any]:
                             },
                         )
                     )
+                    if recovered.get("requires_agent_fill"):
+                        requirements = dict(
+                            dict(recovered.get("validation") or {}).get(
+                                "agent_fill_requirements"
+                            )
+                            or {}
+                        )
+                        raise RuntimeError(
+                            "module OCR recovered the source text and requires "
+                            "--agent-statblock-fill before actor creation: "
+                            + json.dumps(requirements, ensure_ascii=False)
+                        )
                     review = dict(recovered["review"])
                     ocr_recovery = {
                         key: recovered.get(key)
