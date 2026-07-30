@@ -15,6 +15,7 @@ from scripts.regression_party import (
     _catalog_source,
     _class_starting_supplements,
     _configure_base_sheet,
+    _initialize_prepared_spells,
     _item_weight_oz,
     _pack_contents,
     _repair_existing_party_equipment,
@@ -75,6 +76,61 @@ def test_party_catalog_ruling_returns_structured_control_to_agent() -> None:
         "artifact_name": "Scene Feat",
     }
     assert requirement["ruling"]["default_resolver"] == "agent"
+
+
+def test_resumed_replacement_keeps_exact_committed_prepared_spell_setup() -> None:
+    class Client:
+        async def domain(self, tool_id: str, arguments: dict) -> dict:
+            raise AssertionError(
+                f"committed one-time setup must not be submitted again: {tool_id}"
+            )
+
+    actor = {
+        "id": "replacement-cleric",
+        "revision": 12,
+        "sheet": {
+            "spellcasting": {
+                "preparation": {
+                    "selected_spell_ids": ["bless", "cure-wounds"],
+                }
+            }
+        },
+    }
+
+    resumed = asyncio.run(
+        _initialize_prepared_spells(
+            Client(),
+            actor=actor,
+            prepared_ids=["bless", "cure-wounds"],
+            idempotency_key="replacement-cleric-setup",
+        )
+    )
+
+    assert resumed is actor
+
+
+def test_resumed_replacement_rejects_different_prepared_spell_setup() -> None:
+    actor = {
+        "id": "replacement-cleric",
+        "revision": 12,
+        "sheet": {
+            "spellcasting": {
+                "preparation": {
+                    "selected_spell_ids": ["bless"],
+                }
+            }
+        },
+    }
+
+    with pytest.raises(RuntimeError, match="different committed prepared-spell list"):
+        asyncio.run(
+            _initialize_prepared_spells(
+                object(),
+                actor=actor,
+                prepared_ids=["cure-wounds"],
+                idempotency_key="replacement-cleric-setup",
+            )
+        )
 
 
 def test_party_profiles_have_source_linked_gear_and_complete_ability_input() -> None:

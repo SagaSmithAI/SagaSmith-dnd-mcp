@@ -1928,6 +1928,45 @@ async def _apply_artifact(
     return dict(value)
 
 
+async def _initialize_prepared_spells(
+    client: ExposureClient,
+    *,
+    actor: dict[str, Any],
+    prepared_ids: list[str],
+    idempotency_key: str,
+) -> dict[str, Any]:
+    """Resume one-time setup without replaying an already committed spell list."""
+    preparation = dict(
+        dict(actor["sheet"].get("spellcasting") or {}).get("preparation") or {}
+    )
+    existing_ids = [
+        str(item) for item in preparation.get("selected_spell_ids") or []
+    ]
+    if existing_ids:
+        if existing_ids != prepared_ids:
+            raise RuntimeError(
+                "resumed party construction found a different committed prepared-spell "
+                "list; use the edition's legal long-rest or level-up workflow"
+            )
+        return actor
+    prepared = _facade_value(
+        await client.domain(
+            "character_spell_prepare",
+            {
+                "character_id": actor["id"],
+                "mode": "replace_all",
+                "payload": {
+                    "spell_ids": prepared_ids,
+                    "event": "setup",
+                },
+                "expected_revision": actor["revision"],
+                "idempotency_key": idempotency_key,
+            },
+        )
+    )
+    return dict(prepared.get("character") or prepared)
+
+
 async def _build_character(
     client: ExposureClient,
     *,
@@ -2094,22 +2133,12 @@ async def _build_character(
             spell_ids_by_name[name] for name in spellcasting["prepared"]
         ]
         if prepared_ids:
-            prepared = _facade_value(
-                await client.domain(
-                    "character_spell_prepare",
-                    {
-                        "character_id": actor["id"],
-                        "mode": "replace_all",
-                        "payload": {
-                            "spell_ids": prepared_ids,
-                            "event": "setup",
-                        },
-                        "expected_revision": actor["revision"],
-                        "idempotency_key": f"full-party-{slug}-prepare-spells",
-                    },
-                )
+            actor = await _initialize_prepared_spells(
+                client,
+                actor=actor,
+                prepared_ids=prepared_ids,
+                idempotency_key=f"full-party-{slug}-prepare-spells",
             )
-            actor = dict(prepared.get("character") or prepared)
     if str(profile["class"]).casefold() == "wizard":
         spellbook_item = next(
             item
