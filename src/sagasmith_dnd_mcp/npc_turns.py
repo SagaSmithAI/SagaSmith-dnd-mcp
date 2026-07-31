@@ -125,7 +125,8 @@ def normalize_npc_turn_proposal(value: Any) -> dict[str, Any]:
             "decision_summary",
         },
     )
-    if int(data.get("schema_version") or 0) != NPC_TURN_SCHEMA_VERSION:
+    schema_version = data.get("schema_version")
+    if type(schema_version) is not int or schema_version != NPC_TURN_SCHEMA_VERSION:
         raise ValueError(
             f"npc_turn.proposal.schema_version must be {NPC_TURN_SCHEMA_VERSION}"
         )

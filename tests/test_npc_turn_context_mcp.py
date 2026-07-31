@@ -332,6 +332,24 @@ def test_npc_turn_bundle_rejects_privilege_leaks_tampering_and_stale_commits(
                     "idempotency_key": "wrong-target",
                 },
             )
+        with pytest.raises(Exception, match="accepted_action must be boolean"):
+            await _call(
+                server,
+                "memory_change",
+                {
+                    "campaign_id": campaign["id"],
+                    "action": "commit",
+                    "payload": {
+                        "event": {"summary": "Must reject coercion."},
+                        "npc_turn": {
+                            "bundle_receipt": bundle["bundle_receipt"],
+                            "proposal": base_proposal,
+                            "accepted_action": "false",
+                        },
+                    },
+                    "idempotency_key": "non-boolean-action",
+                },
+            )
         await _call(
             server,
             "memory_change",
@@ -521,6 +539,10 @@ def test_mechanical_npc_proposals_must_request_public_resolution() -> None:
 
     with pytest.raises(ValueError, match="requires an explicit resolution request"):
         normalize_npc_turn_proposal(proposal)
+
+    invalid_version = {**proposal, "schema_version": True}
+    with pytest.raises(ValueError, match="schema_version must be 1"):
+        normalize_npc_turn_proposal(invalid_version)
 
     proposal["resolution_requests"] = [
         {

@@ -29930,7 +29930,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     raise ValueError(
                         "accepted NPC ActorKnowledge may target only the speaker or listeners"
                     )
-            accepted_action = bool(npc_turn_data.get("accepted_action", False))
+            raw_accepted_action = npc_turn_data.get("accepted_action", False)
+            if not isinstance(raw_accepted_action, bool):
+                raise ValueError("payload.npc_turn.accepted_action must be boolean")
+            accepted_action = raw_accepted_action
             action_kind = str(proposal["proposed_action"]["kind"])
             if accepted_action and action_kind not in NPC_NARRATIVE_ACTION_KINDS:
                 raise ValueError(
