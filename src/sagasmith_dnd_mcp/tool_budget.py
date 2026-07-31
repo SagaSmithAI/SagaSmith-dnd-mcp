@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-TOOL_BUDGET_VERSION = "2026-07-module-ocr-v14"
+TOOL_BUDGET_VERSION = "2026-07-phase-skill-plans-v16"
 
 # Captured before the conservative facade consolidation.  Keep this historical
 # baseline so a lower tool count cannot conceal a larger aggregate input schema.
@@ -10,7 +10,7 @@ BASELINE_PUBLIC_TOOL_COUNT = 92
 BASELINE_INPUT_SCHEMA_BYTES = 56_611
 
 TARGET_PUBLIC_TOOL_COUNT = 83
-TARGET_CORE_TOOL_COUNT = 12
+TARGET_CORE_TOOL_COUNT = 13
 # Combat transaction-history and receipt views make interrupted multi-call Agent
 # rulings publicly recoverable without another tool or direct storage access.
 # Version 5 adds 181 bytes to enumerate every legal combat_common_action value,
@@ -33,11 +33,16 @@ TARGET_CORE_TOOL_COUNT = 12
 # Version 13 adds the source-exact shake_hypnotic_pattern action to the existing
 # common-action facade. The 25-byte increase adds no public or core tool.
 # Version 14 adds text-only module statblock recovery to the existing review
-# facade. The 20-byte increase adds no public or core tool.
+# facade. The 20-byte increase adds no public or core tool. Version 15 promotes
+# the existing read-only skill_query facade into the cold-start core so a host
+# can discover compact workflow guidance before a campaign exists. It also adds
+# bounded contract inspection and the campaign resume selector without another
+# public tool. Version 16 adds the phase/tool-group Skill-plan selector and
+# trusted campaign/exposure context to the existing core skill_query facade.
 # The aggregate remains well below the captured 92-tool baseline.
-TARGET_INPUT_SCHEMA_BYTES = 49_138
+TARGET_INPUT_SCHEMA_BYTES = 50_171
 PROFILE_TOOL_LIMITS = {
     "lobby": 62,
-    "play": 47,
-    "combat": 45,
+    "play": 48,
+    "combat": 46,
 }

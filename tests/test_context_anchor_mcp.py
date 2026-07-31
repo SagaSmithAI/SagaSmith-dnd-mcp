@@ -226,6 +226,50 @@ def test_public_context_anchor_pins_exact_dm_evidence_without_a_narrative_dsl(
         assert context["retrieval"]["strategy"] == (
             "lexical_structured_pinned_module_evidence_v3"
         )
+        assert context["context_receipt"]["campaign_id"] == campaign["id"]
+        assert context["context_receipt"]["module_source_ref_digests"]
+
+        source_bound_event = {
+            "summary": "Zaltember flees toward area 31.",
+            "event_type": "npc_fled",
+            "audience_scope": "party",
+            "payload": {
+                "source_ref": source_ref,
+                "source_excerpt": source_excerpt,
+            },
+        }
+        current_campaign = await _call(
+            server,
+            "campaign_query",
+            {"view": "get", "payload": {"campaign_id": campaign["id"]}},
+        )
+        with pytest.raises(Exception, match="context_receipt is required"):
+            await _call(
+                server,
+                "memory_change",
+                {
+                    "campaign_id": campaign["id"],
+                    "action": "commit",
+                    "payload": {"event": source_bound_event},
+                    "expected_revision": current_campaign["revision"],
+                    "idempotency_key": "source-bound-without-context",
+                },
+            )
+        committed = await _call(
+            server,
+            "memory_change",
+            {
+                "campaign_id": campaign["id"],
+                "action": "commit",
+                "payload": {
+                    "event": source_bound_event,
+                    "context_receipt": context["context_receipt"],
+                },
+                "expected_revision": current_campaign["revision"],
+                "idempotency_key": "source-bound-with-context",
+            },
+        )
+        assert committed["event"]["event_type"] == "npc_fled"
 
         await _call(
             server,

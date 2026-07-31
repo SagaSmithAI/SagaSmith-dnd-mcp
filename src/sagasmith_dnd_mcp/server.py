@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import hmac
 import json
 import math
 import re
+import time
 from contextlib import nullcontext
 from copy import deepcopy
 from dataclasses import asdict, replace
@@ -18,6 +20,7 @@ from uuid import uuid4
 from weakref import WeakValueDictionary
 
 from mcp.server.fastmcp import FastMCP, Image
+from mcp.server.lowlevel.server import NotificationOptions
 from mcp.types import CallToolResult, TextContent
 from pydantic import Field
 from sagasmith_core import (
@@ -388,11 +391,20 @@ from sqlalchemy.exc import NoResultFound
 
 from sagasmith_dnd_mcp.config import McpConfig
 from sagasmith_dnd_mcp.exposure import Exposure, ExposureError, ExposureRegistry
+from sagasmith_dnd_mcp.facade_contracts import (
+    ACTION_PAYLOAD_CONTRACTS,
+    action_payload_contract,
+)
 from sagasmith_dnd_mcp.random_state import (
     RandomStateMutationService as StateMutationService,
 )
 from sagasmith_dnd_mcp.random_state import (
     bind_idempotency_request,
+)
+from sagasmith_dnd_mcp.skill_plans import (
+    RESULT_OPERATION_PHASES,
+    SkillPlanCatalog,
+    SkillReadTracker,
 )
 from sagasmith_dnd_mcp.skills import SkillCatalog
 from sagasmith_dnd_mcp.storage import SagaSmithStorage
@@ -967,16 +979,39 @@ class SessionExposureFastMCP(FastMCP):
         phase_lookup: Any,
         scope_validator: Any,
         random_context_factory: Any,
+        bound_principal_id: str | None = None,
         **kwargs: Any,
     ) -> None:
         self.exposure_registry = exposure_registry
         self._phase_lookup = phase_lookup
         self._scope_validator = scope_validator
         self._random_context_factory = random_context_factory
+        self._bound_principal_id = (
+            bound_principal_id.strip() if bound_principal_id else None
+        )
         self._sessions: WeakValueDictionary[str, Any] = WeakValueDictionary()
         self._exposure_locks: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
         self._campaign_locks: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
         super().__init__(*args, **kwargs)
+        original_initialization_options = self._mcp_server.create_initialization_options
+
+        def initialization_options(
+            notification_options: NotificationOptions | None = None,
+            experimental_capabilities: dict[str, dict[str, Any]] | None = None,
+        ):
+            """Advertise the dynamic tool notifications this server actually sends."""
+
+            return original_initialization_options(
+                notification_options
+                or NotificationOptions(
+                    tools_changed=True,
+                    prompts_changed=False,
+                    resources_changed=False,
+                ),
+                experimental_capabilities,
+            )
+
+        self._mcp_server.create_initialization_options = initialization_options  # type: ignore[method-assign]
 
     def _request_session(self) -> tuple[str, Any] | None:
         try:
@@ -1084,6 +1119,21 @@ class SessionExposureFastMCP(FastMCP):
             result[principal_argument] = exposure.principal_id
         return result
 
+    def _bind_configured_principal(
+        self,
+        tool_id: str,
+        arguments: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Replace model-authored identity when this process is principal-bound."""
+
+        result = dict(arguments)
+        if self._bound_principal_id is None:
+            return result
+        principal_argument = self._principal_argument(tool_id)
+        if principal_argument is not None:
+            result[principal_argument] = self._bound_principal_id
+        return result
+
     async def _refresh(self, session_key: str, campaign_id: str | None = None) -> bool:
         changed = False
         exposures = (
@@ -1122,6 +1172,7 @@ class SessionExposureFastMCP(FastMCP):
             return await super().call_tool(name, arguments)
         session_key, _ = request
         await self._refresh(session_key)
+        arguments = self._bind_configured_principal(name, arguments)
         exposure = self.exposure_registry.active(session_key)
         if name not in CORE_TOOLS and exposure is None:
             raise ExposureError(
@@ -1129,7 +1180,7 @@ class SessionExposureFastMCP(FastMCP):
             )
         if exposure is not None and not name.startswith("exposure_"):
             arguments = self._bind_exposure_principal(
-                exposure, name, arguments, inject_missing=False
+                exposure, name, arguments, inject_missing=True
             )
             self._scope_validator(exposure, name, arguments)
         if name not in CORE_TOOLS:
@@ -1197,6 +1248,21 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         dnd_root=config.dnd_skills_dir,
         modulegen_root=config.modulegen_skills_dir,
     )
+    skill_plan_catalog = SkillPlanCatalog(
+        skills=catalog,
+        expected_tool_groups=GROUP_BY_ID,
+        expected_operation_phases={
+            **{
+                f"{tool_id}:{selector}": frozenset(
+                    profiles_for_tool(tool_id)
+                )
+                for tool_id, selectors in ACTION_PAYLOAD_CONTRACTS.items()
+                for selector in selectors
+            },
+            **RESULT_OPERATION_PHASES,
+        },
+    )
+    skill_read_tracker = SkillReadTracker()
     native_rule_providers = load_native_rule_providers()
 
     def rule_document_options(checksum: str | None = None) -> dict[str, Any]:
@@ -1982,14 +2048,269 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
 
     mcp = SessionExposureFastMCP(
         "SagaSmith D&D",
-        instructions="D&D 5e campaign runtime, module storage, and skill packs.",
+        instructions=(
+            "SagaSmith is a source-bound D&D 5e campaign runtime. Cold start: call "
+            "skill_query(kind='skill', action='plan'), then read every required_now "
+            "document; use outline/section/search only for task-specific depth. Call "
+            "storage_status and server_capabilities. "
+            "Call campaign_query to find a campaign. Open exactly one exposure with "
+            "exposure_open(campaign_id?, principal_id?), then exposure_search, "
+            "exposure_inspect, and exposure_load. Reopen with campaign_id after creating "
+            "a campaign. The server sends tools/list_changed; if the host does not refresh, "
+            "use exposure_call for loaded domain tools. Never invent a successful write, "
+            "bypass phase/role/revision/idempotency requirements, or treat module search "
+            "summaries as exact evidence. Read sagasmith://bootstrap for the compact "
+            "host-independent workflow. Standard mechanics are engine-owned; unstructured "
+            "module semantics default to Agent DM reasoning from exact source evidence; "
+            "player choices, permission/owner approvals, and missing/conflicting sources "
+            "remain external boundaries."
+        ),
         exposure_registry=exposures,
         phase_lookup=authoritative_phase,
         scope_validator=validate_exposure_scope,
         random_context_factory=campaign_random_context,
+        bound_principal_id=config.bound_principal_id,
     )
 
+    def skill_session_key(principal_id: str) -> str:
+        request = mcp._request_session()
+        return request[0] if request is not None else f"direct:{principal_id}"
+
+    def skill_plan_context(
+        *,
+        principal_id: str,
+        campaign_id: str | None = None,
+        exposure_id: str | None = None,
+        operation: str | None = None,
+        focus_tool_groups: set[str] | None = None,
+        refresh: bool = False,
+        phase_hint: str | None = None,
+    ) -> dict[str, Any]:
+        """Resolve a Skill plan from server-owned phase, role, and exposure state."""
+
+        if refresh:
+            skill_plan_catalog.reload()
+        request = mcp._request_session()
+        session_key = (
+            request[0] if request is not None else f"direct:{principal_id}"
+        )
+        exposure = None
+        if exposure_id is not None:
+            exposure = exposures.get(
+                exposure_id,
+                request[0] if request is not None else None,
+            )
+        elif request is not None:
+            exposure = exposures.active(request[0])
+        if exposure is not None:
+            if exposure.principal_id != principal_id:
+                raise ExposureError(
+                    "Skill plan principal does not match the active exposure."
+                )
+            if campaign_id is not None and exposure.campaign_id != campaign_id:
+                raise ExposureError(
+                    "Skill plan campaign does not match the active exposure."
+                )
+            campaign_id = exposure.campaign_id
+        if campaign_id is not None:
+            membership = access.require_campaign(campaign_id, principal_id)
+            role = str(membership.role)
+            phase = authoritative_phase(campaign_id)
+            if exposure is not None:
+                exposures.refresh_phase(exposure, phase)
+        else:
+            role = (
+                "local_admin"
+                if principal_id == LOCAL_SYSTEM_PRINCIPAL_ID
+                else "public"
+            )
+            phase = phase_hint or PROFILE_LOBBY
+        loaded_groups = (
+            set(exposure.loaded_groups) if exposure is not None else set()
+        )
+        return skill_plan_catalog.plan(
+            phase=phase,
+            role=role,
+            loaded_tool_groups=loaded_groups,
+            session_key=session_key,
+            tracker=skill_read_tracker,
+            campaign_id=campaign_id,
+            exposure_id=exposure.id if exposure is not None else None,
+            operation=operation,
+            focus_tool_groups=focus_tool_groups,
+        )
+
+    def mark_skill_plan_read(
+        *,
+        principal_id: str,
+        kind: str,
+        identifier: str,
+        action: str,
+        heading: str | None,
+    ) -> dict[str, Any] | None:
+        """Record a successful planned read without turning guidance into auth."""
+
+        document = skill_plan_catalog.resolve_document(
+            kind=kind,
+            identifier=identifier,
+            action=action,
+            heading=heading,
+        )
+        if document is None:
+            return None
+        return skill_read_tracker.mark(
+            session_key=skill_session_key(principal_id),
+            document=document,
+        )
+
     rules_context_unset = object()
+    context_receipt_secret = uuid4().bytes + uuid4().bytes
+    context_receipt_ttl_ns = 60 * 60 * 1_000_000_000
+
+    def managed_module_source_digests(value: Any) -> set[str]:
+        """Collect stable identities for exact managed module citations."""
+
+        result: set[str] = set()
+        if isinstance(value, list):
+            for item in value:
+                result.update(managed_module_source_digests(item))
+            return result
+        if not isinstance(value, dict):
+            return result
+        for key, item in value.items():
+            if key in {"source_ref", "source_refs"}:
+                candidates = (
+                    item if key == "source_refs" and isinstance(item, list) else [item]
+                )
+                for candidate in candidates:
+                    if not isinstance(candidate, dict):
+                        continue
+                    if not (MANAGED_MODULE_SOURCE_FIELDS & set(candidate)):
+                        continue
+                    exact = {
+                        name: candidate.get(name)
+                        for name in EXACT_MODULE_SOURCE_FIELD_ORDER
+                    }
+                    result.add(
+                        hashlib.sha256(
+                            canonical_json(exact).encode("utf-8")
+                        ).hexdigest()
+                    )
+                continue
+            result.update(managed_module_source_digests(item))
+        return result
+
+    def anchored_source_digests(
+        campaign_id: str,
+        branch_id: str | None,
+    ) -> set[str]:
+        """Return active module sources whose context was deliberately pinned."""
+
+        result: set[str] = set()
+        for fact in memories.list(campaign_id, branch_id=branch_id):
+            if str(fact.kind) != "context_anchor":
+                continue
+            metadata = dict(fact.metadata or {})
+            result.update(
+                managed_module_source_digests(
+                    [
+                        {"source_ref": dict(binding or {}).get("source_ref")}
+                        for binding in list(metadata.get("source_bindings") or [])
+                    ]
+                )
+            )
+        return result
+
+    def issue_context_receipt(
+        *,
+        campaign_id: str,
+        branch_id: str | None,
+        principal_id: str,
+        audience: str,
+        actor_id: str | None,
+        scope_id: str,
+        related_refs: list[str],
+        context: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Sign proof that exact continuity context was read at this revision."""
+
+        issued_ns = time.monotonic_ns()
+        payload = {
+            "schema_version": 1,
+            "campaign_id": campaign_id,
+            "branch_id": branch_id,
+            "campaign_revision": campaigns.get(campaign_id).revision,
+            "principal_id": principal_id,
+            "audience": audience,
+            "actor_id": actor_id,
+            "scope_id": scope_id,
+            "related_refs": sorted(related_refs),
+            "module_source_ref_digests": sorted(
+                managed_module_source_digests(
+                    [
+                        {"source_ref": dict(item or {}).get("source_ref")}
+                        for item in list(context.get("module_evidence") or [])
+                    ]
+                )
+            ),
+            "issued_monotonic_ns": issued_ns,
+            "expires_monotonic_ns": issued_ns + context_receipt_ttl_ns,
+        }
+        signature = hmac.new(
+            context_receipt_secret,
+            canonical_json(payload).encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+        return {**payload, "signature": signature}
+
+    def verify_context_receipt(
+        receipt: Any,
+        *,
+        campaign_id: str,
+        branch_id: str | None,
+        principal_id: str,
+        required_source_digests: set[str],
+    ) -> None:
+        """Verify a source-bound narrative commit used current pinned context."""
+
+        if not isinstance(receipt, dict):
+            raise ValueError(
+                "payload.context_receipt is required when a continuity commit cites "
+                "a pinned context-anchor source"
+            )
+        payload = dict(receipt)
+        signature = str(payload.pop("signature", ""))
+        expected_signature = hmac.new(
+            context_receipt_secret,
+            canonical_json(payload).encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+        if not hmac.compare_digest(signature, expected_signature):
+            raise ValueError("payload.context_receipt signature is invalid")
+        if payload.get("campaign_id") != campaign_id:
+            raise ValueError("payload.context_receipt belongs to another campaign")
+        if payload.get("branch_id") != branch_id:
+            raise ValueError("payload.context_receipt belongs to another branch")
+        if payload.get("principal_id") != principal_id:
+            raise ValueError("payload.context_receipt belongs to another principal")
+        if int(payload.get("expires_monotonic_ns") or 0) < time.monotonic_ns():
+            raise ValueError("payload.context_receipt expired; read continuity_context again")
+        campaign_revision = campaigns.get(campaign_id).revision
+        if int(payload.get("campaign_revision", -1)) != campaign_revision:
+            raise ValueError(
+                "payload.context_receipt is stale; read continuity_context again at "
+                f"campaign revision {campaign_revision}"
+            )
+        received_source_digests = {
+            str(item)
+            for item in list(payload.get("module_source_ref_digests") or [])
+        }
+        missing = sorted(required_source_digests - received_source_digests)
+        if missing:
+            raise ValueError(
+                "payload.context_receipt did not include every cited pinned module source; "
+                "read continuity_context with the relevant related_refs"
+            )
 
     def character_view(
         character: Any,
@@ -7484,9 +7805,30 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     def server_capabilities() -> dict[str, Any]:
         """Describe the MCP contract and the automatic-vs-ruling combat boundary."""
         return {
-            "contract_version": "2026-07-hypnotic-pattern-v7",
+            "contract_version": "2026-07-phase-skill-plan-v8",
             "transport": "stdio",
             "state_owner": "sagasmith-dnd-mcp",
+            "zero_knowledge_bootstrap": {
+                "resource": "sagasmith://bootstrap",
+                "skill_tool": "skill_query",
+                "skill_entrypoint": "dnd.full",
+                "bounded_reads": ["plan", "outline", "section", "search"],
+                "phase_skill_plan": skill_plan_catalog.summary(),
+            },
+            "principal_binding": {
+                "mode": (
+                    "process_bound"
+                    if config.bound_principal_id is not None
+                    else "trusted_local_or_host_adapter"
+                ),
+                "bound_principal_id": config.bound_principal_id,
+                "environment": "SAGASMITH_DND_MCP_BOUND_PRINCIPAL_ID",
+                "multi_user_requirement": (
+                    "Use one process per trusted principal or a host adapter that hides "
+                    "and injects the authenticated principal. Never let the model choose "
+                    "an authorization identity."
+                ),
+            },
             "features": {
                 "mutation_groups": True,
                 "atomic_undo_redo": True,
@@ -7547,6 +7889,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "legacy_tool_aliases": False,
                 "session_scoped_tool_exposure": True,
                 "native_tools_list_filtering": True,
+                "native_tools_list_changed_advertised": True,
                 "exposure_call_fallback": True,
                 "campaign_bound_exposure": True,
                 "fallback_principal_binding": True,
@@ -7554,6 +7897,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "stable_campaign_fact_identity": True,
                 "atomic_continuity_commit": True,
                 "source_bound_dm_context_anchors": True,
+                "signed_context_receipts_for_anchored_narrative_commits": True,
+                "phase_tool_group_skill_plans": True,
+                "skill_plan_checksum_invalidation": True,
+                "skill_plan_session_read_tracking": True,
                 "pinned_non_executable_module_evidence": True,
                 "skill_manifest_checksums": True,
                 "validated_module_runtime_manifest": True,
@@ -9815,7 +10162,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         scope = f"combat-start:{campaign_id}:{resolved_branch_id}:{principal_id}"
         replay = replay_idempotent(scope, idempotency_key, payload)
         if replay is not None:
-            return combat_response(campaign_id, principal_id, replay)
+            replay_response = combat_response(campaign_id, principal_id, replay)
+            replay_response["skill_plan"] = skill_plan_context(
+                principal_id=principal_id,
+                campaign_id=campaign_id,
+                operation="combat_start:started",
+            )
+            return replay_response
         if expected_revision is not None and campaign.revision != expected_revision:
             raise ValueError(
                 "campaign revision conflict: "
@@ -10139,11 +10492,17 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             ),
             rule_receipts=start_receipts,
         )
-        return combat_response(
+        result = combat_response(
             campaign_id,
             principal_id,
             start_response(list(revisions_result or [])),
         )
+        result["skill_plan"] = skill_plan_context(
+            principal_id=principal_id,
+            campaign_id=campaign_id,
+            operation="combat_start:started",
+        )
+        return result
 
     @mcp.tool()
     @_agent_ruling_boundary
@@ -28470,7 +28829,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         scope = f"combat-end:{campaign_id}:{resolved_branch_id}:{principal_id}"
         replay = replay_idempotent(scope, idempotency_key, payload)
         if replay is not None:
-            return combat_response(campaign_id, principal_id, replay)
+            replay_response = combat_response(campaign_id, principal_id, replay)
+            replay_response["skill_plan"] = skill_plan_context(
+                principal_id=principal_id,
+                campaign_id=campaign_id,
+                operation="combat_end:closed",
+            )
+            return replay_response
         if expected_revision is not None and campaign.revision != expected_revision:
             raise ValueError(
                 "campaign revision conflict: "
@@ -28619,7 +28984,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             },
             character_updates=character_updates,
         )
-        return combat_response(campaign_id, principal_id, response)
+        result = combat_response(campaign_id, principal_id, response)
+        result["skill_plan"] = skill_plan_context(
+            principal_id=principal_id,
+            campaign_id=campaign_id,
+            operation="combat_end:closed",
+        )
+        return result
 
     @mcp.tool()
     def continuity_context(
@@ -28686,7 +29057,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 quest_id = str(quest_value.get("id") or "").strip()
                 if quest_id:
                     resolved_related_refs.add(f"quest:{quest_id}")
-        return continuity.context(
+        result = continuity.context(
             campaign_id,
             query=query,
             actor_id=actor_id,
@@ -28697,6 +29068,17 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             budget_chars=budget_chars,
             related_refs=sorted(resolved_related_refs),
         )
+        result["context_receipt"] = issue_context_receipt(
+            campaign_id=campaign_id,
+            branch_id=branch_id,
+            principal_id=principal_id,
+            audience=audience,
+            actor_id=actor_id,
+            scope_id=scope_id,
+            related_refs=sorted(resolved_related_refs),
+            context=result,
+        )
+        return result
 
     @mcp.tool()
     def continuity_diagnostics(
@@ -28760,6 +29142,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         event_data = dict(raw_event)
         facts_data = [dict(item) for item in raw_facts]
         knowledge_data = [dict(item) for item in raw_knowledge]
+        context_receipt = data.get("context_receipt")
         snapshot_data = dict(data["snapshot"]) if data.get("snapshot") is not None else None
         validate_embedded_module_source_refs(
             campaign_id,
@@ -28798,6 +29181,21 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         replay = replay_idempotent(scope, idempotency_key, request_payload)
         if replay is not None:
             return replay
+        embedded_source_digests = managed_module_source_digests(
+            [event_data.get("payload") or {}, facts_data, knowledge_data]
+        )
+        required_source_digests = embedded_source_digests & anchored_source_digests(
+            campaign_id,
+            branch_id,
+        )
+        if required_source_digests:
+            verify_context_receipt(
+                context_receipt,
+                campaign_id=campaign_id,
+                branch_id=branch_id,
+                principal_id=principal_id,
+                required_source_digests=required_source_digests,
+            )
         current_facts = {
             item.fact_key: item
             for item in memories.list(
@@ -34837,6 +35235,80 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         return catalog.read(skill_id)
 
     @mcp.resource(
+        "sagasmith://bootstrap",
+        name="SagaSmith zero-knowledge bootstrap",
+        description="Compact host-independent startup and recovery workflow.",
+        mime_type="text/markdown",
+    )
+    def bootstrap_resource() -> str:
+        """Give an MCP-only host enough guidance to start without preset knowledge."""
+
+        return """# SagaSmith D&D zero-knowledge bootstrap
+
+1. Call `skill_query(kind="skill", action="plan")` and read every
+   `required_now` document. Use `outline`, `section`, and `search` only for
+   task-specific depth.
+2. Call `storage_status`, `server_capabilities`, and `campaign_query`.
+3. Call `exposure_open`. Before campaign creation load only `lobby.bootstrap`;
+   after creation reopen with the returned `campaign_id`.
+4. Use `exposure_search`, `exposure_inspect`, and `exposure_load`. The server
+   sends `tools/list_changed`; if the host does not refresh, call the loaded
+   domain tool through `exposure_call`.
+5. Before a write, read the exact current revision and use a stable
+   `idempotency_key`. Never emulate a successful write.
+6. Search then expand exact module/rule evidence. Standard mechanics are
+   engine-owned. Module-specific semantics default to Agent DM reasoning.
+   Player-owned choices, owner/permission approvals, and missing or conflicting
+   sources remain external.
+7. On resume, read campaign, branch, manifest/current scene, continuity, and
+   actor knowledge again; discard pre-restore context.
+
+Useful bounded guidance:
+
+- `skill_query(kind="skill", action="section", identifier="dnd.full",
+  heading="Startup")`
+- `skill_query(kind="skill", action="plan", exposure_id="<current exposure>")`
+- `skill_query(kind="skill", action="outline",
+  identifier="dnd.full.skills.dnd-dm")`
+- `skill_query(kind="asset", action="search",
+  identifier="dnd:full/references/mcp-contract.md", query="<tool> <action>")`
+- `skill_query(kind="asset", action="section",
+  identifier="dnd:full/references/long-form-narrative-architecture.md",
+  heading="新 session 或恢复后的读取流程")`
+"""
+
+    @mcp.resource(
+        "sagasmith://skills/assets",
+        name="SagaSmith skill asset index",
+        description="Installed reference, template, and data asset ids.",
+        mime_type="text/markdown",
+    )
+    def skill_asset_index_resource() -> str:
+        """Expose stable asset ids without requiring a campaign-bound tool group."""
+
+        assets = catalog.assets()
+        workflow_assets = [
+            asset
+            for asset in assets
+            if "/srd/" not in asset.id.casefold()
+        ]
+        lines = ["# SagaSmith workflow assets", ""]
+        for asset in workflow_assets:
+            lines.append(
+                f"- `{asset.id}` ({asset.source}, sha256:{asset.checksum})"
+            )
+        lines.extend(
+            [
+                "",
+                f"SRD/reference corpus assets omitted from this compact index: "
+                f"{len(assets) - len(workflow_assets)}.",
+                "Use the core `skill_query` tool with action `outline`, `section`, "
+                "`search`, or `read`. Prefer bounded `section`/`search` reads.",
+            ]
+        )
+        return "\n".join(lines)
+
+    @mcp.resource(
         "sagasmith://skills/overview",
         name="SagaSmith D&D skill overview",
         description="Installed D&D and module-generation skill document ids.",
@@ -34853,10 +35325,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         lines.extend(
             [
                 "",
-                "Read a document with `skill_read` or `sagasmith://skill/{skill_id}`.",
                 (
-                    "Use `skill_asset_list` and `skill_asset_read` for references, data, "
-                    "and templates."
+                    "Read a document with core "
+                    "`skill_query(kind=\"skill\", action=\"read\", identifier=...)` "
+                    "or `sagasmith://skill/{skill_id}`."
+                ),
+                (
+                    "Use core `skill_query(kind=\"asset\", action=\"list\"|\"read\", "
+                    "identifier=...)` for references, data, and templates; prefer "
+                    "bounded `outline`, `section`, and `search` actions."
                 ),
             ]
         )
@@ -34872,8 +35349,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         """Start a D&D DM turn with the bundled D&D DM instructions available as a resource."""
         return (
             f"You are running campaign {campaign_id}. Objective: {objective}\n\n"
-            "Read sagasmith://skill/dnd.full.skills.dnd-dm before acting. Use module_search and "
-            "rule_search for factual retrieval; record durable changes through the MCP tools."
+            "Read sagasmith://bootstrap first. Use core skill_query(action='plan') and "
+            "read every required_now document for the current exposure. Use bounded "
+            "outline/section/search only for task-specific depth; do not load the entire "
+            "DM document unless required. Use module_search/module_expand and "
+            "rule_search/rule_expand for exact factual evidence; record durable changes "
+            "only through public MCP tools."
         )
 
     @mcp.prompt()
@@ -37568,13 +38049,85 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
 
     @mcp.tool()
     def campaign_query(
-        view: Literal["list", "get", "party"] = "list",
+        view: Literal["list", "get", "party", "resume"] = "list",
         payload: dict[str, Any] | None = None,
         principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
     ) -> dict[str, Any]:
-        """Read campaigns, one campaign, or its party state."""
+        """Read campaigns, party state, or one complete resume bundle."""
         data = facade_payload(payload)
-        if view == "get":
+        if view == "resume":
+            data = strict_facade_payload(
+                payload,
+                action="campaign_query(resume)",
+                allowed={
+                    "actor_id",
+                    "audience",
+                    "budget_chars",
+                    "campaign_id",
+                    "limit",
+                    "query",
+                    "related_refs",
+                    "scope_id",
+                },
+                required_names=("campaign_id",),
+            )
+            campaign_id = required(data, "campaign_id")
+            membership = access.require_campaign(campaign_id, principal_id)
+            branch_values = branch_list(campaign_id, principal_id)
+            current_branch = next(
+                (item for item in branch_values if item.get("is_current")),
+                None,
+            )
+            manifest_result = None
+            if membership.role in CAMPAIGN_DM_ROLES:
+                try:
+                    manifest_result = playthrough_manifest(
+                        campaign_id,
+                        "get",
+                        principal_id=principal_id,
+                    )
+                except LookupError:
+                    manifest_result = None
+            context = continuity_context(
+                campaign_id,
+                query=str(data.get("query") or ""),
+                actor_id=data.get("actor_id"),
+                scope_id=str(data.get("scope_id") or "party"),
+                audience=str(data.get("audience") or "dm"),
+                branch_id=(
+                    str(current_branch["id"]) if current_branch is not None else None
+                ),
+                limit=int(data.get("limit", 8)),
+                budget_chars=int(data.get("budget_chars", 12_000)),
+                related_refs=data.get("related_refs"),
+                principal_id=principal_id,
+            )
+            result = {
+                "campaign": campaign_get(campaign_id, principal_id),
+                "branches": branch_values,
+                "current_branch": current_branch,
+                "manifest": manifest_result,
+                "current_scene": module_current(
+                    campaign_id,
+                    scope_id=str(data.get("scope_id") or "party"),
+                    principal_id=principal_id,
+                ),
+                "continuity": context,
+                "resume_invariants": {
+                    "discard_pre_restore_context": True,
+                    "context_receipt_revision": context["context_receipt"][
+                        "campaign_revision"
+                    ],
+                    "reopen_exposure_for_campaign": True,
+                    "refresh_tools_after_phase_change": True,
+                },
+                "skill_plan": skill_plan_context(
+                    principal_id=principal_id,
+                    campaign_id=campaign_id,
+                    operation="campaign_query:resume",
+                ),
+            }
+        elif view == "get":
             result = campaign_get(required(data, "campaign_id"), principal_id)
         elif view == "party":
             result = party_show(required(data, "campaign_id"), principal_id)
@@ -38399,6 +38952,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "actor_knowledge",
                     "snapshot",
                     "branch_id",
+                    "context_receipt",
                 },
                 required_names=("event",),
             )
@@ -39347,12 +39901,48 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     @mcp.tool()
     def skill_query(
         kind: Literal["skill", "asset"],
-        action: Literal["list", "read"],
+        action: Literal["plan", "list", "read", "outline", "section", "search"],
         identifier: str | None = None,
         source: str | None = None,
+        heading: str | None = None,
+        query: str | None = None,
+        max_chars: int = 12_000,
+        limit: int = 8,
+        campaign_id: str | None = None,
+        exposure_id: str | None = None,
+        operation: str | None = None,
+        refresh: bool = False,
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
     ) -> dict[str, Any]:
-        """List or read installed D&D skill documents and text assets."""
-        if kind == "skill":
+        """Plan, discover, or read bounded installed workflow guidance."""
+        if action == "plan":
+            result = skill_plan_context(
+                principal_id=principal_id,
+                campaign_id=campaign_id,
+                exposure_id=exposure_id,
+                operation=operation,
+                refresh=refresh,
+            )
+        elif action == "outline":
+            result = catalog.outline(
+                kind=kind,
+                identifier=required({"identifier": identifier}, "identifier"),
+            )
+        elif action == "section":
+            result = catalog.section(
+                kind=kind,
+                identifier=required({"identifier": identifier}, "identifier"),
+                heading=required({"heading": heading}, "heading"),
+                max_chars=max_chars,
+            )
+        elif action == "search":
+            result = catalog.search(
+                kind=kind,
+                identifier=identifier,
+                query=required({"query": query}, "query"),
+                limit=limit,
+            )
+        elif kind == "skill":
             result = (
                 skill_list()
                 if action == "list"
@@ -39364,7 +39954,23 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 if action == "list"
                 else skill_asset_read(required({"identifier": identifier}, "identifier"))
             )
-        return facade_result(action, result)
+        response = facade_result(action, result)
+        complete_planned_read = action == "read" or (
+            action == "section"
+            and isinstance(result, dict)
+            and result.get("truncated") is False
+        )
+        if complete_planned_read and identifier is not None:
+            read_receipt = mark_skill_plan_read(
+                principal_id=principal_id,
+                kind=kind,
+                identifier=identifier,
+                action=action,
+                heading=heading if action == "section" else None,
+            )
+            if read_receipt is not None:
+                response["skill_read_receipt"] = read_receipt
+        return response
 
     @mcp.tool()
     def game_phase(
@@ -39389,7 +39995,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 idempotency_key,
             )
         )
-        return facade_result(action, result)
+        response = facade_result(action, result)
+        response["skill_plan"] = skill_plan_context(
+            principal_id=principal_id,
+            campaign_id=campaign_id,
+        )
+        return response
 
     @mcp.tool()
     def exposure_open(
@@ -39397,6 +40008,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
     ) -> dict[str, Any]:
         """Start or replace this MCP session's server-owned tool exposure."""
+        if config.bound_principal_id is not None:
+            principal_id = config.bound_principal_id
         if campaign_id:
             access.require_campaign(campaign_id, principal_id)
             phase = authoritative_phase(campaign_id)
@@ -39419,6 +40032,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             **exposures.status(exposure),
             "native_dynamic_tools": request is not None,
             "next": "Use exposure_search, exposure_inspect, then exposure_load.",
+            "skill_plan": skill_plan_context(
+                principal_id=principal_id,
+                exposure_id=exposure.id,
+            ),
         }
 
     @mcp.tool()
@@ -39428,7 +40045,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         exposure = exposures.get(exposure_id, request[0] if request else None)
         if exposure.campaign_id:
             exposures.refresh_phase(exposure, authoritative_phase(exposure.campaign_id))
-        return exposures.status(exposure)
+        return {
+            **exposures.status(exposure),
+            "skill_plan": skill_plan_context(
+                principal_id=exposure.principal_id,
+                exposure_id=exposure.id,
+            ),
+        }
 
     @mcp.tool()
     def exposure_search(
@@ -39438,9 +40061,73 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         return {"groups": exposures.search(query, phase), "catalog_version": "2026-07"}
 
     @mcp.tool()
-    def exposure_inspect(group_id: str) -> dict[str, Any]:
-        """Inspect one capability group, including its tools and phase boundary."""
-        return exposures.inspect(group_id)
+    def exposure_inspect(
+        group_id: str,
+        tool_id: str | None = None,
+        selector: str | None = None,
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
+    ) -> dict[str, Any]:
+        """Inspect a capability group or one tool's action-specific field contract."""
+        result = exposures.inspect(group_id)
+        group = GROUP_BY_ID[group_id]
+        if tool_id is not None and tool_id not in group.tools:
+            raise ExposureError(f"Tool {tool_id!r} does not belong to group {group_id!r}.")
+        operation = (
+            f"{tool_id}:{selector}"
+            if tool_id is not None and selector is not None
+            else None
+        )
+        request = mcp._request_session()
+        active_exposure = (
+            exposures.active(request[0]) if request is not None else None
+        )
+        plan_delta = skill_plan_context(
+            principal_id=(
+                active_exposure.principal_id
+                if active_exposure is not None
+                else principal_id
+            ),
+            exposure_id=(
+                active_exposure.id if active_exposure is not None else None
+            ),
+            operation=operation,
+            focus_tool_groups={group_id},
+            phase_hint=group.phase,
+        )
+        if tool_id is None:
+            return {**result, "skill_plan_delta": plan_delta}
+        tool = mcp._tool_manager.get_tool(tool_id)
+        if tool is None:
+            raise ExposureError(f"Unknown public tool: {tool_id}")
+        schema = dict(tool.parameters or {})
+        contract = action_payload_contract(
+            tool_id=tool_id,
+            input_schema=schema,
+            selector=selector,
+        )
+        try:
+            guidance = catalog.search(
+                kind="asset",
+                identifier="dnd:full/references/mcp-contract.md",
+                query=" ".join(
+                    item for item in (tool_id, selector or "") if item
+                ),
+                limit=3,
+                context_chars=700,
+            )
+        except LookupError:
+            guidance = {
+                "kind": "asset",
+                "query": tool_id,
+                "matches": [],
+                "truncated": False,
+            }
+        return {
+            **result,
+            "tool_contract": contract,
+            "workflow_guidance": guidance,
+            "skill_plan_delta": plan_delta,
+        }
 
     @mcp.tool()
     async def exposure_load(
@@ -39454,6 +40141,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         group = GROUP_BY_ID.get(group_id)
         if group is None:
             raise ExposureError(f"Unknown tool group: {group_id}")
+        if skill_plan_catalog.required and not skill_plan_catalog.available:
+            raise ExposureError(
+                "The installed Full D&D Skills plan is unavailable: "
+                f"{skill_plan_catalog.load_error}. Repair the Skills installation "
+                "before loading domain tools."
+            )
         if group.roles:
             if exposure.campaign_id is None:
                 raise ExposureError(f"Tool group {group_id!r} requires a campaign.")
@@ -39464,7 +40157,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             if exposure.campaign_id:
                 exposures.refresh_phase(exposure, authoritative_phase(exposure.campaign_id))
             exposures.load(exposure, group_id, ttl_calls)
-        return exposures.status(exposure)
+        return {
+            **exposures.status(exposure),
+            "skill_plan_delta": skill_plan_context(
+                principal_id=exposure.principal_id,
+                exposure_id=exposure.id,
+                focus_tool_groups={group_id},
+            ),
+        }
 
     @mcp.tool()
     async def exposure_unload(exposure_id: str, group_id: str) -> dict[str, Any]:
@@ -39473,7 +40173,16 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         exposure = exposures.get(exposure_id, request[0] if request else None)
         async with mcp._exposure_lock(exposure.id):
             exposures.unload(exposure, group_id)
-        return exposures.status(exposure)
+        return {
+            **exposures.status(exposure),
+            "skill_plan_delta": {
+                "removed_tool_groups": [group_id],
+                "current": skill_plan_context(
+                    principal_id=exposure.principal_id,
+                    exposure_id=exposure.id,
+                ),
+            },
+        }
 
     retired_tool_replacements = {
         "chase_start": "chase(action='start')",

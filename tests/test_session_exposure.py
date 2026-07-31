@@ -95,6 +95,64 @@ def test_facade_preserves_external_ruling_ownership() -> None:
     assert result["result"]["reason"] == "source card is incomplete"
 
 
+def test_exposure_inspect_returns_action_specific_payload_contract(
+    tmp_path: Path,
+) -> None:
+    config = McpConfig(
+        home=tmp_path / "home",
+        database_url=None,
+        chroma_url=None,
+        chroma_path_override=None,
+        dnd_skills_dir=tmp_path / "dnd",
+        modulegen_skills_dir=tmp_path / "modulegen",
+        auto_seed_rules=False,
+    )
+
+    async def exercise() -> None:
+        server = create_server(config)
+        _, result = await server.call_tool(
+            "exposure_inspect",
+            {
+                "group_id": "play.resolution",
+                "tool_id": "character_check",
+                "selector": "contest",
+            },
+        )
+        contract = result["tool_contract"]
+        assert contract["selector_field"] == "action"
+        assert contract["selected"] == "contest"
+        contest = contract["actions"]["contest"]
+        assert contest["contract_kind"] == "exact_field_contract"
+        variant = contest["payload_variants"][0]
+        assert variant["additional_properties"] is False
+        assert variant["required_fields"] == [
+            "source_actor_id",
+            "target_actor_id",
+            "source_ability",
+            "target_ability",
+        ]
+        _, compatibility_result = await server.call_tool(
+            "exposure_inspect",
+            {
+                "group_id": "lobby.modules",
+                "tool_id": "module_query",
+                "selector": "scene",
+            },
+        )
+        compatibility_contract = compatibility_result["tool_contract"]["actions"][
+            "scene"
+        ]
+        assert compatibility_contract["contract_kind"] == "runtime_field_guide"
+        assert compatibility_contract["payload_variants"][0][
+            "additional_properties"
+        ] is True
+        assert compatibility_contract["payload_variants"][0]["required_fields"] == [
+            "scene_id"
+        ]
+
+    asyncio.run(exercise())
+
+
 def test_facade_preserves_nested_external_ruling_ownership() -> None:
     nested = {
         "status": "pending_ruling",
@@ -735,8 +793,26 @@ def test_stdio_session_uses_native_refresh_and_exposure_call_fallback(tmp_path) 
         )
         async with stdio_client(params) as (read, write):
             async with ClientSession(read, write) as session:
-                await session.initialize()
+                initialized = await session.initialize()
+                assert initialized.capabilities.tools.listChanged is True
                 assert {tool.name for tool in (await session.list_tools()).tools} == set(CORE_TOOLS)
+                assert "sagasmith://bootstrap" in {
+                    str(resource.uri)
+                    for resource in (await session.list_resources()).resources
+                }
+                outlined = await session.call_tool(
+                    "skill_query",
+                    {
+                        "kind": "skill",
+                        "action": "outline",
+                        "identifier": "dnd.full",
+                    },
+                )
+                outlined_payload = json.loads(outlined.content[0].text)["result"]
+                assert any(
+                    heading["title"] == "Startup"
+                    for heading in outlined_payload["headings"]
+                )
 
                 principal_id = "discord:user-42"
                 opened = await session.call_tool("exposure_open", {"principal_id": principal_id})
@@ -775,12 +851,37 @@ def test_stdio_session_uses_native_refresh_and_exposure_call_fallback(tmp_path) 
                     {"campaign_id": campaign_id, "principal_id": principal_id},
                 )
                 exposure_id = json.loads(reopened.content[0].text)["exposure_id"]
+                resumed = await session.call_tool(
+                    "campaign_query",
+                    {
+                        "view": "resume",
+                        "payload": {"campaign_id": campaign_id},
+                        "principal_id": principal_id,
+                    },
+                )
+                resumed_payload = json.loads(resumed.content[0].text)["result"]
+                assert resumed_payload["campaign"]["id"] == campaign_id
+                assert resumed_payload["continuity"]["context_receipt"][
+                    "campaign_id"
+                ] == campaign_id
                 loaded = await session.call_tool(
                     "exposure_load",
                     {"exposure_id": exposure_id, "group_id": "lobby.rules"},
                 )
                 assert not loaded.isError
                 assert "rule_import" in {tool.name for tool in (await session.list_tools()).tools}
+                inspected = await session.call_tool(
+                    "exposure_inspect",
+                    {
+                        "group_id": "lobby.rules",
+                        "tool_id": "rule_import",
+                        "selector": "stage",
+                    },
+                )
+                inspected_payload = json.loads(inspected.content[0].text)
+                assert inspected_payload["tool_contract"]["actions"]["stage"][
+                    "contract_kind"
+                ] == "exact_field_contract"
                 fallback = await session.call_tool(
                     "exposure_call",
                     {
@@ -804,6 +905,60 @@ def test_stdio_session_uses_native_refresh_and_exposure_call_fallback(tmp_path) 
                 )
                 assert cross_campaign.isError
                 assert "bound to" in cross_campaign.content[0].text
+
+    asyncio.run(exercise())
+
+
+def test_stdio_process_binding_overwrites_model_authored_principal(tmp_path) -> None:
+    async def exercise() -> None:
+        env = dict(os.environ)
+        env.update(
+            {
+                "SAGASMITH_DND_MCP_HOME": str(tmp_path / "home"),
+                "SAGASMITH_DND_MCP_AUTO_SEED": "0",
+                "SAGASMITH_DND_MCP_BOUND_PRINCIPAL_ID": "discord:trusted-user",
+            }
+        )
+        params = StdioServerParameters(
+            command=sys.executable,
+            args=["-m", "sagasmith_dnd_mcp.server"],
+            cwd=Path(__file__).parents[1],
+            env=env,
+        )
+        async with stdio_client(params) as (read, write):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                opened = await session.call_tool(
+                    "exposure_open",
+                    {"principal_id": "model:forged-user"},
+                )
+                opened_payload = json.loads(opened.content[0].text)
+                assert opened_payload["principal_id"] == "discord:trusted-user"
+                exposure_id = opened_payload["exposure_id"]
+                await session.call_tool(
+                    "exposure_load",
+                    {
+                        "exposure_id": exposure_id,
+                        "group_id": "lobby.bootstrap",
+                    },
+                )
+                created = await session.call_tool(
+                    "campaign_create",
+                    {
+                        "name": "Principal-bound campaign",
+                        "principal_id": "model:forged-user",
+                        "idempotency_key": "bound-principal-create",
+                    },
+                )
+                assert not created.isError
+                listed = await session.call_tool(
+                    "campaign_query",
+                    {"principal_id": "another:forged-user"},
+                )
+                listed_payload = json.loads(listed.content[0].text)["result"]
+                assert [item["name"] for item in listed_payload] == [
+                    "Principal-bound campaign"
+                ]
 
     asyncio.run(exercise())
 

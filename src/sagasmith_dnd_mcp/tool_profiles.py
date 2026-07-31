@@ -64,6 +64,7 @@ CORE_TOOLS = frozenset(
         "storage_status",
         "campaign_query",
         "game_phase",
+        "skill_query",
     }
 )
 
@@ -185,7 +186,6 @@ TOOL_GROUPS = (
         "read",
         "actor_knowledge_query",
         "continuity_context",
-        "skill_query",
     ),
     _group(
         "lobby.memory_control",

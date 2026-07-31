@@ -28,6 +28,7 @@ class McpConfig:
     rule_ocr_scale: float = 2.0
     module_ocr_enabled: bool = True
     module_ocr_scale: float = 2.0
+    bound_principal_id: str | None = None
 
     @classmethod
     def from_environment(cls) -> "McpConfig":
@@ -93,6 +94,16 @@ class McpConfig:
                     "SAGASMITH_DND_MCP_MODULE_OCR_SCALE",
                     os.environ.get("SAGASMITH_DND_MCP_RULE_OCR_SCALE", "2.0"),
                 )
+            ),
+            bound_principal_id=(
+                value.strip()
+                if (
+                    value := os.environ.get(
+                        "SAGASMITH_DND_MCP_BOUND_PRINCIPAL_ID",
+                        "",
+                    )
+                ).strip()
+                else None
             ),
         )
 

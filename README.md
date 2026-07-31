@@ -11,9 +11,9 @@
 - **跨 Host 一致** — NanoBot、Codex 或任何兼容 MCP client 使用同一套目录、权限与阶段规则。
 - **会话隔离** — exposure 绑定 MCP session、认证 principal 和 campaign；同一服务上的两个会话可以加载不同工具组。
 - **阶段安全** — 权威阶段来自 campaign state。开战后 lobby/play 写工具不会继续残留，结束战斗后 combat 工具被收回。
-- **最小暴露** — 首次 `tools/list` 只有 12 个核心发现/诊断工具，而不是整个领域 schema。
+- **最小暴露** — 首次 `tools/list` 只有 13 个核心发现/诊断工具，而不是整个领域 schema；其中 `skill_query` 允许零预设 Host 做有界工作流读取。
 - **预算锁定** — 完整公开目录固定为 83 个工具；Lobby/Play/Combat 目录分别不超过
-  62/47/45。预算测试同时锁定聚合输入 schema 为 48,921 字节，低于合并前
+  62/48/46。预算测试同时锁定聚合输入 schema 为 50,171 字节，低于合并前
   92 个工具的 56,611 字节基线。
 - **服务端执行门禁** — 未暴露工具即使通过 `exposure_call` 指定名称也会被拒绝；权限不是提示词约定。
 - **规则与自设内容分界** — 已注册的标准规则 mechanic 由版本锁定的引擎实现执行；标准卡缺少结果实现时会在付款前要求补引擎，不能降级成自设解释。未注册的模组或自设角色卡在首次真实使用前由 Agent 依据精确来源编译一次，服务端校验证据并把带版本的解决方案保存回该卡，后续复用且不重复解释原文。
@@ -22,7 +22,7 @@
 
 ```mermaid
 flowchart TB
-    H[MCP Host / Agent] --> C[12 core tools]
+    H[MCP Host / Agent] --> C[13 core tools]
     C --> O[exposure_open]
     O --> S[search → inspect → load]
     S --> L[lobby groups]
@@ -106,7 +106,8 @@ NanoBot 示例；其他 stdio MCP Host 使用相同的 `command`、`cwd` 与 `en
           "server_tool_profiles",
           "storage_status",
           "campaign_query",
-          "game_phase"
+          "game_phase",
+          "skill_query"
         ]
       }
     }
@@ -116,15 +117,22 @@ NanoBot 示例；其他 stdio MCP Host 使用相同的 `command`、`cwd` 与 `en
 
 `injectPrincipal` 应在多人渠道中开启。Host 注入的 principal 是认证身份，模型不能自行声明；grant 工具中的目标 principal 与调用者身份是两个字段。
 
+不具备可信逐请求身份注入的单用户 stdio Host 应设置
+`SAGASMITH_DND_MCP_BOUND_PRINCIPAL_ID=<stable-user-id>`。服务端会覆盖模型提供的
+principal；`system:local` 只适用于明确受信任的本地进程。
+
 ## 渐进式调用流程
 
 ```text
-1. exposure_open(campaign_id?, principal_id injected)
-2. exposure_search("create a 2024 character")
-3. exposure_inspect("lobby.characters")
-4. exposure_load(["lobby.characters"])
-5. 重新 tools/list，原生调用新出现的工具
-6. exposure_unload(...) 或等待阶段/TTL 自动收回
+1. read sagasmith://bootstrap or skill_query(action="plan")
+2. read every skill_plan.required_now document
+3. campaign_query(view="resume") when resuming
+4. exposure_open(campaign_id?, principal_id injected or process-bound)
+5. exposure_search("create a 2024 character")
+6. exposure_inspect("lobby.characters", tool_id?, selector?)
+7. exposure_load(["lobby.characters"]) and read skill_plan_delta
+8. 重新 tools/list，原生调用新出现的工具
+9. exposure_unload(...) 或等待阶段/TTL 自动收回
 ```
 
 支持动态工具列表的 Host 使用原生 `tools/list` + `tools/call`；不能刷新 schema 的 Host 可使用 `exposure_call` fallback。两条路径都经过同一个服务端 exposure 与权限检查。
@@ -176,7 +184,7 @@ warning，ingest 就必须由 DM 显式传入 `acknowledge_warnings=true`。检�
 
 导入文本本身不会自动变成可执行规则。只有通过 mechanic IR 和 provider 校验的部分参与结算。2014/2024 核心引擎也封装为不可变内置 core pack；campaign 和 Snapshot 锁定精确版本、checksum 与依赖，恢复时缺少任何包都会拒绝物化状态。
 
-规则 profile/pack 写入要求最新 `expected_revision` 和稳定 `idempotency_key`。`campaign_rules_explain` 给出当前 branch lock、fingerprint、mechanic ids 与引用；rule receipt 保留结算时使用的不可变证据。
+规则 profile/pack 写入要求最新 `expected_revision` 和稳定 `idempotency_key`。`campaign_rules(action="explain")` 给出当前 branch lock、fingerprint、mechanic ids 与引用；rule receipt 保留结算时使用的不可变证据。
 
 ### 模组与战斗空间
 
@@ -186,10 +194,17 @@ warning，ingest 就必须由 DM 显式传入 `acknowledge_warnings=true`。检�
 
 - Skill 文档资源：`sagasmith://skill/{skill_id}`
 - 静态目录：`sagasmith://skills/overview`
-- 动态引用/数据/模板：`skill_asset_list` 与 `skill_asset_read`
+- Phase/tool-group 读取计划：核心 `skill_query(kind="skill", action="plan")`
+- 动态引用/数据/模板：核心 `skill_query(kind="asset", action="list"|"outline"|"section"|"search"|"read")`
 - Prompts：`dnd_dm`、`module_generator`
 
-部分 Host 只发现静态 resources，不发现 resource templates；这时通过 asset 工具读取动态资源。
+读取计划来自 Skills 仓库的 `full/data/skill-plan.v1.json`，服务端校验其
+21 个工具组覆盖、依赖 DAG、真实工具成员、文档 checksum 和字符预算。
+成功读取计划 fragment 后会返回 read receipt；checksum 未变化时同一 session
+无需重复装载。Skill plan 只管理 Agent 上下文，不替代 MCP 权限和事务校验。
+
+部分 Host 只发现静态 resources，不发现 resource templates；这时通过核心
+`skill_query` 读取计划和动态资源。
 
 ## 配置
 
@@ -200,6 +215,7 @@ warning，ingest 就必须由 DM 显式传入 `acknowledge_warnings=true`。检�
 | `SAGASMITH_DATABASE_URL` | 使用外部 Core 数据库 |
 | `CHROMA_DB_URL` / `CHROMA_DB_PATH` | 远程或自定义本地 Chroma |
 | `SAGASMITH_DND_SKILLS_DIR` | 指向 D&D Skills checkout |
+| `SAGASMITH_DND_MCP_BOUND_PRINCIPAL_ID` | 单用户进程绑定的可信 principal；覆盖模型输入 |
 | `SAGASMITH_MODULEGEN_SKILLS_DIR` | 指向 module generator checkout |
 | `SAGASMITH_DND_MCP_RULE_IMPORT_ROOTS` | `os.pathsep` 分隔的规则书导入白名单 |
 | `SAGASMITH_DND_MCP_RULE_OCR=0/1` | 是否对纯图片或乱码规则书页启用选择性 OCR；默认启用 |

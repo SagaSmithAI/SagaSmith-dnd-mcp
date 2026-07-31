@@ -7,6 +7,7 @@ import pytest
 from sagasmith_dnd.module_profile import DndModuleProfile
 
 from sagasmith_dnd_mcp.config import McpConfig
+from sagasmith_dnd_mcp.facade_contracts import ACTION_PAYLOAD_CONTRACTS
 from sagasmith_dnd_mcp.server import create_server
 from sagasmith_dnd_mcp.skills import SkillCatalog
 from sagasmith_dnd_mcp.tool_budget import (
@@ -50,6 +51,7 @@ def test_environment_config_has_separate_rule_and_module_import_roots(monkeypatc
     )
     monkeypatch.setenv("SAGASMITH_DND_MCP_MODULE_OCR", "0")
     monkeypatch.setenv("SAGASMITH_DND_MCP_MODULE_OCR_SCALE", "1.5")
+    monkeypatch.setenv("SAGASMITH_DND_MCP_BOUND_PRINCIPAL_ID", "trusted-user")
 
     config = McpConfig.from_environment()
 
@@ -57,6 +59,7 @@ def test_environment_config_has_separate_rule_and_module_import_roots(monkeypatc
     assert [path.name for path in config.module_import_roots] == ["modules-a", "modules-b"]
     assert config.module_ocr_enabled is False
     assert config.module_ocr_scale == 1.5
+    assert config.bound_principal_id == "trusted-user"
 
 
 def test_default_rule_import_roots_include_the_dnd_skill_corpus(monkeypatch) -> None:
@@ -113,6 +116,77 @@ def test_skill_catalog_exposes_references_and_templates_as_assets(tmp_path: Path
     assert catalog.read_resource_asset(resource_id) == "workflow"
 
 
+def test_skill_catalog_supports_bounded_outline_section_and_search(tmp_path: Path) -> None:
+    dnd = tmp_path / "dnd"
+    modulegen = tmp_path / "modulegen"
+    dnd.mkdir()
+    modulegen.mkdir()
+    (dnd / "SKILL.md").write_text(
+        "# D&D\n\n## Startup\n\nOpen an exposure.\n\n"
+        "## Turn Loop\n\nRead exact module evidence.\n",
+        encoding="utf-8",
+    )
+    catalog = SkillCatalog(dnd_root=dnd, modulegen_root=modulegen)
+
+    outline = catalog.outline(kind="skill", identifier="dnd.root")
+    assert [heading["title"] for heading in outline["headings"]] == [
+        "D&D",
+        "Startup",
+        "Turn Loop",
+    ]
+    section = catalog.section(
+        kind="skill",
+        identifier="dnd.root",
+        heading="Startup",
+        max_chars=512,
+    )
+    assert section["content"] == "## Startup\n\nOpen an exposure.\n"
+    search = catalog.search(
+        kind="skill",
+        identifier="dnd.root",
+        query="module evidence",
+    )
+    assert search["matches"][0]["heading"] == "Turn Loop"
+    assert "exact module evidence" in search["matches"][0]["excerpt"]
+
+
+def test_skill_catalog_reuses_indexes_until_an_explicit_refresh(
+    tmp_path: Path,
+) -> None:
+    dnd = tmp_path / "dnd"
+    modulegen = tmp_path / "modulegen"
+    dnd.mkdir()
+    modulegen.mkdir()
+    (dnd / "SKILL.md").write_text("# D&D\n", encoding="utf-8")
+    references = dnd / "references"
+    references.mkdir()
+    (references / "one.md").write_text("# One\n", encoding="utf-8")
+    catalog = SkillCatalog(dnd_root=dnd, modulegen_root=modulegen)
+
+    assert [item.id for item in catalog.list()] == ["dnd.root"]
+    assert [item.id for item in catalog.assets()] == ["dnd:references/one.md"]
+    child = dnd / "skills" / "child"
+    child.mkdir(parents=True)
+    (child / "SKILL.md").write_text("# Child\n", encoding="utf-8")
+    (references / "two.md").write_text("# Two\n", encoding="utf-8")
+
+    assert [item.id for item in catalog.list()] == ["dnd.root"]
+    assert [item.id for item in catalog.assets()] == ["dnd:references/one.md"]
+    catalog.refresh()
+    assert [item.id for item in catalog.list()] == [
+        "dnd.root",
+        "dnd.skills.child",
+    ]
+    assert [item.id for item in catalog.assets()] == [
+        "dnd:references/one.md",
+        "dnd:references/two.md",
+    ]
+    with pytest.raises(LookupError, match="unknown skill asset"):
+        SkillCatalog(dnd_root=dnd, modulegen_root=modulegen).get_asset(
+            "dnd:../outside.md"
+        )
+
+
 def test_character_writes_store_raw_sheet_and_return_derived_view(tmp_path: Path) -> None:
     config = McpConfig(
         home=tmp_path / "home",
@@ -166,6 +240,41 @@ def test_character_writes_store_raw_sheet_and_return_derived_view(tmp_path: Path
     asyncio.run(exercise_server())
 
 
+def test_campaign_resume_bundle_reloads_branch_scene_and_continuity(
+    tmp_path: Path,
+) -> None:
+    config = McpConfig(
+        home=tmp_path / "home",
+        database_url=None,
+        chroma_url=None,
+        chroma_path_override=None,
+        dnd_skills_dir=tmp_path / "dnd",
+        modulegen_skills_dir=tmp_path / "modulegen",
+    )
+
+    async def exercise_server() -> None:
+        server = create_server(config)
+        _, created = await server.call_tool(
+            "campaign_create",
+            {"name": "Resume test", "idempotency_key": "resume-campaign"},
+        )
+        _, envelope = await server.call_tool(
+            "campaign_query",
+            {
+                "view": "resume",
+                "payload": {"campaign_id": created["id"]},
+            },
+        )
+        result = envelope["result"]
+        assert result["campaign"]["id"] == created["id"]
+        assert result["current_branch"]["is_current"] is True
+        assert result["manifest"] is None
+        assert result["continuity"]["context_receipt"]["campaign_id"] == created["id"]
+        assert result["resume_invariants"]["discard_pre_restore_context"] is True
+
+    asyncio.run(exercise_server())
+
+
 def test_server_exposes_static_skill_overview_resource(tmp_path: Path) -> None:
     dnd = tmp_path / "dnd"
     modulegen = tmp_path / "modulegen"
@@ -184,11 +293,40 @@ def test_server_exposes_static_skill_overview_resource(tmp_path: Path) -> None:
     async def inspect_resources() -> None:
         server = create_server(config)
         resources = await server.list_resources()
-        assert [str(resource.uri) for resource in resources] == ["sagasmith://skills/overview"]
+        assert [str(resource.uri) for resource in resources] == [
+            "sagasmith://bootstrap",
+            "sagasmith://skills/assets",
+            "sagasmith://skills/overview",
+        ]
+        bootstrap = await server.read_resource("sagasmith://bootstrap")
+        assert "zero-knowledge bootstrap" in bootstrap[0].content
         content = await server.read_resource("sagasmith://skills/overview")
         assert "dnd.root" in content[0].content
+        assert "skill_query" in content[0].content
+        assert "skill_read" not in content[0].content
+        assert "skill_asset_list" not in content[0].content
+        assert "skill_asset_read" not in content[0].content
 
     asyncio.run(inspect_resources())
+
+
+def test_server_advertises_native_tools_list_changed(tmp_path: Path) -> None:
+    config = McpConfig(
+        home=tmp_path / "home",
+        database_url=None,
+        chroma_url=None,
+        chroma_path_override=None,
+        dnd_skills_dir=tmp_path / "dnd",
+        modulegen_skills_dir=tmp_path / "modulegen",
+    )
+    server = create_server(config)
+
+    capabilities = (
+        server._mcp_server.create_initialization_options()
+        .capabilities.model_dump(exclude_none=True)
+    )
+
+    assert capabilities["tools"]["listChanged"] is True
 
 
 def test_server_tool_profiles_are_complete_and_attached_to_tool_metadata(tmp_path: Path) -> None:
@@ -220,6 +358,52 @@ def test_server_tool_profiles_are_complete_and_attached_to_tool_metadata(tmp_pat
         assert by_name["game_phase"].meta["sagasmith_tool_groups"] == []
 
     asyncio.run(inspect_tools())
+
+
+def test_machine_facade_contracts_reference_real_public_selectors(
+    tmp_path: Path,
+) -> None:
+    config = McpConfig(
+        home=tmp_path / "home",
+        database_url=None,
+        chroma_url=None,
+        chroma_path_override=None,
+        dnd_skills_dir=tmp_path / "dnd",
+        modulegen_skills_dir=tmp_path / "modulegen",
+        auto_seed_rules=False,
+    )
+
+    async def inspect_contracts() -> None:
+        server = create_server(config)
+        tools = {tool.name: tool for tool in await server.list_tools()}
+        generic_facades = {
+            tool_id
+            for tool_id, tool in tools.items()
+            if "payload" in tool.inputSchema.get("properties", {})
+            and any(
+                field in tool.inputSchema["properties"]
+                and tool.inputSchema["properties"][field].get("enum")
+                for field in ("action", "view", "mode")
+            )
+        }
+        assert generic_facades <= set(ACTION_PAYLOAD_CONTRACTS)
+        for tool_id, action_contracts in ACTION_PAYLOAD_CONTRACTS.items():
+            assert tool_id in tools
+            properties = tools[tool_id].inputSchema["properties"]
+            selector = next(
+                field for field in ("action", "view", "mode") if field in properties
+            )
+            public_values = set(properties[selector]["enum"])
+            assert set(action_contracts) == public_values
+            for variants in action_contracts.values():
+                assert variants
+                for variant in variants:
+                    assert set(variant["required_fields"]) <= set(
+                        variant["allowed_fields"]
+                    )
+                    assert isinstance(variant["additional_properties"], bool)
+
+    asyncio.run(inspect_contracts())
 
 
 def test_campaign_phase_uses_combat_as_the_only_effective_override() -> None:
@@ -260,18 +444,18 @@ def test_compact_public_tool_and_schema_budgets_are_locked(tmp_path: Path) -> No
 
         assert BASELINE_PUBLIC_TOOL_COUNT == 92
         assert BASELINE_INPUT_SCHEMA_BYTES == 56_611
-        assert len(CORE_TOOLS) == TARGET_CORE_TOOL_COUNT == 12
+        assert len(CORE_TOOLS) == TARGET_CORE_TOOL_COUNT == 13
         assert len(tools) == TARGET_PUBLIC_TOOL_COUNT == 83
         assert (
             {phase: len(names) for phase, names in profile_catalog().items()}
             == PROFILE_TOOL_LIMITS
             == {
                 "lobby": 62,
-                "play": 47,
-                "combat": 45,
+                "play": 48,
+                "combat": 46,
             }
         )
-        assert schema_bytes == TARGET_INPUT_SCHEMA_BYTES == 49_138
+        assert schema_bytes == TARGET_INPUT_SCHEMA_BYTES == 50_171
         assert schema_bytes < BASELINE_INPUT_SCHEMA_BYTES
         by_name = {tool.name: tool for tool in tools}
         assert by_name["chase"].inputSchema["properties"]["action"]["enum"] == [
@@ -417,7 +601,7 @@ def test_server_capabilities_publish_the_rulebook_import_contract(tmp_path: Path
         assert capabilities["features"]["validated_module_runtime_manifest"] is True
         assert capabilities["features"]["shared_continuity_budget"] is True
         assert capabilities["features"]["continuity_diagnostics"] is True
-        assert capabilities["contract_version"] == "2026-07-hypnotic-pattern-v7"
+        assert capabilities["contract_version"] == "2026-07-phase-skill-plan-v8"
         assert capabilities["features"]["source_bound_hypnotic_pattern"] is True
         assert capabilities["features"][
             "source_bound_first_use_content_solutions"
