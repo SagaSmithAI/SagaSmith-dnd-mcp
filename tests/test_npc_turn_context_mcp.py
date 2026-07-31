@@ -4,6 +4,7 @@ from importlib.resources import files
 from pathlib import Path
 
 import pytest
+from jsonschema import Draft202012Validator
 
 from sagasmith_dnd_mcp.config import McpConfig
 from sagasmith_dnd_mcp.npc_turns import (
@@ -491,6 +492,7 @@ def test_npc_turn_is_live_phase_only_and_contract_schemas_ship(tmp_path: Path) -
         "scene_transition",
         "other",
     ]
+    Draft202012Validator.check_schema(proposal_schema)
 
     async def exercise() -> None:
         server = create_server(_config(tmp_path))
@@ -544,6 +546,15 @@ def test_mechanical_npc_proposals_must_request_public_resolution() -> None:
 
     with pytest.raises(ValueError, match="requires an explicit resolution request"):
         normalize_npc_turn_proposal(proposal)
+
+    proposal_schema = json.loads(
+        files("sagasmith_dnd_mcp")
+        .joinpath("contracts")
+        .joinpath("npc-turn-proposal.v1.schema.json")
+        .read_text(encoding="utf-8")
+    )
+    schema_errors = list(Draft202012Validator(proposal_schema).iter_errors(proposal))
+    assert any(error.validator == "minItems" for error in schema_errors)
 
     invalid_version = {**proposal, "schema_version": True}
     with pytest.raises(ValueError, match="schema_version must be 1"):

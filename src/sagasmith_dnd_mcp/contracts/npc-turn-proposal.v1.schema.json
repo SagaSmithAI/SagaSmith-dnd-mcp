@@ -48,9 +48,21 @@
           "kind": {"enum": ["assert", "ask", "promise", "threaten", "refuse", "reveal", "withhold", "lie"]},
           "content": {"type": "string", "minLength": 1, "maxLength": 2000},
           "truth_posture": {"enum": ["believes_true", "uncertain", "intentional_deception", "opinion", "nonfactual"]},
-          "basis_refs": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
-          "targets": {"type": "array", "items": {"type": "string"}, "uniqueItems": true}
+          "basis_refs": {"type": "array", "items": {"type": "string", "minLength": 1, "maxLength": 300}, "uniqueItems": true},
+          "targets": {"type": "array", "items": {"type": "string", "minLength": 1, "maxLength": 200}, "uniqueItems": true}
         },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "kind": {"enum": ["assert", "reveal", "lie"]},
+                "truth_posture": {"enum": ["believes_true", "uncertain", "intentional_deception"]}
+              },
+              "required": ["kind", "truth_posture"]
+            },
+            "then": {"properties": {"basis_refs": {"minItems": 1}}}
+          }
+        ],
         "additionalProperties": false
       }
     },
@@ -59,7 +71,7 @@
       "required": ["kind", "target_ref", "summary"],
       "properties": {
         "kind": {"enum": ["none", "gesture", "offer", "refuse", "surrender", "move", "flee", "attack", "use_item", "exchange_item", "scene_transition", "other"]},
-        "target_ref": {"type": "string", "maxLength": 300},
+        "target_ref": {"type": "string", "pattern": "^(?:|actor:.+)$", "maxLength": 300},
         "summary": {"type": "string", "maxLength": 1000}
       },
       "additionalProperties": false
@@ -72,7 +84,7 @@
         "properties": {
           "kind": {"enum": ["ability_check", "contest", "saving_throw", "attack", "dm_adjudication"]},
           "reason": {"type": "string", "minLength": 1, "maxLength": 1000},
-          "actor_ids": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+          "actor_ids": {"type": "array", "items": {"type": "string", "minLength": 1, "maxLength": 100}, "uniqueItems": true},
           "suggested_skill": {"type": "string", "maxLength": 100}
         },
         "additionalProperties": false
@@ -98,5 +110,38 @@
     },
     "decision_summary": {"type": "string", "maxLength": 500}
   },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "proposed_action": {
+            "properties": {"kind": {"not": {"enum": ["none", "gesture", "refuse"]}}},
+            "required": ["kind"]
+          }
+        },
+        "required": ["proposed_action"]
+      },
+      "then": {"properties": {"resolution_requests": {"minItems": 1}}}
+    },
+    {
+      "if": {
+        "properties": {
+          "proposed_action": {
+            "properties": {"kind": {"const": "none"}},
+            "required": ["kind"]
+          }
+        },
+        "required": ["proposed_action"]
+      },
+      "then": {
+        "properties": {
+          "utterance": {
+            "properties": {"text": {"minLength": 1}},
+            "required": ["text"]
+          }
+        }
+      }
+    }
+  ],
   "additionalProperties": false
 }
