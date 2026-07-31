@@ -147,6 +147,11 @@ def test_npc_turn_bundle_is_actor_scoped_and_commits_only_accepted_deltas(
         assert bundle["constraints"]["common_context_is_actor_knowledge"] is False
         identity_ref = f"actor:{npc['id']}:identity"
         assert identity_ref in bundle["constraints"]["allowed_basis_refs"]
+        relationship_ref = (
+            f"fact:{bundle['relationships'][0]['id']}:"
+            f"{bundle['relationships'][0]['revision_id']}"
+        )
+        assert relationship_ref in bundle["constraints"]["allowed_basis_refs"]
         assert bundle["perception"][0]["basis_ref"] in bundle["constraints"][
             "allowed_basis_refs"
         ]

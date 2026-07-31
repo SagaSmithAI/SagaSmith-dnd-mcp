@@ -29655,6 +29655,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     f"knowledge:{item['id']}:{item['revision_id']}"
                     for item in actor_knowledge
                 ),
+                *(
+                    f"fact:{item['id']}:{item['revision_id']}"
+                    for item in actor_state
+                ),
                 *(str(item["basis_ref"]) for item in perception),
                 *(f"event:{item['event_id']}" for item in conversation_window),
             }
