@@ -398,6 +398,29 @@ def test_named_npc_state_changes_request_generic_agent_narrative_followup(
             "recommended_operation": "continuity_context:npc_turn",
         }
 
+        inventory_changed = await _call(
+            server,
+            "inventory_change",
+            {
+                "owner": "character",
+                "action": "add",
+                "owner_id": npc["id"],
+                "payload": {
+                    "item": {
+                        "id": "iron-token",
+                        "name": "Iron token",
+                        "kind": "equipment",
+                        "quantity": 1,
+                    }
+                },
+                "expected_revision": damaged["character"]["revision"],
+                "idempotency_key": "give-zaltember-token",
+            },
+        )
+        assert inventory_changed["narrative_followup"]["reasons"] == [
+            "named_npc_inventory_changed"
+        ]
+
     asyncio.run(exercise())
 
 

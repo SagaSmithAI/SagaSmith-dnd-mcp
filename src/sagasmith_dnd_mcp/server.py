@@ -403,6 +403,7 @@ from sagasmith_dnd_mcp.npc_turns import (
     normalize_npc_stimulus,
     normalize_npc_turn_proposal,
     validate_npc_basis_refs,
+    validate_npc_targets,
 )
 from sagasmith_dnd_mcp.random_state import (
     RandomStateMutationService as StateMutationService,
@@ -7664,7 +7665,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             if any(
                 canonical_json(before_inventory.get(key))
                 != canonical_json(after_inventory.get(key))
-                for key in ("items", "equipped", "attuned", "wallet")
+                for key in ("items", "wallet", "equipment_slots")
             ):
                 reasons.add("named_npc_inventory_changed")
             if reasons:
@@ -29844,6 +29845,16 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     str(item) for item in npc_turn_receipt.get("allowed_basis_refs") or []
                 },
             )
+            validate_npc_targets(
+                proposal,
+                allowed_actor_ids={
+                    str(npc_turn_receipt["actor_id"]),
+                    *(
+                        str(item)
+                        for item in npc_turn_receipt.get("interlocutor_actor_ids") or []
+                    ),
+                },
+            )
             if proposal["resolution_requests"]:
                 raise ValueError(
                     "NPC proposal requires resolution; use public rules tools and read a new bundle"
@@ -29925,6 +29936,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 raise ValueError(
                     "mechanical NPC actions require public engine tools before continuity commit"
                 )
+            action_target_ref = str(proposal["proposed_action"].get("target_ref") or "")
+            if accepted_action and action_target_ref:
+                allowed_action_targets = {
+                    f"actor:{actor_id_value}" for actor_id_value in allowed_delta_actor_ids
+                }
+                if action_target_ref not in allowed_action_targets:
+                    raise ValueError(
+                        "accepted narrative NPC action target must be the speaker or listener"
+                    )
             isolation_level = str(npc_turn_data.get("isolation_level") or "logical")
             if isolation_level not in {"isolated", "logical"}:
                 raise ValueError("NPC turn isolation_level must be isolated or logical")

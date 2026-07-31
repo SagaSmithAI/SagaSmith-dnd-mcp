@@ -6,6 +6,10 @@ from pathlib import Path
 import pytest
 
 from sagasmith_dnd_mcp.config import McpConfig
+from sagasmith_dnd_mcp.npc_turns import (
+    normalize_npc_turn_proposal,
+    validate_npc_targets,
+)
 from sagasmith_dnd_mcp.server import create_server
 
 
@@ -299,6 +303,35 @@ def test_npc_turn_bundle_rejects_privilege_leaks_tampering_and_stale_commits(
                     "idempotency_key": "tampered",
                 },
             )
+        wrong_target = {
+            **base_proposal,
+            "speech_acts": [
+                {
+                    "kind": "assert",
+                    "content": "He identifies himself.",
+                    "truth_posture": "believes_true",
+                    "basis_refs": [f"actor:{npc['id']}:identity"],
+                    "targets": ["actor-from-another-conversation"],
+                }
+            ],
+        }
+        with pytest.raises(Exception, match="targets outside its bundle"):
+            await _call(
+                server,
+                "memory_change",
+                {
+                    "campaign_id": campaign["id"],
+                    "action": "commit",
+                    "payload": {
+                        "event": {"summary": "Must also fail."},
+                        "npc_turn": {
+                            "bundle_receipt": bundle["bundle_receipt"],
+                            "proposal": wrong_target,
+                        },
+                    },
+                    "idempotency_key": "wrong-target",
+                },
+            )
         await _call(
             server,
             "memory_change",
@@ -465,3 +498,47 @@ def test_npc_turn_is_live_phase_only_and_contract_schemas_ship(tmp_path: Path) -
             )
 
     asyncio.run(exercise())
+
+
+def test_mechanical_npc_proposals_must_request_public_resolution() -> None:
+    proposal = {
+        "schema_version": 1,
+        "bundle_id": "bundle",
+        "speaker_actor_id": "npc",
+        "intent": {"kind": "attack", "summary": "Strike the intruder."},
+        "utterance": {"text": "", "language": "", "delivery": ""},
+        "speech_acts": [],
+        "proposed_action": {
+            "kind": "attack",
+            "target_ref": "actor:pc",
+            "summary": "Attack the intruder.",
+        },
+        "resolution_requests": [],
+        "proposed_deltas": {"facts": [], "actor_knowledge": []},
+        "portrayal": {"emotion": "angry", "visible_cues": []},
+        "decision_summary": "The NPC chooses violence.",
+    }
+
+    with pytest.raises(ValueError, match="requires an explicit resolution request"):
+        normalize_npc_turn_proposal(proposal)
+
+    proposal["resolution_requests"] = [
+        {
+            "kind": "attack",
+            "reason": "Resolve attack and action economy through the combat engine.",
+            "actor_ids": ["npc", "pc"],
+            "suggested_skill": "",
+        }
+    ]
+    normalized = normalize_npc_turn_proposal(proposal)
+    assert normalized["proposed_action"]["kind"] == "attack"
+    validate_npc_targets(normalized, allowed_actor_ids={"npc", "pc"})
+
+    normalized["resolution_requests"][0]["actor_ids"] = ["npc", "outsider"]
+    with pytest.raises(ValueError, match="targets outside its bundle"):
+        validate_npc_targets(normalized, allowed_actor_ids={"npc", "pc"})
+
+    normalized["resolution_requests"][0]["actor_ids"] = ["npc", "pc"]
+    normalized["proposed_action"]["target_ref"] = "actor:outsider"
+    with pytest.raises(ValueError, match="action target is outside its bundle"):
+        validate_npc_targets(normalized, allowed_actor_ids={"npc", "pc"})
