@@ -1,0 +1,102 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sagasmith.ai/contracts/npc-turn-proposal.v1.schema.json",
+  "title": "SagaSmith isolated NPC turn proposal v1",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "bundle_id",
+    "speaker_actor_id",
+    "intent",
+    "utterance",
+    "speech_acts",
+    "proposed_action",
+    "resolution_requests",
+    "proposed_deltas",
+    "portrayal",
+    "decision_summary"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "bundle_id": {"type": "string", "minLength": 1},
+    "speaker_actor_id": {"type": "string", "minLength": 1},
+    "intent": {
+      "type": "object",
+      "required": ["kind", "summary"],
+      "properties": {
+        "kind": {"type": "string", "minLength": 1, "maxLength": 100},
+        "summary": {"type": "string", "maxLength": 1000}
+      },
+      "additionalProperties": false
+    },
+    "utterance": {
+      "type": "object",
+      "required": ["text", "language", "delivery"],
+      "properties": {
+        "text": {"type": "string", "maxLength": 4000},
+        "language": {"type": "string", "maxLength": 100},
+        "delivery": {"type": "string", "maxLength": 500}
+      },
+      "additionalProperties": false
+    },
+    "speech_acts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["kind", "content", "truth_posture", "basis_refs", "targets"],
+        "properties": {
+          "kind": {"enum": ["assert", "ask", "promise", "threaten", "refuse", "reveal", "withhold", "lie"]},
+          "content": {"type": "string", "minLength": 1, "maxLength": 2000},
+          "truth_posture": {"enum": ["believes_true", "uncertain", "intentional_deception", "opinion", "nonfactual"]},
+          "basis_refs": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+          "targets": {"type": "array", "items": {"type": "string"}, "uniqueItems": true}
+        },
+        "additionalProperties": false
+      }
+    },
+    "proposed_action": {
+      "type": "object",
+      "required": ["kind", "target_ref", "summary"],
+      "properties": {
+        "kind": {"enum": ["none", "gesture", "offer", "refuse", "surrender", "move", "flee", "attack", "use_item", "exchange_item", "scene_transition", "other"]},
+        "target_ref": {"type": "string", "maxLength": 300},
+        "summary": {"type": "string", "maxLength": 1000}
+      },
+      "additionalProperties": false
+    },
+    "resolution_requests": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["kind", "reason", "actor_ids", "suggested_skill"],
+        "properties": {
+          "kind": {"enum": ["ability_check", "contest", "saving_throw", "attack", "dm_adjudication"]},
+          "reason": {"type": "string", "minLength": 1, "maxLength": 1000},
+          "actor_ids": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+          "suggested_skill": {"type": "string", "maxLength": 100}
+        },
+        "additionalProperties": false
+      }
+    },
+    "proposed_deltas": {
+      "type": "object",
+      "required": ["facts", "actor_knowledge"],
+      "properties": {
+        "facts": {"type": "array", "items": {"type": "object"}},
+        "actor_knowledge": {"type": "array", "items": {"type": "object"}}
+      },
+      "additionalProperties": false
+    },
+    "portrayal": {
+      "type": "object",
+      "required": ["emotion", "visible_cues"],
+      "properties": {
+        "emotion": {"type": "string", "maxLength": 200},
+        "visible_cues": {"type": "array", "items": {"type": "string", "maxLength": 500}, "uniqueItems": true}
+      },
+      "additionalProperties": false
+    },
+    "decision_summary": {"type": "string", "maxLength": 500}
+  },
+  "additionalProperties": false
+}

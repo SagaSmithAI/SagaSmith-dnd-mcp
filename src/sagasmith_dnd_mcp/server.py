@@ -395,6 +395,15 @@ from sagasmith_dnd_mcp.facade_contracts import (
     ACTION_PAYLOAD_CONTRACTS,
     action_payload_contract,
 )
+from sagasmith_dnd_mcp.npc_turns import (
+    NPC_NARRATIVE_ACTION_KINDS,
+    NPC_TURN_PURPOSES,
+    NPC_TURN_SCHEMA_VERSION,
+    accepted_proposal_deltas,
+    normalize_npc_stimulus,
+    normalize_npc_turn_proposal,
+    validate_npc_basis_refs,
+)
 from sagasmith_dnd_mcp.random_state import (
     RandomStateMutationService as StateMutationService,
 )
@@ -2311,6 +2320,304 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "payload.context_receipt did not include every cited pinned module source; "
                 "read continuity_context with the relevant related_refs"
             )
+
+    npc_turn_receipt_ttl_ns = 10 * 60 * 1_000_000_000
+
+    def npc_turn_latest_event_sequence(campaign_id: str, branch_id: str | None) -> int:
+        values = events.list(campaign_id, limit=1, branch_id=branch_id)
+        return int(values[-1].sequence) if values else 0
+
+    def npc_turn_actor_state(
+        campaign_id: str,
+        branch_id: str | None,
+        actor_id: str,
+    ) -> tuple[list[dict[str, Any]], dict[str, str], dict[str, str]]:
+        actor_ref = f"actor:{actor_id}"
+        state_facts = [
+            asdict(item)
+            for item in memories.list_for_subject_refs(
+                campaign_id,
+                subject_refs={actor_ref},
+                predicates={"relationship_to", "goal"},
+                kinds={"actor_state"},
+                branch_id=branch_id,
+            )
+        ]
+        fact_heads = {
+            str(item["fact_key"]): str(item["revision_id"])
+            for item in state_facts
+        }
+        knowledge_heads = {
+            str(item.knowledge_key): str(item.revision_id)
+            for item in knowledge.list(
+                campaign_id,
+                actor_id=actor_id,
+                branch_id=branch_id,
+                include_inactive=True,
+            )
+        }
+        return state_facts, fact_heads, knowledge_heads
+
+    def npc_turn_scene_projection(scene: dict[str, Any] | None) -> dict[str, Any] | None:
+        if not isinstance(scene, dict):
+            return None
+        progress = dict(scene.get("progress") or {})
+        return {
+            "scene_id": str(scene.get("scene_id") or ""),
+            "title": str(scene.get("title") or ""),
+            "module_id": str(scene.get("module_id") or ""),
+            "chapter_id": str(scene.get("chapter_id") or ""),
+            "scope_id": str(scene.get("scope_id") or "party"),
+            "current_room": str(progress.get("current_room") or ""),
+            "current_location_key": str(progress.get("current_location_key") or ""),
+            "state_version": int(progress.get("state_version") or 0),
+        }
+
+    def npc_turn_perception_projection(
+        campaign: Any,
+        *,
+        actor_id: str,
+        interlocutors: list[dict[str, Any]],
+        scene: dict[str, Any] | None,
+    ) -> list[dict[str, Any]]:
+        """Project only immediate, outwardly observable turn context."""
+
+        result: list[dict[str, Any]] = [
+            {
+                "basis_ref": f"perception:actor:{item['id']}:presence",
+                "kind": "interlocutor_presence",
+                "actor_id": str(item["id"]),
+                "name": str(item["name"]),
+                "character_type": str(item["character_type"]),
+            }
+            for item in interlocutors
+        ]
+        if scene is not None and scene.get("scene_id"):
+            result.append(
+                {
+                    "basis_ref": f"perception:scene:{scene['scene_id']}:location",
+                    "kind": "current_location",
+                    "scene_id": str(scene["scene_id"]),
+                    "title": str(scene.get("title") or ""),
+                    "current_room": str(scene.get("current_room") or ""),
+                    "current_location_key": str(
+                        scene.get("current_location_key") or ""
+                    ),
+                }
+            )
+        combat = dict(dict(campaign.state or {}).get("combat") or {})
+        if combat.get("active", False):
+            allowed_actor_ids = {actor_id, *(str(item["id"]) for item in interlocutors)}
+            for raw in [
+                *list(combat.get("combatants") or []),
+                *list(combat.get("reinforcements") or []),
+            ]:
+                item = dict(raw or {})
+                observed_actor_id = str(item.get("actor_id") or "")
+                if observed_actor_id not in allowed_actor_ids:
+                    continue
+                result.append(
+                    {
+                        "basis_ref": f"perception:combat:{observed_actor_id}:position",
+                        "kind": "combat_position",
+                        "actor_id": observed_actor_id,
+                        **{
+                            key: deepcopy(item[key])
+                            for key in ("position", "location", "x", "y", "zone", "status")
+                            if key in item
+                        },
+                    }
+                )
+        return result
+
+    def npc_turn_actor_projection(actor: Any) -> dict[str, Any]:
+        notes = canonical_character_notes(
+            actor.notes,
+            character_type=actor.character_type,
+            name=actor.name,
+            summary=actor.summary,
+        )
+        profile = dict(notes.get("profile") or {})
+        profile.pop("dm_notes", None)
+        sheet = validate_character_sheet(actor.sheet)
+        return {
+            "id": actor.id,
+            "name": actor.name,
+            "character_type": actor.character_type,
+            "summary": actor.summary,
+            "revision": actor.revision,
+            "profile": profile,
+            "self_state": {
+                "identity": deepcopy(sheet.get("identity") or {}),
+                "progression": deepcopy(sheet.get("progression") or {}),
+                "abilities": deepcopy(sheet.get("abilities") or {}),
+                "skills": deepcopy(sheet.get("skills") or {}),
+                "combat": deepcopy(sheet.get("combat") or {}),
+                "traits": deepcopy(sheet.get("traits") or {}),
+                "conditions": deepcopy(sheet.get("conditions") or []),
+                "effects": deepcopy(sheet.get("effects") or []),
+                "status_tags": deepcopy(
+                    dict(sheet.get("adventure_state") or {}).get("status_tags") or []
+                ),
+            },
+        }
+
+    def issue_npc_turn_receipt(
+        *,
+        bundle: dict[str, Any],
+        campaign_id: str,
+        branch_id: str | None,
+        principal_id: str,
+        actor_id: str,
+        actor_revision: int,
+        interlocutor_actor_ids: list[str],
+        scene: dict[str, Any] | None,
+        fact_heads: dict[str, str],
+        context_fact_heads: dict[str, str],
+        knowledge_heads: dict[str, str],
+        allowed_basis_refs: list[str],
+        stimulus: dict[str, Any],
+        module_evidence: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        issued_ns = time.monotonic_ns()
+        branch = (
+            branches.get(campaign_id, branch_id)
+            if branch_id
+            else branches.current(campaign_id)
+        )
+        payload = {
+            "schema_version": 2,
+            "purpose": "npc_turn",
+            "bundle_id": str(bundle["bundle_id"]),
+            "bundle_digest": hashlib.sha256(
+                canonical_json(bundle).encode("utf-8")
+            ).hexdigest(),
+            "campaign_id": campaign_id,
+            "branch_id": branch.id,
+            "head_snapshot_id": branch.head_snapshot_id,
+            "campaign_revision": campaigns.get(campaign_id).revision,
+            "latest_event_sequence": npc_turn_latest_event_sequence(campaign_id, branch.id),
+            "principal_id": principal_id,
+            "actor_id": actor_id,
+            "actor_revision": actor_revision,
+            "interlocutor_actor_ids": list(interlocutor_actor_ids),
+            "scene_id": str((scene or {}).get("scene_id") or ""),
+            "scope_id": str((scene or {}).get("scope_id") or "party"),
+            "scene_state_version": int((scene or {}).get("state_version") or 0),
+            "fact_heads": dict(sorted(fact_heads.items())),
+            "context_fact_heads": dict(sorted(context_fact_heads.items())),
+            "knowledge_heads": dict(sorted(knowledge_heads.items())),
+            "allowed_basis_refs": sorted(allowed_basis_refs),
+            "stimulus_digest": hashlib.sha256(
+                canonical_json(stimulus).encode("utf-8")
+            ).hexdigest(),
+            "module_source_ref_digests": sorted(
+                managed_module_source_digests(
+                    [
+                        {"source_ref": dict(item or {}).get("source_ref")}
+                        for item in module_evidence
+                    ]
+                )
+            ),
+            "issued_monotonic_ns": issued_ns,
+            "expires_monotonic_ns": issued_ns + npc_turn_receipt_ttl_ns,
+        }
+        signature = hmac.new(
+            context_receipt_secret,
+            canonical_json(payload).encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+        return {**payload, "signature": signature}
+
+    def verify_npc_turn_receipt(
+        receipt: Any,
+        *,
+        campaign_id: str,
+        branch_id: str | None,
+        principal_id: str,
+        required_source_digests: set[str] | None = None,
+        require_fresh: bool = True,
+    ) -> dict[str, Any]:
+        if not isinstance(receipt, dict):
+            raise ValueError("npc_turn.bundle_receipt is required")
+        payload = dict(receipt)
+        signature = str(payload.pop("signature", ""))
+        expected_signature = hmac.new(
+            context_receipt_secret,
+            canonical_json(payload).encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+        if not hmac.compare_digest(signature, expected_signature):
+            raise ValueError("npc_turn.bundle_receipt signature is invalid")
+        if payload.get("schema_version") != 2 or payload.get("purpose") != "npc_turn":
+            raise ValueError("npc_turn.bundle_receipt has the wrong purpose or schema")
+        if payload.get("campaign_id") != campaign_id:
+            raise ValueError("npc_turn.bundle_receipt belongs to another campaign")
+        if payload.get("branch_id") != branch_id:
+            raise ValueError("npc_turn.bundle_receipt belongs to another branch")
+        if payload.get("principal_id") != principal_id:
+            raise ValueError("npc_turn.bundle_receipt belongs to another principal")
+        required = set(required_source_digests or set())
+        received = {str(item) for item in payload.get("module_source_ref_digests") or []}
+        if missing := sorted(required - received):
+            raise ValueError(
+                "npc_turn.bundle_receipt did not include cited module sources: "
+                + ", ".join(missing)
+            )
+        if not require_fresh:
+            return payload
+        if int(payload.get("expires_monotonic_ns") or 0) < time.monotonic_ns():
+            raise ValueError("npc_turn.bundle_receipt expired; read the NPC turn bundle again")
+        if int(payload.get("campaign_revision") or -1) != campaigns.get(campaign_id).revision:
+            raise ValueError("npc_turn.bundle_receipt is stale at the campaign revision")
+        branch = branches.current(campaign_id)
+        if branch.id != branch_id or payload.get("head_snapshot_id") != branch.head_snapshot_id:
+            raise ValueError("npc_turn.bundle_receipt is stale after branch or snapshot change")
+        if int(payload.get("latest_event_sequence") or 0) != npc_turn_latest_event_sequence(
+            campaign_id, branch_id
+        ):
+            raise ValueError("npc_turn.bundle_receipt is stale after a continuity event")
+        actor_id = str(payload.get("actor_id") or "")
+        actor = characters.get(actor_id)
+        if actor.campaign_id != campaign_id or actor.revision != int(
+            payload.get("actor_revision") or -1
+        ):
+            raise ValueError("npc_turn.bundle_receipt is stale at the actor revision")
+        scene_scope_id = str(payload.get("scope_id") or "party")
+        scene = npc_turn_scene_projection(
+            modules.current_scene(campaign_id, scope_id=scene_scope_id)
+        )
+        if str((scene or {}).get("scene_id") or "") != str(payload.get("scene_id") or ""):
+            raise ValueError("npc_turn.bundle_receipt is stale after a scene change")
+        if int((scene or {}).get("state_version") or 0) != int(
+            payload.get("scene_state_version") or 0
+        ):
+            raise ValueError("npc_turn.bundle_receipt is stale at the scene revision")
+        _state, fact_heads, knowledge_heads = npc_turn_actor_state(
+            campaign_id,
+            branch_id,
+            actor_id,
+        )
+        if dict(payload.get("fact_heads") or {}) != fact_heads:
+            raise ValueError("npc_turn.bundle_receipt is stale at an actor-state fact")
+        current_memory_heads = {
+            str(item.id): str(item.revision_id)
+            for item in memories.list(
+                campaign_id,
+                branch_id=branch_id,
+                include_inactive=True,
+            )
+        }
+        if any(
+            current_memory_heads.get(str(memory_id)) != str(revision_id)
+            for memory_id, revision_id in dict(
+                payload.get("context_fact_heads") or {}
+            ).items()
+        ):
+            raise ValueError("npc_turn.bundle_receipt is stale at a context fact")
+        if dict(payload.get("knowledge_heads") or {}) != knowledge_heads:
+            raise ValueError("npc_turn.bundle_receipt is stale at ActorKnowledge")
+        return payload
 
     def character_view(
         character: Any,
@@ -7301,6 +7608,126 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             actor="mcp",
         )
 
+    def narrative_followup_for_mutation(
+        campaign: Any,
+        *,
+        branch_id: str,
+        campaign_state: dict[str, Any] | None,
+        character_updates: list[CharacterStateUpdate] | None,
+    ) -> dict[str, Any] | None:
+        """Describe generic named-NPC changes that need an Agent narrative pass."""
+
+        anchored_actor_refs = {
+            str(ref)
+            for fact in memories.list(
+                campaign.id,
+                kind="context_anchor",
+                branch_id=branch_id,
+            )
+            for ref in list(dict(fact.metadata or {}).get("related_refs") or [])
+            if str(ref).startswith("actor:")
+        }
+        narrative_actor_changes: dict[str, set[str]] = {}
+        for update in character_updates or []:
+            before = characters.get(update.character_id)
+            actor_ref = f"actor:{before.id}"
+            if (
+                before.character_type not in NON_PLAYER_CHARACTER_TYPES
+                or actor_ref not in anchored_actor_refs
+            ):
+                continue
+            before_sheet = validate_character_sheet(before.sheet)
+            after_sheet = validate_character_sheet(update.sheet)
+            reasons: set[str] = set()
+            if dict(before_sheet.get("combat") or {}).get("hp") != dict(
+                after_sheet.get("combat") or {}
+            ).get("hp"):
+                reasons.add("named_npc_hp_changed")
+            if list(before_sheet.get("conditions") or []) != list(
+                after_sheet.get("conditions") or []
+            ):
+                reasons.add("named_npc_conditions_changed")
+            before_status = list(
+                dict(before_sheet.get("adventure_state") or {}).get("status_tags") or []
+            )
+            after_status = list(
+                dict(after_sheet.get("adventure_state") or {}).get("status_tags") or []
+            )
+            if before_status != after_status:
+                reasons.add("named_npc_status_changed")
+            if list(before_sheet.get("effects") or []) != list(
+                after_sheet.get("effects") or []
+            ):
+                reasons.add("named_npc_effects_changed")
+            before_inventory = dict(before_sheet.get("inventory") or {})
+            after_inventory = dict(after_sheet.get("inventory") or {})
+            if any(
+                canonical_json(before_inventory.get(key))
+                != canonical_json(after_inventory.get(key))
+                for key in ("items", "equipped", "attuned", "wallet")
+            ):
+                reasons.add("named_npc_inventory_changed")
+            if reasons:
+                narrative_actor_changes.setdefault(before.id, set()).update(reasons)
+        if campaign_state is not None:
+            before_combat = dict(dict(campaign.state or {}).get("combat") or {})
+            after_combat = dict(dict(campaign_state or {}).get("combat") or {})
+
+            def combat_actor_positions(value: dict[str, Any]) -> dict[str, tuple[Any, ...]]:
+                result: dict[str, tuple[Any, ...]] = {}
+                for item in [
+                    *list(value.get("combatants") or []),
+                    *list(value.get("reinforcements") or []),
+                ]:
+                    actor_id_value = str(dict(item or {}).get("actor_id") or "")
+                    if not actor_id_value:
+                        continue
+                    actor_ref = f"actor:{actor_id_value}"
+                    if actor_ref not in anchored_actor_refs:
+                        continue
+                    data = dict(item or {})
+                    result[actor_id_value] = tuple(
+                        canonical_json(data.get(key))
+                        for key in ("position", "location", "x", "y", "zone", "status")
+                    )
+                return result
+
+            before_positions = combat_actor_positions(before_combat)
+            after_positions = combat_actor_positions(after_combat)
+            for changed_actor_id in sorted(set(before_positions) | set(after_positions)):
+                if before_positions.get(changed_actor_id) != after_positions.get(
+                    changed_actor_id
+                ):
+                    narrative_actor_changes.setdefault(changed_actor_id, set()).add(
+                        "named_npc_position_changed"
+                    )
+        if not narrative_actor_changes:
+            return None
+        scene = npc_turn_scene_projection(modules.current_scene(campaign.id, scope_id="party"))
+        related_refs = {
+            *(f"actor:{actor_id}" for actor_id in narrative_actor_changes),
+            *(
+                [f"scene:{scene['scene_id']}"]
+                if scene is not None and scene.get("scene_id")
+                else []
+            ),
+        }
+        return {
+            "status": "agent_review_required",
+            "default_resolver": "agent",
+            "blocking": False,
+            "actor_ids": sorted(narrative_actor_changes),
+            "reasons": sorted(
+                {
+                    reason
+                    for reasons in narrative_actor_changes.values()
+                    for reason in reasons
+                }
+            ),
+            "related_refs": sorted(related_refs),
+            "recommended_operation": "continuity_context:npc_turn",
+        }
+
     def update_character(
         before: Any,
         *,
@@ -7368,6 +7795,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 summary=summary if summary is not None else before.summary,
             )
         )
+        character_update = CharacterStateUpdate(
+            character_id=before.id,
+            sheet=normalized_sheet,
+            notes=normalized_notes,
+            expected_revision=expected_revision,
+            name=name,
+            player_name=player_name,
+            summary=summary,
+        )
         response = response_for(
             character_view(
                 replace(
@@ -7381,23 +7817,21 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 )
             )
         )
+        followup = narrative_followup_for_mutation(
+            campaigns.get(before.campaign_id),
+            branch_id=branch_id,
+            campaign_state=None,
+            character_updates=[character_update],
+        )
+        if followup is not None:
+            response = {**response, "narrative_followup": followup}
         stream = active_random_stream()
         if stream is not None and stream.draw_count > 0:
             response = deepcopy(response)
             response.setdefault("random_stream_receipt", stream.receipt())
         StateMutationService(storage.database).replace(
             before.campaign_id,
-            character_updates=[
-                CharacterStateUpdate(
-                    character_id=before.id,
-                    sheet=normalized_sheet,
-                    notes=normalized_notes,
-                    expected_revision=expected_revision,
-                    name=name,
-                    player_name=player_name,
-                    summary=summary,
-                )
-            ],
+            character_updates=[character_update],
             operation=operation,
             actor=principal_id,
             branch_id=branch_id,
@@ -7559,6 +7993,18 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             character_updates,
             response_fields,
         )
+        if "narrative_followup" not in response_fields:
+            followup = narrative_followup_for_mutation(
+                campaign,
+                branch_id=branch_id,
+                campaign_state=campaign_state,
+                character_updates=character_updates,
+            )
+            if followup is not None:
+                response_fields = {
+                    **response_fields,
+                    "narrative_followup": followup,
+                }
         stream_before_commit = active_random_stream()
         persists_campaign = campaign_state is not None or (
             stream_before_commit is not None
@@ -28999,6 +29445,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         actor_id: str | None = None,
         scope_id: str = "party",
         audience: str = "dm",
+        purpose: Literal["general", "npc_turn"] = "general",
+        interlocutor_actor_ids: list[str] | None = None,
+        stimulus: dict[str, Any] | None = None,
+        conversation_limit: int = 8,
         branch_id: str | None = None,
         limit: int = 8,
         budget_chars: int = 12_000,
@@ -29006,8 +29456,19 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
     ) -> dict[str, Any]:
         """Retrieve current continuity plus pinned, source-exact DM module context."""
+        if purpose not in NPC_TURN_PURPOSES:
+            raise ValueError(f"unsupported continuity context purpose: {purpose}")
+        if purpose == "npc_turn" and authoritative_phase(campaign_id) not in {
+            PROFILE_PLAY,
+            PROFILE_COMBAT,
+        }:
+            raise ValueError("NPC turn context is available only during Play or Combat")
         membership = access.require_campaign(campaign_id, principal_id)
         branch_id = readable_branch(campaign_id, branch_id, principal_id)
+        if purpose == "npc_turn" and membership.role not in CAMPAIGN_DM_ROLES:
+            raise ValueError("NPC turn context is available only to Owner/DM")
+        if purpose == "npc_turn" and not actor_id:
+            raise ValueError("actor_id is required for NPC turn context")
         if membership.role not in CAMPAIGN_DM_ROLES:
             audience = "player"
             if actor_id:
@@ -29030,6 +29491,17 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             normalize_context_entity_ref(item, field="related_refs[]")
             for item in list(related_refs or [])
         }
+        if actor_id:
+            resolved_related_refs.add(f"actor:{actor_id}")
+        normalized_interlocutor_ids: list[str] = []
+        for item in interlocutor_actor_ids or []:
+            value = str(item).strip()
+            if not value:
+                raise ValueError("interlocutor_actor_ids must not contain blank ids")
+            if value in normalized_interlocutor_ids:
+                raise ValueError("interlocutor_actor_ids must be unique")
+            normalized_interlocutor_ids.append(value)
+            resolved_related_refs.add(f"actor:{value}")
         if membership.role in CAMPAIGN_DM_ROLES:
             campaign = campaigns.get(campaign_id)
             state = dict(campaign.state or {})
@@ -29068,6 +29540,194 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             budget_chars=budget_chars,
             related_refs=sorted(resolved_related_refs),
         )
+        if purpose == "npc_turn":
+            assert actor_id is not None
+            actor = characters.get(actor_id)
+            if actor.campaign_id != campaign_id:
+                raise ValueError("NPC turn actor belongs to another campaign")
+            if actor.character_type not in NON_PLAYER_CHARACTER_TYPES:
+                raise ValueError("NPC turn actor must be an NPC or monster")
+            if actor_id in normalized_interlocutor_ids:
+                raise ValueError("NPC turn actor cannot also be an interlocutor")
+            interlocutors: list[dict[str, Any]] = []
+            for interlocutor_id in normalized_interlocutor_ids:
+                interlocutor = characters.get(interlocutor_id)
+                if interlocutor.campaign_id != campaign_id:
+                    raise ValueError("every NPC interlocutor must belong to the campaign")
+                interlocutors.append(
+                    {
+                        "id": interlocutor.id,
+                        "name": interlocutor.name,
+                        "character_type": interlocutor.character_type,
+                    }
+                )
+            normalized_stimulus = normalize_npc_stimulus(stimulus)
+            stimulus_actor_ids = {
+                str(normalized_stimulus.get("speaker_actor_id") or ""),
+                *normalized_stimulus.get("target_actor_ids", []),
+            } - {""}
+            allowed_stimulus_actor_ids = {actor_id, *normalized_interlocutor_ids}
+            if unknown_stimulus_actors := sorted(
+                stimulus_actor_ids - allowed_stimulus_actor_ids
+            ):
+                raise ValueError(
+                    "stimulus actor ids must identify the NPC or an interlocutor: "
+                    + ", ".join(unknown_stimulus_actors)
+                )
+            scene = npc_turn_scene_projection(result.get("scoped_scene"))
+            perception = npc_turn_perception_projection(
+                campaigns.get(campaign_id),
+                actor_id=actor_id,
+                interlocutors=interlocutors,
+                scene=scene,
+            )
+            actor_state, fact_heads, knowledge_heads = npc_turn_actor_state(
+                campaign_id,
+                branch_id,
+                actor_id,
+            )
+            relationships = [
+                item for item in actor_state if item.get("predicate") == "relationship_to"
+            ]
+            goals = [item for item in actor_state if item.get("predicate") == "goal"]
+            actor_knowledge = list(result.get("actor_knowledge") or [])
+            common_context = [
+                item
+                for item in list(result.get("facts") or [])
+                if item.get("disclosure_scope") == "public"
+            ]
+            relevant_anchor_heads = {
+                str(item.id): str(item.revision_id)
+                for item in memories.list(
+                    campaign_id,
+                    kind="context_anchor",
+                    branch_id=branch_id,
+                )
+                if resolved_related_refs
+                & {
+                    str(ref)
+                    for ref in list(dict(item.metadata or {}).get("related_refs") or [])
+                }
+            }
+            context_fact_heads = {
+                **relevant_anchor_heads,
+                **{
+                    str(item["id"]): str(item["revision_id"])
+                    for item in common_context
+                },
+            }
+            raw_conversation = events.list_for_actor(
+                campaign_id,
+                actor_id=actor_id,
+                branch_id=branch_id,
+                limit=max(1, min(int(conversation_limit), 30)),
+            )
+            conversation_window = []
+            for event in raw_conversation:
+                payload = dict(event.payload or {})
+                conversation_window.append(
+                    {
+                        "event_id": event.id,
+                        "sequence": event.sequence,
+                        "event_type": event.event_type,
+                        "summary": event.summary,
+                        "speaker_actor_id": str(payload.get("speaker_actor_id") or ""),
+                        "listener_actor_ids": list(payload.get("listener_actor_ids") or []),
+                        "utterance": str(payload.get("utterance") or ""),
+                        "language": str(payload.get("language") or ""),
+                        "visible_action": str(payload.get("visible_action") or ""),
+                        "participants": [dict(item) for item in event.participants],
+                    }
+                )
+            stimulus_ref = "stimulus:" + hashlib.sha256(
+                canonical_json(normalized_stimulus).encode("utf-8")
+            ).hexdigest()
+            allowed_basis_refs = {
+                f"actor:{actor_id}:identity",
+                f"actor:{actor_id}:self_state",
+                *(
+                    [stimulus_ref]
+                    if normalized_stimulus.get("kind") != "none"
+                    else []
+                ),
+                *(
+                    f"knowledge:{item['id']}:{item['revision_id']}"
+                    for item in actor_knowledge
+                ),
+                *(str(item["basis_ref"]) for item in perception),
+                *(f"event:{item['event_id']}" for item in conversation_window),
+            }
+            portrayal_context = [
+                {
+                    **dict(item),
+                    "context_role": "dm_portrayal_context",
+                    "disclosure_policy": "not_speakable_without_actor_basis",
+                }
+                for item in list(result.get("module_evidence") or [])
+            ]
+            branch = dict(result.get("branch") or {})
+            bundle: dict[str, Any] = {
+                "schema_version": NPC_TURN_SCHEMA_VERSION,
+                "bundle_id": str(uuid4()),
+                "purpose": "npc_turn",
+                "authority": {
+                    "campaign_id": campaign_id,
+                    "branch_id": branch_id,
+                    "head_snapshot_id": branch.get("head_snapshot_id"),
+                    "campaign_revision": campaigns.get(campaign_id).revision,
+                    "latest_event_sequence": npc_turn_latest_event_sequence(
+                        campaign_id, branch_id
+                    ),
+                    "actor_revision": actor.revision,
+                    "scene_state_version": int((scene or {}).get("state_version") or 0),
+                },
+                "actor": npc_turn_actor_projection(actor),
+                "interlocutors": interlocutors,
+                "stimulus": {**normalized_stimulus, "basis_ref": stimulus_ref},
+                "perception": perception,
+                "actor_knowledge": actor_knowledge,
+                "common_context": common_context,
+                "relationships": relationships,
+                "goals": goals,
+                "conversation_window": conversation_window,
+                "scene": scene,
+                "portrayal_context": portrayal_context,
+                "constraints": {
+                    "allowed_basis_refs": sorted(allowed_basis_refs),
+                    "allowed_target_actor_ids": sorted(
+                        {actor_id, *normalized_interlocutor_ids}
+                    ),
+                    "module_evidence_is_actor_knowledge": False,
+                    "common_context_is_actor_knowledge": False,
+                    "may_roll_dice": False,
+                    "may_call_tools": False,
+                    "may_write_state": False,
+                    "output_contract": "npc-turn-proposal.v1",
+                },
+                "retrieval": {
+                    **dict(result.get("retrieval") or {}),
+                    "actor_state_count": len(actor_state),
+                    "conversation_event_count": len(conversation_window),
+                },
+            }
+            receipt = issue_npc_turn_receipt(
+                bundle=bundle,
+                campaign_id=campaign_id,
+                branch_id=branch_id,
+                principal_id=principal_id,
+                actor_id=actor_id,
+                actor_revision=actor.revision,
+                interlocutor_actor_ids=normalized_interlocutor_ids,
+                scene=scene,
+                fact_heads=fact_heads,
+                context_fact_heads=context_fact_heads,
+                knowledge_heads=knowledge_heads,
+                allowed_basis_refs=sorted(allowed_basis_refs),
+                stimulus=normalized_stimulus,
+                module_evidence=portrayal_context,
+            )
+            bundle["bundle_receipt"] = receipt
+            return bundle
         result["context_receipt"] = issue_context_receipt(
             campaign_id=campaign_id,
             branch_id=branch_id,
@@ -29128,6 +29788,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if not idempotency_key:
             raise ValueError("idempotency_key is required for continuity commits")
         data = facade_payload(payload)
+        branch_id = require_current_branch(campaign_id, data.get("branch_id"))
         raw_event = required(data, "event")
         raw_facts = data.get("facts") or []
         raw_knowledge = data.get("actor_knowledge") or []
@@ -29143,6 +29804,171 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         facts_data = [dict(item) for item in raw_facts]
         knowledge_data = [dict(item) for item in raw_knowledge]
         context_receipt = data.get("context_receipt")
+        npc_turn_data = data.get("npc_turn")
+        npc_turn_receipt: dict[str, Any] | None = None
+        npc_turn_trace: dict[str, Any] | None = None
+        if npc_turn_data is not None:
+            if not isinstance(npc_turn_data, dict):
+                raise ValueError("payload.npc_turn must be an object")
+            unknown_npc_fields = set(npc_turn_data) - {
+                "bundle_receipt",
+                "proposal",
+                "accepted_fact_indexes",
+                "accepted_actor_knowledge_indexes",
+                "accepted_action",
+                "isolation_level",
+            }
+            if unknown_npc_fields:
+                raise ValueError(
+                    f"payload.npc_turn has unknown fields: {sorted(unknown_npc_fields)}"
+                )
+            if facts_data or knowledge_data:
+                raise ValueError(
+                    "NPC turn facts and ActorKnowledge must come from accepted proposal indexes"
+                )
+            proposal = normalize_npc_turn_proposal(npc_turn_data.get("proposal"))
+            npc_turn_receipt = verify_npc_turn_receipt(
+                npc_turn_data.get("bundle_receipt"),
+                campaign_id=campaign_id,
+                branch_id=branch_id,
+                principal_id=principal_id,
+                require_fresh=False,
+            )
+            if proposal["bundle_id"] != npc_turn_receipt.get("bundle_id"):
+                raise ValueError("NPC proposal belongs to another context bundle")
+            if proposal["speaker_actor_id"] != npc_turn_receipt.get("actor_id"):
+                raise ValueError("NPC proposal speaker does not match its context bundle")
+            validate_npc_basis_refs(
+                proposal,
+                allowed_basis_refs={
+                    str(item) for item in npc_turn_receipt.get("allowed_basis_refs") or []
+                },
+            )
+            if proposal["resolution_requests"]:
+                raise ValueError(
+                    "NPC proposal requires resolution; use public rules tools and read a new bundle"
+                )
+            fact_indexes = npc_turn_data.get("accepted_fact_indexes") or []
+            knowledge_indexes = npc_turn_data.get("accepted_actor_knowledge_indexes") or []
+            if not isinstance(fact_indexes, list) or not isinstance(knowledge_indexes, list):
+                raise ValueError("accepted NPC proposal indexes must be lists")
+            facts_data, knowledge_data = accepted_proposal_deltas(
+                proposal,
+                fact_indexes=fact_indexes,
+                actor_knowledge_indexes=knowledge_indexes,
+            )
+            speaker_actor_id = str(npc_turn_receipt["actor_id"])
+            listener_actor_ids = [
+                str(item) for item in npc_turn_receipt.get("interlocutor_actor_ids") or []
+            ]
+            allowed_delta_actor_ids = {speaker_actor_id, *listener_actor_ids}
+            allowed_fact_fields = {
+                "action",
+                "fact_key",
+                "memory_id",
+                "content",
+                "kind",
+                "subject",
+                "metadata",
+                "subject_ref",
+                "predicate",
+                "status",
+                "valid_from",
+                "valid_to",
+                "source_event_ids",
+                "importance",
+                "disclosure_scope",
+                "expected_revision_id",
+            }
+            for index, fact in enumerate(facts_data):
+                if unknown := set(fact) - allowed_fact_fields:
+                    raise ValueError(
+                        f"accepted NPC fact[{index}] has unknown fields: {sorted(unknown)}"
+                    )
+                if str(fact.get("kind") or "") != "actor_state":
+                    raise ValueError("accepted NPC facts must use kind='actor_state'")
+                if str(fact.get("subject_ref") or "") != f"actor:{speaker_actor_id}":
+                    raise ValueError("accepted NPC facts must belong to the speaking actor")
+                if str(fact.get("predicate") or "") not in {"relationship_to", "goal"}:
+                    raise ValueError(
+                        "accepted NPC facts may update only relationships or goals"
+                    )
+                if str(fact.get("disclosure_scope") or "dm") != "dm":
+                    raise ValueError("accepted NPC actor-state facts must remain DM-only")
+                fact["disclosure_scope"] = "dm"
+            allowed_knowledge_fields = {
+                "action",
+                "actor_id",
+                "knowledge_key",
+                "knowledge_id",
+                "proposition",
+                "subject_ref",
+                "epistemic_status",
+                "confidence",
+                "cause",
+                "disclosure_scope",
+                "expected_revision_id",
+            }
+            for index, item in enumerate(knowledge_data):
+                if unknown := set(item) - allowed_knowledge_fields:
+                    raise ValueError(
+                        "accepted NPC ActorKnowledge"
+                        f"[{index}] has unknown fields: {sorted(unknown)}"
+                    )
+                if str(item.get("actor_id") or "") not in allowed_delta_actor_ids:
+                    raise ValueError(
+                        "accepted NPC ActorKnowledge may target only the speaker or listeners"
+                    )
+            accepted_action = bool(npc_turn_data.get("accepted_action", False))
+            action_kind = str(proposal["proposed_action"]["kind"])
+            if accepted_action and action_kind not in NPC_NARRATIVE_ACTION_KINDS:
+                raise ValueError(
+                    "mechanical NPC actions require public engine tools before continuity commit"
+                )
+            isolation_level = str(npc_turn_data.get("isolation_level") or "logical")
+            if isolation_level not in {"isolated", "logical"}:
+                raise ValueError("NPC turn isolation_level must be isolated or logical")
+            audience_scope = str(event_data.get("audience_scope") or "actor")
+            if audience_scope not in {"actor", "party", "public"}:
+                raise ValueError("NPC dialogue audience_scope must be actor, party, or public")
+            summary = str(event_data.get("summary") or "").strip()
+            if not summary:
+                raise ValueError("payload.event.summary is required")
+            proposal_digest = hashlib.sha256(
+                canonical_json(proposal).encode("utf-8")
+            ).hexdigest()
+            visible_action = ""
+            if accepted_action and action_kind != "none":
+                visible_action = str(proposal["proposed_action"].get("summary") or action_kind)
+            npc_turn_trace = {
+                "bundle_digest": str(npc_turn_receipt["bundle_digest"]),
+                "proposal_digest": proposal_digest,
+                "isolation_level": isolation_level,
+            }
+            event_data = {
+                "event_type": "npc_dialogue_turn",
+                "summary": summary,
+                "audience_scope": audience_scope,
+                "participants": [
+                    {"actor_id": speaker_actor_id, "role": "speaker"},
+                    *(
+                        {"actor_id": listener_id, "role": "listener"}
+                        for listener_id in listener_actor_ids
+                    ),
+                ],
+                "payload": {
+                    "schema_version": NPC_TURN_SCHEMA_VERSION,
+                    "speaker_actor_id": speaker_actor_id,
+                    "listener_actor_ids": listener_actor_ids,
+                    "scene_id": str(npc_turn_receipt.get("scene_id") or ""),
+                    "language": str(proposal["utterance"].get("language") or ""),
+                    "utterance": str(proposal["utterance"].get("text") or ""),
+                    "delivery": str(proposal["utterance"].get("delivery") or ""),
+                    "visible_action": visible_action,
+                    "turn_trace": npc_turn_trace,
+                },
+            }
+            context_receipt = npc_turn_data.get("bundle_receipt")
         snapshot_data = dict(data["snapshot"]) if data.get("snapshot") is not None else None
         validate_embedded_module_source_refs(
             campaign_id,
@@ -29159,9 +29985,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             knowledge_data,
             field="payload.actor_knowledge",
         )
-        if event_data.get("audience_scope") == "actor" and not knowledge_data:
-            raise ValueError("actor-scoped continuity events require actor_knowledge writes")
-        branch_id = require_current_branch(campaign_id, data.get("branch_id"))
+        if (
+            event_data.get("audience_scope") == "actor"
+            and not knowledge_data
+            and not event_data.get("participants")
+        ):
+            raise ValueError(
+                "actor-scoped continuity events require ActorKnowledge or event participants"
+            )
         manifest = catalog.manifest()
         event_payload = dict(event_data.get("payload") or {})
         event_payload["_sagasmith_skill_manifest"] = manifest
@@ -29176,6 +30007,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "snapshot": snapshot_data,
             "branch_id": branch_id,
             "skill_manifest": manifest,
+            "npc_turn_trace": npc_turn_trace,
         }
         scope = f"continuity-commit:{campaign_id}:{branch_id}:{principal_id}"
         replay = replay_idempotent(scope, idempotency_key, request_payload)
@@ -29188,14 +30020,22 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             campaign_id,
             branch_id,
         )
-        if required_source_digests:
-            verify_context_receipt(
+        if npc_turn_receipt is not None:
+            npc_turn_receipt = verify_npc_turn_receipt(
                 context_receipt,
                 campaign_id=campaign_id,
                 branch_id=branch_id,
                 principal_id=principal_id,
                 required_source_digests=required_source_digests,
             )
+        elif required_source_digests:
+                verify_context_receipt(
+                    context_receipt,
+                    campaign_id=campaign_id,
+                    branch_id=branch_id,
+                    principal_id=principal_id,
+                    required_source_digests=required_source_digests,
+                )
         current_facts = {
             item.fact_key: item
             for item in memories.list(
@@ -38953,6 +39793,7 @@ Useful bounded guidance:
                     "snapshot",
                     "branch_id",
                     "context_receipt",
+                    "npc_turn",
                 },
                 required_names=("event",),
             )

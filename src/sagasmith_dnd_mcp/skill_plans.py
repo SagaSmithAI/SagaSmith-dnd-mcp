@@ -19,6 +19,7 @@ VISIBILITIES = {"public", "member", "dm", "owner", "local_admin"}
 RESULT_OPERATION_PHASES = {
     "combat_start:started": frozenset({"combat"}),
     "combat_end:closed": frozenset({"play"}),
+    "continuity_context:npc_turn": frozenset({"play", "combat"}),
 }
 RESULT_OPERATION_IDS = frozenset(RESULT_OPERATION_PHASES)
 

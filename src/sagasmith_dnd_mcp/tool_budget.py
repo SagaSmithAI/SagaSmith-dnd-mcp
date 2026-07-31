@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-TOOL_BUDGET_VERSION = "2026-07-phase-skill-plans-v16"
+TOOL_BUDGET_VERSION = "2026-07-npc-turn-isolation-v17"
 
 # Captured before the conservative facade consolidation.  Keep this historical
 # baseline so a lower tool count cannot conceal a larger aggregate input schema.
@@ -39,10 +39,12 @@ TARGET_CORE_TOOL_COUNT = 13
 # bounded contract inspection and the campaign resume selector without another
 # public tool. Version 16 adds the phase/tool-group Skill-plan selector and
 # trusted campaign/exposure context to the existing core skill_query facade.
-# The aggregate remains well below the captured 92-tool baseline.
-TARGET_INPUT_SCHEMA_BYTES = 50_171
+# Version 17 adds strict NPC-turn context selectors to continuity_context and
+# makes that existing tool available during Combat; no public/core tool is
+# added, and the aggregate remains below the captured 92-tool baseline.
+TARGET_INPUT_SCHEMA_BYTES = 50_611
 PROFILE_TOOL_LIMITS = {
     "lobby": 62,
     "play": 48,
-    "combat": 46,
+    "combat": 47,
 }

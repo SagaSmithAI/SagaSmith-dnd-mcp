@@ -296,6 +296,7 @@ TOOL_GROUPS = (
         "read",
         "combat_query",
         "character_query",
+        "continuity_context",
         "module_query",
         "module_search",
         "branch_query",

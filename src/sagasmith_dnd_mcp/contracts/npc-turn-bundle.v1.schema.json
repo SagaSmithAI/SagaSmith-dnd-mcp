@@ -1,0 +1,100 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sagasmith.ai/contracts/npc-turn-bundle.v1.schema.json",
+  "title": "SagaSmith isolated NPC turn bundle v1",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "bundle_id",
+    "purpose",
+    "authority",
+    "actor",
+    "interlocutors",
+    "stimulus",
+    "perception",
+    "actor_knowledge",
+    "common_context",
+    "relationships",
+    "goals",
+    "conversation_window",
+    "scene",
+    "portrayal_context",
+    "constraints",
+    "retrieval",
+    "bundle_receipt"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "bundle_id": {"type": "string", "minLength": 1},
+    "purpose": {"const": "npc_turn"},
+    "authority": {
+      "type": "object",
+      "required": [
+        "campaign_id",
+        "branch_id",
+        "head_snapshot_id",
+        "campaign_revision",
+        "latest_event_sequence",
+        "actor_revision",
+        "scene_state_version"
+      ]
+    },
+    "actor": {
+      "type": "object",
+      "required": ["id", "name", "character_type", "revision", "profile", "self_state"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "character_type": {"enum": ["npc", "monster"]}
+      }
+    },
+    "interlocutors": {"type": "array", "items": {"type": "object"}},
+    "stimulus": {"type": "object"},
+    "perception": {"type": "array"},
+    "actor_knowledge": {"type": "array"},
+    "common_context": {"type": "array"},
+    "relationships": {"type": "array"},
+    "goals": {"type": "array"},
+    "conversation_window": {"type": "array"},
+    "scene": {"type": ["object", "null"]},
+    "portrayal_context": {"type": "array"},
+    "constraints": {
+      "type": "object",
+      "required": [
+        "allowed_basis_refs",
+        "allowed_target_actor_ids",
+        "module_evidence_is_actor_knowledge",
+        "common_context_is_actor_knowledge",
+        "may_roll_dice",
+        "may_call_tools",
+        "may_write_state",
+        "output_contract"
+      ],
+      "properties": {
+        "allowed_basis_refs": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+        "allowed_target_actor_ids": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+        "module_evidence_is_actor_knowledge": {"const": false},
+        "common_context_is_actor_knowledge": {"const": false},
+        "may_roll_dice": {"const": false},
+        "may_call_tools": {"const": false},
+        "may_write_state": {"const": false},
+        "output_contract": {"const": "npc-turn-proposal.v1"}
+      },
+      "additionalProperties": false
+    },
+    "retrieval": {"type": "object"},
+    "bundle_receipt": {
+      "type": "object",
+      "required": ["schema_version", "purpose", "bundle_id", "bundle_digest", "actor_id", "allowed_basis_refs", "signature"],
+      "properties": {
+        "schema_version": {"const": 2},
+        "purpose": {"const": "npc_turn"},
+        "bundle_id": {"type": "string"},
+        "bundle_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "actor_id": {"type": "string"},
+        "allowed_basis_refs": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+        "signature": {"type": "string", "minLength": 1}
+      }
+    }
+  },
+  "additionalProperties": false
+}

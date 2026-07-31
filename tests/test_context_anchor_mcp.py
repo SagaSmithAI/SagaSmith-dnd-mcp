@@ -3,6 +3,7 @@ import hashlib
 from pathlib import Path
 
 import pytest
+from sagasmith_dnd.character_schema import default_character_sheet
 
 from sagasmith_dnd_mcp.config import McpConfig
 from sagasmith_dnd_mcp.server import create_server
@@ -314,6 +315,88 @@ def test_public_context_anchor_pins_exact_dm_evidence_without_a_narrative_dsl(
                     "idempotency_key": "invalid-trigger",
                 },
             )
+
+    asyncio.run(exercise())
+
+
+def test_named_npc_state_changes_request_generic_agent_narrative_followup(
+    tmp_path: Path,
+) -> None:
+    async def exercise() -> None:
+        server = create_server(_config(tmp_path))
+        campaign = await _call(
+            server,
+            "campaign_create",
+            {"name": "Narrative follow-up", "idempotency_key": "campaign"},
+        )
+        source_ref = await _import_ironslag_context(server, campaign["id"])
+        sheet = default_character_sheet()
+        sheet["combat"]["hp"] = {"value": 5, "max": 5, "temp": 0}
+        npc = await _call(
+            server,
+            "character_create",
+            {
+                "campaign_id": campaign["id"],
+                "name": "Zaltember",
+                "character_type": "npc",
+                "sheet": sheet,
+                "idempotency_key": "zaltember",
+            },
+        )
+        await _call(
+            server,
+            "memory_change",
+            {
+                "campaign_id": campaign["id"],
+                "action": "upsert",
+                "payload": {
+                    "fact_key": f"context:actor:{npc['id']}:ironslag",
+                    "kind": "context_anchor",
+                    "subject": "Zaltember module context",
+                    "subject_ref": f"actor:{npc['id']}",
+                    "content": "Exact source context for Agent-as-DM adjudication.",
+                    "metadata": {
+                        "schema_version": 1,
+                        "purpose": "Zaltember behavior after consequential state changes",
+                        "related_refs": [f"actor:{npc['id']}", "scene:ironslag-area18"],
+                        "source_bindings": [
+                            {
+                                "source_ref": source_ref,
+                                "source_excerpt": (
+                                    "Zaltember is a bully and coward. If wounded, "
+                                    "he flees to area 31."
+                                ),
+                            }
+                        ],
+                    },
+                    "disclosure_scope": "dm",
+                },
+                "idempotency_key": "npc-anchor",
+            },
+        )
+        arguments = {
+            "character_id": npc["id"],
+            "action": "damage",
+            "payload": {
+                "parts": [{"amount": 1, "damage_type": "bludgeoning"}],
+            },
+            "expected_revision": npc["revision"],
+            "idempotency_key": "wound-zaltember",
+        }
+        damaged = await _call(server, "character_state_change", arguments)
+        replay = await _call(server, "character_state_change", arguments)
+
+        assert replay == damaged
+        assert damaged["result"]["after_hp"] == 4
+        assert damaged["narrative_followup"] == {
+            "status": "agent_review_required",
+            "default_resolver": "agent",
+            "blocking": False,
+            "actor_ids": [npc["id"]],
+            "reasons": ["named_npc_hp_changed"],
+            "related_refs": [f"actor:{npc['id']}"],
+            "recommended_operation": "continuity_context:npc_turn",
+        }
 
     asyncio.run(exercise())
 

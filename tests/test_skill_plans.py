@@ -647,9 +647,9 @@ def test_real_skill_plan_manifest_is_valid_and_within_budgets() -> None:
 
     assert SKILL_PLAN_ASSET_ID.endswith("skill-plan.v1.json")
     assert plans.available is True, plans.load_error
-    assert plans.summary()["group_count"] == 28
+    assert plans.summary()["group_count"] == 29
     assert plans.summary()["tool_group_count"] == 21
-    assert plans.summary()["operation_binding_count"] == 16
+    assert plans.summary()["operation_binding_count"] == 17
     assert len(skills.read("dnd.full.skills.dnd-dm")) < 12_000
     assert len(
         skills.read_asset(
@@ -679,6 +679,17 @@ def test_real_skill_plan_manifest_is_valid_and_within_budgets() -> None:
     assert combat_plan["phase"] == "combat"
     assert {"phase.combat", "combat.actions"} <= {
         item["skill_group"] for item in combat_plan["required_now"]
+    }
+    npc_plan = plans.plan(
+        phase="play",
+        role="dm",
+        loaded_tool_groups={"play.scene", "play.scene_control"},
+        operation="continuity_context:npc_turn",
+        session_key="dm-npc-session",
+        tracker=SkillReadTracker(),
+    )
+    assert "npc.portrayal" in {
+        item["skill_group"] for item in npc_plan["required_now"]
     }
 
 
@@ -719,9 +730,9 @@ def test_stdio_cold_start_uses_real_phase_skill_plan(tmp_path: Path) -> None:
                     "phase_skill_plan"
                 ]
                 assert summary["available"] is True
-                assert summary["group_count"] == 28
+                assert summary["group_count"] == 29
                 assert summary["tool_group_count"] == 21
-                assert summary["operation_binding_count"] == 16
+                assert summary["operation_binding_count"] == 17
 
                 planned = await session.call_tool(
                     "skill_query",
