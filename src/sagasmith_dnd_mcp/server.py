@@ -53,6 +53,8 @@ from sagasmith_core import (
     file_sha256,
     normalize_document,
     render_pdf_page,
+    validate_module_pack,
+    validate_preset_pack,
     validate_subject_context_fact,
 )
 from sagasmith_core.access import CAMPAIGN_DM_ROLES, LOCAL_SYSTEM_PRINCIPAL_ID
@@ -275,6 +277,17 @@ from sagasmith_dnd.module_profile import DndModuleProfile
 from sagasmith_dnd.playthrough import (
     playthrough_source_bindings,
     validate_playthrough_manifest,
+)
+from sagasmith_dnd.portable_cards import (
+    SRD2014_PRESET_PACK_ID,
+    SRD2014_PRESET_PACK_VERSION,
+    SRD2024_PRESET_PACK_ID,
+    SRD2024_PRESET_PACK_VERSION,
+    build_dnd_actor_card,
+    build_srd2014_preset_pack,
+    build_srd2024_preset_pack,
+    preset_pack_catalog_definition,
+    validate_dnd_actor_card,
 )
 from sagasmith_dnd.progression import (
     advance_single_class_level,
@@ -2063,9 +2076,112 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 CORE_2024_CONTENT_PACK_VERSION,
             )
 
+    def ensure_actor_preset_pack(
+        pack_id: str,
+        version: str,
+        builder: Callable[[Path], dict[str, Any]],
+        source: str,
+    ) -> None:
+        """Install checksum-validated portable SRD actor cards as catalog presets."""
+
+        if not config.dnd_skills_dir.exists():
+            return
+        try:
+            existing = rule_packs.get_version(pack_id, version)
+            if existing.status == "installed":
+                return
+        except LookupError:
+            pass
+        package = builder(config.dnd_skills_dir)
+        if not package:
+            return
+        manifest, artifacts = preset_pack_catalog_definition(package)
+        result = rule_packs.save_draft(
+            manifest=manifest,
+            artifacts=artifacts,
+            provenance={
+                "source": source,
+                "structured": True,
+                "portable_package_checksum": package["checksum"],
+                "license": package["metadata"].get("license"),
+                "attribution": package["metadata"].get("attribution"),
+            },
+        )
+        if result.status == "validated":
+            rule_packs.install(pack_id, version)
+
     ensure_core_content_pack()
     ensure_standard2014_content_pack()
     ensure_core2024_content_pack()
+    ensure_actor_preset_pack(
+        SRD2014_PRESET_PACK_ID,
+        SRD2014_PRESET_PACK_VERSION,
+        build_srd2014_preset_pack,
+        "bundled-srd2014-actor-presets",
+    )
+    ensure_actor_preset_pack(
+        SRD2024_PRESET_PACK_ID,
+        SRD2024_PRESET_PACK_VERSION,
+        build_srd2024_preset_pack,
+        "bundled-srd2024-actor-presets",
+    )
+
+    def default_preset_actor_card(artifact_id: str) -> dict[str, Any]:
+        """Resolve one installed bundled preset without requiring campaign activation."""
+
+        identifier = str(artifact_id).strip()
+        candidates = (
+            (SRD2014_PRESET_PACK_ID, SRD2014_PRESET_PACK_VERSION),
+            (SRD2024_PRESET_PACK_ID, SRD2024_PRESET_PACK_VERSION),
+        )
+        matches = []
+        for pack_id, version in candidates:
+            try:
+                pack = rule_packs.get_version(pack_id, version)
+            except LookupError:
+                continue
+            matches.extend(
+                dict(dict(artifact.get("card") or {}).get("portable_card") or {})
+                for artifact in pack.artifacts
+                if str(artifact.get("id") or "") == identifier
+            )
+        if len(matches) != 1:
+            raise ValueError("artifact_id must resolve to exactly one installed actor preset")
+        return validate_dnd_actor_card(matches[0])
+
+    def portable_input(
+        data: dict[str, Any], *, field: str, expected_kind: str
+    ) -> dict[str, Any]:
+        """Load one inline, managed, or allowlisted portable package."""
+
+        choices = [
+            name
+            for name in (field, "artifact", "source_path")
+            if data.get(name) is not None
+        ]
+        if len(choices) != 1:
+            raise ValueError(
+                f"provide exactly one of payload.{field}, payload.artifact, or payload.source_path"
+            )
+        if field in choices:
+            value = data[field]
+            if not isinstance(value, dict):
+                raise ValueError(f"payload.{field} must be an object")
+            package = dict(value)
+        else:
+            package = storage.read_portable_package(
+                artifact=str(data["artifact"]) if "artifact" in choices else None,
+                source_path=data.get("source_path") if "source_path" in choices else None,
+            )
+        if package.get("kind") != expected_kind:
+            raise ValueError(f"portable package kind must be {expected_kind}")
+        return package
+
+    def managed_module_asset_bytes(source_path: str) -> bytes:
+        path = Path(source_path).expanduser().resolve()
+        if not path.is_file() or not path.is_relative_to(config.artifacts_dir.resolve()):
+            raise LookupError("module asset is not available in managed MCP storage")
+        return path.read_bytes()
 
     def checked_rule_facts(value: dict[str, Any] | None) -> dict[str, Any]:
         facts = dict(value or {})
@@ -20889,28 +21005,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 preserve_target_sheets,
                 allocations=preserve_allocations,
             )
-        activity_sheet = current.sheet
-        if random_save_spec is not None:
-            # Cards imported before source actions preserved omitted ``uses``
-            # as an exhausted zero-capacity counter. The exact reviewed Gazer
-            # contract is at-will, so repair only this recognized legacy card
-            # as it is first settled and persist the corrected representation.
-            activity_sheet = deepcopy(current.sheet)
-            for activity in dict(activity_sheet.get("content") or {}).get("activities", []):
-                if str(activity.get("id") or "") != activity_id:
-                    continue
-                uses = dict(activity.get("uses") or {})
-                if (
-                    int(uses.get("value", 0) or 0) == 0
-                    and int(uses.get("max", 0) or 0) == 0
-                    and not bool(uses.get("unlimited", False))
-                ):
-                    uses["unlimited"] = True
-                    activity["uses"] = uses
-                break
         try:
             applied = consume_activity(
-                activity_sheet,
+                current.sheet,
                 activity_id=activity_id,
                 rules=rule_context,
             )
@@ -34774,6 +34871,18 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     (standard.pack_id, standard.version, dict(item))
                     for item in standard.artifacts
                 )
+            try:
+                presets2014 = rule_packs.get_version(
+                    SRD2014_PRESET_PACK_ID,
+                    SRD2014_PRESET_PACK_VERSION,
+                )
+            except LookupError:
+                presets2014 = None
+            if presets2014 is not None:
+                values.extend(
+                    (presets2014.pack_id, presets2014.version, dict(item))
+                    for item in presets2014.artifacts
+                )
         elif profile and profile.edition == "2024":
             try:
                 core2024 = rule_packs.get_version(
@@ -34786,6 +34895,18 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 values.extend(
                     (core2024.pack_id, core2024.version, dict(item))
                     for item in core2024.artifacts
+                )
+            try:
+                presets2024 = rule_packs.get_version(
+                    SRD2024_PRESET_PACK_ID,
+                    SRD2024_PRESET_PACK_VERSION,
+                )
+            except LookupError:
+                presets2024 = None
+            if presets2024 is not None:
+                values.extend(
+                    (presets2024.pack_id, presets2024.version, dict(item))
+                    for item in presets2024.artifacts
                 )
         for activation in rule_packs.activations(campaign_id, branch_id=branch_id):
             if not activation.enabled:
@@ -39659,6 +39780,8 @@ Useful bounded guidance:
             "ingest",
             "activate",
             "attach_asset",
+            "bind_actor",
+            "import_package",
         ],
         payload: dict[str, Any] | None = None,
         principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
@@ -39666,6 +39789,133 @@ Useful bounded guidance:
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Run the staged module-import state machine and activate only reviewed revisions."""
+        if action == "bind_actor":
+            data = strict_facade_payload(
+                payload,
+                action="module_import(bind_actor)",
+                allowed={
+                    "module_id",
+                    "character_id",
+                    "portable_actor_id",
+                    "binding_kind",
+                    "role",
+                    "scene_id",
+                    "metadata",
+                },
+                required_names=(
+                    "module_id",
+                    "character_id",
+                    "portable_actor_id",
+                    "binding_kind",
+                ),
+            )
+            access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
+            require_facade_phase(campaign_id, "module_import(bind_actor)", PROFILE_LOBBY)
+            result = modules.bind_actor(
+                campaign_id=campaign_id,
+                module_id=str(data["module_id"]),
+                character_id=str(data["character_id"]),
+                portable_actor_id=str(data["portable_actor_id"]),
+                binding_kind=str(data["binding_kind"]),
+                role=str(data.get("role") or ""),
+                scene_id=(str(data["scene_id"]) if data.get("scene_id") else None),
+                metadata=dict(data.get("metadata") or {}),
+            )
+            return facade_result(action, result)
+        if action == "import_package":
+            data = strict_facade_payload(
+                payload,
+                action="module_import(import_package)",
+                allowed={"package", "artifact", "source_path", "activate"},
+            )
+            access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
+            require_facade_phase(campaign_id, "module_import(import_package)", PROFILE_LOBBY)
+            if not idempotency_key:
+                raise ValueError("idempotency_key is required for portable module import")
+            package = validate_module_pack(
+                portable_input(data, field="package", expected_kind="module_pack"),
+                expected_system_id=DND5E.id,
+            )
+            validated_cards = [
+                validate_dnd_actor_card(card)
+                for card in package["payload"]["actors"]
+            ]
+            campaign_edition = campaign_rules_edition(campaign_id)
+            mismatched = [
+                card["id"]
+                for card in validated_cards
+                if card["payload"]["sheet"]["edition"] != campaign_edition
+            ]
+            if mismatched:
+                raise ValueError(
+                    "module actor cards do not match the campaign edition: "
+                    + ", ".join(mismatched)
+                )
+            result = modules.import_portable_pack(
+                campaign_id,
+                package,
+                parser=MarkdownModuleParser(profile=DndModuleProfile()),
+                activate=bool(data.get("activate", True)),
+                asset_writer=storage.store_portable_module_asset,
+            )
+            actor_map: dict[str, str] = {}
+            binding_ids: list[str] = []
+            for card in validated_cards:
+                card_payload = card["payload"]
+                bindings = list(card_payload["bindings"])
+                preset_pc = any(
+                    str(binding.get("binding_kind") or "") == "preset_pc"
+                    for binding in bindings
+                ) or card_payload["actor_type"] == "pc"
+                character = characters.import_portable_card(
+                    card,
+                    campaign_id=None if preset_pc else campaign_id,
+                    principal_id=principal_id,
+                    idempotency_key=(
+                        f"portable-module:{idempotency_key}:{card['checksum']}"
+                    ),
+                )
+                actor_map[card["id"]] = character.id
+                effective_bindings = bindings or [
+                    {
+                        "kind": "module",
+                        "module_key": package["payload"]["source"]["source_key"],
+                        "binding_kind": "preset_pc" if preset_pc else "cast",
+                        "role": "",
+                    }
+                ]
+                for binding in effective_bindings:
+                    scene_key = str(binding.get("scene_key") or "")
+                    scene_id = result["scene_map"].get(scene_key) if scene_key else None
+                    binding_kind = str(
+                        binding.get("binding_kind")
+                        or ("preset_pc" if preset_pc else "cast")
+                    )
+                    saved = modules.bind_actor(
+                        campaign_id=campaign_id,
+                        module_id=result["module_id"],
+                        character_id=character.id,
+                        portable_actor_id=card["id"],
+                        binding_kind=binding_kind,
+                        role=str(binding.get("role") or ""),
+                        scene_id=scene_id,
+                        metadata={
+                            **dict(binding.get("metadata") or {}),
+                            "portable_card_checksum": card["checksum"],
+                            "portable_provenance": deepcopy(
+                                card_payload.get("provenance") or {}
+                            ),
+                            "portable_metadata": deepcopy(card.get("metadata") or {}),
+                            "portable_dependencies": deepcopy(
+                                card.get("dependencies") or []
+                            ),
+                        },
+                    )
+                    binding_ids.append(saved["id"])
+            result["actor_map"] = actor_map
+            result["actor_binding_ids"] = binding_ids
+            result.pop("actor_cards", None)
+            return facade_result(action, result)
         if action == "stage":
             data = strict_facade_payload(
                 payload,
@@ -39930,6 +40180,8 @@ Useful bounded guidance:
             "assets",
             "content",
             "candidates",
+            "actors",
+            "package",
         ] = "list",
         payload: dict[str, Any] | None = None,
         principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
@@ -39975,6 +40227,59 @@ Useful bounded guidance:
                 required(data, "module_id"),
                 principal_id,
             )
+        elif view == "actors":
+            data = strict_facade_payload(
+                payload,
+                action="module_query(actors)",
+                allowed={"module_id", "scene_id", "binding_kind"},
+                required_names=("module_id",),
+            )
+            access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
+            result = modules.list_actor_bindings(
+                campaign_id,
+                str(required(data, "module_id")),
+                scene_id=(str(data["scene_id"]) if data.get("scene_id") else None),
+                binding_kind=(
+                    str(data["binding_kind"]) if data.get("binding_kind") else None
+                ),
+            )
+        elif view == "package":
+            data = strict_facade_payload(
+                payload,
+                action="module_query(package)",
+                allowed={
+                    "module_id",
+                    "portable_id",
+                    "version",
+                    "metadata",
+                    "dependencies",
+                    "include_package",
+                },
+                required_names=("module_id", "portable_id"),
+            )
+            access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
+            package = modules.export_portable_pack(
+                campaign_id,
+                str(required(data, "module_id")),
+                portable_id=str(required(data, "portable_id")),
+                version=str(data.get("version") or "1.0.0"),
+                metadata=dict(data.get("metadata") or {}),
+                dependencies=list(data.get("dependencies") or []),
+                asset_loader=managed_module_asset_bytes,
+            )
+            for actor_card in package["payload"]["actors"]:
+                validate_dnd_actor_card(actor_card)
+            artifact = storage.write_portable_package(package)
+            result = {
+                "artifact": artifact,
+                "summary": {
+                    "scenes": len(package["payload"]["scene_atlas"]),
+                    "assets": len(package["payload"]["assets"]),
+                    "content_reviews": len(package["payload"]["content_reviews"]),
+                    "actors": len(package["payload"]["actors"]),
+                },
+                **({"package": package} if data.get("include_package") is True else {}),
+            }
         else:
             result = module_progress_index(
                 campaign_id,
@@ -40017,6 +40322,7 @@ Useful bounded guidance:
             "content_catalog",
             "sources",
             "source_chunks",
+            "actor_presets",
         ] = "list",
         payload: dict[str, Any] | None = None,
         principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
@@ -40037,6 +40343,53 @@ Useful bounded guidance:
                 principal_id,
                 data.get("branch_id"),
             )
+        elif view == "actor_presets":
+            data = strict_facade_payload(
+                payload,
+                action="rule_pack_query(actor_presets)",
+                allowed={"edition", "artifact_id", "include_package"},
+                required_names=("edition",),
+            )
+            edition = normalize_dnd_edition(
+                str(required(data, "edition"))
+            )
+            package = (
+                build_srd2014_preset_pack(config.dnd_skills_dir)
+                if edition == "2014"
+                else build_srd2024_preset_pack(config.dnd_skills_dir)
+            )
+            if not package:
+                raise ValueError("bundled D&D actor presets are unavailable")
+            artifact_id = str(data.get("artifact_id") or "").strip()
+            if artifact_id:
+                matches = [
+                    card
+                    for card in package["payload"]["cards"]
+                    if card["id"] == artifact_id
+                ]
+                if len(matches) != 1:
+                    raise ValueError("artifact_id is not present in the actor preset pack")
+                card = validate_dnd_actor_card(matches[0])
+                result = {
+                    "card": card,
+                    "artifact": storage.write_portable_package(card),
+                }
+            else:
+                result = {
+                    "package": {
+                        "id": package["id"],
+                        "version": package["version"],
+                        "checksum": package["checksum"],
+                        "cards": len(package["payload"]["cards"]),
+                        "metadata": deepcopy(package["metadata"]),
+                    },
+                    "artifact": storage.write_portable_package(package),
+                    **(
+                        {"portable_package": package}
+                        if data.get("include_package") is True
+                        else {}
+                    ),
+                }
         elif view == "sources":
             result = rules.sources(
                 system_id=data.get("system_id", DND5E.id),
@@ -40196,6 +40549,7 @@ Useful bounded guidance:
             "document",
             "rest",
             "advancement",
+            "portable_card",
         ] = "list",
         payload: dict[str, Any] | None = None,
         principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
@@ -40204,6 +40558,57 @@ Useful bounded guidance:
         data = facade_payload(payload)
         if view == "get":
             result = character_get(required(data, "character_id"), principal_id)
+        elif view == "portable_card":
+            data = strict_facade_payload(
+                payload,
+                action="character_query(portable_card)",
+                allowed={
+                    "character_id",
+                    "portable_id",
+                    "version",
+                    "provenance",
+                    "bindings",
+                    "metadata",
+                    "dependencies",
+                },
+                required_names=("character_id",),
+            )
+            character = characters.get(str(required(data, "character_id")))
+            if character.campaign_id is not None:
+                require_character_control(character, principal_id)
+            elif principal_id != LOCAL_SYSTEM_PRINCIPAL_ID:
+                raise PermissionError(
+                    "exporting a library actor card requires the local system principal"
+                )
+            portable_id = str(data.get("portable_id") or "").strip() or (
+                f"dnd5e.shared.{ascii_slug(character.name) or 'actor'}"
+            )
+            card = build_dnd_actor_card(
+                portable_id=portable_id,
+                version=str(data.get("version") or "1.0.0"),
+                actor_type=character.character_type,
+                name=character.name,
+                player_name=character.player_name,
+                summary=character.summary,
+                sheet=character.sheet,
+                notes=character.notes,
+                provenance=dict(data.get("provenance") or {}),
+                bindings=list(data.get("bindings") or []),
+                metadata=dict(data.get("metadata") or {}),
+                dependencies=list(data.get("dependencies") or []),
+            )
+            result = {
+                "card": card,
+                "artifact": storage.write_portable_package(card),
+                "excluded_runtime_state": [
+                    "database_id",
+                    "campaign_id",
+                    "template_id",
+                    "revision",
+                    "actor_knowledge",
+                    "snapshots",
+                ],
+            }
         elif view == "batch":
             campaign_id = str(required(data, "campaign_id"))
             actor_ids_value = data.get("character_ids")
@@ -40406,6 +40811,7 @@ Useful bounded guidance:
             "reviewed_rule_statblock",
             "module_statblock",
             "narrative_npc",
+            "portable_card",
         ],
         payload: dict[str, Any],
         principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
@@ -40413,7 +40819,117 @@ Useful bounded guidance:
     ) -> dict[str, Any]:
         """Create directly, by build/template, or from source-bound module evidence."""
         data = facade_payload(payload)
-        if mode == "direct":
+        if mode == "portable_card":
+            data = strict_facade_payload(
+                payload,
+                action="character_create_from(portable_card)",
+                allowed={
+                    "campaign_id",
+                    "artifact_id",
+                    "card",
+                    "artifact",
+                    "source_path",
+                    "name",
+                    "player_name",
+                },
+            )
+            artifact_id = str(data.get("artifact_id") or "").strip()
+            portable_sources = [
+                field
+                for field in ("card", "artifact", "source_path")
+                if data.get(field) is not None
+            ]
+            if not portable_sources:
+                if not artifact_id:
+                    raise ValueError(
+                        "provide artifact_id or exactly one portable card/package source"
+                    )
+                card = default_preset_actor_card(artifact_id)
+            else:
+                if len(portable_sources) != 1:
+                    raise ValueError(
+                        "provide exactly one of payload.card, payload.artifact, or "
+                        "payload.source_path"
+                    )
+                source = portable_sources[0]
+                if source == "card":
+                    raw_package = data["card"]
+                    if not isinstance(raw_package, dict):
+                        raise ValueError("payload.card must be an object")
+                else:
+                    raw_package = storage.read_portable_package(
+                        artifact=(
+                            str(data["artifact"]) if source == "artifact" else None
+                        ),
+                        source_path=(
+                            data.get("source_path")
+                            if source == "source_path"
+                            else None
+                        ),
+                    )
+                if raw_package.get("kind") == "actor_card":
+                    if artifact_id:
+                        raise ValueError(
+                            "artifact_id selects a card only when importing a preset pack"
+                        )
+                    card = validate_dnd_actor_card(raw_package)
+                elif raw_package.get("kind") == "preset_pack":
+                    if not artifact_id:
+                        raise ValueError(
+                            "artifact_id is required when importing a preset pack"
+                        )
+                    preset = validate_preset_pack(
+                        raw_package, expected_system_id=DND5E.id
+                    )
+                    matches = [
+                        item
+                        for item in preset["payload"]["cards"]
+                        if item["id"] == artifact_id
+                    ]
+                    if len(matches) != 1:
+                        raise ValueError(
+                            "artifact_id must identify exactly one card in the preset pack"
+                        )
+                    card = validate_dnd_actor_card(matches[0])
+                else:
+                    raise ValueError(
+                        "portable character import requires an actor_card or preset_pack"
+                    )
+            card_payload = card["payload"]
+            campaign_id = (
+                str(data["campaign_id"]) if data.get("campaign_id") is not None else None
+            )
+            if campaign_id is not None and (
+                card_payload["sheet"]["edition"] != campaign_rules_edition(campaign_id)
+            ):
+                raise ValueError("portable actor card edition does not match the campaign")
+            character = character_create(
+                str(data.get("name") or card_payload["name"]),
+                campaign_id,
+                str(card_payload["actor_type"]),
+                (
+                    str(data["player_name"])
+                    if data.get("player_name") is not None
+                    else card_payload["player_name"]
+                ),
+                str(card_payload["summary"]),
+                dict(card_payload["sheet"]),
+                dict(card_payload["notes"]),
+                principal_id,
+                idempotency_key,
+            )
+            result = {
+                "character": character,
+                "portable_card": {
+                    "id": card["id"],
+                    "version": card["version"],
+                    "checksum": card["checksum"],
+                    "provenance": deepcopy(card_payload.get("provenance") or {}),
+                    "bindings": deepcopy(card_payload.get("bindings") or []),
+                },
+                "actor_knowledge_imported": False,
+            }
+        elif mode == "direct":
             result = character_create(
                 required(data, "name"),
                 data.get("campaign_id"),

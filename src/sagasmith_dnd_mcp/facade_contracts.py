@@ -93,6 +93,25 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
             ),
         ],
         "candidates": [_guide(("module_id",), ("module_id",))],
+        "actors": [
+            _guide(
+                ("binding_kind", "module_id", "scene_id"),
+                ("module_id",),
+            )
+        ],
+        "package": [
+            _guide(
+                (
+                    "dependencies",
+                    "include_package",
+                    "metadata",
+                    "module_id",
+                    "portable_id",
+                    "version",
+                ),
+                ("module_id", "portable_id"),
+            )
+        ],
     },
     "rule_pack_compile": {
         "draft": [
@@ -129,6 +148,12 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
             _guide(
                 ("limit", "page", "query", "source_id"),
                 ("source_id",),
+            )
+        ],
+        "actor_presets": [
+            _guide(
+                ("artifact_id", "edition", "include_package"),
+                ("edition",),
             )
         ],
     },
@@ -203,6 +228,20 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
             _guide(
                 ("character_id", "class_name"),
                 ("character_id", "class_name"),
+            )
+        ],
+        "portable_card": [
+            _guide(
+                (
+                    "bindings",
+                    "character_id",
+                    "dependencies",
+                    "metadata",
+                    "portable_id",
+                    "provenance",
+                    "version",
+                ),
+                ("character_id",),
             )
         ],
     },
@@ -305,6 +344,19 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
                     "summary",
                     "source_excerpt",
                     "source_ref",
+                ),
+            )
+        ],
+        "portable_card": [
+            _guide(
+                (
+                    "artifact",
+                    "artifact_id",
+                    "campaign_id",
+                    "card",
+                    "name",
+                    "player_name",
+                    "source_path",
                 ),
             )
         ],
@@ -1141,6 +1193,28 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
         "ingest": [_variant(("job_id",), ("job_id",))],
         "activate": [
             _variant(("job_id", "progress_remaps"), ("job_id",))
+        ],
+        "bind_actor": [
+            _variant(
+                (
+                    "binding_kind",
+                    "character_id",
+                    "metadata",
+                    "module_id",
+                    "portable_actor_id",
+                    "role",
+                    "scene_id",
+                ),
+                (
+                    "module_id",
+                    "character_id",
+                    "portable_actor_id",
+                    "binding_kind",
+                ),
+            )
+        ],
+        "import_package": [
+            _variant(("activate", "artifact", "package", "source_path"))
         ],
     },
     "module_review": {

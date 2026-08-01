@@ -13,7 +13,7 @@
 - **阶段安全** — 权威阶段来自 campaign state。开战后 lobby/play 写工具不会继续残留，结束战斗后 combat 工具被收回。
 - **最小暴露** — 首次 `tools/list` 只有 13 个核心发现/诊断工具，而不是整个领域 schema；其中 `skill_query` 允许零预设 Host 做有界工作流读取。
 - **预算锁定** — 完整公开目录固定为 84 个工具；Lobby/Play/Combat 目录分别不超过
-  63/49/48。预算测试同时锁定聚合输入 schema 为 51,594 字节，低于合并前
+  63/49/48。预算测试同时锁定聚合输入 schema 为 51,700 字节，低于合并前
   92 个工具的 56,611 字节基线。
 - **服务端执行门禁** — 未暴露工具即使通过 `exposure_call` 指定名称也会被拒绝；权限不是提示词约定。
 - **规则与自设内容分界** — 已注册的标准规则 mechanic 由版本锁定的引擎实现执行；标准卡缺少结果实现时会在付款前要求补引擎，不能降级成自设解释。未注册的模组或自设角色卡在首次真实使用前由 Agent 依据精确来源编译一次，服务端校验证据并把带版本的解决方案保存回该卡，后续复用且不重复解释原文。
@@ -43,6 +43,7 @@ flowchart TB
   artifacts/modules/      # editable generated modules before import
   artifacts/rulebooks/    # content-addressed staged user books
   artifacts/normalized-rulebooks/ # verified normalization/OCR caches
+  artifacts/portable-packages/ # exported actor/module/preset packages
 ```
 
 客户端不应直接写 SQLite、ChromaDB 或 artifact 目录。所有写入通过 MCP，确保迁移、revision、幂等、权限与 audit receipt 使用同一过程边界。
@@ -190,6 +191,27 @@ warning，ingest 就必须由 DM 显式传入 `acknowledge_warnings=true`。检�
 
 模组生成先形成可编辑 artifact，再经 staged inspect/import。导入生成 scene index 和保守的 location/room 证据；系统不会从散文中凭空画精确战术地图。战斗开始时才为 encounter 创建临时五尺方格 combat map，随后由 DM/Agent 在证据和裁决基础上补充位置与世界变化。地图背景不具机械意义；墙体、视线、掩体、高度、体型占位和困难地形消耗在引擎实现前继续由 DM 裁决。
 
+### 可分享角色卡、怪物预设与结构化模组
+
+PC、NPC、怪物统一使用 `sagasmith.portable` actor card。Lobby 中通过
+`character_query(view="portable_card")` 导出，通过
+`character_create_from(mode="portable_card")` 导入 inline package、托管 artifact
+或白名单路径。服务先验证 checksum、D&D sheet 与 campaign edition，再创建新的
+Character identity；campaign id、revision、权限与 actor knowledge 不会迁移。
+
+服务器启动时把 SRD 2014 的 317 张角色卡和 SRD 2024 的 330 张角色卡安装为
+默认 preset pack，并投影为 `content_catalog(kind="actor_card")`。Host 不需要也不
+应该维护怪物名称表。`rule_pack_query(view="actor_presets")` 可导出整包或单卡；
+第三方 preset pack 也能由同一个 portable character import 路径按
+`artifact_id` 选择卡片。
+
+结构化模组先以 `module_import(action="bind_actor")` 关联 cast、encounter 与
+preset PC，再由 `module_query(view="package")` 导出自包含 module pack。包中保留
+标准化文档、Scene Atlas、内嵌 checksum-bound 资产、审核内容、角色卡和稳定场景
+关联。`module_import(action="import_package")` 在目标 campaign 重新走 Core ingest、
+生成新 actor id 并恢复关联。模组包不是 Snapshot：它不包含 progress、world state、
+memory、actor knowledge、random stream 或 branch DAG。
+
 ### Skills、resources 与 prompts
 
 - Skill 文档资源：`sagasmith://skill/{skill_id}`
@@ -227,6 +249,8 @@ warning，ingest 就必须由 DM 显式传入 `acknowledge_warnings=true`。检�
 | `SAGASMITH_DND_GATEWAY_ORIGINS` | 逗号分隔的精确 CORS origin allowlist |
 
 服务永远不会直接导入模型任意选择的路径。规则书必须位于 allowlisted root；商业内容由用户自行确保使用权。
+Portable JSON 的 `source_path` 同样只允许位于 rule/module import roots；服务端导出
+则写入 MCP 自有的 `artifacts/portable-packages/`。
 
 ## 验证
 

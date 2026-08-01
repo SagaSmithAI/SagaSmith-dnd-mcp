@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import json
 import re
 import shutil
 from mimetypes import guess_type
@@ -57,6 +60,7 @@ class SagaSmithStorage:
                 "modules": self._collection_status("modules"),
             },
             "artifacts_dir": str(self.config.artifacts_dir),
+            "portable_packages_dir": str(self.config.portable_packages_dir),
             "rules": {
                 "auto_seed": self.config.auto_seed_rules,
                 "seed_root": str(self.config.dnd_skills_dir / "full" / "skills" / "dnd-dm" / "srd"),
@@ -294,6 +298,99 @@ class SagaSmithStorage:
             "media_type": media_type,
             "staged": True,
         }
+
+    def write_portable_package(self, package: dict[str, Any]) -> dict[str, Any]:
+        """Persist an already validated portable package in managed storage."""
+
+        package_id = str(package.get("id") or "").strip()
+        checksum = str(package.get("checksum") or "").strip()
+        if not package_id or not re.fullmatch(r"[0-9a-f]{64}", checksum):
+            raise ValueError("portable package requires a valid id and checksum")
+        content = (
+            json.dumps(package, ensure_ascii=False, sort_keys=True, indent=2) + "\n"
+        ).encode("utf-8")
+        safe_id = re.sub(r"[^A-Za-z0-9._-]+", "-", package_id).strip("-.")
+        filename = f"{checksum[:12]}-{safe_id}.sagasmith.json"
+        target = (self.config.portable_packages_dir / filename).resolve()
+        if target.parent != self.config.portable_packages_dir.resolve():
+            raise ValueError("invalid portable package artifact name")
+        if not target.exists():
+            target.write_bytes(content)
+        elif hashlib.sha256(target.read_bytes()).hexdigest() != hashlib.sha256(content).hexdigest():
+            raise RuntimeError("managed portable package file mismatch")
+        return {
+            "artifact": filename,
+            "checksum": checksum,
+            "size": len(content),
+            "kind": package.get("kind"),
+            "id": package_id,
+            "version": package.get("version"),
+        }
+
+    def read_portable_package(
+        self, *, artifact: str | None = None, source_path: str | Path | None = None
+    ) -> dict[str, Any]:
+        """Read a managed export or an allowlisted user-supplied portable JSON file."""
+
+        if (artifact is None) == (source_path is None):
+            raise ValueError("provide exactly one of artifact or source_path")
+        if artifact is not None:
+            target = (self.config.portable_packages_dir / artifact).resolve()
+            if target.parent != self.config.portable_packages_dir.resolve():
+                raise ValueError("invalid managed portable package artifact")
+        else:
+            target = Path(source_path or "").expanduser().resolve()
+            allowed_roots = {
+                *(root.resolve() for root in self.config.module_import_roots),
+                *(root.resolve() for root in self.config.rule_import_roots),
+            }
+            if not allowed_roots or not any(
+                target.is_relative_to(root) for root in allowed_roots
+            ):
+                raise PermissionError("portable package is outside configured import roots")
+        if not target.is_file() or not target.name.casefold().endswith(
+            (".json", ".sagasmith")
+        ):
+            raise LookupError(str(target))
+        if target.stat().st_size > 100 * 1024 * 1024:
+            raise ValueError("portable package exceeds the 100 MiB safety limit")
+        try:
+            value = json.loads(target.read_text(encoding="utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError("portable package must be UTF-8 JSON") from exc
+        if not isinstance(value, dict):
+            raise ValueError("portable package must contain a JSON object")
+        return value
+
+    def store_portable_module_asset(
+        self, module_id: str, asset: dict[str, Any]
+    ) -> str:
+        """Materialize one checksum-verified embedded asset beneath module storage."""
+
+        if not re.fullmatch(r"[0-9a-fA-F-]{36}", module_id):
+            raise ValueError("invalid module id for portable asset")
+        encoded = asset.get("data_base64")
+        if not isinstance(encoded, str):
+            raise ValueError("portable module asset has no embedded bytes")
+        content = base64.b64decode(encoded, validate=True)
+        checksum = hashlib.sha256(content).hexdigest()
+        if checksum != asset.get("checksum") or len(content) != asset.get("size"):
+            raise ValueError("portable module asset checksum or size mismatch")
+        safe_name = re.sub(
+            r"[^A-Za-z0-9._-]+", "-", str(asset.get("name") or "asset")
+        ).strip("-.")
+        directory = (self.config.module_assets_dir / module_id).resolve()
+        if directory.parent != self.config.module_assets_dir.resolve():
+            raise ValueError("invalid portable module asset directory")
+        directory.mkdir(parents=True, exist_ok=True)
+        target = (directory / f"{checksum[:12]}-{safe_name or 'asset'}").resolve()
+        if target.parent != directory:
+            raise ValueError("invalid portable module asset name")
+        if not target.exists():
+            target.write_bytes(content)
+        elif file_sha256(target) != checksum:
+            raise RuntimeError("managed portable module asset checksum mismatch")
+        return str(target)
 
     def store_rendered_module_page(
         self,

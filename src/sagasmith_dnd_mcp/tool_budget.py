@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-TOOL_BUDGET_VERSION = "2026-08-bounded-context-isolation-v21"
+TOOL_BUDGET_VERSION = "2026-08-portable-content-v22"
 
 # Captured before the conservative facade consolidation.  Keep this historical
 # baseline so a lower tool count cannot conceal a larger aggregate input schema.
@@ -49,8 +49,10 @@ TARGET_CORE_TOOL_COUNT = 13
 # conversation history. It adds no public or core tool.
 # Version 20 makes legacy top-level memory identity fields explicitly optional,
 # preserving the difference between omitted fields and an attempted identity
-# change during memory_change(upsert).
-TARGET_INPUT_SCHEMA_BYTES = 51_603
+# change during memory_change(upsert). Version 22 adds portable actor-card and
+# module-package actions to five existing facades. Public/core tool counts and
+# phase limits stay fixed; the 97-byte schema increase remains below baseline.
+TARGET_INPUT_SCHEMA_BYTES = 51_700
 PROFILE_TOOL_LIMITS = {
     "lobby": 63,
     "play": 49,
