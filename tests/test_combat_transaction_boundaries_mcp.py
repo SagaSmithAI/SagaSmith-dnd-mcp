@@ -1315,38 +1315,53 @@ def test_custom_spell_requires_compilation_before_action_or_slot_payment(
     asyncio.run(exercise())
 
 
-def test_second_wind_heals_and_pays_bonus_action_atomically(tmp_path: Path) -> None:
+@pytest.mark.parametrize("edition", ["2014", "2024"])
+def test_second_wind_heals_and_pays_bonus_action_atomically(
+    tmp_path: Path,
+    edition: str,
+) -> None:
     async def exercise() -> None:
         server = create_server(_config(tmp_path))
         campaign = await _call(
             server,
             "campaign_create",
-            {"name": "Second Wind", "edition": "2014", "idempotency_key": "campaign"},
+            {"name": "Second Wind", "edition": edition, "idempotency_key": "campaign"},
         )
         sheet = default_character_sheet()
+        sheet["edition"] = edition
         sheet["progression"]["level"] = 2
         sheet["progression"]["classes"] = [
             {"name": "Fighter", "level": 2, "subclass": "", "hit_die": 10}
         ]
         sheet["combat"]["hp"] = {"value": 1, "max": 20, "temp": 0}
-        sheet["content"]["features"] = [
-            {
-                "id": "dnd5e.content.srd2014.feature.fighter-second-wind",
+        second_wind_id = f"dnd5e.content.srd{edition}.feature.fighter-second-wind"
+        if edition == "2024":
+            sheet["resources"]["second_wind"] = {
+                "label": "Second Wind",
+                "value": 2,
+                "max": 2,
+                "recovers_on": "long_rest",
+                "recovery_amounts": {"short_rest": 1, "long_rest": "all"},
+                "source_key": "Fighter",
+            }
+        feature = {
+                "id": second_wind_id,
                 "name": "Second Wind",
                 "source_key": "Fighter",
                 "description": "Regain 1d10 + Fighter level hit points.",
-                "uses": {
+                **({"uses": {
                     "label": "Second Wind",
                     "value": 1,
                     "max": 1,
                     "recovers_on": "short_rest",
-                },
-                "resource_key": "",
+                }} if edition == "2014" else {}),
+                "resource_key": "second_wind" if edition == "2024" else "",
                 "activation": {"type": "bonus_action", "cost": 1, "trigger": ""},
                 "scaling": [],
                 "choices": {"outcome": "roll 1d10 + fighter level"},
+                "mechanic_refs": ["dnd5e.core.activity.second_wind"],
             }
-        ]
+        sheet["content"]["features"] = [feature]
         actor = await _call(
             server,
             "character_create",
@@ -1376,7 +1391,7 @@ def test_second_wind_heals_and_pays_bonus_action_atomically(tmp_path: Path) -> N
             {
                 "campaign_id": campaign["id"],
                 "actor_id": actor["id"],
-                "activity_id": "dnd5e.content.srd2014.feature.fighter-second-wind",
+                "activity_id": second_wind_id,
                 "expected_revision": started["campaign_revision"],
                 "idempotency_key": "second-wind",
             },
@@ -1392,7 +1407,10 @@ def test_second_wind_heals_and_pays_bonus_action_atomically(tmp_path: Path) -> N
         assert current["turn_budget"]["bonus_action"] == 0
         actor_after = await _call(server, "character_get", {"character_id": actor["id"]})
         assert actor_after["sheet"]["combat"]["hp"]["value"] == effect["after_hp"]
-        assert actor_after["sheet"]["content"]["features"][0]["uses"]["value"] == 0
+        if edition == "2014":
+            assert actor_after["sheet"]["content"]["features"][0]["uses"]["value"] == 0
+        else:
+            assert actor_after["sheet"]["resources"]["second_wind"]["value"] == 1
         assert any(
             item["mechanic_id"] == "dnd5e.core.activity.second_wind"
             for item in result["result"]["rule_receipts"]

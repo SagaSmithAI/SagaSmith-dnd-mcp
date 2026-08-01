@@ -144,10 +144,12 @@ from sagasmith_dnd.combat_engine import (
     apply_damage_to_sheet,
     apply_healing_to_sheet,
     apply_hit_point_loss_to_sheet,
+    apply_weapon_mastery_to_encounter,
     arm_readied_spell,
     available_actions,
     available_attack_defenses,
     available_reactions,
+    consume_weapon_mastery_attack_effects,
     current_combatant,
     damage_amount_after_reduction,
     detach_attachment,
@@ -174,6 +176,7 @@ from sagasmith_dnd.combat_engine import (
     resolve_choice_window,
     resolve_common_action,
     resolve_death_save_to_sheet,
+    resolve_divine_spark_to_sheet,
     resolve_hypnotic_pattern_target,
     resolve_preserve_life_to_sheets,
     resolve_random_save_effects,
@@ -221,6 +224,11 @@ from sagasmith_dnd.content_solution import (
 from sagasmith_dnd.core_content import PACK_ID as CORE_CONTENT_PACK_ID
 from sagasmith_dnd.core_content import PACK_VERSION as CORE_CONTENT_PACK_VERSION
 from sagasmith_dnd.core_content import build_srd2014_content
+from sagasmith_dnd.core_content_2024 import PACK_ID as CORE_2024_CONTENT_PACK_ID
+from sagasmith_dnd.core_content_2024 import (
+    PACK_VERSION as CORE_2024_CONTENT_PACK_VERSION,
+)
+from sagasmith_dnd.core_content_2024 import build_srd2024_content
 from sagasmith_dnd.core_rule_pack import get_core_rule_pack
 from sagasmith_dnd.document_layout import DND5E_DOCUMENT_LAYOUT_PROFILE
 from sagasmith_dnd.editions import DEFAULT_CAMPAIGN_EDITION, normalize_dnd_edition
@@ -237,6 +245,7 @@ from sagasmith_dnd.game_time import (
     rules_day_from_ticks,
     validate_calendar_minute_point,
 )
+from sagasmith_dnd.heroic_inspiration import spend_heroic_inspiration_reroll
 from sagasmith_dnd.lifecycle import (
     LONG_REST_MINIMUM_MINUTES,
     advance_effect_durations,
@@ -260,6 +269,7 @@ from sagasmith_dnd.lifecycle import (
     validate_rest_hit_dice_requests,
     validate_rest_schedule,
     validate_song_of_rest_source,
+    validate_sorcerous_restoration_choice,
 )
 from sagasmith_dnd.module_profile import DndModuleProfile
 from sagasmith_dnd.playthrough import (
@@ -359,11 +369,11 @@ from sagasmith_dnd.standard_content import build_standard2014_content
 from sagasmith_dnd.standard_spell_ids import (
     CORE_BLADE_WARD_MECHANIC_ID,
     CORE_FLY_MECHANIC_ID,
-    CORE_FLY_SPELL_ID,
+    CORE_FLY_SPELL_IDS,
     CORE_HYPNOTIC_PATTERN_MECHANIC_ID,
-    CORE_HYPNOTIC_PATTERN_SPELL_ID,
+    CORE_HYPNOTIC_PATTERN_SPELL_IDS,
     CORE_INVISIBILITY_MECHANIC_ID,
-    CORE_INVISIBILITY_SPELL_ID,
+    CORE_INVISIBILITY_SPELL_IDS,
     CORE_WITCH_BOLT_MECHANIC_ID,
     STANDARD_2014_CONTENT_PACK_ID,
     STANDARD_2014_CONTENT_PACK_VERSION,
@@ -378,6 +388,7 @@ from sagasmith_dnd.statblocks import (
     gazer_eye_ray_spec,
     legendary_action_spec,
     parse_2014_statblock,
+    parse_2024_statblock,
     recover_2014_statblock_from_ocr,
     source_contest_effect_spec,
     source_save_effect_spec,
@@ -455,6 +466,12 @@ from sagasmith_dnd_mcp.tool_profiles import (
 )
 
 CORE_GRAPPLE_ESCAPE_CHECKS = frozenset({"athletics", "acrobatics"})
+SECOND_WIND_ACTIVITY_IDS = frozenset(
+    {
+        "dnd5e.content.srd2014.feature.fighter-second-wind",
+        "dnd5e.content.srd2024.feature.fighter-second-wind",
+    }
+)
 ENGINE_OWNED_STANDARD_ACTIVITY_IDS = frozenset(
     {
         "dnd5e.content.srd2014.feature.cleric-channel-divinity",
@@ -462,6 +479,11 @@ ENGINE_OWNED_STANDARD_ACTIVITY_IDS = frozenset(
         "dnd5e.content.srd2014.feature.fighter-second-wind",
         "dnd5e.content.srd2014.feature.life-domain-channel-divinity-preserve-life",
         "dnd5e.content.srd2014.feature.rogue-cunning-action",
+        "dnd5e.content.srd2024.feature.cleric-channel-divinity",
+        "dnd5e.content.srd2024.feature.fighter-action-surge",
+        "dnd5e.content.srd2024.feature.fighter-second-wind",
+        "dnd5e.content.srd2024.feature.life-domain-preserve-life",
+        "dnd5e.content.srd2024.feature.rogue-cunning-action",
         "dnd5e.core.monster.aggressive",
         "dnd5e.core.monster.battle-cry",
     }
@@ -473,6 +495,7 @@ ENGINE_SETTLED_CARD_MECHANIC_IDS = frozenset(
         "dnd5e.core.activity.area_save_damage",
         "dnd5e.core.activity.battle_cry",
         "dnd5e.core.activity.cunning_action",
+        "dnd5e.core.activity.divine_spark",
         "dnd5e.core.activity.frightful_presence",
         "dnd5e.core.activity.legendary_action",
         "dnd5e.core.activity.preserve_life",
@@ -733,9 +756,14 @@ SUPPORTED_FEATURE_SELECTION_KINDS = frozenset(
         "",
         "ability_score_increase",
         "bonus_cantrip",
+        "feat_grant",
         "favored_enemy",
+        "eldritch_invocations_2024",
         "known_spell_grants",
+        "language_grant",
+        "magic_initiate",
         "mystic_arcanum",
+        "proficiency_grants",
         "signature_spells",
         "spell_mastery",
     }
@@ -743,21 +771,30 @@ SUPPORTED_FEATURE_SELECTION_KINDS = frozenset(
 SUPPORTED_FEATURE_SELECTION_REQUIREMENT_FIELDS = frozenset(
     {
         "allowed_distributions",
+        "allowed_categories",
+        "ability_options",
+        "always_prepared",
         "at_will_spells",
+        "casting_times",
         "choice_uniqueness_scope",
+        "cantrip_count",
         "count",
         "creature_type_options",
         "eligible_class",
+        "eligible_classes",
         "field",
         "grants_skill_proficiency",
+        "grant_method",
         "humanoid_race_count",
         "kind",
         "language_if_spoken",
         "maximum_score",
         "maximum_spell_level",
         "option_prerequisites",
+        "option_artifact_ids",
         "options",
         "replacement_study_minutes",
+        "repeatable_options",
         "required_spell_levels",
         "requires_existing_proficiency",
         "requires_new_choice",
@@ -765,12 +802,18 @@ SUPPORTED_FEATURE_SELECTION_REQUIREMENT_FIELDS = frozenset(
         "requires_spellbook",
         "requires_untrained_skill",
         "skills_only",
+        "skill_options",
+        "schools",
+        "source_class_options",
         "source_class",
+        "spellcasting_ability_options",
         "spell_level",
+        "level_1_spell_count",
+        "tool_options",
     }
 )
 SUPPORTED_FEATURE_OPTION_PREREQUISITE_FIELDS = frozenset(
-    {"minimum_level", "required_cantrip", "required_pact_boon"}
+    {"minimum_level", "required_cantrip", "required_invocation", "required_pact_boon"}
 )
 SUPPORTED_FEATURE_MECHANICAL_GRANTS = frozenset(
     {
@@ -1480,6 +1523,31 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             return normalize_dnd_edition(profile.edition)
         raise RulesetUnavailableError("campaign has no authoritative rule profile")
 
+    def statblock_content_kind(edition: str) -> str:
+        """Return the review kind bound to one authoritative D&D edition."""
+
+        normalized = normalize_dnd_edition(edition)
+        return f"dnd5e_{normalized}_statblock"
+
+    def parse_edition_statblock(
+        markdown: str,
+        *,
+        edition: str,
+        source_key: str,
+        rule_refs: list[str] | tuple[str, ...] = (),
+        name: str | None = None,
+    ) -> Any:
+        """Parse a statblock only with the campaign/source edition's grammar."""
+
+        normalized = normalize_dnd_edition(edition)
+        parser = parse_2024_statblock if normalized == "2024" else parse_2014_statblock
+        return parser(
+            markdown,
+            source_key=source_key,
+            rule_refs=rule_refs,
+            name=name,
+        )
+
     def managed_module_source_ref(
         campaign_id: str,
         value: str | dict[str, Any],
@@ -1961,8 +2029,43 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 STANDARD_2014_CONTENT_PACK_VERSION,
             )
 
+    def ensure_core2024_content_pack() -> None:
+        """Install the source-linked SRD 5.2.1 catalog independently of 2014."""
+
+        if not config.dnd_skills_dir.exists():
+            return
+        try:
+            existing = rule_packs.get_version(
+                CORE_2024_CONTENT_PACK_ID,
+                CORE_2024_CONTENT_PACK_VERSION,
+            )
+            if existing.status == "installed":
+                return
+        except LookupError:
+            pass
+        manifest, artifacts = build_srd2024_content(config.dnd_skills_dir)
+        if not artifacts:
+            return
+        manifest, native_errors = bind_native_mechanic_contract(
+            manifest,
+            artifacts,
+            [],
+        )
+        result = rule_packs.save_draft(
+            manifest=manifest,
+            artifacts=artifacts,
+            provenance={"source": "bundled-srd2024", "structured": True},
+            additional_errors=native_errors,
+        )
+        if result.status == "validated":
+            rule_packs.install(
+                CORE_2024_CONTENT_PACK_ID,
+                CORE_2024_CONTENT_PACK_VERSION,
+            )
+
     ensure_core_content_pack()
     ensure_standard2014_content_pack()
+    ensure_core2024_content_pack()
 
     def checked_rule_facts(value: dict[str, Any] | None) -> dict[str, Any]:
         facts = dict(value or {})
@@ -4586,6 +4689,27 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     ) -> dict[str, Any]:
         membership = access.require_campaign(campaign_id, principal_id)
         value = dict(action)
+        if "use_weapon_mastery" in value and not isinstance(
+            value["use_weapon_mastery"], bool
+        ):
+            raise CombatEngineError("use_weapon_mastery must be boolean")
+        for field, allowed in (
+            ("light_extra_attack", {"bonus_action", "nick"}),
+            ("weapon_mastery_followup", {"cleave"}),
+        ):
+            if field not in value:
+                continue
+            normalized = str(value[field] or "").strip().casefold()
+            if normalized not in allowed:
+                raise CombatEngineError(
+                    f"{field} must be one of: {', '.join(sorted(allowed))}"
+                )
+            value[field] = normalized
+        if "mastery_secondary_target_id" in value:
+            secondary_target_id = str(value["mastery_secondary_target_id"] or "").strip()
+            if not secondary_target_id:
+                raise CombatEngineError("mastery_secondary_target_id must be non-empty")
+            value["mastery_secondary_target_id"] = secondary_target_id
         if membership.role not in CAMPAIGN_DM_ROLES:
             # Tactical context (cover, advantage, concealment and reach) is a
             # scene/DM fact, not a client-controlled modifier.
@@ -4845,6 +4969,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
 
         if str(source_card.get("pack_id") or "") in {
             CORE_CONTENT_PACK_ID,
+            CORE_2024_CONTENT_PACK_ID,
             STANDARD_2014_CONTENT_PACK_ID,
         }:
             return {
@@ -11962,6 +12087,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 weapon_id=str(plan.get("weapon_id") or ""),
                 attack_mode=str(plan.get("attack_mode") or "melee"),
                 multiattack_option_id=action.get("multiattack_option_id"),
+                target_id=target_id,
+                light_extra_attack=action.get("light_extra_attack"),
+                weapon_mastery_followup=action.get("weapon_mastery_followup"),
             )
         except NeedsRulingError as error:
             if access.require_campaign(campaign_id, principal_id).role not in CAMPAIGN_DM_ROLES:
@@ -12177,6 +12305,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 weapon_id=str(plan.get("weapon_id") or ""),
                 attack_mode=str(plan.get("attack_mode") or "melee"),
                 multiattack_option_id=action_payload.get("multiattack_option_id"),
+                target_id=target_id,
+                light_extra_attack=action_payload.get("light_extra_attack"),
+                weapon_mastery_followup=action_payload.get(
+                    "weapon_mastery_followup"
+                ),
             )
             attack_payment_receipts = core_receipts(
                 rule_context,
@@ -12192,6 +12325,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         if consumed_attack_advantage:
             attack_roll["consumed_next_attack_advantage_effect_id"] = consumed_attack_advantage
+        mastery_consumption = consume_weapon_mastery_attack_effects(
+            next_encounter,
+            plan,
+        )
+        next_encounter = mastery_consumption["encounter"]
+        if mastery_consumption["consumed_effect_ids"]:
+            attack_roll["consumed_weapon_mastery_effect_ids"] = mastery_consumption[
+                "consumed_effect_ids"
+            ]
         if spell_resolution is not None:
             attack_roll.update(
                 spell_id=str(spell_resolution["spell_id"]),
@@ -12328,6 +12470,17 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             attack=attack_roll,
             rules=rule_context,
         )
+        mastery_commit = apply_weapon_mastery_to_encounter(
+            next_encounter,
+            result,
+            attacker_id=actor_id,
+            target_id=target_id,
+        )
+        next_encounter = mastery_commit["encounter"]
+        if mastery_commit["effect"] is not None:
+            result.setdefault("weapon_mastery", {})["committed_effect"] = (
+                mastery_commit["effect"]
+            )
         attack_sheets = {
             actor_id: updated_attacker["sheet"],
             target_id: updated_target["sheet"],
@@ -12604,7 +12757,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             custom_item_solution = bool(
                 isinstance(item_card, dict)
                 and str(item_card.get("pack_id") or "")
-                not in {CORE_CONTENT_PACK_ID, STANDARD_2014_CONTENT_PACK_ID}
+                not in {
+                    CORE_CONTENT_PACK_ID,
+                    CORE_2024_CONTENT_PACK_ID,
+                    STANDARD_2014_CONTENT_PACK_ID,
+                }
                 and not source_card_has_executable_mechanic(
                     campaign_id,
                     item_card,
@@ -15914,6 +16071,17 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             attack=attack,
             rules=rule_context,
         )
+        mastery_commit = apply_weapon_mastery_to_encounter(
+            next_encounter,
+            result,
+            attacker_id=attacker_id,
+            target_id=actor_id,
+        )
+        next_encounter = mastery_commit["encounter"]
+        if mastery_commit["effect"] is not None:
+            result.setdefault("weapon_mastery", {})["committed_effect"] = (
+                mastery_commit["effect"]
+            )
         attack_sheets = {
             attacker_id: updated_attacker["sheet"],
             actor_id: updated_target["sheet"],
@@ -17553,7 +17721,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         invisibility_target: dict[str, Any] | None = None
         hypnotic_pattern_target: dict[str, Any] | None = None
         if fly:
-            if source_item_id is not None or spell_id != CORE_FLY_SPELL_ID:
+            if source_item_id is not None or spell_id not in CORE_FLY_SPELL_IDS:
                 raise CombatEngineError(
                     "the Core Fly path requires its exact actor spell card"
                 )
@@ -17639,7 +17807,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "contexts": contexts,
             }
         if invisibility:
-            if source_item_id is not None or spell_id != CORE_INVISIBILITY_SPELL_ID:
+            if (
+                source_item_id is not None
+                or spell_id not in CORE_INVISIBILITY_SPELL_IDS
+            ):
                 raise CombatEngineError(
                     "the Core Invisibility path requires its exact actor "
                     "spell card"
@@ -17967,7 +18138,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     if effect.get("active")
                     and effect.get("concentration")
                     and str(effect.get("source_spell_id") or "")
-                    == CORE_FLY_SPELL_ID
+                    in CORE_FLY_SPELL_IDS
                 ),
                 None,
             )
@@ -18095,7 +18266,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     if effect.get("active")
                     and effect.get("concentration")
                     and str(effect.get("source_spell_id") or "")
-                    == CORE_INVISIBILITY_SPELL_ID
+                    in CORE_INVISIBILITY_SPELL_IDS
                 ),
                 None,
             )
@@ -18231,7 +18402,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     if effect.get("active")
                     and effect.get("concentration")
                     and str(effect.get("source_spell_id") or "")
-                    == CORE_HYPNOTIC_PATTERN_SPELL_ID
+                    in CORE_HYPNOTIC_PATTERN_SPELL_IDS
                 ),
                 None,
             )
@@ -20440,13 +20611,98 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 )
             )
         turn_undead = (
-            activity_id == "dnd5e.content.srd2014.feature.cleric-channel-divinity"
+            activity_id
+            in {
+                "dnd5e.content.srd2014.feature.cleric-channel-divinity",
+                "dnd5e.content.srd2024.feature.cleric-channel-divinity",
+            }
             and str(dict(declaration or {}).get("option") or "")
             .strip()
             .casefold()
             .replace(" ", "_")
             == "turn_undead"
         )
+        divine_spark = (
+            activity_id
+            == "dnd5e.content.srd2024.feature.cleric-channel-divinity"
+            and str(dict(declaration or {}).get("option") or "")
+            .strip()
+            .casefold()
+            .replace(" ", "_")
+            == "divine_spark"
+        )
+        divine_spark_target_record = None
+        divine_spark_target: dict[str, Any] | None = None
+        if divine_spark:
+            if not is_dm(campaign_id, principal_id):
+                raise PermissionError(
+                    "Divine Spark multi-actor settlement requires the Agent in the DM role"
+                )
+            declared = dict(declaration or {})
+            mode = str(declared.get("mode") or "").strip().casefold()
+            expected_fields = {"option", "target_id", "mode"}
+            if mode == "damage":
+                expected_fields.add("damage_type")
+            if set(declared) != expected_fields:
+                raise CombatEngineError(
+                    "Divine Spark declaration requires option, target_id, mode, and "
+                    "damage_type only for damage"
+                )
+            target_id = str(declared.get("target_id") or "").strip()
+            if not target_id or target_id == actor_id:
+                raise CombatEngineError("Divine Spark targets one other creature")
+            combatants_by_id = {
+                str(item.get("actor_id") or ""): item
+                for item in encounter.get("combatants", [])
+            }
+            source_combatant = combatants_by_id.get(actor_id)
+            target_combatant = combatants_by_id.get(target_id)
+            if source_combatant is None or target_combatant is None:
+                raise CombatEngineError(
+                    "Divine Spark source and target must be current combatants"
+                )
+            source_position = dict(source_combatant.get("position") or {})
+            target_position = dict(target_combatant.get("position") or {})
+            if set(source_position) != {"x", "y"} or set(target_position) != {
+                "x",
+                "y",
+            }:
+                raise NeedsRulingError(
+                    "Divine Spark requires source and target battle-map positions",
+                    missing=("divine_spark_positions",),
+                )
+            source_conditions = {
+                str(item).casefold() for item in source_combatant.get("conditions", [])
+            }
+            target_conditions = {
+                str(item).casefold() for item in target_combatant.get("conditions", [])
+            }
+            visible_to = target_combatant.get("visible_to_actor_ids")
+            if (
+                "blinded" in source_conditions
+                or "dead" in target_conditions
+                or bool(target_combatant.get("hidden", False))
+                or "invisible" in target_conditions
+                or (
+                    isinstance(visible_to, list)
+                    and actor_id not in {str(item) for item in visible_to}
+                )
+            ):
+                raise CombatEngineError(
+                    "Divine Spark requires one living target the Cleric can see"
+                )
+            distance = (
+                max(
+                    abs(int(source_position["x"]) - int(target_position["x"])),
+                    abs(int(source_position["y"]) - int(target_position["y"])),
+                )
+                * 5
+            )
+            if distance > 30:
+                raise CombatEngineError("Divine Spark target is outside 30 feet")
+            divine_spark_target_record = require_campaign_actor(campaign_id, target_id)
+            access.require_actor(campaign_id, target_id, principal_id, control=True)
+            divine_spark_target = combat_actor_snapshot(target_id)
         turn_targets: dict[str, Any] = {}
         turn_target_records: dict[str, Any] = {}
         if turn_undead:
@@ -20455,10 +20711,18 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "Turn Undead multi-actor settlement requires the Agent in the DM role"
                 )
             declared = dict(declaration or {})
-            if set(declared) != {"option", "perception"}:
+            if set(declared) not in (
+                {"option", "perception"},
+                {"option", "perception", "sear_undead"},
+            ):
                 raise CombatEngineError(
-                    "Turn Undead declaration requires only option and perception"
+                    "Turn Undead declaration requires option, perception, and "
+                    "optional sear_undead"
                 )
+            if "sear_undead" in declared and not isinstance(
+                declared["sear_undead"], bool
+            ):
+                raise CombatEngineError("Turn Undead sear_undead must be boolean")
             perceptions = declared.get("perception")
             if not isinstance(perceptions, list):
                 raise CombatEngineError("Turn Undead perception must be a list")
@@ -20549,6 +20813,82 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 raise CombatEngineError(
                     "Turn Undead has no undead within 30 feet that can see or hear the cleric"
                 )
+        preserve_life = str(activity_id).endswith(
+            "life-domain-channel-divinity-preserve-life"
+        ) or str(activity_id).endswith("life-domain-preserve-life")
+        preserve_target_records: dict[str, Any] = {}
+        preserve_target_sheets: dict[str, dict[str, Any]] = {}
+        preserve_allocations: list[dict[str, Any]] = []
+        if preserve_life:
+            if not is_dm(campaign_id, principal_id):
+                raise PermissionError(
+                    "Preserve Life multi-actor settlement requires the Agent in the DM role"
+                )
+            declared = dict(declaration or {})
+            if set(declared) != {"allocations"}:
+                raise CombatEngineError(
+                    "Preserve Life declaration requires only an allocations list"
+                )
+            raw_allocations = declared.get("allocations")
+            if not isinstance(raw_allocations, list) or not raw_allocations:
+                raise CombatEngineError("Preserve Life requires at least one allocation")
+            combatants_by_id = {
+                str(item.get("actor_id") or ""): item
+                for item in encounter.get("combatants", [])
+            }
+            source_position = dict(
+                dict(combatants_by_id.get(actor_id) or {}).get("position") or {}
+            )
+            if set(source_position) != {"x", "y"}:
+                raise NeedsRulingError(
+                    "Preserve Life requires the cleric's battle-map position",
+                    missing=("preserve_life_source_position",),
+                )
+            for allocation in raw_allocations:
+                if not isinstance(allocation, dict) or set(allocation) != {
+                    "target_id",
+                    "amount",
+                }:
+                    raise CombatEngineError(
+                        "each combat Preserve Life allocation requires target_id and amount"
+                    )
+                target_id = str(allocation.get("target_id") or "").strip()
+                target_combatant = combatants_by_id.get(target_id)
+                if target_combatant is None:
+                    raise CombatEngineError(
+                        "Preserve Life targets must be current combatants"
+                    )
+                target_position = dict(target_combatant.get("position") or {})
+                if set(target_position) != {"x", "y"}:
+                    raise NeedsRulingError(
+                        "Preserve Life requires each target's battle-map position",
+                        missing=(f"preserve_life_target_position:{target_id}",),
+                    )
+                distance = (
+                    max(
+                        abs(int(source_position["x"]) - int(target_position["x"])),
+                        abs(int(source_position["y"]) - int(target_position["y"])),
+                    )
+                    * 5
+                )
+                if distance > 30:
+                    raise CombatEngineError(
+                        f"Preserve Life target is outside 30 feet: {target_id}"
+                    )
+                target = characters.get(target_id)
+                if target.campaign_id != campaign_id:
+                    raise CombatEngineError("Preserve Life targets must share the campaign")
+                access.require_actor(campaign_id, target_id, principal_id, control=True)
+                preserve_target_records[target_id] = target
+                preserve_target_sheets[target_id] = target.sheet
+                preserve_allocations.append(
+                    {"target_id": target_id, "amount": allocation.get("amount")}
+                )
+            resolve_preserve_life_to_sheets(
+                current.sheet,
+                preserve_target_sheets,
+                allocations=preserve_allocations,
+            )
         activity_sheet = current.sheet
         if random_save_spec is not None:
             # Cards imported before source actions preserved omitted ``uses``
@@ -20609,7 +20949,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 raise CombatEngineError("resolve the earlier pending save or choice first")
         else:
             require_no_blocking_pending(encounter)
-        engine_owned_special = activity_id == "dnd5e.content.srd2014.feature.fighter-action-surge"
+        engine_owned_special = activity_id in {
+            "dnd5e.content.srd2014.feature.fighter-action-surge",
+            "dnd5e.content.srd2024.feature.fighter-action-surge",
+        }
         if (
             activation_type == "special"
             and not engine_owned_special
@@ -20654,6 +20997,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 encounter,
                 actor_id_value=actor_id,
                 activation_type=activation_type,
+                action_kind=str(
+                    dict(activity_card.get("choices") or {}).get("action_kind")
+                    or ""
+                )
+                or None,
             )
             activity_activation_payment = {
                 "kind": "activity",
@@ -21327,10 +21675,16 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 source_actor,
                 turn_targets,
                 rules=rule_context,
+                sear_undead=bool(
+                    dict(declaration or {}).get("sear_undead", False)
+                ),
             )
+            turn_dependencies: list[dict[str, Any]] = []
             for target_result in settled_turn["targets"]:
                 target_id = str(target_result["target_id"])
-                if not target_result["turned"]:
+                if not target_result["turned"] and not target_result.get(
+                    "sear_damage"
+                ):
                     continue
                 target_sheet = validate_character_sheet(settled_turn["sheets"][target_id])
                 sync_combatant_conditions(next_encounter, target_id, target_sheet)
@@ -21339,11 +21693,34 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     for item in next_encounter["combatants"]
                     if item.get("actor_id") == target_id
                 )
-                target_combatant["turned"] = {
-                    "source_actor_id": actor_id,
-                    "effect_id": target_result["effect_id"],
-                }
-                target_combatant.setdefault("turn_budget", {})["reaction"] = 0
+                if target_result["turned"]:
+                    target_combatant["turned"] = {
+                        "source_actor_id": actor_id,
+                        "effect_id": target_result["effect_id"],
+                    }
+                    target_combatant.setdefault("turn_budget", {})["reaction"] = 0
+                if settled_turn["edition"] == "2024" and target_result["turned"]:
+                    dependency = {
+                        "id": f"effect-dependency-{uuid4().hex}",
+                        "mechanic_id": "dnd5e.core.activity.turn_undead",
+                        "dependency": "source_actor_capable",
+                        "source_actor_id": actor_id,
+                        "target_actor_id": target_id,
+                        "target_effect_id": target_result["effect_id"],
+                        "active": True,
+                    }
+                    next_encounter.setdefault("dependent_effects", []).append(
+                        dependency
+                    )
+                    turn_dependencies.append(dependency)
+                sear_damage = dict(target_result.get("sear_damage") or {})
+                concentration = dict(sear_damage.get("concentration") or {})
+                add_concentration_window(
+                    next_encounter,
+                    target_id,
+                    concentration or None,
+                    next_revision=campaign.revision + 1,
+                )
                 target = turn_target_records[target_id]
                 additional_updates.append(
                     CharacterStateUpdate(
@@ -21357,10 +21734,98 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "kind": "turn_undead",
                 "save_dc": settled_turn["save_dc"],
                 "duration": settled_turn["duration"],
+                "sear_undead": settled_turn["sear_undead"],
                 "targets": settled_turn["targets"],
+                "dependencies": turn_dependencies,
                 "requires_ruling": False,
             }
-        if activity_id == "dnd5e.content.srd2014.feature.fighter-second-wind":
+        if divine_spark:
+            assert divine_spark_target_record is not None
+            assert divine_spark_target is not None
+            source_actor = combat_actor_snapshot(actor_id)
+            source_actor["sheet"] = applied["sheet"]
+            source_actor["derived"] = derive_character_sheet(applied["sheet"])
+            settled_spark = resolve_divine_spark_to_sheet(
+                source_actor,
+                divine_spark_target,
+                mode=str(dict(declaration or {}).get("mode") or ""),
+                damage_type=dict(declaration or {}).get("damage_type"),
+                rules=rule_context,
+            )
+            target_id = str(settled_spark["target_id"])
+            target_sheet = validate_character_sheet(settled_spark.pop("sheet"))
+            sync_combatant_conditions(next_encounter, target_id, target_sheet)
+            reconcile_readied_spells(next_encounter, target_id, target_sheet)
+            if settled_spark.get("damage") is not None:
+                reconcile_source_attachments(
+                    next_encounter,
+                    actor_id=target_id,
+                    sheet=target_sheet,
+                )
+                concentration = dict(
+                    dict(settled_spark.get("damage") or {}).get("concentration") or {}
+                )
+                add_concentration_window(
+                    next_encounter,
+                    target_id,
+                    concentration or None,
+                    next_revision=campaign.revision + 1,
+                )
+            additional_updates.append(
+                CharacterStateUpdate(
+                    character_id=target_id,
+                    sheet=target_sheet,
+                    notes=validate_character_notes(divine_spark_target_record.notes),
+                    expected_revision=divine_spark_target_record.revision,
+                )
+            )
+            core_effect = {
+                **settled_spark,
+                "activation_payment": activity_activation_payment,
+                "requires_ruling": False,
+            }
+        if preserve_life:
+            settled_inputs = {
+                target_id: (
+                    applied["sheet"] if target_id == actor_id else target.sheet
+                )
+                for target_id, target in preserve_target_records.items()
+            }
+            settled_preserve = resolve_preserve_life_to_sheets(
+                applied["sheet"],
+                settled_inputs,
+                allocations=preserve_allocations,
+            )
+            if actor_id in settled_preserve["sheets"]:
+                applied["sheet"] = settled_preserve["sheets"][actor_id]
+            for target_id, target in preserve_target_records.items():
+                if target_id == actor_id:
+                    continue
+                target_sheet = validate_character_sheet(
+                    settled_preserve["sheets"][target_id]
+                )
+                sync_combatant_conditions(next_encounter, target_id, target_sheet)
+                additional_updates.append(
+                    CharacterStateUpdate(
+                        character_id=target_id,
+                        sheet=target_sheet,
+                        notes=validate_character_notes(target.notes),
+                        expected_revision=target.revision,
+                    )
+                )
+            core_effect = {
+                "kind": "preserve_life",
+                "edition": settled_preserve["edition"],
+                "pool": settled_preserve["pool"],
+                "allocated": settled_preserve["allocated"],
+                "remaining_unallocated": settled_preserve[
+                    "remaining_unallocated"
+                ],
+                "targets": settled_preserve["targets"],
+                "activation_payment": activity_activation_payment,
+                "requires_ruling": False,
+            }
+        if activity_id in SECOND_WIND_ACTIVITY_IDS:
             second_wind = resolve_second_wind_to_sheet(applied["sheet"])
             applied["sheet"] = second_wind.pop("sheet")
             core_effect = second_wind
@@ -21373,6 +21838,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "aggressive": "dnd5e.core.monster.aggressive",
                 "battle_cry": "dnd5e.core.activity.battle_cry",
                 "cunning_action": "dnd5e.core.activity.cunning_action",
+                "divine_spark": "dnd5e.core.activity.divine_spark",
                 "frightful_presence": (
                     "dnd5e.core.activity.frightful_presence"
                 ),
@@ -21380,6 +21846,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "dnd5e.core.activity.legendary_action"
                 ),
                 "second_wind": "dnd5e.core.activity.second_wind",
+                "preserve_life": "dnd5e.core.activity.preserve_life",
                 "turn_undead": "dnd5e.core.activity.turn_undead",
                 "random_save_effects": "dnd5e.core.activity.random_save_effects",
                 "source_save_effect": "dnd5e.core.activity.source_save_effect",
@@ -21391,6 +21858,16 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     rule_context,
                     [mechanic_id],
                     f"combat.activity.{core_effect['kind']}",
+                ),
+                *(
+                    core_receipts(
+                        rule_context,
+                        ["dnd5e.core.activity.sear_undead"],
+                        "combat.activity.sear_undead",
+                    )
+                    if str(core_effect["kind"]) == "turn_undead"
+                    and core_effect.get("sear_undead") is not None
+                    else []
                 ),
             ]
         if compiled_activity_plan is not None:
@@ -21547,15 +22024,22 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 branch_id=resolved_branch_id,
             ),
         )
+        resolution_id = f"resolution-{uuid4().hex}"
         next_state = dict(campaign.state or {})
         next_state["resolution_log"] = [
             *list(next_state.get("resolution_log") or []),
-            {"type": kind, "actor_id": actor_id, "result": result},
+            {
+                "id": resolution_id,
+                "type": kind,
+                "actor_id": actor_id,
+                "result": result,
+            },
         ][-100:]
 
         def check_response(revisions: list[Any]) -> dict[str, Any]:
             response = {
                 "status": "committed",
+                "resolution_id": resolution_id,
                 "result": result,
                 "campaign_revision": campaign.revision + 1,
                 "revisions": [asdict(item) for item in revisions],
@@ -21581,6 +22065,164 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             rule_receipts=list(result.get("rule_receipts") or []),
         )
         return check_response(list(revisions_result or []))
+
+    def character_heroic_inspiration_reroll(
+        campaign_id: str,
+        actor_id: str,
+        resolution_id: str,
+        roll_index: int,
+        expected_original_roll: int,
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
+        expected_revision: int | None = None,
+        branch_id: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Reroll one die from an exact just-recorded Play check."""
+
+        access.require_actor(
+            campaign_id,
+            actor_id,
+            principal_id,
+            control=True,
+        )
+        actor = require_campaign_actor(campaign_id, actor_id)
+        if actor.character_type != "pc":
+            raise CombatEngineError("Heroic Inspiration can be spent only by a player character")
+        require_write_contract(expected_revision, idempotency_key)
+        resolved_branch_id = require_current_branch(campaign_id, branch_id)
+        if campaign_rules_edition(campaign_id) != "2024":
+            raise CombatEngineError("Heroic Inspiration requires the 2024 rules")
+        if isinstance(roll_index, bool) or not isinstance(roll_index, int) or roll_index < 0:
+            raise CombatEngineError("roll_index must be a non-negative integer")
+        normalized_resolution_id = str(resolution_id or "").strip()
+        payload = {
+            "actor_id": actor_id,
+            "resolution_id": normalized_resolution_id,
+            "roll_index": roll_index,
+            "expected_original_roll": expected_original_roll,
+            "branch_id": resolved_branch_id,
+        }
+        scope = f"heroic-inspiration:{campaign_id}:{resolved_branch_id}:{principal_id}"
+        replay = replay_idempotent(scope, idempotency_key, payload)
+        if replay is not None:
+            return replay
+        campaign = campaigns.get(campaign_id)
+        if campaign.revision != expected_revision:
+            raise ValueError(
+                "campaign revision conflict: "
+                f"expected {expected_revision}, found {campaign.revision}"
+            )
+        if dict(campaign.state or {}).get("combat", {}).get("active", False):
+            raise CombatEngineError("this check reroll is available only outside combat")
+        next_state = deepcopy(dict(campaign.state or {}))
+        matching = [
+            event
+            for event in list(next_state.get("resolution_log") or [])
+            if isinstance(event, dict)
+            and str(event.get("id") or "") == normalized_resolution_id
+            and str(event.get("actor_id") or "") == actor_id
+        ]
+        if len(matching) != 1:
+            raise CombatEngineError("resolution_id must identify one check by this actor")
+        event = matching[0]
+        if str(event.get("type") or "") not in (
+            ABILITY_CHECK_KINDS | frozenset({"save"})
+        ):
+            raise CombatEngineError("Heroic Inspiration check reroll requires a d20 Test")
+        if event.get("heroic_inspiration_reroll") is not None:
+            raise CombatEngineError("this recorded die has already used Heroic Inspiration")
+        original = deepcopy(dict(event.get("result") or {}))
+        rolls = list(original.get("rolls") or [])
+        if roll_index >= len(rolls) or rolls[roll_index] != expected_original_roll:
+            raise CombatEngineError(
+                "roll_index and expected_original_roll must match the recorded die"
+            )
+        spent = spend_heroic_inspiration_reroll(
+            actor.sheet,
+            die_sides=20,
+            original_roll=expected_original_roll,
+        )
+        rolls[roll_index] = int(spent["new_roll"])
+        roll_mode = str(original.get("roll_mode") or "normal")
+        natural = (
+            max(rolls)
+            if roll_mode == "advantage"
+            else min(rolls)
+            if roll_mode == "disadvantage"
+            else rolls[0]
+        )
+        modifier = int(original.get("total", 0) or 0) - int(
+            original.get("natural", 0) or 0
+        )
+        rerolled_result = {
+            **original,
+            "rolls": rolls,
+            "natural": natural,
+            "critical": natural == 20,
+            "fumble": natural == 1,
+            "total": natural + modifier,
+        }
+        if isinstance(original.get("dc"), int):
+            rerolled_result["success"] = rerolled_result["total"] >= int(original["dc"])
+        event["result"] = rerolled_result
+        event["heroic_inspiration_reroll"] = {
+            key: value for key, value in spent.items() if key != "sheet"
+        }
+        rules = effective_rule_context(
+            campaign_id,
+            facts={
+                "actor_id": actor_id,
+                "resolution_id": normalized_resolution_id,
+                "roll_index": roll_index,
+            },
+            branch_id=resolved_branch_id,
+        )
+        receipts = core_receipts(
+            rules,
+            ["dnd5e.core.heroic_inspiration"],
+            "character.check.heroic_inspiration_reroll",
+        )
+        normalized_sheet = validate_character_sheet(spent["sheet"])
+
+        def reroll_response(revisions: list[Any]) -> dict[str, Any]:
+            response = {
+                "status": "committed",
+                "resolution_id": normalized_resolution_id,
+                "result": rerolled_result,
+                "heroic_inspiration_reroll": event["heroic_inspiration_reroll"],
+                "campaign_revision": campaign.revision + 1,
+                "revisions": [asdict(item) for item in revisions],
+                "rule_receipts": receipts,
+            }
+            stream = active_random_stream()
+            if stream is not None and stream.draw_count > 0:
+                response["random_stream_receipt"] = stream.receipt()
+            return response
+
+        revisions_result = StateMutationService(storage.database).replace(
+            campaign_id,
+            campaign_state=validate_party_state(next_state),
+            character_updates=[
+                CharacterStateUpdate(
+                    character_id=actor.id,
+                    sheet=normalized_sheet,
+                    notes=validate_character_notes(actor.notes),
+                    expected_revision=actor.revision,
+                )
+            ],
+            expected_campaign_revision=campaign.revision,
+            operation="character.heroic_inspiration.reroll",
+            actor=principal_id,
+            branch_id=resolved_branch_id,
+            idempotency_key=idempotency_key,
+            idempotency_write=IdempotencyWrite(
+                scope=scope,
+                payload=payload,
+                response=reroll_response,
+            ),
+            rule_receipts=receipts,
+        )
+        return reroll_response(list(revisions_result or []))
 
     @_agent_ruling_boundary
     def character_group_check(
@@ -22974,7 +23616,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         )
         if (
             str(source_card.get("pack_id") or "")
-            in {CORE_CONTENT_PACK_ID, STANDARD_2014_CONTENT_PACK_ID}
+            in {
+                CORE_CONTENT_PACK_ID,
+                CORE_2024_CONTENT_PACK_ID,
+                STANDARD_2014_CONTENT_PACK_ID,
+            }
             or source_card_has_executable_mechanic(
                 campaign_id,
                 source_card,
@@ -26332,6 +26978,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "hit_dice_spends",
             "arcane_recovery",
             "natural_recovery",
+            "sorcerous_restoration_points",
             "song_of_rest_source_actor_id",
             "attune_item_id",
             "attunement_prerequisite_confirmed",
@@ -26358,6 +27005,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             hit_dice_spends = raw_member.get("hit_dice_spends")
             arcane_recovery = raw_member.get("arcane_recovery")
             natural_recovery = raw_member.get("natural_recovery")
+            sorcerous_restoration_points = raw_member.get(
+                "sorcerous_restoration_points"
+            )
             if hit_dice_spends is not None and not isinstance(hit_dice_spends, list):
                 raise ValueError(
                     f"resting_members[{index}].hit_dice_spends must be an array"
@@ -26369,6 +27019,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             if natural_recovery is not None and not isinstance(natural_recovery, dict):
                 raise ValueError(
                     f"resting_members[{index}].natural_recovery must be an object"
+                )
+            if sorcerous_restoration_points is not None and (
+                isinstance(sorcerous_restoration_points, bool)
+                or not isinstance(sorcerous_restoration_points, int)
+            ):
+                raise ValueError(
+                    "resting_members["
+                    f"{index}].sorcerous_restoration_points must be an integer"
                 )
             attune_item_id = (
                 str(raw_member.get("attune_item_id") or "").strip() or None
@@ -26398,6 +27056,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "hit_dice_spends": list(hit_dice_spends or []),
                     "arcane_recovery": deepcopy(arcane_recovery or {}),
                     "natural_recovery": deepcopy(natural_recovery or {}),
+                    "sorcerous_restoration_points": (
+                        sorcerous_restoration_points
+                    ),
                     "song_of_rest_source_actor_id": (
                         str(raw_member.get("song_of_rest_source_actor_id") or "").strip()
                         or None
@@ -26473,6 +27134,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 current.sheet,
                 member["natural_recovery"],
                 rest_activity_minutes=member["rest_activity_minutes"],
+            )
+            validate_sorcerous_restoration_choice(
+                current.sheet,
+                member["sorcerous_restoration_points"],
             )
             if member["song_of_rest_source_actor_id"] is not None:
                 validate_song_of_rest_source(
@@ -26609,6 +27274,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     hit_dice_spends=resting_member["hit_dice_spends"],
                     arcane_recovery=resting_member["arcane_recovery"],
                     natural_recovery=resting_member["natural_recovery"],
+                    sorcerous_restoration_points=resting_member[
+                        "sorcerous_restoration_points"
+                    ],
                     song_of_rest_source_sheet=(
                         all_characters[str(song_source_id)].sheet
                         if song_source_id is not None
@@ -27120,7 +27788,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 raise CombatEngineError(
                     "the source-bound Fly mechanic is a 2014 rule"
                 )
-            if spell_id != CORE_FLY_SPELL_ID:
+            if spell_id not in CORE_FLY_SPELL_IDS:
                 raise CombatEngineError(
                     "the Core Fly path requires its exact source-bound SRD spell id"
                 )
@@ -27172,7 +27840,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 raise CombatEngineError(
                     "the source-bound Invisibility mechanic is a 2014 rule"
                 )
-            if spell_id != CORE_INVISIBILITY_SPELL_ID:
+            if spell_id not in CORE_INVISIBILITY_SPELL_IDS:
                 raise CombatEngineError(
                     "the Core Invisibility path requires its exact "
                     "source-bound SRD spell id"
@@ -27370,7 +28038,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     if effect.get("active")
                     and effect.get("concentration")
                     and str(effect.get("source_spell_id") or "")
-                    == CORE_FLY_SPELL_ID
+                    in CORE_FLY_SPELL_IDS
                 ),
                 None,
             )
@@ -27426,7 +28094,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     if effect.get("active")
                     and effect.get("concentration")
                     and str(effect.get("source_spell_id") or "")
-                    == CORE_INVISIBILITY_SPELL_ID
+                    in CORE_INVISIBILITY_SPELL_IDS
                 ),
                 None,
             )
@@ -27591,6 +28259,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "hit_dice_spends",
             "arcane_recovery",
             "natural_recovery",
+            "sorcerous_restoration_points",
             "song_of_rest_source_actor_id",
             "attune_item_id",
             "attunement_prerequisite_confirmed",
@@ -27604,6 +28273,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "hit_dice_spends",
             "arcane_recovery",
             "natural_recovery",
+            "sorcerous_restoration_points",
             "song_of_rest_source_actor_id",
             "attune_item_id",
             "attunement_prerequisite_confirmed",
@@ -27649,6 +28319,16 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             natural_recovery = raw_member.get("natural_recovery")
             if natural_recovery is not None and not isinstance(natural_recovery, dict):
                 raise ValueError(f"members[{index}].natural_recovery must be an object")
+            sorcerous_restoration_points = raw_member.get(
+                "sorcerous_restoration_points"
+            )
+            if sorcerous_restoration_points is not None and (
+                isinstance(sorcerous_restoration_points, bool)
+                or not isinstance(sorcerous_restoration_points, int)
+            ):
+                raise ValueError(
+                    f"members[{index}].sorcerous_restoration_points must be an integer"
+                )
             song_source_id = (
                 str(raw_member.get("song_of_rest_source_actor_id") or "").strip() or None
             )
@@ -27699,6 +28379,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         "hit_dice_spends": list(hit_dice_spends or []),
                         "arcane_recovery": deepcopy(arcane_recovery or {}),
                         "natural_recovery": deepcopy(natural_recovery or {}),
+                        "sorcerous_restoration_points": (
+                            sorcerous_restoration_points
+                        ),
                         "song_of_rest_source_actor_id": song_source_id,
                         "attune_item_id": attune_item_id,
                         "attunement_prerequisite_confirmed": attunement_confirmed,
@@ -27801,6 +28484,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     member["natural_recovery"],
                     rest_activity_minutes=member["rest_activity_minutes"],
                 )
+                validate_sorcerous_restoration_choice(
+                    current.sheet,
+                    member["sorcerous_restoration_points"],
+                )
                 song_source_id = member["song_of_rest_source_actor_id"]
                 if song_source_id is not None:
                     validate_song_of_rest_source(all_characters[str(song_source_id)].sheet)
@@ -27889,6 +28576,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                             "hit_dice_spends": member["hit_dice_spends"],
                             "arcane_recovery": member["arcane_recovery"],
                             "natural_recovery": member["natural_recovery"],
+                            "sorcerous_restoration_points": member[
+                                "sorcerous_restoration_points"
+                            ],
                             "song_of_rest_source_sheet": (
                                 all_characters[str(song_source_id)].sheet
                                 if song_source_id is not None
@@ -28091,7 +28781,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "character": character_view(current),
                 "campaign_revision": campaign.revision,
             }
-        preserve_life = str(activity_id).endswith("life-domain-channel-divinity-preserve-life")
+        preserve_life = str(activity_id).endswith(
+            "life-domain-channel-divinity-preserve-life"
+        ) or str(activity_id).endswith("life-domain-preserve-life")
         if preserve_life:
             if not is_dm(current.campaign_id, principal_id):
                 raise PermissionError(
@@ -28251,6 +28943,142 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 include_revisions=False,
             )
             return response
+        divine_spark = (
+            activity_id
+            == "dnd5e.content.srd2024.feature.cleric-channel-divinity"
+            and str(dict(declaration or {}).get("option") or "")
+            .strip()
+            .casefold()
+            .replace(" ", "_")
+            == "divine_spark"
+        )
+        if divine_spark:
+            if not is_dm(current.campaign_id, principal_id):
+                raise PermissionError(
+                    "Divine Spark multi-actor settlement requires the Agent in the DM role"
+                )
+            declared = dict(declaration or {})
+            mode = str(declared.get("mode") or "").strip().casefold()
+            expected_fields = {
+                "option",
+                "target_id",
+                "mode",
+                "expected_revision",
+                "within_30_ft",
+                "can_see",
+            }
+            if mode == "damage":
+                expected_fields.add("damage_type")
+            if set(declared) != expected_fields:
+                raise CombatEngineError(
+                    "noncombat Divine Spark requires option, target_id, mode, "
+                    "expected_revision, within_30_ft, can_see, and damage_type only "
+                    "for damage"
+                )
+            target_id = str(declared.get("target_id") or "").strip()
+            if not target_id or target_id == character_id:
+                raise CombatEngineError("Divine Spark targets one other creature")
+            if declared.get("within_30_ft") is not True or declared.get("can_see") is not True:
+                raise CombatEngineError(
+                    "noncombat Divine Spark requires Agent-as-DM confirmation of range "
+                    "and visibility"
+                )
+            target = require_campaign_actor(current.campaign_id, target_id)
+            access.require_actor(
+                current.campaign_id,
+                target_id,
+                principal_id,
+                control=True,
+            )
+            target_revision = declared.get("expected_revision")
+            if isinstance(target_revision, bool) or not isinstance(target_revision, int):
+                raise ValueError("Divine Spark target expected_revision must be an integer")
+            if target.revision != target_revision:
+                raise ValueError(f"character revision conflict: {target_id}")
+            activity_rules = effective_rule_context(
+                current.campaign_id,
+                facts={"actor_id": character_id, "activity_id": activity_id},
+            )
+            try:
+                applied = consume_activity(
+                    current.sheet,
+                    activity_id=activity_id,
+                    rules=activity_rules,
+                )
+            except ActivityError as exc:
+                raise ValueError(str(exc)) from exc
+            source_actor = combat_actor_snapshot(character_id)
+            source_actor["sheet"] = applied["sheet"]
+            source_actor["derived"] = derive_character_sheet(applied["sheet"])
+            target_actor = combat_actor_snapshot(target_id)
+            settled_spark = resolve_divine_spark_to_sheet(
+                source_actor,
+                target_actor,
+                mode=mode,
+                damage_type=declared.get("damage_type"),
+                rules=activity_rules,
+            )
+            target_sheet = validate_character_sheet(settled_spark.pop("sheet"))
+            source_sheet = validate_character_sheet(applied["sheet"])
+            updates = [
+                CharacterStateUpdate(
+                    character_id=character_id,
+                    sheet=source_sheet,
+                    notes=validate_character_notes(current.notes),
+                    expected_revision=expected_revision,
+                ),
+                CharacterStateUpdate(
+                    character_id=target_id,
+                    sheet=target_sheet,
+                    notes=validate_character_notes(target.notes),
+                    expected_revision=target_revision,
+                ),
+            ]
+            receipts = [
+                *list(applied.get("rule_receipts") or []),
+                *core_receipts(
+                    activity_rules,
+                    ["dnd5e.core.activity.divine_spark"],
+                    "activity.divine_spark",
+                ),
+            ]
+            source_projected = replace(
+                current,
+                sheet=source_sheet,
+                revision=current.revision + 1,
+            )
+            target_projected = replace(
+                target,
+                sheet=target_sheet,
+                revision=target.revision + 1,
+            )
+            response = commit_campaign_state(
+                campaign,
+                None,
+                operation="character.activity.divine_spark",
+                principal_id=principal_id,
+                branch_id=branch_id,
+                idempotency_key=idempotency_key,
+                scope=scope,
+                payload=payload,
+                response_fields={
+                    "status": "committed",
+                    "result": {
+                        "activity_id": activity_id,
+                        "payment": applied.get("payment"),
+                        "core_effect": settled_spark,
+                        "requires_ruling": False,
+                        "rule_receipts": receipts,
+                    },
+                    "character": character_view(source_projected),
+                    "target": character_view(target_projected),
+                },
+                character_updates=updates,
+                rule_receipts=receipts,
+                include_campaign_revision=False,
+                include_revisions=False,
+            )
+            return response
         try:
             applied = consume_activity(
                 current.sheet,
@@ -28271,7 +29099,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "result": {key: value for key, value in applied.items() if key != "sheet"},
                 "character": character_view(current),
             }
-        if activity_id == "dnd5e.content.srd2014.feature.fighter-second-wind":
+        if activity_id in SECOND_WIND_ACTIVITY_IDS:
             rule_context = effective_rule_context(
                 current.campaign_id,
                 facts={"actor_id": character_id, "activity_id": activity_id},
@@ -31676,6 +32504,12 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         """Recover and review one module statblock without requiring model vision."""
 
         access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
+        campaign_edition = campaign_rules_edition(campaign_id)
+        if campaign_edition != "2014":
+            raise ValueError(
+                "layout OCR statblock recovery currently supports only D&D 2014; "
+                "submit an evidence-bound 2024 transcription through module_review"
+            )
         if not idempotency_key:
             raise ValueError("idempotency_key is required for OCR statblock recovery")
         target_name = str(name or "").strip()
@@ -31809,7 +32643,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         source_asset_id: str | None = None,
         page_number: int | None = None,
         source_chunk_ids: list[str] | None = None,
-        content_kind: Literal["dnd5e_2014_statblock"] = "dnd5e_2014_statblock",
+        content_kind: Literal[
+            "dnd5e_2014_statblock",
+            "dnd5e_2024_statblock",
+        ] = "dnd5e_2014_statblock",
         metadata: dict[str, Any] | None = None,
         principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         idempotency_key: str | None = None,
@@ -31819,8 +32656,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
         if not idempotency_key:
             raise ValueError("idempotency_key is required for module content review")
-        parsed = parse_2014_statblock(
+        campaign_edition = campaign_rules_edition(campaign_id)
+        expected_content_kind = statblock_content_kind(campaign_edition)
+        if content_kind != expected_content_kind:
+            raise ValueError(
+                f"content_kind must be {expected_content_kind} for this campaign"
+            )
+        parsed = parse_edition_statblock(
             normalized_content,
+            edition=campaign_edition,
             source_key=f"module-review:{module_id}:{content_key}",
             name=None,
         )
@@ -31933,6 +32777,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if module is None:
             raise LookupError(module_id)
         chunks = modules.list_chunks(campaign_id, module_id)
+        campaign_edition = campaign_rules_edition(campaign_id)
         candidates = module_statblock_review_candidates(
             chunks,
             source_title=str(module.get("title") or ""),
@@ -31948,9 +32793,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             candidate["review_tool"] = "module_review"
             candidate["review_action"] = "submit_content"
             candidate["module_id"] = module_id
+            candidate["content_kind"] = statblock_content_kind(campaign_edition)
             if candidate.get("execution_state") == "review_ready":
-                parsed_candidate = parse_2014_statblock(
+                parsed_candidate = parse_edition_statblock(
                     str(candidate.get("normalized_content") or ""),
+                    edition=campaign_edition,
                     source_key=f"module-candidate:{candidate['id']}",
                     name=None,
                 )
@@ -32558,6 +33405,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         """Recover and review one statblock through layout OCR for text-only agents."""
 
         access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
+        if campaign_rules_edition(campaign_id) != "2014":
+            raise ValueError(
+                "layout OCR statblock recovery currently supports only D&D 2014; "
+                "submit an evidence-bound 2024 transcription through rule_import review_statblock"
+            )
         if not idempotency_key:
             raise ValueError("idempotency_key is required for OCR statblock recovery")
         job = require_import_job(campaign_id, job_id, "rulebook")
@@ -32926,8 +33778,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             raise ValueError("rule import job must be indexed before statblock review")
         source = rules.source(job.source_id)
         campaign_edition = campaign_rules_edition(campaign_id)
-        if campaign_edition != "2014" or str(source.get("edition") or "") != "2014":
-            raise ValueError("reviewed rule statblocks require a D&D 2014 campaign and source")
+        source_edition = normalize_dnd_edition(str(source.get("edition") or ""))
+        if source_edition != campaign_edition:
+            raise ValueError(
+                "reviewed rule statblocks require matching campaign and source editions"
+            )
         if isinstance(page_number, bool) or not isinstance(page_number, int) or page_number < 1:
             raise ValueError("page_number must be a positive integer")
         content = str(normalized_content or "").strip()
@@ -32982,8 +33837,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             review_identity = f"{review_identity}:derived-from:{derived_from_review_id}"
         review_digest = hashlib.sha256(review_identity.encode()).hexdigest()
         review_id = f"rule-statblock-review:{review_digest[:24]}"
-        parsed = parse_2014_statblock(
+        parsed = parse_edition_statblock(
             content,
+            edition=campaign_edition,
             source_key=f"rule-review:{review_id}",
             rule_refs=[
                 f"rule-source:{job.source_id}",
@@ -33030,6 +33886,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "source_id": job.source_id,
             "source_key": source["source_key"],
             "source_checksum": source["checksum"],
+            "edition": campaign_edition,
             "artifact": job.artifact,
             "asset_checksum": job.artifact_checksum,
             "page_number": page_number,
@@ -33917,12 +34774,34 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     (standard.pack_id, standard.version, dict(item))
                     for item in standard.artifacts
                 )
+        elif profile and profile.edition == "2024":
+            try:
+                core2024 = rule_packs.get_version(
+                    CORE_2024_CONTENT_PACK_ID,
+                    CORE_2024_CONTENT_PACK_VERSION,
+                )
+            except LookupError:
+                core2024 = None
+            if core2024 is not None:
+                values.extend(
+                    (core2024.pack_id, core2024.version, dict(item))
+                    for item in core2024.artifacts
+                )
         for activation in rule_packs.activations(campaign_id, branch_id=branch_id):
             if not activation.enabled:
                 continue
             pack = rule_packs.get_version(activation.pack_id, activation.version)
             values.extend((pack.pack_id, pack.version, dict(item)) for item in pack.artifacts)
-        return [item for item in values if kind is None or item[2].get("kind") == kind]
+        unique: list[tuple[str, str, dict[str, Any]]] = []
+        seen: set[tuple[str, str, str]] = set()
+        for pack_id, version, artifact in values:
+            identity = (pack_id, version, str(artifact.get("id") or ""))
+            if identity in seen:
+                continue
+            seen.add(identity)
+            if kind is None or artifact.get("kind") == kind:
+                unique.append((pack_id, version, artifact))
+        return unique
 
     def hydrate_class_prepared_spell_cards(
         campaign_id: str,
@@ -34891,10 +35770,41 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             elif artifact_kind == "background":
                 grants = dict(card.get("background_grants") or {})
                 choices = dict(grants.get("choices") or {})
+                ability_options = list(choices.get("ability_score_options") or [])
+                tool_choice_count = int(choices.get("tool_choice_count", 0) or 0)
+                fields = []
+                if choices.get("language_count"):
+                    fields.append("languages")
+                if ability_options:
+                    fields.append("ability_score_increases")
+                if tool_choice_count:
+                    fields.append("tools")
+                equipment_packages = deepcopy(
+                    dict(choices.get("equipment_packages") or {})
+                )
+                if equipment_packages:
+                    fields.append("equipment_package")
+                if choices.get("origin_feat_name") == "Magic Initiate":
+                    fields.append("origin_feat_selection")
                 selection_requirements = {
-                    "fields": ["languages"] if choices.get("language_count") else [],
+                    "fields": fields,
                     "language_count": int(choices.get("language_count", 0) or 0),
                     "skill_proficiencies": list(card.get("skill_proficiencies") or []),
+                    "ability_score_options": ability_options,
+                    "allowed_ability_score_distributions": deepcopy(
+                        list(choices.get("allowed_ability_score_distributions") or [])
+                    ),
+                    "maximum_ability_score": int(
+                        choices.get("maximum_ability_score", 20) or 20
+                    ),
+                    "tool_choice_count": tool_choice_count,
+                    "tool_options": list(choices.get("tool_options") or []),
+                    "equipment_package_options": sorted(equipment_packages),
+                    "equipment_packages": equipment_packages,
+                    "origin_feat_name": str(choices.get("origin_feat_name") or ""),
+                    "origin_feat_preset": deepcopy(
+                        dict(choices.get("origin_feat_preset") or {})
+                    ),
                     "customizable": True,
                     "customization_fields": [
                         "custom_name",
@@ -34904,9 +35814,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     ],
                 }
             elif artifact_kind == "feat":
+                requirements = deepcopy(dict(card.get("selection_requirements") or {}))
                 selection_requirements = {
-                    "fields": [],
+                    "fields": [requirements["field"]] if requirements.get("field") else [],
                     "prerequisites": deepcopy(list(card.get("prerequisites") or [])),
+                    "category": str(card.get("category") or ""),
+                    "repeatable": bool(card.get("repeatable", False)),
+                    **requirements,
                 }
             elif artifact_kind == "feature":
                 requirements = deepcopy(dict(card.get("selection_requirements") or {}))
@@ -35387,6 +36301,318 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             )
             return spell_card
 
+        def apply_ability_score_increases(
+            requirements: dict[str, Any],
+            raw_increases: Any,
+            *,
+            source: str,
+        ) -> dict[str, int]:
+            if not isinstance(raw_increases, dict) or not raw_increases:
+                raise ValueError(f"{source} ability_score_increases must be a non-empty object")
+            normalized: dict[str, int] = {}
+            allowed_abilities = {
+                str(item).casefold() for item in requirements.get("ability_options", [])
+            }
+            for ability, amount in raw_increases.items():
+                normalized_ability = str(ability).strip().casefold()
+                if normalized_ability not in sheet["abilities"]:
+                    raise ValueError(f"{source} names an unknown ability")
+                if allowed_abilities and normalized_ability not in allowed_abilities:
+                    raise ValueError(f"{source} names an ineligible ability")
+                if isinstance(amount, bool) or not isinstance(amount, int) or amount <= 0:
+                    raise ValueError(f"{source} increases must be positive integers")
+                normalized[normalized_ability] = amount
+            distribution = sorted(normalized.values(), reverse=True)
+            allowed = [
+                sorted([int(amount) for amount in option], reverse=True)
+                for option in requirements.get("allowed_distributions", [])
+            ]
+            if distribution not in allowed:
+                raise ValueError(f"{source} increases do not match an allowed distribution")
+            maximum_score = int(requirements.get("maximum_score", 20) or 20)
+            previous_constitution = int(sheet["abilities"]["constitution"]["score"])
+            for ability, amount in normalized.items():
+                old_score = int(sheet["abilities"][ability]["score"])
+                if old_score + amount > maximum_score:
+                    raise ValueError(f"{source} exceeds its maximum ability score")
+                sheet["abilities"][ability]["score"] = old_score + amount
+            updated = apply_constitution_score_hit_point_change(
+                sheet,
+                previous_score=previous_constitution,
+                new_score=int(sheet["abilities"]["constitution"]["score"]),
+                source=source,
+            )
+            sheet.clear()
+            sheet.update(updated)
+            return normalized
+
+        def materialize_feat(
+            feat_match: tuple[str, str, dict[str, Any]],
+            feat_selection: dict[str, Any],
+            *,
+            source: str,
+        ) -> dict[str, Any]:
+            feat_pack_id, feat_version, feat_artifact = feat_match
+            feat_id = str(feat_artifact["id"])
+            feat_card = deepcopy(dict(feat_artifact.get("card") or {}))
+            repeatable = bool(feat_card.get("repeatable", False))
+            if not repeatable and any(
+                str(item.get("id") or "") == feat_id
+                for item in sheet["content"]["feats"]
+            ):
+                raise ValueError("selected feat is already present and is not repeatable")
+            for prerequisite in feat_card.get("prerequisites", []):
+                prerequisite_kind = str(prerequisite.get("kind") or "")
+                if prerequisite_kind == "level_minimum":
+                    if int(sheet["progression"]["level"]) < int(
+                        prerequisite.get("minimum", 0) or 0
+                    ):
+                        raise ValueError("feat level prerequisite is not met")
+                elif prerequisite_kind == "ability_any_minimum":
+                    minimum = int(prerequisite.get("minimum", 0) or 0)
+                    if not any(
+                        int(sheet["abilities"].get(str(ability), {}).get("score", 0) or 0)
+                        >= minimum
+                        for ability in prerequisite.get("abilities", [])
+                    ):
+                        raise ValueError("feat ability prerequisite is not met")
+                elif prerequisite_kind == "ability_minimum":
+                    ability = str(prerequisite.get("ability") or "").casefold()
+                    if int(sheet["abilities"].get(ability, {}).get("score", 0) or 0) < int(
+                        prerequisite.get("minimum", 0) or 0
+                    ):
+                        raise ValueError(f"feat prerequisite is not met: {ability}")
+                elif prerequisite_kind == "feature_required":
+                    required_feature = str(prerequisite.get("feature") or "").casefold()
+                    has_feature = required_feature == source.casefold() or any(
+                        required_feature == str(item.get("name") or "").casefold()
+                        for item in sheet["content"]["features"]
+                    )
+                    if required_feature == "spellcasting":
+                        has_feature = has_feature or bool(
+                            str(sheet.get("spellcasting", {}).get("ability") or "")
+                        )
+                    if not has_feature:
+                        raise ValueError("feat feature prerequisite is not met")
+                else:
+                    raise RulesetUnavailableError(
+                        "feat prerequisite requires Agent-as-DM source review"
+                    )
+            requirements = dict(feat_card.get("selection_requirements") or {})
+            recorded_choices = deepcopy(feat_selection)
+            if requirements:
+                requirement_kind = str(requirements.get("kind") or "")
+                choice_field = str(requirements.get("field") or "")
+                unsupported = set(feat_selection) - {choice_field}
+                if unsupported:
+                    raise ValueError(
+                        f"feat selection has unsupported fields: {sorted(unsupported)}"
+                    )
+                if requirement_kind == "ability_score_increase":
+                    normalized_increases = apply_ability_score_increases(
+                        requirements,
+                        feat_selection.get(choice_field),
+                        source=f"{source}: {feat_card.get('name') or feat_id}",
+                    )
+                    recorded_choices[choice_field] = normalized_increases
+                elif requirement_kind == "magic_initiate":
+                    magic_choice = feat_selection.get(choice_field)
+                    if not isinstance(magic_choice, dict):
+                        raise ValueError("Magic Initiate choice must be a structured object")
+                    expected_fields = {
+                        "source_class",
+                        "spellcasting_ability",
+                        "cantrip_artifact_ids",
+                        "level_1_spell_artifact_id",
+                    }
+                    if set(magic_choice) != expected_fields:
+                        raise ValueError(
+                            "Magic Initiate requires source_class, spellcasting_ability, "
+                            "two cantrip_artifact_ids, and level_1_spell_artifact_id"
+                        )
+                    source_class = str(magic_choice["source_class"]).strip().title()
+                    source_options = {
+                        str(item).casefold()
+                        for item in requirements.get("source_class_options", [])
+                    }
+                    if source_class.casefold() not in source_options:
+                        raise ValueError("Magic Initiate source_class is not allowed")
+                    prior_source_classes = {
+                        str(dict(item.get("choices") or {}).get("magic_initiate", {}).get(
+                            "source_class"
+                        ) or "").casefold()
+                        for item in sheet["content"]["feats"]
+                        if str(item.get("id") or "") == feat_id
+                    }
+                    if source_class.casefold() in prior_source_classes:
+                        raise ValueError(
+                            "Magic Initiate must use a different spell list when repeated"
+                        )
+                    spellcasting_ability = str(
+                        magic_choice["spellcasting_ability"]
+                    ).casefold()
+                    ability_options = {
+                        str(item).casefold()
+                        for item in requirements.get("spellcasting_ability_options", [])
+                    }
+                    if spellcasting_ability not in ability_options:
+                        raise ValueError("Magic Initiate spellcasting ability is not allowed")
+                    cantrip_ids = _validated_distinct_choices(
+                        magic_choice["cantrip_artifact_ids"],
+                        count=int(requirements.get("cantrip_count", 2) or 2),
+                        label="Magic Initiate cantrips",
+                    )
+                    spell_ids = [
+                        *cantrip_ids,
+                        str(magic_choice["level_1_spell_artifact_id"]),
+                    ]
+                    spell_matches: list[tuple[str, str, dict[str, Any]]] = []
+                    for index, spell_id in enumerate(spell_ids):
+                        spell_match = next(
+                            (
+                                item
+                                for item in candidates
+                                if str(item[2].get("id") or "") == spell_id
+                                and item[2].get("kind") == "spell"
+                            ),
+                            None,
+                        )
+                        if spell_match is None:
+                            raise ValueError("Magic Initiate spell artifact is unavailable")
+                        spell_card = dict(spell_match[2].get("card") or {})
+                        expected_level = 0 if index < len(cantrip_ids) else 1
+                        if (
+                            source_class.casefold()
+                            not in {
+                                str(item).casefold()
+                                for item in spell_card.get("classes", [])
+                            }
+                            or int(spell_card.get("level", -1)) != expected_level
+                        ):
+                            raise ValueError(
+                                "Magic Initiate spell does not match its source list and level"
+                            )
+                        spell_matches.append(spell_match)
+                    for spell_match in spell_matches[: len(cantrip_ids)]:
+                        materialize_feature_spell(
+                            spell_match,
+                            method="known",
+                            source_key=f"Magic Initiate ({source_class})",
+                            allow_existing=True,
+                        )
+                    granted_spell = materialize_feature_spell(
+                        spell_matches[-1],
+                        method="class_prepared",
+                        source_key=f"Magic Initiate ({source_class})",
+                        allow_existing=True,
+                    )
+                    granted_spell.setdefault("access", {})["always_prepared"] = True
+                    granted_spell["access"]["prepared"] = True
+                    free_cast_key = (
+                        f"magic_initiate:{source_class.casefold()}:"
+                        f"{spell_ids[-1]}"
+                    )
+                    sheet["resources"][free_cast_key] = {
+                        "label": (
+                            f"Magic Initiate ({source_class}): "
+                            f"{granted_spell.get('name') or spell_ids[-1]}"
+                        ),
+                        "value": 1,
+                        "max": 1,
+                        "recovers_on": "long_rest",
+                        "source_key": f"Magic Initiate ({source_class})",
+                    }
+                    recorded_choices[choice_field] = deepcopy(magic_choice)
+                elif requirement_kind == "proficiency_grants":
+                    raw_proficiencies = feat_selection.get(choice_field)
+                    if not isinstance(raw_proficiencies, list) or len(
+                        raw_proficiencies
+                    ) != int(requirements.get("count", 0) or 0):
+                        raise ValueError("Skilled requires exactly three proficiency choices")
+                    skill_options = {
+                        str(item).casefold()
+                        for item in requirements.get("skill_options", [])
+                    }
+                    tool_options = {
+                        str(item).casefold(): str(item)
+                        for item in requirements.get("tool_options", [])
+                    }
+                    normalized_proficiencies: list[dict[str, str]] = []
+                    seen_proficiencies: set[tuple[str, str]] = set()
+                    for raw_proficiency in raw_proficiencies:
+                        if not isinstance(raw_proficiency, dict) or set(raw_proficiency) != {
+                            "kind",
+                            "name",
+                        }:
+                            raise ValueError(
+                                "Skilled proficiency choices require kind and name"
+                            )
+                        proficiency_kind = str(raw_proficiency["kind"]).casefold()
+                        proficiency_name = str(raw_proficiency["name"]).strip()
+                        key = (proficiency_kind, proficiency_name.casefold())
+                        if key in seen_proficiencies:
+                            raise ValueError("Skilled proficiency choices must be distinct")
+                        seen_proficiencies.add(key)
+                        if proficiency_kind == "skill":
+                            skill_key = proficiency_name.casefold()
+                            if skill_key not in skill_options or skill_key not in sheet["skills"]:
+                                raise ValueError("Skilled names an unavailable skill")
+                            if sheet["skills"][skill_key]["proficiency"] != "none":
+                                raise ValueError("Skilled skill is already proficient")
+                            sheet["skills"][skill_key]["proficiency"] = "proficient"
+                            normalized_name = skill_key
+                        elif proficiency_kind == "tool":
+                            if proficiency_name.casefold() not in tool_options:
+                                raise ValueError("Skilled names an unavailable tool")
+                            normalized_name = tool_options[proficiency_name.casefold()]
+                            if normalized_name.casefold() in {
+                                str(item).casefold()
+                                for item in sheet["traits"]["proficiencies"]["tools"]
+                            }:
+                                raise ValueError("Skilled tool is already proficient")
+                            sheet["traits"]["proficiencies"]["tools"].append(
+                                normalized_name
+                            )
+                        else:
+                            raise ValueError("Skilled choice kind must be skill or tool")
+                        normalized_proficiencies.append(
+                            {"kind": proficiency_kind, "name": normalized_name}
+                        )
+                    recorded_choices[choice_field] = normalized_proficiencies
+                else:
+                    raise RulesetUnavailableError(
+                        "feat selection requirements are not executable"
+                    )
+            elif feat_selection:
+                raise ValueError("selected feat does not accept structured choices")
+            for metadata_key in (
+                "category",
+                "prerequisites",
+                "repeatable",
+                "selection_requirements",
+            ):
+                feat_card.pop(metadata_key, None)
+            if recorded_choices:
+                feat_card["choices"] = {
+                    **dict(feat_card.get("choices") or {}),
+                    **recorded_choices,
+                    "grant_source": source,
+                }
+            else:
+                feat_card["choices"] = {
+                    **dict(feat_card.get("choices") or {}),
+                    "grant_source": source,
+                }
+            feat_card.update(
+                id=feat_id,
+                pack_id=feat_pack_id,
+                pack_version=feat_version,
+                rule_refs=list(feat_artifact.get("rule_refs") or []),
+                mechanic_refs=list(feat_artifact.get("mechanic_refs") or []),
+            )
+            sheet["content"]["feats"].append(feat_card)
+            return feat_card
+
         if kind == "spell":
             if any(item.get("id") == artifact_id for item in sheet["content"]["spells"]):
                 raise ValueError("content spell is already present")
@@ -35468,24 +36694,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             card.update(provenance)
             sheet["content"]["spells"].append(card)
         elif kind == "feat":
-            if any(item.get("id") == artifact_id for item in sheet["content"]["feats"]):
-                raise ValueError("content feat is already present")
-            for prerequisite in card.get("prerequisites", []):
-                if prerequisite.get("kind") != "ability_minimum":
-                    ruling_kind = str(prerequisite.get("ruling_kind") or "source_or_scene_fact")
-                    return {
-                        **_ruling_status("pending_ruling", ruling_kind),
-                        "reason": "feat has a prerequisite that needs Agent-as-DM review",
-                    }
-                ability = str(prerequisite.get("ability") or "")
-                score = int(sheet.get("abilities", {}).get(ability, {}).get("score", 0) or 0)
-                if score < int(prerequisite.get("minimum", 0) or 0):
-                    raise ValueError(f"feat prerequisite is not met: {ability}")
-            # Eligibility is validated against the catalog card, but the actor
-            # feature schema stores the selected feat and exact pack provenance.
-            card.pop("prerequisites", None)
-            card.update(provenance)
-            sheet["content"]["feats"].append(card)
+            materialize_feat(
+                match,
+                selection,
+                source="direct feat selection",
+            )
         elif kind == "subclass":
             classes = list(sheet["progression"]["classes"])
             if not classes:
@@ -35608,6 +36821,38 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 }
             if len({item.casefold() for item in selected_languages}) != len(selected_languages):
                 raise ValueError("background language choices must be distinct")
+            ability_options = [
+                str(item).casefold()
+                for item in requirements.get("ability_score_options", [])
+            ]
+            selected_ability_increases: dict[str, int] = {}
+            if ability_options:
+                selected_ability_increases = apply_ability_score_increases(
+                    {
+                        "ability_options": ability_options,
+                        "allowed_distributions": list(
+                            requirements.get("allowed_ability_score_distributions") or []
+                        ),
+                        "maximum_score": int(
+                            requirements.get("maximum_ability_score", 20) or 20
+                        ),
+                    },
+                    selection.get("ability_score_increases"),
+                    source=f"{base_background} background",
+                )
+            tool_choice_count = int(requirements.get("tool_choice_count", 0) or 0)
+            selected_tools = _validated_distinct_choices(
+                selection.get("tools"),
+                count=tool_choice_count,
+                label="background tools",
+            )
+            tool_options = {
+                str(item).casefold(): str(item)
+                for item in requirements.get("tool_options", [])
+            }
+            if any(item.casefold() not in tool_options for item in selected_tools):
+                raise ValueError("background tool choice is not one of the allowed options")
+            selected_tools = [tool_options[item.casefold()] for item in selected_tools]
             if custom_skills_raw is None:
                 selected_skills = [
                     str(item).casefold() for item in card.get("skill_proficiencies", [])
@@ -35643,31 +36888,137 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                             "already granted by another source: " + ", ".join(duplicate_skills)
                         ),
                     }
-            equipment_item_ids_raw = selection.get("equipment_item_ids", [])
-            if not isinstance(equipment_item_ids_raw, list):
-                raise ValueError("background equipment_item_ids must be an array")
-            equipment_item_ids = [str(item).strip() for item in equipment_item_ids_raw]
-            if any(not item for item in equipment_item_ids):
-                raise ValueError("background equipment item ids must not be empty")
-            if len(equipment_item_ids) != len(set(equipment_item_ids)):
-                raise ValueError("background equipment item ids must be distinct")
-            inventory_item_ids = {str(item["id"]) for item in sheet["inventory"]["items"]}
-            missing_equipment = [
-                item_id for item_id in equipment_item_ids if item_id not in inventory_item_ids
-            ]
-            if missing_equipment:
-                raise ValueError(
-                    "background equipment references unknown inventory items: "
-                    + ", ".join(missing_equipment)
-                )
+            equipment_packages = dict(requirements.get("equipment_packages") or {})
+            selected_equipment_package = str(
+                selection.get("equipment_package") or ""
+            ).strip().upper()
+            equipment_item_ids: list[str] = []
+            if equipment_packages:
+                if not selected_equipment_package:
+                    return {
+                        "status": "pending_choice",
+                        "reason": "background requires equipment package A or B",
+                    }
+                package = equipment_packages.get(selected_equipment_package)
+                if not isinstance(package, dict):
+                    raise ValueError("background equipment_package is not A or B")
+                if selection.get("equipment_item_ids") not in (None, []):
+                    raise ValueError(
+                        "structured background equipment cannot use caller-supplied item ids"
+                    )
+                raw_items = package.get("items") or []
+                if not isinstance(raw_items, list):
+                    raise RulesetUnavailableError(
+                        "background equipment package items are not executable"
+                    )
+                for raw_item in raw_items:
+                    if not isinstance(raw_item, dict):
+                        raise RulesetUnavailableError(
+                            "background equipment package item is not structured"
+                        )
+                    if raw_item.get("selected_tool") is True:
+                        if len(selected_tools) != 1:
+                            raise RulesetUnavailableError(
+                                "background equipment package requires its selected tool"
+                            )
+                        item_match = next(
+                            (
+                                item
+                                for item in candidates
+                                if item[2].get("kind") == "item"
+                                and str(
+                                    dict(item[2].get("card") or {}).get("name") or ""
+                                ).casefold()
+                                == selected_tools[0].casefold()
+                            ),
+                            None,
+                        )
+                    else:
+                        requested_item_id = str(raw_item.get("artifact_id") or "")
+                        item_match = next(
+                            (
+                                item
+                                for item in candidates
+                                if item[2].get("kind") == "item"
+                                and str(item[2].get("id") or "") == requested_item_id
+                            ),
+                            None,
+                        )
+                    if item_match is None:
+                        raise RulesetUnavailableError(
+                            "background equipment item is absent from the active catalog"
+                        )
+                    item_artifact = item_match[2]
+                    inventory_template = deepcopy(
+                        dict(dict(item_artifact.get("card") or {}).get("inventory_template") or {})
+                    )
+                    if not inventory_template:
+                        raise RulesetUnavailableError(
+                            "background equipment item has no executable inventory template"
+                        )
+                    quantity = raw_item.get("quantity", 1)
+                    if isinstance(quantity, bool) or not isinstance(quantity, int) or quantity < 1:
+                        raise RulesetUnavailableError(
+                            "background equipment quantity is invalid"
+                        )
+                    inventory_template["quantity"] = quantity
+                    display_name = str(raw_item.get("display_name") or "").strip()
+                    if display_name:
+                        inventory_template["name"] = display_name
+                    sheet, item_id = add_inventory_item(sheet, inventory_template)
+                    equipment_item_ids.append(item_id)
+                wallet = package.get("wallet") or {}
+                if not isinstance(wallet, dict):
+                    raise RulesetUnavailableError(
+                        "background equipment package wallet is not executable"
+                    )
+                for denomination, amount in wallet.items():
+                    normalized_denomination = str(denomination).casefold()
+                    if normalized_denomination not in DENOMINATIONS:
+                        raise RulesetUnavailableError(
+                            "background equipment package has an unknown denomination"
+                        )
+                    if isinstance(amount, bool) or not isinstance(amount, int) or amount < 0:
+                        raise RulesetUnavailableError(
+                            "background equipment package currency is invalid"
+                        )
+                    sheet = adjust_wallet(sheet, normalized_denomination, amount)
+            else:
+                equipment_item_ids_raw = selection.get("equipment_item_ids", [])
+                if not isinstance(equipment_item_ids_raw, list):
+                    raise ValueError("background equipment_item_ids must be an array")
+                equipment_item_ids = [str(item).strip() for item in equipment_item_ids_raw]
+                if any(not item for item in equipment_item_ids):
+                    raise ValueError("background equipment item ids must not be empty")
+                if len(equipment_item_ids) != len(set(equipment_item_ids)):
+                    raise ValueError("background equipment item ids must be distinct")
+                inventory_item_ids = {
+                    str(item["id"]) for item in sheet["inventory"]["items"]
+                }
+                missing_equipment = [
+                    item_id
+                    for item_id in equipment_item_ids
+                    if item_id not in inventory_item_ids
+                ]
+                if missing_equipment:
+                    raise ValueError(
+                        "background equipment references unknown inventory items: "
+                        + ", ".join(missing_equipment)
+                    )
             sheet["progression"]["background"] = selected_background
             grants["languages"] = selected_languages
+            grants["tools"] = list(
+                dict.fromkeys([*list(grants.get("tools") or []), *selected_tools])
+            )
             grants["equipment_item_ids"] = equipment_item_ids
             grants["choices"] = {
                 **requirements,
                 "base_background": base_background,
                 "customized": bool(custom_name),
                 "selected_skills": selected_skills,
+                "ability_score_increases": selected_ability_increases,
+                "selected_tools": selected_tools,
+                "selected_equipment_package": selected_equipment_package,
             }
             sheet["progression"]["background_grants"] = {
                 **sheet["progression"]["background_grants"],
@@ -35676,10 +37027,63 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             sheet["traits"]["languages"] = list(
                 dict.fromkeys([*sheet["traits"]["languages"], *selected_languages])
             )
+            sheet["traits"]["proficiencies"]["tools"] = list(
+                dict.fromkeys(
+                    [
+                        *sheet["traits"]["proficiencies"]["tools"],
+                        *list(grants.get("tools") or []),
+                    ]
+                )
+            )
             for skill_key in selected_skills:
                 if skill_key not in sheet["skills"]:
                     raise ValueError(f"background references an unknown skill: {skill_key}")
                 sheet["skills"][skill_key]["proficiency"] = "proficient"
+            origin_feat_name = str(requirements.get("origin_feat_name") or "")
+            if origin_feat_name:
+                origin_feat_match = next(
+                    (
+                        item
+                        for item in candidates
+                        if item[2].get("kind") == "feat"
+                        and str(dict(item[2].get("card") or {}).get("name") or "").casefold()
+                        == origin_feat_name.casefold()
+                    ),
+                    None,
+                )
+                if origin_feat_match is None:
+                    raise RulesetUnavailableError(
+                        "background origin feat is absent from the active catalog"
+                    )
+                origin_feat_selection = selection.get("origin_feat_selection") or {}
+                if not isinstance(origin_feat_selection, dict):
+                    raise ValueError("background origin_feat_selection must be an object")
+                if origin_feat_name == "Magic Initiate":
+                    origin_preset = dict(requirements.get("origin_feat_preset") or {})
+                    if not str(origin_preset.get("source_class") or "").strip():
+                        raise RulesetUnavailableError(
+                            "background Magic Initiate is missing its source class"
+                        )
+                    materialize_feat(
+                        origin_feat_match,
+                        {
+                            "magic_initiate": {
+                                **origin_preset,
+                                **origin_feat_selection,
+                            }
+                        },
+                        source=f"{base_background} background",
+                    )
+                else:
+                    if origin_feat_selection:
+                        raise ValueError(
+                            "this background origin feat does not accept a selection"
+                        )
+                    materialize_feat(
+                        origin_feat_match,
+                        {},
+                        source=f"{base_background} background",
+                    )
         elif kind == "species":
             selected_species = str(card.get("name") or artifact_id)
             constitution_score_before = int(sheet["abilities"]["constitution"]["score"])
@@ -36062,11 +37466,19 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                                 "feature ability_score_increases must be a non-empty object"
                             )
                         normalized_increases: dict[str, int] = {}
+                        ability_options = {
+                            str(item).casefold()
+                            for item in requirements.get("ability_options", [])
+                        }
                         for ability, amount in selected_increases.items():
                             normalized_ability = str(ability).strip().casefold()
                             if normalized_ability not in sheet["abilities"]:
                                 raise ValueError(
                                     "feature ability score increase names an unknown ability"
+                                )
+                            if ability_options and normalized_ability not in ability_options:
+                                raise ValueError(
+                                    "feature ability score increase names an ineligible ability"
                                 )
                             if (
                                 isinstance(amount, bool)
@@ -36192,6 +37604,335 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                                     prior_enemies.add(prior_type)
                         if normalized_enemy in prior_enemies:
                             raise ValueError("favored enemy choice was already selected")
+                    elif requirements.get("kind") == "eldritch_invocations_2024":
+                        raw_invocations = selection.get(choice_field)
+                        required_count = int(requirements.get("count", 0) or 0)
+                        if not isinstance(raw_invocations, list) or len(
+                            raw_invocations
+                        ) != required_count:
+                            raise ValueError(
+                                f"Eldritch Invocations requires exactly {required_count} choices"
+                            )
+                        option_names = {
+                            str(item).casefold(): str(item)
+                            for item in requirements.get("options", [])
+                        }
+                        option_ids = {
+                            str(key): str(value)
+                            for key, value in dict(
+                                requirements.get("option_artifact_ids") or {}
+                            ).items()
+                        }
+                        repeatable_options = {
+                            str(item).casefold()
+                            for item in requirements.get("repeatable_options", [])
+                        }
+                        prerequisite_map = dict(
+                            requirements.get("option_prerequisites") or {}
+                        )
+                        existing_invocations = [
+                            item
+                            for item in sheet["content"]["features"]
+                            if str(item.get("source_key") or "") == "Eldritch Invocation"
+                        ]
+                        selected_keys: set[tuple[str, str]] = set()
+                        normalized_invocations: list[dict[str, Any]] = []
+                        batch_invocation_names = {
+                            str(item.get("option") or "").casefold()
+                            for item in raw_invocations
+                            if isinstance(item, dict)
+                        }
+                        at_will_spells = {
+                            "Armor of Shadows": "Mage Armor",
+                            "Ascendant Step": "Levitate",
+                            "Mask of Many Faces": "Disguise Self",
+                            "Master of Myriad Forms": "Alter Self",
+                            "Misty Visions": "Silent Image",
+                            "Otherworldly Leap": "Jump",
+                            "Pact of the Chain": "Find Familiar",
+                            "Visions of Distant Realms": "Arcane Eye",
+                            "Whispers of the Grave": "Speak with Dead",
+                        }
+                        for raw_invocation in raw_invocations:
+                            if (
+                                not isinstance(raw_invocation, dict)
+                                or "option" not in raw_invocation
+                            ):
+                                raise ValueError(
+                                    "each Eldritch Invocation choice requires option"
+                                )
+                            unsupported_invocation_fields = set(raw_invocation) - {
+                                "option",
+                                "target_artifact_id",
+                                "option_selection",
+                            }
+                            if unsupported_invocation_fields:
+                                raise ValueError(
+                                    "Eldritch Invocation choice has unsupported fields: "
+                                    f"{sorted(unsupported_invocation_fields)}"
+                                )
+                            option_key = str(raw_invocation["option"]).casefold()
+                            if option_key not in option_names:
+                                raise ValueError("Eldritch Invocation option is unavailable")
+                            option = option_names[option_key]
+                            prerequisite = dict(prerequisite_map.get(option) or {})
+                            if target is None or int(target.get("level", 0) or 0) < int(
+                                prerequisite.get("minimum_level", 1) or 1
+                            ):
+                                raise ValueError(
+                                    "Eldritch Invocation level prerequisite is not met"
+                                )
+                            required_invocation = str(
+                                prerequisite.get("required_invocation") or ""
+                            ).casefold()
+                            known_invocation_names = {
+                                str(item.get("name") or "").casefold()
+                                for item in [*existing_invocations]
+                            } | batch_invocation_names | {
+                                str(item.get("option") or "").casefold()
+                                for item in normalized_invocations
+                            }
+                            if (
+                                required_invocation
+                                and required_invocation not in known_invocation_names
+                            ):
+                                raise ValueError(
+                                    "Eldritch Invocation prerequisite invocation is not known"
+                                )
+                            target_artifact_id = str(
+                                raw_invocation.get("target_artifact_id") or ""
+                            )
+                            repeatable = option_key in repeatable_options
+                            if repeatable and not target_artifact_id:
+                                raise ValueError(
+                                    "repeatable Eldritch Invocation requires target_artifact_id"
+                                )
+                            if not repeatable and target_artifact_id:
+                                raise ValueError(
+                                    "non-repeatable Eldritch Invocation has no target artifact"
+                                )
+                            selection_key = (option_key, target_artifact_id)
+                            prior_keys = {
+                                (
+                                    str(item.get("name") or "").casefold(),
+                                    str(dict(item.get("choices") or {}).get(
+                                        "target_artifact_id"
+                                    ) or ""),
+                                )
+                                for item in existing_invocations
+                            }
+                            if selection_key in selected_keys or selection_key in prior_keys:
+                                raise ValueError("Eldritch Invocation choice is already known")
+                            if not repeatable and any(
+                                option_key == key[0] for key in prior_keys | selected_keys
+                            ):
+                                raise ValueError(
+                                    "non-repeatable Eldritch Invocation is already known"
+                                )
+                            option_selection = raw_invocation.get("option_selection") or {}
+                            if not isinstance(option_selection, dict):
+                                raise ValueError(
+                                    "Eldritch Invocation option_selection must be an object"
+                                )
+                            if option == "Lessons of the First Ones":
+                                feat_match = next(
+                                    (
+                                        item
+                                        for item in candidates
+                                        if item[2].get("kind") == "feat"
+                                        and str(item[2].get("id") or "")
+                                        == target_artifact_id
+                                    ),
+                                    None,
+                                )
+                                if (
+                                    feat_match is None
+                                    or str(
+                                        dict(feat_match[2].get("card") or {}).get(
+                                            "category"
+                                        )
+                                        or ""
+                                    ).casefold()
+                                    != "origin"
+                                ):
+                                    raise ValueError(
+                                        "Lessons of the First Ones requires an Origin feat"
+                                    )
+                                materialize_feat(
+                                    feat_match,
+                                    option_selection,
+                                    source="Lessons of the First Ones",
+                                )
+                            elif repeatable:
+                                if option_selection:
+                                    raise ValueError(
+                                        "targeted blast invocation has no option_selection"
+                                    )
+                                spell_match = next(
+                                    (
+                                        item
+                                        for item in candidates
+                                        if item[2].get("kind") == "spell"
+                                        and str(item[2].get("id") or "")
+                                        == target_artifact_id
+                                    ),
+                                    None,
+                                )
+                                if spell_match is None:
+                                    raise ValueError(
+                                        "targeted Eldritch Invocation spell is unavailable"
+                                    )
+                                spell_card = dict(spell_match[2].get("card") or {})
+                                actor_spell = next(
+                                    (
+                                        item
+                                        for item in sheet["content"]["spells"]
+                                        if str(item.get("id") or "") == target_artifact_id
+                                    ),
+                                    None,
+                                )
+                                if (
+                                    int(spell_card.get("level", -1)) != 0
+                                    or "warlock"
+                                    not in {
+                                        str(item).casefold()
+                                        for item in spell_card.get("classes", [])
+                                    }
+                                    or actor_spell is None
+                                    or not bool(dict(actor_spell.get("access") or {}).get("known"))
+                                ):
+                                    raise ValueError(
+                                        "targeted invocation requires a known Warlock cantrip"
+                                    )
+                            elif option_selection:
+                                raise ValueError(
+                                    "Eldritch Invocation option does not accept option_selection"
+                                )
+                            option_artifact_id = option_ids[option]
+                            option_match = next(
+                                item
+                                for item in candidates
+                                if str(item[2].get("id") or "") == option_artifact_id
+                            )
+                            invocation_card = deepcopy(
+                                dict(option_match[2].get("card") or {})
+                            )
+                            for metadata_key in (
+                                "class_name",
+                                "feature_subtype",
+                                "minimum_level",
+                                "prerequisite_text",
+                                "repeatable",
+                            ):
+                                invocation_card.pop(metadata_key, None)
+                            invocation_card["source_key"] = "Eldritch Invocation"
+                            invocation_card["choices"] = {
+                                "target_artifact_id": target_artifact_id,
+                                "option_selection": deepcopy(option_selection),
+                            }
+                            invocation_card.update(
+                                id=option_artifact_id,
+                                pack_id=option_match[0],
+                                pack_version=option_match[1],
+                                rule_refs=list(option_match[2].get("rule_refs") or []),
+                                mechanic_refs=list(
+                                    option_match[2].get("mechanic_refs") or []
+                                ),
+                            )
+                            sheet["content"]["features"].append(invocation_card)
+                            spell_name = at_will_spells.get(option)
+                            if spell_name:
+                                spell_match = next(
+                                    (
+                                        item
+                                        for item in candidates
+                                        if item[2].get("kind") == "spell"
+                                        and str(
+                                            dict(item[2].get("card") or {}).get("name")
+                                            or ""
+                                        ).casefold()
+                                        == spell_name.casefold()
+                                    ),
+                                    None,
+                                )
+                                if spell_match is None:
+                                    raise RulesetUnavailableError(
+                                        f"invocation spell is unavailable: {spell_name}"
+                                    )
+                                materialize_feature_spell(
+                                    spell_match,
+                                    method="eldritch_invocation",
+                                    source_key=option,
+                                    at_will=True,
+                                    allow_existing=True,
+                                )
+                            selected_keys.add(selection_key)
+                            normalized_invocations.append(
+                                {
+                                    "option": option,
+                                    "target_artifact_id": target_artifact_id,
+                                    "option_selection": deepcopy(option_selection),
+                                }
+                            )
+                        selection[choice_field] = normalized_invocations
+                    elif requirements.get("kind") == "feat_grant":
+                        raw_feat_choice = selection.get(choice_field)
+                        if not isinstance(raw_feat_choice, dict):
+                            raise ValueError("feature feat_choice must be a structured object")
+                        unsupported_feat_choice = set(raw_feat_choice) - {
+                            "artifact_id",
+                            "selection",
+                        }
+                        if unsupported_feat_choice:
+                            raise ValueError(
+                                "feature feat_choice has unsupported fields: "
+                                f"{sorted(unsupported_feat_choice)}"
+                            )
+                        feat_artifact_id = str(
+                            raw_feat_choice.get("artifact_id") or ""
+                        ).strip()
+                        feat_match = next(
+                            (
+                                item
+                                for item in candidates
+                                if str(item[2].get("id") or "") == feat_artifact_id
+                                and item[2].get("kind") == "feat"
+                            ),
+                            None,
+                        )
+                        if feat_match is None:
+                            raise ValueError("feature feat artifact is unavailable")
+                        allowed_categories = {
+                            str(item).casefold()
+                            for item in requirements.get("allowed_categories", [])
+                        }
+                        feat_category = str(
+                            dict(feat_match[2].get("card") or {}).get("category") or ""
+                        ).casefold()
+                        if allowed_categories and feat_category not in allowed_categories:
+                            raise ValueError("feature feat category is not allowed")
+                        feat_selection = raw_feat_choice.get("selection") or {}
+                        if not isinstance(feat_selection, dict):
+                            raise ValueError("feature feat_choice.selection must be an object")
+                        materialize_feat(
+                            feat_match,
+                            feat_selection,
+                            source=str(card.get("name") or artifact_id),
+                        )
+                    elif requirements.get("kind") == "language_grant":
+                        language = str(selection.get(choice_field) or "").strip()
+                        allowed_languages = {
+                            str(item).casefold()
+                            for item in requirements.get("options", [])
+                        }
+                        if not language or language.casefold() not in allowed_languages:
+                            raise ValueError("feature language is not an allowed option")
+                        known_languages = {
+                            str(item).casefold() for item in sheet["traits"]["languages"]
+                        }
+                        if language.casefold() in known_languages:
+                            raise ValueError("feature language is already known")
+                        sheet["traits"]["languages"].append(language)
                     elif requirements.get("kind") in {
                         "known_spell_grants",
                         "mystic_arcanum",
@@ -36221,6 +37962,43 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                             int(dict(item[2].get("card") or {}).get("level", 0) or 0)
                             for item in spell_matches
                         ]
+                        allowed_casting_times = {
+                            str(item).casefold()
+                            for item in requirements.get("casting_times", [])
+                        }
+                        if allowed_casting_times and any(
+                            str(
+                                dict(
+                                    dict(spell_match[2].get("card") or {}).get(
+                                        "definition"
+                                    )
+                                    or {}
+                                ).get("casting_time")
+                                or ""
+                            ).casefold()
+                            not in allowed_casting_times
+                            for spell_match in spell_matches
+                        ):
+                            raise ValueError(
+                                "feature spell does not have an allowed casting time"
+                            )
+                        allowed_schools = {
+                            str(item).casefold() for item in requirements.get("schools", [])
+                        }
+                        if allowed_schools and any(
+                            str(
+                                dict(
+                                    dict(spell_match[2].get("card") or {}).get(
+                                        "definition"
+                                    )
+                                    or {}
+                                ).get("school")
+                                or ""
+                            ).casefold()
+                            not in allowed_schools
+                            for spell_match in spell_matches
+                        ):
+                            raise ValueError("feature spell is not from an allowed school")
                         eligible_class = str(requirements.get("eligible_class") or "").casefold()
                         if eligible_class and eligible_class != "any":
                             for spell_match in spell_matches:
@@ -36233,6 +38011,22 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                                 if eligible_class not in eligible_classes:
                                     raise ValueError(
                                         "feature spell is not on the required class list"
+                                    )
+                        eligible_classes = {
+                            str(item).casefold()
+                            for item in requirements.get("eligible_classes", [])
+                        }
+                        if eligible_classes:
+                            for spell_match in spell_matches:
+                                spell_classes = {
+                                    str(item).casefold()
+                                    for item in dict(spell_match[2].get("card") or {}).get(
+                                        "classes", []
+                                    )
+                                }
+                                if not eligible_classes.intersection(spell_classes):
+                                    raise ValueError(
+                                        "feature spell is not on an eligible class list"
                                     )
                         feature_kind = str(requirements.get("kind") or "")
                         if feature_kind == "known_spell_grants":
@@ -36257,15 +38051,59 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                                 raise ValueError(
                                     "feature spell exceeds the actor's available spell level"
                                 )
+                            declared_maximum_value = requirements.get(
+                                "maximum_spell_level", 0
+                            )
+                            if declared_maximum_value == "available_slots":
+                                declared_maximum = maximum_spell_level
+                            elif isinstance(declared_maximum_value, bool) or not isinstance(
+                                declared_maximum_value, int
+                            ):
+                                raise RulesetUnavailableError(
+                                    "feature maximum spell level expression is not executable"
+                                )
+                            else:
+                                declared_maximum = declared_maximum_value
+                            if declared_maximum and any(
+                                level > declared_maximum for level in spell_levels
+                            ):
+                                raise ValueError(
+                                    "feature spell exceeds the feature's maximum spell level"
+                                )
                             source_class = str(
                                 requirements.get("source_class") or declared_class
                             ).title()
+                            grant_method = str(
+                                requirements.get("grant_method")
+                                or (
+                                    "class_prepared"
+                                    if requirements.get("always_prepared")
+                                    else "known"
+                                )
+                            )
+                            if grant_method not in {"known", "class_prepared", "spellbook"}:
+                                raise RulesetUnavailableError(
+                                    "feature spell grant method is not executable"
+                                )
                             for spell_match in spell_matches:
-                                materialize_feature_spell(
+                                spell_card = materialize_feature_spell(
                                     spell_match,
-                                    method="known",
+                                    method=grant_method,
                                     source_key=source_class,
                                 )
+                                if grant_method == "spellbook":
+                                    spell_id = str(spell_match[2]["id"])
+                                    if spell_id not in sheet["spellcasting"]["spellbook"][
+                                        "spell_ids"
+                                    ]:
+                                        sheet["spellcasting"]["spellbook"][
+                                            "spell_ids"
+                                        ].append(spell_id)
+                                if requirements.get("always_prepared"):
+                                    spell_card.setdefault("access", {})[
+                                        "always_prepared"
+                                    ] = True
+                                    spell_card["access"]["prepared"] = True
                         elif feature_kind == "mystic_arcanum":
                             required_level = int(requirements.get("spell_level", 0) or 0)
                             if spell_levels != [required_level]:
@@ -37214,7 +39052,7 @@ Useful bounded guidance:
     @mcp.tool()
     def character_check(
         campaign_id: str,
-        action: Literal["check", "group", "contest"] = "check",
+        action: Literal["check", "group", "contest", "reroll"] = "check",
         payload: dict[str, Any] | None = None,
         principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         expected_revision: int | None = None,
@@ -37223,6 +39061,34 @@ Useful bounded guidance:
     ) -> dict[str, Any]:
         """Resolve an individual, group, or contested check in the Play phase."""
         require_facade_phase(campaign_id, f"character_check({action})", PROFILE_PLAY)
+        if action == "reroll":
+            data = strict_facade_payload(
+                payload,
+                action="character_check(reroll)",
+                allowed={
+                    "actor_id",
+                    "resolution_id",
+                    "roll_index",
+                    "expected_original_roll",
+                },
+                required_names=(
+                    "actor_id",
+                    "resolution_id",
+                    "roll_index",
+                    "expected_original_roll",
+                ),
+            )
+            return character_heroic_inspiration_reroll(
+                campaign_id,
+                data["actor_id"],
+                data["resolution_id"],
+                data["roll_index"],
+                data["expected_original_roll"],
+                principal_id,
+                expected_revision,
+                branch_id,
+                idempotency_key,
+            )
         if action == "group":
             data = strict_facade_payload(
                 payload,
@@ -38023,9 +39889,14 @@ Useful bounded guidance:
                 "observation",
             ),
         )
-        content_kind = data.get("content_kind", "dnd5e_2014_statblock")
-        if content_kind != "dnd5e_2014_statblock":
-            raise ValueError("payload.content_kind must be dnd5e_2014_statblock")
+        expected_content_kind = statblock_content_kind(
+            campaign_rules_edition(campaign_id)
+        )
+        content_kind = data.get("content_kind", expected_content_kind)
+        if content_kind != expected_content_kind:
+            raise ValueError(
+                f"payload.content_kind must be {expected_content_kind}"
+            )
         return facade_result(
             action,
             module_content_review(
@@ -38413,6 +40284,13 @@ Useful bounded guidance:
                 data.get("natural_recovery"),
                 rest_activity_minutes=data.get("rest_activity_minutes"),
             )
+            sorcerous_restoration_points = data.get(
+                "sorcerous_restoration_points"
+            )
+            validate_sorcerous_restoration_choice(
+                current.sheet,
+                sorcerous_restoration_points,
+            )
             song_source_actor_id = (
                 str(data.get("song_of_rest_source_actor_id") or "").strip() or None
             )
@@ -38466,6 +40344,9 @@ Useful bounded guidance:
                 "hit_dice_spends": [{"key": key, "count": count} for key, count in hit_dice],
                 "arcane_recovery": arcane_recovery,
                 "natural_recovery": natural_recovery,
+                "sorcerous_restoration_points": (
+                    sorcerous_restoration_points
+                ),
                 "song_of_rest_source_actor_id": song_source_actor_id,
                 "song_of_rest_die": (f"1d{song_die_sides}" if song_die_sides is not None else None),
                 "attune_item_id": attune_item_id,
@@ -38765,19 +40646,28 @@ Useful bounded guidance:
                 raise ValueError("reviewed rule statblock content checksum is invalid")
             campaign = campaigns.get(campaign_id)
             source = rules.source(str(job.source_id))
-            if (
-                campaign_rules_edition(campaign.id) != "2014"
-                or str(source.get("edition") or "") != "2014"
+            campaign_edition = campaign_rules_edition(campaign.id)
+            source_edition = normalize_dnd_edition(
+                str(source.get("edition") or "")
+            )
+            if source_edition != campaign_edition or (
+                review.get("edition") is not None
+                and normalize_dnd_edition(str(review["edition"]))
+                != campaign_edition
             ):
-                raise ValueError("reviewed rule statblocks require a D&D 2014 campaign and source")
+                raise ValueError(
+                    "reviewed rule statblocks require matching campaign, source, "
+                    "and review editions"
+                )
             source_key = f"rule-review:{review_id}"
             source_rule_refs = [
                 f"rule-source:{job.source_id}",
                 f"rule-source-page:{job.source_id}:{review['page_number']}",
                 f"rule-review:{review_id}",
             ]
-            parsed = parse_2014_statblock(
+            parsed = parse_edition_statblock(
                 content,
+                edition=campaign_edition,
                 source_key=source_key,
                 rule_refs=source_rule_refs,
                 name=str(data.get("name") or "").strip() or None,
@@ -38925,13 +40815,15 @@ Useful bounded guidance:
             access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
             campaign = campaigns.get(campaign_id)
             campaign_edition = campaign_rules_edition(campaign.id)
-            if campaign_edition != "2014":
-                raise ValueError("reviewed module statblocks currently support D&D 2014 campaigns")
             review = modules.get_content_review(campaign_id, review_id)
-            if review["content_kind"] != "dnd5e_2014_statblock":
-                raise ValueError("module content review is not a D&D 2014 statblock")
-            parsed = parse_2014_statblock(
+            expected_content_kind = statblock_content_kind(campaign_edition)
+            if review["content_kind"] != expected_content_kind:
+                raise ValueError(
+                    "module content review does not match the campaign edition"
+                )
+            parsed = parse_edition_statblock(
                 review["normalized_content"],
+                edition=campaign_edition,
                 source_key=f"module-review:{review_id}",
                 rule_refs=[f"module-scene:{review['scene_id']}", f"module-review:{review_id}"],
                 name=str(data.get("name") or "").strip() or None,
@@ -39078,15 +40970,14 @@ Useful bounded guidance:
             if str(source.get("system_id") or "") != DND5E.id:
                 raise ValueError("statblock source must belong to the dnd5e rule corpus")
             campaign_edition = campaign_rules_edition(campaign.id)
-            source_edition = str(source.get("edition") or "")
+            source_edition = normalize_dnd_edition(
+                str(source.get("edition") or "")
+            )
             if source_edition != campaign_edition:
                 raise ValueError(
                     f"statblock source edition {source_edition!r} does not match "
                     f"campaign edition {campaign_edition!r}"
                 )
-            if source_edition != "2014":
-                raise ValueError("structured statblock import currently supports D&D 2014 sources")
-
             available_chunks = rules.source_chunks(source_id)
             by_chunk_id = {str(item["id"]): item for item in available_chunks}
             selected_value = data.get("chunk_ids")
@@ -39132,7 +41023,7 @@ Useful bounded guidance:
             text_layout_recovery: dict[str, Any] | None = None
             recovered_candidate: dict[str, Any] | None = None
             parsed = None
-            if source_statblock_name:
+            if source_statblock_name and source_edition == "2014":
                 try:
                     recovered_candidate = normalize_2014_statblock_candidate(
                         source_statblock_name,
@@ -39147,8 +41038,9 @@ Useful bounded guidance:
                     # card name.  Never let an earlier valid card silently
                     # satisfy a different requested identity.
                     try:
-                        identity = parse_2014_statblock(
+                        identity = parse_edition_statblock(
                             source_text,
+                            edition=source_edition,
                             source_key=f"rule-source:{source['source_key']}",
                             rule_refs=selected_chunk_ids,
                         )
@@ -39166,17 +41058,47 @@ Useful bounded guidance:
                     )
                     if canonical_identity != canonical_requested:
                         raise recovery_error
-                    parsed = parse_2014_statblock(
+                    parsed = parse_edition_statblock(
                         source_text,
+                        edition=source_edition,
                         source_key=f"rule-source:{source['source_key']}",
                         rule_refs=selected_chunk_ids,
                         name=actor_name or None,
                     )
                     recovered_candidate = None
+            elif source_statblock_name:
+                identity = parse_edition_statblock(
+                    source_text,
+                    edition=source_edition,
+                    source_key=f"rule-source:{source['source_key']}",
+                    rule_refs=selected_chunk_ids,
+                )
+                canonical_identity = re.sub(
+                    r"[^a-z0-9]",
+                    "",
+                    str(identity.name).casefold(),
+                )
+                canonical_requested = re.sub(
+                    r"[^a-z0-9]",
+                    "",
+                    source_statblock_name.casefold(),
+                )
+                if canonical_identity != canonical_requested:
+                    raise StatblockImportError(
+                        "source_statblock_name does not match the parsed 2024 card identity"
+                    )
+                parsed = parse_edition_statblock(
+                    source_text,
+                    edition=source_edition,
+                    source_key=f"rule-source:{source['source_key']}",
+                    rule_refs=selected_chunk_ids,
+                    name=actor_name or None,
+                )
             if recovered_candidate is None:
                 if parsed is None:
-                    parsed = parse_2014_statblock(
+                    parsed = parse_edition_statblock(
                         source_text,
+                        edition=source_edition,
                         source_key=f"rule-source:{source['source_key']}",
                         rule_refs=selected_chunk_ids,
                         name=actor_name or None,
@@ -39186,8 +41108,9 @@ Useful bounded guidance:
                 selected_chunks = [by_chunk_id[item] for item in recovered_chunk_ids]
                 selected_chunk_ids = recovered_chunk_ids
                 source_text = str(recovered_candidate["normalized_content"])
-                parsed = parse_2014_statblock(
+                parsed = parse_edition_statblock(
                     source_text,
+                    edition=source_edition,
                     source_key=f"rule-source:{source['source_key']}",
                     rule_refs=selected_chunk_ids,
                     name=actor_name or None,
@@ -41340,7 +43263,11 @@ Useful bounded guidance:
             return facade_result(action, replay)
         if (
             str(source_card.get("pack_id") or "")
-            in {CORE_CONTENT_PACK_ID, STANDARD_2014_CONTENT_PACK_ID}
+            in {
+                CORE_CONTENT_PACK_ID,
+                CORE_2024_CONTENT_PACK_ID,
+                STANDARD_2014_CONTENT_PACK_ID,
+            }
             or source_card_has_executable_mechanic(
                 campaign_id,
                 source_card,

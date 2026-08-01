@@ -11,7 +11,10 @@ import sagasmith_dnd_mcp.server as server_module
 from sagasmith_dnd_mcp.config import McpConfig
 from sagasmith_dnd_mcp.server import create_server
 
-CHANNEL_DIVINITY_ID = "dnd5e.content.srd2014.feature.cleric-channel-divinity"
+CHANNEL_DIVINITY_IDS = {
+    "2014": "dnd5e.content.srd2014.feature.cleric-channel-divinity",
+    "2024": "dnd5e.content.srd2024.feature.cleric-channel-divinity",
+}
 
 
 def _config(tmp_path: Path) -> McpConfig:
@@ -36,25 +39,36 @@ async def _raw(server, name: str, arguments: dict):
     return result
 
 
-def _cleric_sheet() -> dict:
+def _cleric_sheet(edition: str) -> dict:
     sheet = default_character_sheet()
-    sheet["edition"] = "2014"
-    sheet["progression"]["level"] = 2
+    sheet["edition"] = edition
+    cleric_level = 5 if edition == "2024" else 2
+    sheet["progression"]["level"] = cleric_level
     sheet["progression"]["classes"] = [
-        {"name": "Cleric", "level": 2, "subclass": "", "hit_die": 8}
+        {
+            "name": "Cleric",
+            "level": cleric_level,
+            "subclass": "",
+            "hit_die": 8,
+        }
     ]
     sheet["abilities"]["wisdom"]["score"] = 16
     sheet["spellcasting"]["ability"] = "wisdom"
     sheet["resources"]["channel_divinity"] = {
         "label": "Channel Divinity",
-        "value": 1,
-        "max": 1,
-        "recovers_on": "short_rest",
+        "value": 2 if edition == "2024" else 1,
+        "max": 2 if edition == "2024" else 1,
+        "recovers_on": "long_rest" if edition == "2024" else "short_rest",
+        **(
+            {"recovery_amounts": {"short_rest": 1, "long_rest": "all"}}
+            if edition == "2024"
+            else {}
+        ),
         "source_key": "Cleric",
     }
     sheet["content"]["features"] = [
         {
-            "id": CHANNEL_DIVINITY_ID,
+            "id": CHANNEL_DIVINITY_IDS[edition],
             "name": "Channel Divinity",
             "source_key": "Cleric",
             "description": "As an action, present your holy symbol and turn undead.",
@@ -62,22 +76,38 @@ def _cleric_sheet() -> dict:
             "resource_key": "channel_divinity",
             "activation": {"type": "action", "cost": 1, "trigger": ""},
             "scaling": [],
-            "choices": {"options": ["Turn Undead", "selected-domain option"]},
+            "choices": {
+                "options": ["Turn Undead", "selected-domain option"],
+                **({"action_kind": "magic"} if edition == "2024" else {}),
+            },
+            "mechanic_refs": ["dnd5e.core.activity.turn_undead"],
         }
     ]
+    if edition == "2024":
+        sheet["content"]["features"].append(
+            {
+                "id": "dnd5e.content.srd2024.feature.cleric-sear-undead",
+                "name": "Sear Undead",
+                "source_key": "Cleric",
+                "description": "Failed Turn Undead saves also take Radiant damage.",
+                "mechanic_refs": ["dnd5e.core.activity.sear_undead"],
+            }
+        )
     return sheet
 
 
-def _undead_sheet() -> dict:
+def _undead_sheet(edition: str) -> dict:
     sheet = default_character_sheet()
-    sheet["edition"] = "2014"
+    sheet["edition"] = edition
     sheet["progression"]["species"] = "undead"
-    sheet["combat"]["hp"] = {"value": 12, "max": 12, "temp": 0}
+    maximum = 100 if edition == "2024" else 12
+    sheet["combat"]["hp"] = {"value": maximum, "max": maximum, "temp": 0}
     return sheet
 
 
+@pytest.mark.parametrize("edition", ["2014", "2024"])
 def test_turn_undead_preflights_then_commits_all_actors_atomically(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, edition: str
 ) -> None:
     original = server_module.resolve_turn_undead_to_sheets
 
@@ -98,7 +128,7 @@ def test_turn_undead_preflights_then_commits_all_actors_atomically(
         campaign = await _call(
             server,
             "campaign_create",
-            {"name": "Turn Undead", "edition": "2014", "idempotency_key": "campaign"},
+            {"name": "Turn Undead", "edition": edition, "idempotency_key": "campaign"},
         )
         cleric = await _call(
             server,
@@ -106,7 +136,7 @@ def test_turn_undead_preflights_then_commits_all_actors_atomically(
             {
                 "campaign_id": campaign["id"],
                 "name": "Cleric",
-                "sheet": _cleric_sheet(),
+                "sheet": _cleric_sheet(edition),
                 "idempotency_key": "cleric",
             },
         )
@@ -116,7 +146,7 @@ def test_turn_undead_preflights_then_commits_all_actors_atomically(
             {
                 "campaign_id": campaign["id"],
                 "name": "Skeleton",
-                "sheet": _undead_sheet(),
+                "sheet": _undead_sheet(edition),
                 "idempotency_key": "undead",
             },
         )
@@ -166,15 +196,21 @@ def test_turn_undead_preflights_then_commits_all_actors_atomically(
                 {
                     "campaign_id": campaign["id"],
                     "actor_id": cleric["id"],
-                    "activity_id": CHANNEL_DIVINITY_ID,
-                    "declaration": {"option": "turn_undead", "perception": []},
+                    "activity_id": CHANNEL_DIVINITY_IDS[edition],
+                    "declaration": {
+                        "option": "turn_undead",
+                        "perception": [],
+                        **({"sear_undead": True} if edition == "2024" else {}),
+                    },
                     "expected_revision": started["campaign_revision"],
                     "idempotency_key": "invalid",
                 },
             )
 
         unchanged = await _call(server, "character_get", {"character_id": cleric["id"]})
-        assert unchanged["sheet"]["resources"]["channel_divinity"]["value"] == 1
+        assert unchanged["sheet"]["resources"]["channel_divinity"]["value"] == (
+            2 if edition == "2024" else 1
+        )
         current = started["combat"]["combatants"][started["combat"]["turn_index"]]
         assert current["turn_budget"]["main_action"] == 1
 
@@ -184,9 +220,10 @@ def test_turn_undead_preflights_then_commits_all_actors_atomically(
             {
                 "campaign_id": campaign["id"],
                 "actor_id": cleric["id"],
-                "activity_id": CHANNEL_DIVINITY_ID,
+                "activity_id": CHANNEL_DIVINITY_IDS[edition],
                 "declaration": {
                     "option": "turn_undead",
+                    **({"sear_undead": True} if edition == "2024" else {}),
                     "perception": [
                         {"target_id": undead["id"], "can_see_or_hear": True}
                     ],
@@ -200,8 +237,20 @@ def test_turn_undead_preflights_then_commits_all_actors_atomically(
         assert resolved["result"]["requires_ruling"] is False
         effect = resolved["result"]["core_effect"]
         assert effect["kind"] == "turn_undead"
-        assert effect["save_dc"] == 13
+        assert effect["save_dc"] == (14 if edition == "2024" else 13)
         assert effect["targets"][0]["turned"] is True
+        assert (effect["sear_undead"] is not None) is (edition == "2024")
+        if edition == "2024":
+            assert effect["targets"][0]["sear_damage"]["applied_amount"] > 0
+            assert any(
+                item["mechanic_id"] == "dnd5e.core.activity.sear_undead"
+                for item in resolved["result"]["rule_receipts"]
+            )
+        assert len(effect["dependencies"]) == (1 if edition == "2024" else 0)
+        if edition == "2024":
+            assert effect["dependencies"][0]["dependency"] == (
+                "source_actor_capable"
+            )
         assert any(
             item["mechanic_id"] == "dnd5e.core.activity.turn_undead"
             for item in resolved["result"]["rule_receipts"]
@@ -222,8 +271,12 @@ def test_turn_undead_preflights_then_commits_all_actors_atomically(
         undead_after = await _call(
             server, "character_get", {"character_id": undead["id"]}
         )
-        assert cleric_after["sheet"]["resources"]["channel_divinity"]["value"] == 0
-        assert "turned" in undead_after["sheet"]["conditions"]
+        assert cleric_after["sheet"]["resources"]["channel_divinity"]["value"] == (
+            1 if edition == "2024" else 0
+        )
+        assert set(undead_after["sheet"]["conditions"]) == (
+            {"turned"} if edition == "2014" else {"frightened", "incapacitated"}
+        )
         assert undead_after["sheet"]["effects"][-1]["kind"] == "turn_undead"
 
     asyncio.run(exercise())

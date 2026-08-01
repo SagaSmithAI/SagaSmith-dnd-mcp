@@ -194,6 +194,7 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
                     "rest_schedule",
                     "rest_type",
                     "song_of_rest_source_actor_id",
+                    "sorcerous_restoration_points",
                 ),
                 ("character_id", "duration_minutes", "rest_type"),
             )
@@ -925,6 +926,22 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
         ],
     },
     "character_check": {
+        "reroll": [
+            _variant(
+                (
+                    "actor_id",
+                    "expected_original_roll",
+                    "resolution_id",
+                    "roll_index",
+                ),
+                (
+                    "actor_id",
+                    "resolution_id",
+                    "roll_index",
+                    "expected_original_roll",
+                ),
+            )
+        ],
         "check": [
             _variant(
                 (
