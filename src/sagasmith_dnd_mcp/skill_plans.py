@@ -20,6 +20,13 @@ RESULT_OPERATION_PHASES = {
     "combat_start:started": frozenset({"combat"}),
     "combat_end:closed": frozenset({"play"}),
     "continuity_context:npc_turn": frozenset({"play", "combat"}),
+    "continuity_context:actor_turn": frozenset({"play", "combat"}),
+    "continuity_context:audience_render": frozenset({"play", "combat"}),
+    "continuity_context:faction_turn": frozenset({"play", "combat"}),
+    "continuity_context:source_interpretation": frozenset(
+        {"lobby", "play", "combat"}
+    ),
+    "continuity_context:bounded_ruling": frozenset({"lobby", "play", "combat"}),
 }
 RESULT_OPERATION_IDS = frozenset(RESULT_OPERATION_PHASES)
 

@@ -47,11 +47,13 @@ from sagasmith_core import (
     RuleReceiptService,
     RuleService,
     SnapshotService,
+    SubjectContextService,
     default_local_principal,
     extract_pdf_page_text,
     file_sha256,
     normalize_document,
     render_pdf_page,
+    validate_subject_context_fact,
 )
 from sagasmith_core.access import CAMPAIGN_DM_ROLES, LOCAL_SYSTEM_PRINCIPAL_ID
 from sagasmith_core.context_anchors import normalize_context_entity_ref
@@ -87,7 +89,10 @@ from sagasmith_dnd.activities import (
     consume_activity,
     recharge_activities_at_turn_start,
 )
-from sagasmith_dnd.actor_types import NON_PLAYER_CHARACTER_TYPES
+from sagasmith_dnd.actor_types import (
+    NON_PLAYER_CHARACTER_TYPES,
+    require_agent_decidable_character_type,
+)
 from sagasmith_dnd.campaign_state import (
     merge_reviewed_campaign_settings,
     merge_reviewed_campaign_state,
@@ -389,6 +394,13 @@ from sagasmith_dnd.vocabulary import (
 )
 from sqlalchemy.exc import NoResultFound
 
+from sagasmith_dnd_mcp.bounded_evaluations import (
+    BOUNDED_EVALUATION_PURPOSES,
+    BOUNDED_EVALUATION_SCHEMA_VERSION,
+    BOUNDED_OUTPUT_CONTRACTS,
+    normalize_bounded_proposal,
+    validate_bounded_proposal_refs,
+)
 from sagasmith_dnd_mcp.config import McpConfig
 from sagasmith_dnd_mcp.exposure import Exposure, ExposureError, ExposureRegistry
 from sagasmith_dnd_mcp.facade_contracts import (
@@ -1247,6 +1259,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     import_jobs = ImportJobService(storage.database)
     default_local_principal(storage.database)
     memories = MemoryService(storage.database)
+    subject_contexts = SubjectContextService(storage.database)
     modules = ModuleService(storage.database)
     rules = RuleService(storage.database)
     rule_packs = RulePackService(storage.database)
@@ -2177,6 +2190,48 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     context_receipt_secret = uuid4().bytes + uuid4().bytes
     context_receipt_ttl_ns = 60 * 60 * 1_000_000_000
 
+    def receipt_principal_fingerprint(principal_id: str) -> str:
+        return hashlib.sha256(principal_id.encode("utf-8")).hexdigest()
+
+    def host_context_binding(
+        *,
+        campaign_id: str,
+        branch_id: str,
+        principal_id: str,
+        role: str,
+        audience: str,
+    ) -> dict[str, str]:
+        """Return the exact host replay boundary without exposing principal identity."""
+
+        principal_hash = receipt_principal_fingerprint(principal_id)
+        value = {
+            "domain": "sagasmith-dnd",
+            "campaign_id": campaign_id,
+            "principal_fingerprint": principal_hash,
+            "role": role,
+            "audience": audience,
+            "branch_id": branch_id,
+            "memory_policy": "domain_authoritative",
+        }
+        return {
+            **value,
+            "context_epoch": hashlib.sha256(
+                canonical_json(
+                    {
+                        key: value[key]
+                        for key in (
+                            "domain",
+                            "campaign_id",
+                            "principal_fingerprint",
+                            "role",
+                            "audience",
+                            "branch_id",
+                        )
+                    }
+                ).encode("utf-8")
+            ).hexdigest(),
+        }
+
     def managed_module_source_digests(value: Any) -> set[str]:
         """Collect stable identities for exact managed module citations."""
 
@@ -2250,7 +2305,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "campaign_id": campaign_id,
             "branch_id": branch_id,
             "campaign_revision": campaigns.get(campaign_id).revision,
-            "principal_id": principal_id,
+            "principal_fingerprint": receipt_principal_fingerprint(principal_id),
             "audience": audience,
             "actor_id": actor_id,
             "scope_id": scope_id,
@@ -2301,7 +2356,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             raise ValueError("payload.context_receipt belongs to another campaign")
         if payload.get("branch_id") != branch_id:
             raise ValueError("payload.context_receipt belongs to another branch")
-        if payload.get("principal_id") != principal_id:
+        if payload.get("principal_fingerprint") != receipt_principal_fingerprint(
+            principal_id
+        ):
             raise ValueError("payload.context_receipt belongs to another principal")
         if int(payload.get("expires_monotonic_ns") or 0) < time.monotonic_ns():
             raise ValueError("payload.context_receipt expired; read continuity_context again")
@@ -2498,7 +2555,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "head_snapshot_id": branch.head_snapshot_id,
             "campaign_revision": campaigns.get(campaign_id).revision,
             "latest_event_sequence": npc_turn_latest_event_sequence(campaign_id, branch.id),
-            "principal_id": principal_id,
+            "principal_fingerprint": receipt_principal_fingerprint(principal_id),
             "actor_id": actor_id,
             "actor_revision": actor_revision,
             "interlocutor_actor_ids": list(interlocutor_actor_ids),
@@ -2556,7 +2613,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             raise ValueError("npc_turn.bundle_receipt belongs to another campaign")
         if payload.get("branch_id") != branch_id:
             raise ValueError("npc_turn.bundle_receipt belongs to another branch")
-        if payload.get("principal_id") != principal_id:
+        if payload.get("principal_fingerprint") != receipt_principal_fingerprint(
+            principal_id
+        ):
             raise ValueError("npc_turn.bundle_receipt belongs to another principal")
         required = set(required_source_digests or set())
         received = {str(item) for item in payload.get("module_source_ref_digests") or []}
@@ -2619,6 +2678,513 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if dict(payload.get("knowledge_heads") or {}) != knowledge_heads:
             raise ValueError("npc_turn.bundle_receipt is stale at ActorKnowledge")
         return payload
+
+    bounded_evaluation_receipt_ttl_ns = 10 * 60 * 1_000_000_000
+
+    def bounded_memory_epoch_digest(campaign_id: str, branch_id: str) -> str:
+        heads = [
+            (str(item.id), str(item.revision_id))
+            for item in memories.list(
+                campaign_id,
+                branch_id=branch_id,
+                include_inactive=True,
+            )
+        ]
+        return hashlib.sha256(canonical_json(sorted(heads)).encode("utf-8")).hexdigest()
+
+    def bounded_knowledge_epoch_digest(
+        campaign_id: str,
+        branch_id: str,
+        actor_ids: list[str],
+    ) -> str:
+        heads = [
+            (actor_id, str(item.id), str(item.revision_id))
+            for actor_id in sorted(set(actor_ids))
+            for item in knowledge.list(
+                campaign_id,
+                actor_id=actor_id,
+                branch_id=branch_id,
+                include_inactive=True,
+            )
+        ]
+        return hashlib.sha256(canonical_json(sorted(heads)).encode("utf-8")).hexdigest()
+
+    def issue_bounded_evaluation_receipt(
+        *,
+        bundle: dict[str, Any],
+        campaign_id: str,
+        branch_id: str,
+        principal_id: str,
+        purpose: str,
+        subject_ref: str,
+        allowed_basis_refs: list[str],
+        allowed_claim_basis_refs: list[str],
+        allowed_target_refs: list[str],
+        context_heads: dict[str, str],
+        knowledge_heads: dict[str, str],
+        knowledge_actor_ids: list[str],
+        actor_revision: int | None,
+        scene: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Sign a purpose, principal, branch, and revision-bound semantic bundle."""
+
+        issued_ns = time.monotonic_ns()
+        branch = branches.get(campaign_id, branch_id)
+        payload = {
+            "schema_version": 1,
+            "purpose": purpose,
+            "bundle_id": str(bundle["bundle_id"]),
+            "bundle_digest": hashlib.sha256(
+                canonical_json(bundle).encode("utf-8")
+            ).hexdigest(),
+            "campaign_id": campaign_id,
+            "branch_id": branch.id,
+            "head_snapshot_id": branch.head_snapshot_id,
+            "campaign_revision": campaigns.get(campaign_id).revision,
+            "latest_event_sequence": npc_turn_latest_event_sequence(
+                campaign_id, branch.id
+            ),
+            "principal_fingerprint": receipt_principal_fingerprint(principal_id),
+            "subject_ref": subject_ref,
+            "allowed_basis_refs": sorted(allowed_basis_refs),
+            "allowed_claim_basis_refs": sorted(allowed_claim_basis_refs),
+            "allowed_target_refs": sorted(allowed_target_refs),
+            "question_digest": hashlib.sha256(
+                str(dict(bundle.get("context") or {}).get("question") or "")
+                .strip()
+                .encode("utf-8")
+            ).hexdigest(),
+            "context_heads": dict(sorted(context_heads.items())),
+            "knowledge_heads": dict(sorted(knowledge_heads.items())),
+            "memory_epoch_digest": bounded_memory_epoch_digest(campaign_id, branch.id),
+            "knowledge_actor_ids": sorted(set(knowledge_actor_ids)),
+            "knowledge_epoch_digest": bounded_knowledge_epoch_digest(
+                campaign_id,
+                branch.id,
+                knowledge_actor_ids,
+            ),
+            "actor_revision": actor_revision,
+            "scene_id": str((scene or {}).get("scene_id") or ""),
+            "scene_scope_id": str((scene or {}).get("scope_id") or "party"),
+            "scene_state_version": int((scene or {}).get("state_version") or 0),
+            "issued_monotonic_ns": issued_ns,
+            "expires_monotonic_ns": issued_ns + bounded_evaluation_receipt_ttl_ns,
+        }
+        signature = hmac.new(
+            context_receipt_secret,
+            canonical_json(payload).encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+        return {**payload, "signature": signature}
+
+    def verify_bounded_evaluation_receipt(
+        receipt: Any,
+        *,
+        campaign_id: str,
+        branch_id: str,
+        principal_id: str,
+        purpose: str | None = None,
+    ) -> dict[str, Any]:
+        """Verify a bounded proposal still belongs to the live epistemic epoch."""
+
+        if not isinstance(receipt, dict):
+            raise ValueError("bounded evaluation bundle_receipt is required")
+        payload = dict(receipt)
+        signature = str(payload.pop("signature", ""))
+        expected_signature = hmac.new(
+            context_receipt_secret,
+            canonical_json(payload).encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+        if not hmac.compare_digest(signature, expected_signature):
+            raise ValueError("bounded evaluation bundle_receipt signature is invalid")
+        receipt_purpose = str(payload.get("purpose") or "")
+        if (
+            payload.get("schema_version") != 1
+            or receipt_purpose not in BOUNDED_EVALUATION_PURPOSES
+        ):
+            raise ValueError("bounded evaluation bundle_receipt has the wrong purpose or schema")
+        if purpose is not None and receipt_purpose != purpose:
+            raise ValueError("bounded evaluation bundle_receipt has the wrong purpose")
+        if payload.get("campaign_id") != campaign_id:
+            raise ValueError("bounded evaluation bundle_receipt belongs to another campaign")
+        if payload.get("branch_id") != branch_id:
+            raise ValueError("bounded evaluation bundle_receipt belongs to another branch")
+        if payload.get("principal_fingerprint") != receipt_principal_fingerprint(
+            principal_id
+        ):
+            raise ValueError("bounded evaluation bundle_receipt belongs to another principal")
+        if int(payload.get("expires_monotonic_ns") or 0) < time.monotonic_ns():
+            raise ValueError("bounded evaluation bundle_receipt expired; read a new bundle")
+        if int(payload.get("campaign_revision") or -1) != campaigns.get(campaign_id).revision:
+            raise ValueError("bounded evaluation bundle_receipt is stale at campaign revision")
+        branch = branches.current(campaign_id)
+        if branch.id != branch_id or payload.get("head_snapshot_id") != branch.head_snapshot_id:
+            raise ValueError(
+                "bounded evaluation bundle_receipt is stale after branch or snapshot change"
+            )
+        if int(payload.get("latest_event_sequence") or 0) != npc_turn_latest_event_sequence(
+            campaign_id, branch_id
+        ):
+            raise ValueError("bounded evaluation bundle_receipt is stale after a continuity event")
+        if payload.get("memory_epoch_digest") != bounded_memory_epoch_digest(
+            campaign_id, branch_id
+        ):
+            raise ValueError("bounded evaluation bundle_receipt is stale at campaign memory")
+        current_heads = {
+            str(item.id): str(item.revision_id)
+            for item in memories.list(
+                campaign_id,
+                branch_id=branch_id,
+                include_inactive=True,
+            )
+        }
+        if any(
+            current_heads.get(str(memory_id)) != str(revision_id)
+            for memory_id, revision_id in dict(payload.get("context_heads") or {}).items()
+        ):
+            raise ValueError("bounded evaluation bundle_receipt is stale at a context fact")
+        for knowledge_id, revision_id in dict(payload.get("knowledge_heads") or {}).items():
+            try:
+                current = knowledge.get(str(knowledge_id), branch_id=branch_id)
+            except LookupError as exc:
+                raise ValueError(
+                    "bounded evaluation bundle_receipt is stale at ActorKnowledge"
+                ) from exc
+            if str(current.revision_id) != str(revision_id):
+                raise ValueError(
+                    "bounded evaluation bundle_receipt is stale at ActorKnowledge"
+                )
+        knowledge_actor_ids = [
+            str(item) for item in list(payload.get("knowledge_actor_ids") or [])
+        ]
+        if payload.get("knowledge_epoch_digest") != bounded_knowledge_epoch_digest(
+            campaign_id,
+            branch_id,
+            knowledge_actor_ids,
+        ):
+            raise ValueError("bounded evaluation bundle_receipt is stale at ActorKnowledge")
+        subject_ref = str(payload.get("subject_ref") or "")
+        actor_revision = payload.get("actor_revision")
+        if actor_revision is not None and subject_ref.startswith("actor:"):
+            actor = characters.get(subject_ref.removeprefix("actor:"))
+            if actor.campaign_id != campaign_id or actor.revision != int(actor_revision):
+                raise ValueError("bounded evaluation bundle_receipt is stale at actor revision")
+        scene = npc_turn_scene_projection(
+            modules.current_scene(
+                campaign_id,
+                scope_id=str(payload.get("scene_scope_id") or "party"),
+            )
+        )
+        if str((scene or {}).get("scene_id") or "") != str(
+            payload.get("scene_id") or ""
+        ) or int((scene or {}).get("state_version") or 0) != int(
+            payload.get("scene_state_version") or 0
+        ):
+            raise ValueError("bounded evaluation bundle_receipt is stale at scene revision")
+        return payload
+
+    def bounded_evaluation_bundle(
+        *,
+        purpose: str,
+        campaign_id: str,
+        branch_id: str,
+        principal_id: str,
+        role: str,
+        audience: str,
+        actor_id: str | None,
+        subject_ref: str | None,
+        target_refs: list[str],
+        query: str,
+        result: dict[str, Any],
+        related_refs: set[str],
+        interlocutor_actor_ids: list[str],
+        stimulus: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Project one least-authority context envelope for host-side reasoning."""
+
+        if purpose not in BOUNDED_EVALUATION_PURPOSES:
+            raise ValueError(f"unsupported bounded evaluation purpose: {purpose}")
+        facts = [dict(item) for item in list(result.get("facts") or [])]
+        events_context = [dict(item) for item in list(result.get("events") or [])]
+        actor_knowledge = [
+            dict(item) for item in list(result.get("actor_knowledge") or [])
+        ]
+        source_evidence = [
+            dict(item) for item in list(result.get("module_evidence") or [])
+        ]
+        scene = deepcopy(result.get("scoped_scene"))
+        subject: dict[str, Any]
+        normalized_stimulus: dict[str, Any] | None = None
+        actor_projection: dict[str, Any] | None = None
+        actor_revision: int | None = None
+        interlocutors: list[dict[str, Any]] = []
+
+        if purpose == "actor_turn":
+            if not actor_id:
+                raise ValueError("actor_id is required for actor_turn")
+            actor = characters.get(actor_id)
+            if actor.campaign_id != campaign_id:
+                raise ValueError("actor_turn actor belongs to another campaign")
+            require_agent_decidable_character_type(actor.character_type)
+            subject_ref = f"actor:{actor_id}"
+            subject = {"kind": "actor", "id": actor_id, "name": actor.name}
+            actor_projection = npc_turn_actor_projection(actor)
+            actor_revision = actor.revision
+            normalized_stimulus = normalize_npc_stimulus(stimulus)
+            for interlocutor_id in interlocutor_actor_ids:
+                if interlocutor_id == actor_id:
+                    raise ValueError("actor_turn subject cannot also be an interlocutor")
+                interlocutor = characters.get(interlocutor_id)
+                if interlocutor.campaign_id != campaign_id:
+                    raise ValueError("actor_turn interlocutors must belong to the campaign")
+                interlocutors.append(
+                    {
+                        "id": interlocutor.id,
+                        "name": interlocutor.name,
+                        "character_type": interlocutor.character_type,
+                    }
+                )
+            actor_state, _fact_heads, _knowledge_heads = npc_turn_actor_state(
+                campaign_id, branch_id, actor_id
+            )
+            facts = actor_state
+            actor_projection["perception"] = npc_turn_perception_projection(
+                campaigns.get(campaign_id),
+                actor_id=actor_id,
+                interlocutors=interlocutors,
+                scene=npc_turn_scene_projection(scene),
+            )
+            scene = npc_turn_scene_projection(scene)
+            events_context = [
+                {
+                    "id": event.id,
+                    "sequence": event.sequence,
+                    "event_type": event.event_type,
+                    "summary": event.summary,
+                    "participants": [dict(item) for item in event.participants],
+                }
+                for event in events.list_for_actor(
+                    campaign_id,
+                    actor_id=actor_id,
+                    branch_id=branch_id,
+                    limit=20,
+                )
+            ]
+            target_refs = sorted(
+                {f"actor:{actor_id}", *(f"actor:{item}" for item in interlocutor_actor_ids)}
+            )
+        elif purpose == "faction_turn":
+            normalized_subject_ref = normalize_context_entity_ref(
+                subject_ref, field="subject_ref"
+            )
+            if not normalized_subject_ref.startswith("faction:"):
+                raise ValueError("faction_turn subject_ref must use faction:<id>")
+            subject_ref = normalized_subject_ref
+            faction_id = normalized_subject_ref.removeprefix("faction:")
+            subject = {"kind": "faction", "id": faction_id, "name": faction_id}
+            facts = [
+                asdict(item)
+                for item in subject_contexts.list(
+                    campaign_id,
+                    subject_ref=normalized_subject_ref,
+                    branch_id=branch_id,
+                )
+            ]
+            if not facts:
+                raise ValueError(
+                    "faction_turn subject has no faction_state or faction_knowledge"
+                )
+            events_context = []
+            actor_knowledge = []
+        elif purpose == "audience_render":
+            subject_id = actor_id or audience or "party"
+            subject_ref = f"audience:{subject_id}"
+            subject = {"kind": "audience", "id": subject_id, "name": audience}
+            source_evidence = []
+            target_refs = []
+        elif purpose == "source_interpretation":
+            if not query.strip():
+                raise ValueError("query is required for source_interpretation")
+            if not source_evidence:
+                raise ValueError(
+                    "source_interpretation requires pinned module evidence; provide "
+                    "related_refs for a current context_anchor"
+                )
+            source_id = hashlib.sha256(
+                canonical_json(source_evidence).encode("utf-8")
+            ).hexdigest()
+            subject_ref = f"source:{source_id}"
+            subject = {"kind": "source", "id": source_id, "name": "module evidence"}
+            facts = []
+            events_context = []
+            actor_knowledge = []
+            target_refs = []
+        else:
+            if not query.strip():
+                raise ValueError("query is required for bounded_ruling")
+            ruling_id = hashlib.sha256(query.strip().encode("utf-8")).hexdigest()
+            subject_ref = f"ruling:{ruling_id}"
+            subject = {"kind": "ruling", "id": ruling_id, "name": "DM ruling"}
+
+        fact_context: list[dict[str, Any]] = []
+        event_context: list[dict[str, Any]] = []
+        knowledge_context: list[dict[str, Any]] = []
+        source_context: list[dict[str, Any]] = []
+        allowed_basis_refs: set[str] = set()
+        claim_basis_refs: set[str] = set()
+        decision_only_basis_refs: set[str] = set()
+        context_heads: dict[str, str] = {}
+        knowledge_heads: dict[str, str] = {}
+        knowledge_actor_ids: set[str] = set()
+        if actor_id and purpose in {"actor_turn", "audience_render", "bounded_ruling"}:
+            # Bind even an empty knowledge set. Otherwise the first fact learned
+            # after bundle issuance would not invalidate an actor-scoped proposal.
+            knowledge_actor_ids.add(actor_id)
+
+        for item in facts:
+            memory_id = str(item.get("id") or "")
+            revision_id = str(item.get("revision_id") or "")
+            if not memory_id or not revision_id:
+                continue
+            basis_ref = f"fact:{memory_id}:{revision_id}"
+            fact_context.append({**item, "basis_ref": basis_ref})
+            allowed_basis_refs.add(basis_ref)
+            claim_basis_refs.add(basis_ref)
+            context_heads[memory_id] = revision_id
+        for item in actor_knowledge:
+            knowledge_id = str(item.get("id") or "")
+            revision_id = str(item.get("revision_id") or "")
+            if not knowledge_id or not revision_id:
+                continue
+            basis_ref = f"knowledge:{knowledge_id}:{revision_id}"
+            knowledge_context.append({**item, "basis_ref": basis_ref})
+            allowed_basis_refs.add(basis_ref)
+            claim_basis_refs.add(basis_ref)
+            knowledge_heads[knowledge_id] = revision_id
+            knowledge_actor_id = str(item.get("actor_id") or "")
+            if knowledge_actor_id:
+                knowledge_actor_ids.add(knowledge_actor_id)
+        for item in events_context:
+            event_id = str(item.get("id") or "")
+            if not event_id:
+                continue
+            basis_ref = f"event:{event_id}"
+            event_context.append({**item, "basis_ref": basis_ref})
+            allowed_basis_refs.add(basis_ref)
+            claim_basis_refs.add(basis_ref)
+        for item in source_evidence:
+            basis_ref = "source:" + hashlib.sha256(
+                canonical_json(
+                    {
+                        "source_ref": item.get("source_ref"),
+                        "source_excerpt": item.get("source_excerpt"),
+                    }
+                ).encode("utf-8")
+            ).hexdigest()
+            source_context.append(
+                {
+                    **item,
+                    "basis_ref": basis_ref,
+                    "context_role": (
+                        "decision_only"
+                        if purpose in {"actor_turn", "faction_turn"}
+                        else "evidence"
+                    ),
+                }
+            )
+            allowed_basis_refs.add(basis_ref)
+            if purpose in {"actor_turn", "faction_turn"}:
+                decision_only_basis_refs.add(basis_ref)
+            else:
+                claim_basis_refs.add(basis_ref)
+        question_ref = "question:" + hashlib.sha256(query.encode("utf-8")).hexdigest()
+        if query:
+            allowed_basis_refs.add(question_ref)
+            decision_only_basis_refs.add(question_ref)
+        if actor_projection is not None:
+            for suffix in ("identity", "self_state"):
+                basis_ref = f"actor:{actor_id}:{suffix}"
+                allowed_basis_refs.add(basis_ref)
+                claim_basis_refs.add(basis_ref)
+        if normalized_stimulus is not None and normalized_stimulus.get("kind") != "none":
+            stimulus_ref = "stimulus:" + hashlib.sha256(
+                canonical_json(normalized_stimulus).encode("utf-8")
+            ).hexdigest()
+            normalized_stimulus = {**normalized_stimulus, "basis_ref": stimulus_ref}
+            allowed_basis_refs.add(stimulus_ref)
+            claim_basis_refs.add(stimulus_ref)
+        for anchor in memories.list(
+            campaign_id,
+            kind="context_anchor",
+            branch_id=branch_id,
+        ):
+            metadata = dict(anchor.metadata or {})
+            if related_refs & {str(ref) for ref in metadata.get("related_refs") or []}:
+                context_heads[str(anchor.id)] = str(anchor.revision_id)
+
+        bundle: dict[str, Any] = {
+            "schema_version": BOUNDED_EVALUATION_SCHEMA_VERSION,
+            "bundle_id": str(uuid4()),
+            "purpose": purpose,
+            "authority": {
+                "campaign_id": campaign_id,
+                "branch_id": branch_id,
+                "head_snapshot_id": branches.get(campaign_id, branch_id).head_snapshot_id,
+                "campaign_revision": campaigns.get(campaign_id).revision,
+                "latest_event_sequence": npc_turn_latest_event_sequence(
+                    campaign_id, branch_id
+                ),
+                "host_context_binding": host_context_binding(
+                    campaign_id=campaign_id,
+                    branch_id=branch_id,
+                    principal_id=principal_id,
+                    role=role,
+                    audience=audience,
+                ),
+            },
+            "subject": subject,
+            "context": {
+                "question": query,
+                "question_basis_ref": question_ref if query else "",
+                "actor": actor_projection,
+                "interlocutors": interlocutors,
+                "stimulus": normalized_stimulus,
+                "facts": fact_context,
+                "actor_knowledge": knowledge_context,
+                "events": event_context,
+                "scene": scene,
+                "source_evidence": source_context,
+                "audience": audience,
+            },
+            "constraints": {
+                "allowed_basis_refs": sorted(allowed_basis_refs),
+                "allowed_claim_basis_refs": sorted(claim_basis_refs),
+                "decision_only_basis_refs": sorted(decision_only_basis_refs),
+                "allowed_target_refs": sorted(set(target_refs)),
+                "may_roll_dice": False,
+                "may_call_tools": False,
+                "may_write_state": False,
+                "output_contract": BOUNDED_OUTPUT_CONTRACTS[purpose],
+            },
+        }
+        bundle["bundle_receipt"] = issue_bounded_evaluation_receipt(
+            bundle=bundle,
+            campaign_id=campaign_id,
+            branch_id=branch_id,
+            principal_id=principal_id,
+            purpose=purpose,
+            subject_ref=str(subject_ref),
+            allowed_basis_refs=sorted(allowed_basis_refs),
+            allowed_claim_basis_refs=sorted(claim_basis_refs),
+            allowed_target_refs=sorted(set(target_refs)),
+            context_heads=context_heads,
+            knowledge_heads=knowledge_heads,
+            knowledge_actor_ids=sorted(knowledge_actor_ids),
+            actor_revision=actor_revision,
+            scene=npc_turn_scene_projection(scene),
+        )
+        return bundle
 
     def character_view(
         character: Any,
@@ -29446,7 +30012,17 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         actor_id: str | None = None,
         scope_id: str = "party",
         audience: str = "dm",
-        purpose: Literal["general", "npc_turn"] = "general",
+        purpose: Literal[
+            "general",
+            "npc_turn",
+            "actor_turn",
+            "audience_render",
+            "faction_turn",
+            "source_interpretation",
+            "bounded_ruling",
+        ] = "general",
+        subject_ref: str | None = None,
+        evaluation_target_refs: list[str] | None = None,
         interlocutor_actor_ids: list[str] | None = None,
         stimulus: dict[str, Any] | None = None,
         conversation_limit: int = 8,
@@ -29457,19 +30033,37 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
     ) -> dict[str, Any]:
         """Retrieve current continuity plus pinned, source-exact DM module context."""
-        if purpose not in NPC_TURN_PURPOSES:
+        continuity_purposes = NPC_TURN_PURPOSES | BOUNDED_EVALUATION_PURPOSES
+        if purpose not in continuity_purposes:
             raise ValueError(f"unsupported continuity context purpose: {purpose}")
-        if purpose == "npc_turn" and authoritative_phase(campaign_id) not in {
+        live_turn_purposes = {
+            "npc_turn",
+            "actor_turn",
+            "audience_render",
+            "faction_turn",
+        }
+        if purpose in live_turn_purposes and authoritative_phase(campaign_id) not in {
             PROFILE_PLAY,
             PROFILE_COMBAT,
         }:
-            raise ValueError("NPC turn context is available only during Play or Combat")
+            raise ValueError(
+                f"{purpose} context is available only during Play or Combat"
+            )
         membership = access.require_campaign(campaign_id, principal_id)
         branch_id = readable_branch(campaign_id, branch_id, principal_id)
-        if purpose == "npc_turn" and membership.role not in CAMPAIGN_DM_ROLES:
-            raise ValueError("NPC turn context is available only to Owner/DM")
-        if purpose == "npc_turn" and not actor_id:
-            raise ValueError("actor_id is required for NPC turn context")
+        if audience not in {"dm", "player"}:
+            raise ValueError("audience must be dm or player")
+        dm_only_purposes = {
+            "npc_turn",
+            "actor_turn",
+            "faction_turn",
+            "source_interpretation",
+            "bounded_ruling",
+        }
+        if purpose in dm_only_purposes and membership.role not in CAMPAIGN_DM_ROLES:
+            raise ValueError(f"{purpose} context is available only to Owner/DM")
+        if purpose in {"npc_turn", "actor_turn"} and not actor_id:
+            raise ValueError(f"actor_id is required for {purpose} context")
         if membership.role not in CAMPAIGN_DM_ROLES:
             audience = "player"
             if actor_id:
@@ -29488,6 +30082,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 private=True,
                 branch_id=branch_id,
             )
+        if purpose == "audience_render" and audience != "player":
+            raise ValueError("audience_render requires audience='player'")
         resolved_related_refs = {
             normalize_context_entity_ref(item, field="related_refs[]")
             for item in list(related_refs or [])
@@ -29503,6 +30099,21 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 raise ValueError("interlocutor_actor_ids must be unique")
             normalized_interlocutor_ids.append(value)
             resolved_related_refs.add(f"actor:{value}")
+        normalized_target_refs: list[str] = []
+        for item in evaluation_target_refs or []:
+            value = normalize_context_entity_ref(
+                item, field="evaluation_target_refs[]"
+            )
+            if value in normalized_target_refs:
+                raise ValueError("evaluation_target_refs must be unique")
+            normalized_target_refs.append(value)
+            resolved_related_refs.add(value)
+        normalized_subject_ref: str | None = None
+        if subject_ref is not None:
+            normalized_subject_ref = normalize_context_entity_ref(
+                subject_ref, field="subject_ref"
+            )
+            resolved_related_refs.add(normalized_subject_ref)
         if membership.role in CAMPAIGN_DM_ROLES:
             campaign = campaigns.get(campaign_id)
             state = dict(campaign.state or {})
@@ -29541,6 +30152,23 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             budget_chars=budget_chars,
             related_refs=sorted(resolved_related_refs),
         )
+        if purpose in BOUNDED_EVALUATION_PURPOSES:
+            return bounded_evaluation_bundle(
+                purpose=purpose,
+                campaign_id=campaign_id,
+                branch_id=branch_id,
+                principal_id=principal_id,
+                role=membership.role,
+                audience=audience,
+                actor_id=actor_id,
+                subject_ref=normalized_subject_ref,
+                target_refs=normalized_target_refs,
+                query=query,
+                result=result,
+                related_refs=resolved_related_refs,
+                interlocutor_actor_ids=normalized_interlocutor_ids,
+                stimulus=stimulus,
+            )
         if purpose == "npc_turn":
             assert actor_id is not None
             actor = characters.get(actor_id)
@@ -29685,6 +30313,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     ),
                     "actor_revision": actor.revision,
                     "scene_state_version": int((scene or {}).get("state_version") or 0),
+                    "host_context_binding": host_context_binding(
+                        campaign_id=campaign_id,
+                        branch_id=branch_id,
+                        principal_id=principal_id,
+                        role=membership.role,
+                        audience=audience,
+                    ),
                 },
                 "actor": npc_turn_actor_projection(actor),
                 "interlocutors": interlocutors,
@@ -29733,6 +30368,13 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             )
             bundle["bundle_receipt"] = receipt
             return bundle
+        result["host_context_binding"] = host_context_binding(
+            campaign_id=campaign_id,
+            branch_id=branch_id,
+            principal_id=principal_id,
+            role=membership.role,
+            audience=audience,
+        )
         result["context_receipt"] = issue_context_receipt(
             campaign_id=campaign_id,
             branch_id=branch_id,
@@ -29743,6 +30385,97 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             related_refs=sorted(resolved_related_refs),
             context=result,
         )
+        return result
+
+    @mcp.tool()
+    def bounded_evaluation(
+        campaign_id: str,
+        action: Literal["validate"],
+        proposal: dict[str, Any],
+        bundle_receipt: dict[str, Any],
+        branch_id: str | None = None,
+        principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
+    ) -> dict[str, Any]:
+        """Validate one isolated proposal against its live signed context receipt."""
+
+        if action != "validate":
+            raise ValueError("bounded_evaluation action must be validate")
+        membership = access.require_campaign(campaign_id, principal_id)
+        branch_id = readable_branch(campaign_id, branch_id, principal_id)
+        receipt = verify_bounded_evaluation_receipt(
+            bundle_receipt,
+            campaign_id=campaign_id,
+            branch_id=branch_id,
+            principal_id=principal_id,
+        )
+        purpose = str(receipt["purpose"])
+        if membership.role not in CAMPAIGN_DM_ROLES and purpose != "audience_render":
+            raise ValueError(
+                "players may validate only audience_render proposals issued to themselves"
+            )
+        normalized = normalize_bounded_proposal(purpose, proposal)
+        if normalized["bundle_id"] != receipt.get("bundle_id"):
+            raise ValueError("bounded proposal belongs to another context bundle")
+        if purpose == "source_interpretation" and hashlib.sha256(
+            str(normalized["question"]).strip().encode("utf-8")
+        ).hexdigest() != str(receipt.get("question_digest") or ""):
+            raise ValueError(
+                "source interpretation question does not match its signed bundle"
+            )
+        validate_bounded_proposal_refs(
+            normalized,
+            subject_ref=str(receipt["subject_ref"]),
+            allowed_basis_refs={
+                str(item) for item in receipt.get("allowed_basis_refs") or []
+            },
+            allowed_claim_basis_refs={
+                str(item)
+                for item in receipt.get("allowed_claim_basis_refs") or []
+            },
+            allowed_target_refs={
+                str(item) for item in receipt.get("allowed_target_refs") or []
+            },
+        )
+        proposal_digest = hashlib.sha256(
+            canonical_json(normalized).encode("utf-8")
+        ).hexdigest()
+        validation_payload = {
+            "schema_version": 1,
+            "purpose": purpose,
+            "bundle_id": str(receipt["bundle_id"]),
+            "bundle_digest": str(receipt["bundle_digest"]),
+            "proposal_digest": proposal_digest,
+            "campaign_id": campaign_id,
+            "branch_id": branch_id,
+            "campaign_revision": campaigns.get(campaign_id).revision,
+            "principal_fingerprint": receipt_principal_fingerprint(principal_id),
+            "expires_monotonic_ns": int(receipt["expires_monotonic_ns"]),
+        }
+        validation_receipt = {
+            **validation_payload,
+            "signature": hmac.new(
+                context_receipt_secret,
+                canonical_json(validation_payload).encode("utf-8"),
+                hashlib.sha256,
+            ).hexdigest(),
+        }
+        result: dict[str, Any] = {
+            "validated": True,
+            "authoritative_state_changed": False,
+            "purpose": purpose,
+            "proposal": normalized,
+            "validation_receipt": validation_receipt,
+            "next_step": (
+                "relay publication.text exactly"
+                if purpose == "audience_render"
+                else "resolve mechanics and select any writes through public MCP tools"
+            ),
+        }
+        if purpose == "audience_render":
+            result["publication"] = {
+                "text": str(normalized["text"]),
+                "validation_receipt": validation_receipt,
+            }
         return result
 
     @mcp.tool()
@@ -30021,6 +30754,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "actor-scoped continuity events require ActorKnowledge or event participants"
             )
         manifest = catalog.manifest()
+        for fact in facts_data:
+            validate_subject_context_fact(
+                kind=fact.get("kind"),
+                subject_ref=fact.get("subject_ref"),
+            )
         event_payload = dict(event_data.get("payload") or {})
         event_payload["_sagasmith_skill_manifest"] = manifest
         event_data["payload"] = event_payload
@@ -38980,6 +39718,7 @@ Useful bounded guidance:
                     principal_id=principal_id,
                 ),
                 "continuity": context,
+                "host_context_binding": context["host_context_binding"],
                 "resume_invariants": {
                     "discard_pre_restore_context": True,
                     "context_receipt_revision": context["context_receipt"][
@@ -39852,6 +40591,11 @@ Useful bounded guidance:
             field=f"memory_change({action})",
         )
         resolved_branch_id = require_current_branch(campaign_id, data.get("branch_id"))
+        if action in {"add", "upsert"}:
+            validate_subject_context_fact(
+                kind=data.get("kind") or "fact",
+                subject_ref=data.get("subject_ref") or "",
+            )
         request_payload = {"action": action, **data, "branch_id": resolved_branch_id}
         scope = f"memory-change:{action}:{campaign_id}:{resolved_branch_id}:{principal_id}"
         replay = replay_idempotent(scope, idempotency_key, request_payload)
@@ -41312,6 +42056,7 @@ Useful bounded guidance:
             **dict(registered_tool.meta or {}),
             "sagasmith_tool_profiles": list(profiles_for_tool(registered_tool.name)),
             "sagasmith_tool_groups": list(groups_for_tool(registered_tool.name)),
+            "sagasmith_domain_context": "sagasmith-dnd",
         }
 
     return mcp

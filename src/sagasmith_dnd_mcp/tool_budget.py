@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-TOOL_BUDGET_VERSION = "2026-07-npc-turn-isolation-v17"
+TOOL_BUDGET_VERSION = "2026-08-bounded-context-isolation-v18"
 
 # Captured before the conservative facade consolidation.  Keep this historical
 # baseline so a lower tool count cannot conceal a larger aggregate input schema.
 BASELINE_PUBLIC_TOOL_COUNT = 92
 BASELINE_INPUT_SCHEMA_BYTES = 56_611
 
-TARGET_PUBLIC_TOOL_COUNT = 83
+TARGET_PUBLIC_TOOL_COUNT = 84
 TARGET_CORE_TOOL_COUNT = 13
 # Combat transaction-history and receipt views make interrupted multi-call Agent
 # rulings publicly recoverable without another tool or direct storage access.
@@ -41,10 +41,12 @@ TARGET_CORE_TOOL_COUNT = 13
 # trusted campaign/exposure context to the existing core skill_query facade.
 # Version 17 adds strict NPC-turn context selectors to continuity_context and
 # makes that existing tool available during Combat; no public/core tool is
-# added, and the aggregate remains below the captured 92-tool baseline.
-TARGET_INPUT_SCHEMA_BYTES = 50_611
+# added. Version 18 adds one strict bounded_evaluation validation facade for
+# actor, audience, faction, source, and ruling proposals. Context creation stays
+# in continuity_context, and the aggregate remains below the 92-tool baseline.
+TARGET_INPUT_SCHEMA_BYTES = 51_528
 PROFILE_TOOL_LIMITS = {
-    "lobby": 62,
-    "play": 48,
-    "combat": 47,
+    "lobby": 63,
+    "play": 49,
+    "combat": 48,
 }

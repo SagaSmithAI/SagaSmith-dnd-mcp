@@ -228,7 +228,110 @@ def test_public_context_anchor_pins_exact_dm_evidence_without_a_narrative_dsl(
             "lexical_structured_pinned_module_evidence_v3"
         )
         assert context["context_receipt"]["campaign_id"] == campaign["id"]
+        assert "principal_id" not in context["context_receipt"]
+        assert len(context["context_receipt"]["principal_fingerprint"]) == 64
         assert context["context_receipt"]["module_source_ref_digests"]
+
+        interpretation_bundle = await _call(
+            server,
+            "continuity_context",
+            {
+                "campaign_id": campaign["id"],
+                "purpose": "source_interpretation",
+                "query": "When does Zaltember flee?",
+                "related_refs": ["actor:zaltember"],
+            },
+        )
+        assert interpretation_bundle["purpose"] == "source_interpretation"
+        assert interpretation_bundle["context"]["source_evidence"][0][
+            "context_role"
+        ] == "evidence"
+        source_basis = interpretation_bundle["context"]["source_evidence"][0][
+            "basis_ref"
+        ]
+        interpretation = {
+            "schema_version": 1,
+            "bundle_id": interpretation_bundle["bundle_id"],
+            "purpose": "source_interpretation",
+            "question": "When does Zaltember flee?",
+            "interpretation": "Being wounded is narrative context for a DM decision.",
+            "claims": [
+                {
+                    "statement": "The excerpt says he flees if wounded.",
+                    "basis_refs": [source_basis],
+                    "posture": "supported",
+                }
+            ],
+            "ambiguities": ["The excerpt does not define a mechanical HP threshold."],
+            "requires_dm_review": True,
+        }
+        validated_interpretation = await _call(
+            server,
+            "bounded_evaluation",
+            {
+                "campaign_id": campaign["id"],
+                "action": "validate",
+                "proposal": interpretation,
+                "bundle_receipt": interpretation_bundle["bundle_receipt"],
+            },
+        )
+        assert validated_interpretation["proposal"] == interpretation
+
+        with pytest.raises(Exception, match="question does not match"):
+            await _call(
+                server,
+                "bounded_evaluation",
+                {
+                    "campaign_id": campaign["id"],
+                    "action": "validate",
+                    "proposal": {
+                        **interpretation,
+                        "question": "What unrelated event happens next?",
+                    },
+                    "bundle_receipt": interpretation_bundle["bundle_receipt"],
+                },
+            )
+
+        ruling_bundle = await _call(
+            server,
+            "continuity_context",
+            {
+                "campaign_id": campaign["id"],
+                "purpose": "bounded_ruling",
+                "query": "Does the current wound make Zaltember flee now?",
+                "related_refs": ["actor:zaltember"],
+            },
+        )
+        ruling_source_basis = ruling_bundle["context"]["source_evidence"][0][
+            "basis_ref"
+        ]
+        ruling = {
+            "schema_version": 1,
+            "bundle_id": ruling_bundle["bundle_id"],
+            "purpose": "bounded_ruling",
+            "ruling": "The DM must decide from current actor state; no threshold is invented.",
+            "claims": [
+                {
+                    "statement": "The source supplies no numeric threshold.",
+                    "basis_refs": [ruling_source_basis],
+                    "posture": "inference",
+                }
+            ],
+            "engine_requests": [],
+            "unresolved": ["Whether the live injury is enough to trigger flight."],
+            "decision_summary": "The result remains a proposal until the DM commits it.",
+        }
+        validated_ruling = await _call(
+            server,
+            "bounded_evaluation",
+            {
+                "campaign_id": campaign["id"],
+                "action": "validate",
+                "proposal": ruling,
+                "bundle_receipt": ruling_bundle["bundle_receipt"],
+            },
+        )
+        assert validated_ruling["proposal"] == ruling
 
         source_bound_event = {
             "summary": "Zaltember flees toward area 31.",

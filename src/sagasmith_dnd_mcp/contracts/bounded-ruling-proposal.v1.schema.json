@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sagasmith.ai/contracts/bounded-ruling-proposal.v1.schema.json",
+  "title": "SagaSmith bounded DM ruling proposal v1",
+  "type": "object",
+  "required": ["schema_version", "bundle_id", "purpose", "ruling", "claims", "engine_requests", "unresolved", "decision_summary"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "bundle_id": {"type": "string", "minLength": 1},
+    "purpose": {"const": "bounded_ruling"},
+    "ruling": {"type": "string", "minLength": 1, "maxLength": 4000},
+    "claims": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["statement", "basis_refs", "posture"],
+        "properties": {
+          "statement": {"type": "string", "minLength": 1, "maxLength": 2000},
+          "basis_refs": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+          "posture": {"enum": ["supported", "inference", "uncertain", "opinion", "nonfactual"]}
+        },
+        "additionalProperties": false
+      }
+    },
+    "engine_requests": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["kind", "reason", "actor_ids"],
+        "properties": {
+          "kind": {"enum": ["ability_check", "contest", "saving_throw", "attack", "rules_engine", "dm_adjudication"]},
+          "reason": {"type": "string", "minLength": 1, "maxLength": 1000},
+          "actor_ids": {"type": "array", "items": {"type": "string"}, "uniqueItems": true}
+        },
+        "additionalProperties": false
+      }
+    },
+    "unresolved": {"type": "array", "items": {"type": "string", "maxLength": 1000}, "uniqueItems": true},
+    "decision_summary": {"type": "string", "maxLength": 500}
+  },
+  "additionalProperties": false
+}

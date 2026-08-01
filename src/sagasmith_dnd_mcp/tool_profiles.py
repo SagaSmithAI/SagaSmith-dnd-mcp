@@ -186,6 +186,7 @@ TOOL_GROUPS = (
         "read",
         "actor_knowledge_query",
         "continuity_context",
+        "bounded_evaluation",
     ),
     _group(
         "lobby.memory_control",
@@ -220,6 +221,7 @@ TOOL_GROUPS = (
         "module_expand",
         "branch_query",
         "continuity_context",
+        "bounded_evaluation",
         "actor_knowledge_query",
     ),
     _group(
@@ -297,6 +299,7 @@ TOOL_GROUPS = (
         "combat_query",
         "character_query",
         "continuity_context",
+        "bounded_evaluation",
         "module_query",
         "module_search",
         "branch_query",

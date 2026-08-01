@@ -445,17 +445,17 @@ def test_compact_public_tool_and_schema_budgets_are_locked(tmp_path: Path) -> No
         assert BASELINE_PUBLIC_TOOL_COUNT == 92
         assert BASELINE_INPUT_SCHEMA_BYTES == 56_611
         assert len(CORE_TOOLS) == TARGET_CORE_TOOL_COUNT == 13
-        assert len(tools) == TARGET_PUBLIC_TOOL_COUNT == 83
+        assert len(tools) == TARGET_PUBLIC_TOOL_COUNT == 84
         assert (
             {phase: len(names) for phase, names in profile_catalog().items()}
             == PROFILE_TOOL_LIMITS
             == {
-                "lobby": 62,
-                "play": 48,
-                "combat": 47,
+                "lobby": 63,
+                "play": 49,
+                "combat": 48,
             }
         )
-        assert schema_bytes == TARGET_INPUT_SCHEMA_BYTES == 50_611
+        assert schema_bytes == TARGET_INPUT_SCHEMA_BYTES == 51_528
         assert schema_bytes < BASELINE_INPUT_SCHEMA_BYTES
         by_name = {tool.name: tool for tool in tools}
         assert by_name["chase"].inputSchema["properties"]["action"]["enum"] == [

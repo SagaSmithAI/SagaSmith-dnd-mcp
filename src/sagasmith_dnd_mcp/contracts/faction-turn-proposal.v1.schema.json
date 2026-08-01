@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sagasmith.ai/contracts/faction-turn-proposal.v1.schema.json",
+  "title": "SagaSmith isolated faction turn proposal v1",
+  "type": "object",
+  "required": ["schema_version", "bundle_id", "purpose", "faction_id", "intent", "proposed_actions", "claims", "resolution_requests", "proposed_deltas", "decision_summary"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "bundle_id": {"type": "string", "minLength": 1},
+    "purpose": {"const": "faction_turn"},
+    "faction_id": {"type": "string", "minLength": 1, "maxLength": 200},
+    "intent": {"type": "string", "minLength": 1, "maxLength": 1000},
+    "proposed_actions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["kind", "target_ref", "summary", "basis_refs"],
+        "properties": {
+          "kind": {"type": "string", "minLength": 1, "maxLength": 100},
+          "target_ref": {"type": "string", "maxLength": 300},
+          "summary": {"type": "string", "minLength": 1, "maxLength": 1000},
+          "basis_refs": {"type": "array", "items": {"type": "string"}, "uniqueItems": true}
+        },
+        "additionalProperties": false
+      }
+    },
+    "claims": {"type": "array", "items": {"$ref": "#/$defs/claim"}},
+    "resolution_requests": {"type": "array", "items": {"$ref": "#/$defs/request"}},
+    "proposed_deltas": {"type": "array", "items": {"type": "object"}},
+    "decision_summary": {"type": "string", "maxLength": 500}
+  },
+  "$defs": {
+    "claim": {
+      "type": "object",
+      "required": ["statement", "basis_refs", "posture"],
+      "properties": {
+        "statement": {"type": "string", "minLength": 1, "maxLength": 2000},
+        "basis_refs": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+        "posture": {"enum": ["supported", "inference", "uncertain", "opinion", "nonfactual"]}
+      },
+      "additionalProperties": false
+    },
+    "request": {
+      "type": "object",
+      "required": ["kind", "reason", "actor_ids"],
+      "properties": {
+        "kind": {"enum": ["ability_check", "contest", "saving_throw", "attack", "rules_engine", "dm_adjudication"]},
+        "reason": {"type": "string", "minLength": 1, "maxLength": 1000},
+        "actor_ids": {"type": "array", "items": {"type": "string"}, "uniqueItems": true}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

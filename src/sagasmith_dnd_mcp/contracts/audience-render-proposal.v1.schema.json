@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sagasmith.ai/contracts/audience-render-proposal.v1.schema.json",
+  "title": "SagaSmith audience-safe rendering proposal v1",
+  "type": "object",
+  "required": ["schema_version", "bundle_id", "purpose", "text", "cited_basis_refs", "omitted_sensitive_refs", "decision_summary"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "bundle_id": {"type": "string", "minLength": 1},
+    "purpose": {"const": "audience_render"},
+    "text": {"type": "string", "minLength": 1, "maxLength": 8000},
+    "cited_basis_refs": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+    "omitted_sensitive_refs": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+    "decision_summary": {"type": "string", "maxLength": 500}
+  },
+  "additionalProperties": false
+}

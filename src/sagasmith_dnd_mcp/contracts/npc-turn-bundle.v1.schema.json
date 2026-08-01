@@ -36,8 +36,12 @@
         "campaign_revision",
         "latest_event_sequence",
         "actor_revision",
-        "scene_state_version"
-      ]
+        "scene_state_version",
+        "host_context_binding"
+      ],
+      "properties": {
+        "host_context_binding": {"$ref": "#/$defs/hostContextBinding"}
+      }
     },
     "actor": {
       "type": "object",
@@ -84,16 +88,34 @@
     "retrieval": {"type": "object"},
     "bundle_receipt": {
       "type": "object",
-      "required": ["schema_version", "purpose", "bundle_id", "bundle_digest", "actor_id", "allowed_basis_refs", "signature"],
+      "required": ["schema_version", "purpose", "bundle_id", "bundle_digest", "principal_fingerprint", "actor_id", "allowed_basis_refs", "signature"],
       "properties": {
         "schema_version": {"const": 2},
         "purpose": {"const": "npc_turn"},
         "bundle_id": {"type": "string"},
         "bundle_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "principal_fingerprint": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
         "actor_id": {"type": "string"},
         "allowed_basis_refs": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
         "signature": {"type": "string", "minLength": 1}
       }
+    }
+  },
+  "$defs": {
+    "hostContextBinding": {
+      "type": "object",
+      "required": ["domain", "campaign_id", "principal_fingerprint", "role", "audience", "branch_id", "memory_policy", "context_epoch"],
+      "properties": {
+        "domain": {"const": "sagasmith-dnd"},
+        "campaign_id": {"type": "string", "minLength": 1},
+        "principal_fingerprint": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "role": {"enum": ["owner", "dm", "player"]},
+        "audience": {"enum": ["dm", "player"]},
+        "branch_id": {"type": "string", "minLength": 1},
+        "memory_policy": {"const": "domain_authoritative"},
+        "context_epoch": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      },
+      "additionalProperties": false
     }
   },
   "additionalProperties": false

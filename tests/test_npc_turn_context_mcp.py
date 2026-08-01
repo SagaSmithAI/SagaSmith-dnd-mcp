@@ -135,8 +135,17 @@ def test_npc_turn_bundle_is_actor_scoped_and_commits_only_accepted_deltas(
                 "query": "identity survival family",
             },
         )
+        bundle_schema = json.loads(
+            files("sagasmith_dnd_mcp")
+            .joinpath("contracts")
+            .joinpath("npc-turn-bundle.v1.schema.json")
+            .read_text(encoding="utf-8")
+        )
+        Draft202012Validator(bundle_schema).validate(bundle)
 
         assert bundle["purpose"] == "npc_turn"
+        assert "principal_id" not in bundle["bundle_receipt"]
+        assert len(bundle["bundle_receipt"]["principal_fingerprint"]) == 64
         assert bundle["actor"]["id"] == npc["id"]
         assert bundle["interlocutors"] == [
             {"id": pc["id"], "name": "Envoy", "character_type": "pc"}

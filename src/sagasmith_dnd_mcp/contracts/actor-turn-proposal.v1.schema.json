@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sagasmith.ai/contracts/actor-turn-proposal.v1.schema.json",
+  "title": "SagaSmith autonomous actor turn proposal v1",
+  "type": "object",
+  "required": ["schema_version", "bundle_id", "purpose", "actor_id", "intent", "proposed_action", "claims", "resolution_requests", "proposed_deltas", "decision_summary"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "bundle_id": {"type": "string", "minLength": 1},
+    "purpose": {"const": "actor_turn"},
+    "actor_id": {"type": "string", "minLength": 1},
+    "intent": {"type": "string", "minLength": 1, "maxLength": 1000},
+    "proposed_action": {
+      "type": "object",
+      "required": ["kind", "target_ref", "summary"],
+      "properties": {
+        "kind": {"enum": ["none", "gesture", "offer", "refuse", "surrender", "move", "flee", "attack", "use_item", "exchange_item", "scene_transition", "other"]},
+        "target_ref": {"type": "string", "maxLength": 300},
+        "summary": {"type": "string", "maxLength": 1000}
+      },
+      "additionalProperties": false
+    },
+    "claims": {"$ref": "#/$defs/claims"},
+    "resolution_requests": {"$ref": "#/$defs/requests"},
+    "proposed_deltas": {"type": "array", "items": {"type": "object"}},
+    "decision_summary": {"type": "string", "maxLength": 500}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"proposed_action": {"properties": {"kind": {"not": {"enum": ["none", "gesture", "refuse"]}}}}}},
+      "then": {"properties": {"resolution_requests": {"minItems": 1}}}
+    }
+  ],
+  "$defs": {
+    "claims": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["statement", "basis_refs", "posture"],
+        "properties": {
+          "statement": {"type": "string", "minLength": 1, "maxLength": 2000},
+          "basis_refs": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+          "posture": {"enum": ["supported", "inference", "uncertain", "opinion", "nonfactual"]}
+        },
+        "additionalProperties": false
+      }
+    },
+    "requests": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["kind", "reason", "actor_ids"],
+        "properties": {
+          "kind": {"enum": ["ability_check", "contest", "saving_throw", "attack", "rules_engine", "dm_adjudication"]},
+          "reason": {"type": "string", "minLength": 1, "maxLength": 1000},
+          "actor_ids": {"type": "array", "items": {"type": "string"}, "uniqueItems": true}
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

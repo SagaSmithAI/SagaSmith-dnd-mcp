@@ -613,6 +613,9 @@ def test_server_skill_plan_follows_exposure_phase_and_read_checksums(
         assert resumed["result"]["skill_plan"]["operation"] == (
             "campaign_query:resume"
         )
+        assert resumed["result"]["host_context_binding"] == resumed["result"][
+            "continuity"
+        ]["host_context_binding"]
         assert "tool.play.scene" in {
             item["skill_group"]
             for item in resumed["result"]["skill_plan"]["required_now"]
@@ -647,9 +650,9 @@ def test_real_skill_plan_manifest_is_valid_and_within_budgets() -> None:
 
     assert SKILL_PLAN_ASSET_ID.endswith("skill-plan.v1.json")
     assert plans.available is True, plans.load_error
-    assert plans.summary()["group_count"] == 29
+    assert plans.summary()["group_count"] == 35
     assert plans.summary()["tool_group_count"] == 21
-    assert plans.summary()["operation_binding_count"] == 17
+    assert plans.summary()["operation_binding_count"] == 22
     assert len(skills.read("dnd.full.skills.dnd-dm")) < 12_000
     assert len(
         skills.read_asset(
@@ -691,6 +694,28 @@ def test_real_skill_plan_manifest_is_valid_and_within_budgets() -> None:
     assert "npc.portrayal" in {
         item["skill_group"] for item in npc_plan["required_now"]
     }
+    actor_plan = plans.plan(
+        phase="combat",
+        role="dm",
+        loaded_tool_groups={"combat.observe"},
+        operation="continuity_context:actor_turn",
+        session_key="dm-actor-session",
+        tracker=SkillReadTracker(),
+    )
+    assert {"core.context_isolation", "evaluation.actor"} <= {
+        item["skill_group"] for item in actor_plan["required_now"]
+    }
+    audience_plan = plans.plan(
+        phase="play",
+        role="player",
+        loaded_tool_groups={"play.scene"},
+        operation="continuity_context:audience_render",
+        session_key="player-audience-session",
+        tracker=SkillReadTracker(),
+    )
+    assert "evaluation.audience" in {
+        item["skill_group"] for item in audience_plan["required_now"]
+    }
 
 
 def test_stdio_cold_start_uses_real_phase_skill_plan(tmp_path: Path) -> None:
@@ -730,9 +755,9 @@ def test_stdio_cold_start_uses_real_phase_skill_plan(tmp_path: Path) -> None:
                     "phase_skill_plan"
                 ]
                 assert summary["available"] is True
-                assert summary["group_count"] == 29
+                assert summary["group_count"] == 35
                 assert summary["tool_group_count"] == 21
-                assert summary["operation_binding_count"] == 17
+                assert summary["operation_binding_count"] == 22
 
                 planned = await session.call_tool(
                     "skill_query",
