@@ -355,6 +355,7 @@ def test_server_tool_profiles_are_complete_and_attached_to_tool_metadata(tmp_pat
             "play",
             "combat",
         ]
+        assert by_name["campaign_query"].meta["sagasmith_context_sync"] is True
         assert by_name["game_phase"].meta["sagasmith_tool_groups"] == []
 
     asyncio.run(inspect_tools())
@@ -455,7 +456,7 @@ def test_compact_public_tool_and_schema_budgets_are_locked(tmp_path: Path) -> No
                 "combat": 48,
             }
         )
-        assert schema_bytes == TARGET_INPUT_SCHEMA_BYTES == 51_528
+        assert schema_bytes == TARGET_INPUT_SCHEMA_BYTES == 51_594
         assert schema_bytes < BASELINE_INPUT_SCHEMA_BYTES
         by_name = {tool.name: tool for tool in tools}
         assert by_name["chase"].inputSchema["properties"]["action"]["enum"] == [

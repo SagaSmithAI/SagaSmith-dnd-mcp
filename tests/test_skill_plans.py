@@ -616,6 +616,16 @@ def test_server_skill_plan_follows_exposure_phase_and_read_checksums(
         assert resumed["result"]["host_context_binding"] == resumed["result"][
             "continuity"
         ]["host_context_binding"]
+        _, synchronized = await server.call_tool(
+            "campaign_query",
+            {
+                "view": "binding",
+                "payload": {"campaign_id": campaign["id"]},
+            },
+        )
+        assert synchronized["result"]["campaign_id"] == campaign["id"]
+        assert synchronized["result"]["role"] == "owner"
+        assert synchronized["result"]["audience"] == "dm"
         assert "tool.play.scene" in {
             item["skill_group"]
             for item in resumed["result"]["skill_plan"]["required_now"]

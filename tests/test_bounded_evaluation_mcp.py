@@ -36,21 +36,27 @@ async def _live_campaign(server):
     )
     npc = await _call(
         server,
-        "character_create",
+        "character_create_from",
         {
-            "campaign_id": campaign["id"],
-            "name": "Autonomous envoy",
-            "character_type": "npc",
-            "summary": "A cautious envoy.",
+            "mode": "direct",
+            "payload": {
+                "campaign_id": campaign["id"],
+                "name": "Autonomous envoy",
+                "character_type": "npc",
+                "summary": "A cautious envoy.",
+            },
             "idempotency_key": "npc",
         },
     )
     pc = await _call(
         server,
-        "character_create",
+        "character_create_from",
         {
-            "campaign_id": campaign["id"],
-            "name": "Human hero",
+            "mode": "direct",
+            "payload": {
+                "campaign_id": campaign["id"],
+                "name": "Human hero",
+            },
             "idempotency_key": "pc",
         },
     )
@@ -83,7 +89,6 @@ def _actor_proposal(bundle: dict, actor_id: str) -> dict:
         "proposed_action": {"kind": "none", "target_ref": "", "summary": ""},
         "claims": [],
         "resolution_requests": [],
-        "proposed_deltas": [],
         "decision_summary": "The envoy listens without conceding.",
     }
 
@@ -228,7 +233,6 @@ def test_actor_audience_and_faction_bundles_validate_without_writing_state(
             ],
             "claims": [],
             "resolution_requests": [],
-            "proposed_deltas": [],
             "decision_summary": "The court delays escalation.",
         }
         faction_validated = await _call(
@@ -386,7 +390,6 @@ def test_bounded_actor_mechanics_require_public_engine_resolution() -> None:
         },
         "claims": [],
         "resolution_requests": [],
-        "proposed_deltas": [],
         "decision_summary": "",
     }
     with pytest.raises(ValueError, match="requires an explicit resolution request"):
@@ -404,12 +407,43 @@ def test_generic_actor_contract_rejects_dialogue_in_favor_of_npc_turn() -> None:
         "proposed_action": {"kind": "none", "target_ref": "", "summary": ""},
         "claims": [],
         "resolution_requests": [],
-        "proposed_deltas": [],
         "decision_summary": "",
     }
 
     with pytest.raises(ValueError, match="unknown fields.*utterance"):
         normalize_bounded_proposal("actor_turn", proposal)
+
+
+def test_generic_turn_contracts_reject_untyped_state_deltas() -> None:
+    actor = {
+        "schema_version": 1,
+        "bundle_id": "bundle",
+        "purpose": "actor_turn",
+        "actor_id": "npc",
+        "intent": "Wait.",
+        "proposed_action": {"kind": "none", "target_ref": "", "summary": ""},
+        "claims": [],
+        "resolution_requests": [],
+        "proposed_deltas": [{"hp": -99}],
+        "decision_summary": "",
+    }
+    with pytest.raises(ValueError, match="unknown fields.*proposed_deltas"):
+        normalize_bounded_proposal("actor_turn", actor)
+
+    faction = {
+        "schema_version": 1,
+        "bundle_id": "bundle",
+        "purpose": "faction_turn",
+        "faction_id": "court",
+        "intent": "Wait.",
+        "proposed_actions": [],
+        "claims": [],
+        "resolution_requests": [],
+        "proposed_deltas": [{"world_state": "won"}],
+        "decision_summary": "",
+    }
+    with pytest.raises(ValueError, match="unknown fields.*proposed_deltas"):
+        normalize_bounded_proposal("faction_turn", faction)
 
 
 def test_source_interpretation_requires_evidence_and_reviews_uncertainty() -> None:

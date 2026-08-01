@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-TOOL_BUDGET_VERSION = "2026-08-bounded-context-isolation-v18"
+TOOL_BUDGET_VERSION = "2026-08-bounded-context-isolation-v20"
 
 # Captured before the conservative facade consolidation.  Keep this historical
 # baseline so a lower tool count cannot conceal a larger aggregate input schema.
@@ -44,7 +44,13 @@ TARGET_CORE_TOOL_COUNT = 13
 # added. Version 18 adds one strict bounded_evaluation validation facade for
 # actor, audience, faction, source, and ruling proposals. Context creation stays
 # in continuity_context, and the aggregate remains below the 92-tool baseline.
-TARGET_INPUT_SCHEMA_BYTES = 51_528
+# Version 19 adds the read-only campaign_query(binding) selector used by generic
+# hosts to refresh principal/role/audience/branch context before replaying any
+# conversation history. It adds no public or core tool.
+# Version 20 makes legacy top-level memory identity fields explicitly optional,
+# preserving the difference between omitted fields and an attempted identity
+# change during memory_change(upsert).
+TARGET_INPUT_SCHEMA_BYTES = 51_594
 PROFILE_TOOL_LIMITS = {
     "lobby": 63,
     "play": 49,

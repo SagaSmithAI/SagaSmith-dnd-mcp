@@ -864,6 +864,20 @@ def test_stdio_session_uses_native_refresh_and_exposure_call_fallback(tmp_path) 
                 assert resumed_payload["continuity"]["context_receipt"][
                     "campaign_id"
                 ] == campaign_id
+                synchronized = await session.call_tool(
+                    "campaign_query",
+                    {
+                        "view": "binding",
+                        "payload": {"campaign_id": campaign_id},
+                        "principal_id": principal_id,
+                    },
+                )
+                synchronized_payload = json.loads(synchronized.content[0].text)[
+                    "result"
+                ]
+                assert synchronized_payload["campaign_id"] == campaign_id
+                assert synchronized_payload["principal_fingerprint"]
+                assert synchronized_payload["role"] == "owner"
                 loaded = await session.call_tool(
                     "exposure_load",
                     {"exposure_id": exposure_id, "group_id": "lobby.rules"},

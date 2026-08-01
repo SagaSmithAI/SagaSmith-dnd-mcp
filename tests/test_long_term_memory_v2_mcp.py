@@ -158,6 +158,23 @@ def test_memory_facade_supports_stable_upsert_revision_and_supersede(tmp_path: P
         assert revised["importance"] == 4
         assert revised["disclosure_scope"] == "party"
 
+        with pytest.raises(Exception, match="fact_key identity conflict.*subject"):
+            await _call(
+                server,
+                "memory_change",
+                {
+                    "campaign_id": campaign["id"],
+                    "action": "upsert",
+                    "payload": {
+                        "fact_key": "location:cellar:door-state",
+                        "subject": "A different fact identity",
+                        "content": "This write must be rejected.",
+                        "expected_revision_id": revised["revision_id"],
+                    },
+                    "idempotency_key": "fact-identity-conflict",
+                },
+            )
+
         superseded = await _call(
             server,
             "memory_change",

@@ -3,7 +3,7 @@
   "$id": "https://sagasmith.ai/contracts/faction-turn-proposal.v1.schema.json",
   "title": "SagaSmith isolated faction turn proposal v1",
   "type": "object",
-  "required": ["schema_version", "bundle_id", "purpose", "faction_id", "intent", "proposed_actions", "claims", "resolution_requests", "proposed_deltas", "decision_summary"],
+  "required": ["schema_version", "bundle_id", "purpose", "faction_id", "intent", "proposed_actions", "claims", "resolution_requests", "decision_summary"],
   "properties": {
     "schema_version": {"const": 1},
     "bundle_id": {"type": "string", "minLength": 1},
@@ -26,7 +26,6 @@
     },
     "claims": {"type": "array", "items": {"$ref": "#/$defs/claim"}},
     "resolution_requests": {"type": "array", "items": {"$ref": "#/$defs/request"}},
-    "proposed_deltas": {"type": "array", "items": {"type": "object"}},
     "decision_summary": {"type": "string", "maxLength": 500}
   },
   "$defs": {

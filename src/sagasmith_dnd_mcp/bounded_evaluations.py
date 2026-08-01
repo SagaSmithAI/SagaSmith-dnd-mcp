@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from copy import deepcopy
 from typing import Any
 
 BOUNDED_EVALUATION_SCHEMA_VERSION = 1
@@ -165,13 +164,9 @@ def normalize_bounded_proposal(purpose: str, value: Any) -> dict[str, Any]:
                 "proposed_action",
                 "claims",
                 "resolution_requests",
-                "proposed_deltas",
                 "decision_summary",
             },
         )
-        deltas = data.get("proposed_deltas") or []
-        if not isinstance(deltas, list) or not all(isinstance(item, dict) for item in deltas):
-            raise ValueError("actor_turn.proposal.proposed_deltas must be objects")
         action = _object(data.get("proposed_action") or {}, "proposed_action")
         _strict(action, "proposed_action", {"kind", "target_ref", "summary"})
         action_kind = _text(action.get("kind"), "proposed_action.kind", maximum=50) or "none"
@@ -201,7 +196,6 @@ def normalize_bounded_proposal(purpose: str, value: Any) -> dict[str, Any]:
             },
             "claims": _claims(data.get("claims")),
             "resolution_requests": requests,
-            "proposed_deltas": [deepcopy(item) for item in deltas],
             "decision_summary": _text(
                 data.get("decision_summary"), "decision_summary", maximum=500
             ),
@@ -233,7 +227,6 @@ def normalize_bounded_proposal(purpose: str, value: Any) -> dict[str, Any]:
                 "proposed_actions",
                 "claims",
                 "resolution_requests",
-                "proposed_deltas",
                 "decision_summary",
             },
         )
@@ -273,9 +266,6 @@ def normalize_bounded_proposal(purpose: str, value: Any) -> dict[str, Any]:
                     ),
                 }
             )
-        deltas = data.get("proposed_deltas") or []
-        if not isinstance(deltas, list) or not all(isinstance(item, dict) for item in deltas):
-            raise ValueError("faction_turn.proposal.proposed_deltas must be objects")
         result = {
             **common,
             "faction_id": _text(data.get("faction_id"), "faction_id", required=True, maximum=200),
@@ -285,7 +275,6 @@ def normalize_bounded_proposal(purpose: str, value: Any) -> dict[str, Any]:
             "resolution_requests": _requests(
                 data.get("resolution_requests"), "resolution_requests"
             ),
-            "proposed_deltas": [deepcopy(item) for item in deltas],
             "decision_summary": _text(
                 data.get("decision_summary"), "decision_summary", maximum=500
             ),

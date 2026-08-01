@@ -222,6 +222,7 @@ from sagasmith_dnd.core_content import PACK_ID as CORE_CONTENT_PACK_ID
 from sagasmith_dnd.core_content import PACK_VERSION as CORE_CONTENT_PACK_VERSION
 from sagasmith_dnd.core_content import build_srd2014_content
 from sagasmith_dnd.core_rule_pack import get_core_rule_pack
+from sagasmith_dnd.document_layout import DND5E_DOCUMENT_LAYOUT_PROFILE
 from sagasmith_dnd.editions import DEFAULT_CAMPAIGN_EDITION, normalize_dnd_edition
 from sagasmith_dnd.engine import resolve_check, roll
 from sagasmith_dnd.game_time import (
@@ -1001,6 +1002,7 @@ class SessionExposureFastMCP(FastMCP):
         phase_lookup: Any,
         scope_validator: Any,
         random_context_factory: Any,
+        context_binding_factory: Any,
         bound_principal_id: str | None = None,
         **kwargs: Any,
     ) -> None:
@@ -1008,6 +1010,7 @@ class SessionExposureFastMCP(FastMCP):
         self._phase_lookup = phase_lookup
         self._scope_validator = scope_validator
         self._random_context_factory = random_context_factory
+        self._context_binding_factory = context_binding_factory
         self._bound_principal_id = (
             bound_principal_id.strip() if bound_principal_id else None
         )
@@ -1093,6 +1096,75 @@ class SessionExposureFastMCP(FastMCP):
                 )
             )
         return updated_content, attach(structured)
+
+    @staticmethod
+    def _attach_host_context_binding(
+        result: Any,
+        binding: dict[str, Any] | None,
+    ) -> Any:
+        """Attach one authoritative binding to both MCP result representations."""
+
+        if binding is None or not (isinstance(result, tuple) and len(result) == 2):
+            return result
+        content, structured = result
+
+        def attach(value: Any) -> Any:
+            if not isinstance(value, dict):
+                return value
+            updated = deepcopy(value)
+            payload = updated.get("result")
+            if isinstance(payload, dict):
+                payload["host_context_binding"] = deepcopy(binding)
+            else:
+                updated["host_context_binding"] = deepcopy(binding)
+            return updated
+
+        updated_content = []
+        for item in content:
+            text_value = getattr(item, "text", None)
+            if not isinstance(text_value, str):
+                updated_content.append(item)
+                continue
+            try:
+                decoded = json.loads(text_value)
+            except json.JSONDecodeError:
+                updated_content.append(item)
+                continue
+            updated_content.append(
+                item.model_copy(
+                    update={
+                        "text": json.dumps(
+                            attach(decoded),
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        )
+                    }
+                )
+            )
+        return updated_content, attach(structured)
+
+    @staticmethod
+    def _result_campaign_id(
+        name: str,
+        result: Any,
+        arguments: dict[str, Any] | None = None,
+    ) -> str | None:
+        if not (isinstance(result, tuple) and len(result) == 2):
+            return None
+        structured = result[1]
+        if not isinstance(structured, dict):
+            return None
+        payload = structured.get("result", structured)
+        if not isinstance(payload, dict):
+            return None
+        campaign_id = payload.get("campaign_id")
+        effective_name = name
+        if name == "exposure_call" and isinstance(arguments, dict):
+            effective_name = str(arguments.get("tool_id") or name)
+        if not campaign_id and effective_name == "campaign_create":
+            campaign_id = payload.get("id")
+        value = str(campaign_id or "").strip()
+        return value or None
 
     @staticmethod
     def _finalize_random_stream(
@@ -1239,6 +1311,25 @@ class SessionExposureFastMCP(FastMCP):
         campaign_id = str(arguments.get("campaign_id") or "") or None
         if campaign_id and name in {"game_phase", "combat_start", "combat_end"}:
             await self._refresh(session_key, campaign_id)
+        campaign_id = campaign_id or (exposure.campaign_id if exposure else None)
+        campaign_id = campaign_id or self._result_campaign_id(name, result, arguments)
+        if campaign_id:
+            principal_argument = self._principal_argument(name)
+            principal_id = str(
+                arguments.get(principal_argument) if principal_argument else ""
+            ).strip()
+            principal_id = (
+                principal_id
+                or (exposure.principal_id if exposure is not None else "")
+                or self._bound_principal_id
+                or "system:local"
+            )
+            binding = self._context_binding_factory(
+                campaign_id,
+                principal_id,
+                arguments,
+            )
+            result = self._attach_host_context_binding(result, binding)
         return result
 
 
@@ -1293,6 +1384,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "ocr_provider": storage.rule_ocr_provider(),
             "document_cache_dir": config.normalized_rulebooks_dir,
             "expected_checksum": checksum or None,
+            "layout_profile": DND5E_DOCUMENT_LAYOUT_PROFILE,
         }
 
     def module_document_options(checksum: str | None = None) -> dict[str, Any]:
@@ -1300,6 +1392,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "ocr_provider": storage.module_ocr_provider(),
             "document_cache_dir": config.normalized_modules_dir,
             "expected_checksum": checksum or None,
+            "layout_profile": DND5E_DOCUMENT_LAYOUT_PROFILE,
         }
 
     def profile_options_with_core_lock(
@@ -2092,6 +2185,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         phase_lookup=authoritative_phase,
         scope_validator=validate_exposure_scope,
         random_context_factory=campaign_random_context,
+        context_binding_factory=lambda campaign_id, principal_id, arguments: (
+            authoritative_host_context_binding(campaign_id, principal_id, arguments)
+        ),
         bound_principal_id=config.bound_principal_id,
     )
 
@@ -4300,6 +4396,39 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         current = branches.current(campaign_id)
         return current.id if current is not None else None
 
+    def authoritative_host_context_binding(
+        campaign_id: str,
+        principal_id: str,
+        arguments: dict[str, Any] | None = None,
+    ) -> dict[str, str] | None:
+        """Resolve the current replay boundary from server-owned authorization state."""
+
+        try:
+            membership = access.require_campaign(campaign_id, principal_id)
+        except (LookupError, PermissionError):
+            return None
+        branch_id = current_branch_id(campaign_id)
+        if branch_id is None:
+            return None
+        values = dict(arguments or {})
+        payload = values.get("payload")
+        if isinstance(payload, dict):
+            values = {**payload, **values}
+        requested_audience = str(values.get("audience") or "").strip().casefold()
+        if membership.role not in CAMPAIGN_DM_ROLES:
+            audience = "player"
+        elif requested_audience in {"dm", "player"}:
+            audience = requested_audience
+        else:
+            audience = "dm"
+        return host_context_binding(
+            campaign_id=campaign_id,
+            branch_id=branch_id,
+            principal_id=principal_id,
+            role=str(membership.role),
+            audience=audience,
+        )
+
     def active_encounter(campaign_id: str) -> tuple[Any, dict[str, Any]]:
         campaign = campaigns.get(campaign_id)
         encounter = dict(campaign.state or {}).get("combat")
@@ -4369,6 +4498,31 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 ) from error
             return scope_id
         raise PermissionError("players may read only party or an owned player scene scope")
+
+    def player_module_scene_view(
+        campaign_id: str,
+        scene: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        """Project a module scene without arbitrary GM progress metadata."""
+
+        if scene is None:
+            return None
+        if scene.get("visibility", "keeper") not in PLAYER_MODULE_VISIBILITY_SCOPES:
+            return {
+                "campaign_id": campaign_id,
+                "scene_id": scene.get("scene_id"),
+                "redacted": True,
+                "content": "[DM-only scene content hidden]",
+            }
+        projected = deepcopy(scene)
+        if isinstance(projected.get("progress"), dict):
+            progress = dict(projected["progress"])
+            progress.pop("state", None)
+            projected["progress"] = progress
+        spatial = dict(projected.get("spatial") or {})
+        spatial.pop("review", None)
+        projected["spatial"] = spatial
+        return projected
 
     def require_import_job(campaign_id: str, job_id: str, kind: str | None = None) -> Any:
         job = import_jobs.get(job_id)
@@ -30066,6 +30220,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             raise ValueError(f"actor_id is required for {purpose} context")
         if membership.role not in CAMPAIGN_DM_ROLES:
             audience = "player"
+            scope_id = readable_scene_scope(campaign_id, scope_id, principal_id)
             if actor_id:
                 access.require_actor(
                     campaign_id,
@@ -30892,6 +31047,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             path,
             ocr_provider=storage.module_ocr_provider(),
             cache_dir=config.normalized_modules_dir,
+            layout_profile=DND5E_DOCUMENT_LAYOUT_PROFILE,
         )
         document_inspection = inspect_character_document(
             document,
@@ -31834,16 +31990,11 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
     ) -> dict[str, Any]:
         """Read one full scene, including its structured rooms and visibility metadata."""
         membership = access.require_campaign(campaign_id, principal_id)
-        result = modules.read_scene(campaign_id, scene_id, scope_id=scope_id)
-        visibility = result.get("visibility", "keeper")
-        if membership.role in CAMPAIGN_DM_ROLES or visibility in PLAYER_MODULE_VISIBILITY_SCOPES:
+        resolved_scope_id = readable_scene_scope(campaign_id, scope_id, principal_id)
+        result = modules.read_scene(campaign_id, scene_id, scope_id=resolved_scope_id)
+        if membership.role in CAMPAIGN_DM_ROLES:
             return result
-        return {
-            "campaign_id": campaign_id,
-            "scene_id": scene_id,
-            "redacted": True,
-            "content": "[DM-only scene content hidden]",
-        }
+        return player_module_scene_view(campaign_id, result)
 
     def module_scene_readiness(
         campaign_id: str,
@@ -32018,13 +32169,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         result = modules.current_scene(campaign_id, scope_id=resolved_scope_id)
         if result is None or membership.role in CAMPAIGN_DM_ROLES:
             return result
-        if result.get("visibility", "keeper") in PLAYER_MODULE_VISIBILITY_SCOPES:
-            return result
-        return {
-            "campaign_id": campaign_id,
-            "redacted": True,
-            "content": "[DM-only scene content hidden]",
-        }
+        return player_module_scene_view(campaign_id, result)
 
     def module_progress_index(
         campaign_id: str,
@@ -38344,6 +38489,7 @@ Useful bounded guidance:
                 ocr_provider=storage.module_ocr_provider(),
                 cache_dir=config.normalized_modules_dir,
                 expected_checksum=str(staged["checksum"]),
+                layout_profile=DND5E_DOCUMENT_LAYOUT_PROFILE,
             )
             inspection = inspect_character_document(
                 document,
@@ -39654,13 +39800,27 @@ Useful bounded guidance:
 
     @mcp.tool()
     def campaign_query(
-        view: Literal["list", "get", "party", "resume"] = "list",
+        view: Literal["list", "get", "party", "resume", "binding"] = "list",
         payload: dict[str, Any] | None = None,
         principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
     ) -> dict[str, Any]:
         """Read campaigns, party state, or one complete resume bundle."""
         data = facade_payload(payload)
-        if view == "resume":
+        if view == "binding":
+            data = strict_facade_payload(
+                payload,
+                action="campaign_query(binding)",
+                allowed={"campaign_id"},
+                required_names=("campaign_id",),
+            )
+            campaign_id = required(data, "campaign_id")
+            result = authoritative_host_context_binding(
+                campaign_id,
+                principal_id,
+            )
+            if result is None:
+                raise LookupError("campaign has no active branch context")
+        elif view == "resume":
             data = strict_facade_payload(
                 payload,
                 action="campaign_query(resume)",
@@ -40530,8 +40690,8 @@ Useful bounded guidance:
         action: Literal["add", "upsert", "revise", "supersede", "commit"] = "add",
         payload: dict[str, Any] | None = None,
         content: str | None = None,
-        kind: str = "fact",
-        subject: str = "",
+        kind: str | None = None,
+        subject: str | None = None,
         metadata: dict[str, Any] | None = None,
         branch_id: str | None = None,
         principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
@@ -40644,10 +40804,20 @@ Useful bounded guidance:
                 campaign_id,
                 fact_key=fact_key,
                 content=str(required(data, "content")),
-                kind=str(data.get("kind") or "fact"),
-                subject=str(data.get("subject") or ""),
-                subject_ref=str(data.get("subject_ref") or ""),
-                predicate=str(data.get("predicate") or ""),
+                kind=(str(data["kind"]) if data.get("kind") is not None else None),
+                subject=(
+                    str(data["subject"]) if data.get("subject") is not None else None
+                ),
+                subject_ref=(
+                    str(data["subject_ref"])
+                    if data.get("subject_ref") is not None
+                    else None
+                ),
+                predicate=(
+                    str(data["predicate"])
+                    if data.get("predicate") is not None
+                    else None
+                ),
                 metadata=(
                     None
                     if current is not None and data.get("metadata") is None
@@ -42058,6 +42228,8 @@ Useful bounded guidance:
             "sagasmith_tool_groups": list(groups_for_tool(registered_tool.name)),
             "sagasmith_domain_context": "sagasmith-dnd",
         }
+        if registered_tool.name == "campaign_query":
+            registered_tool.meta["sagasmith_context_sync"] = True
 
     return mcp
 

@@ -114,6 +114,30 @@ def test_module_scene_reads_do_not_cross_player_scope_or_leak_keeper_structure(
                     "principal_id": "player:bob",
                 },
             )
+        with pytest.raises(Exception, match="owned player scene scope"):
+            await call(
+                server,
+                "continuity_context",
+                {
+                    "campaign_id": campaign["id"],
+                    "scope_id": f"player:{alice['id']}",
+                    "audience": "player",
+                    "principal_id": "player:bob",
+                },
+            )
+        player_context = await call(
+            server,
+            "continuity_context",
+            {
+                "campaign_id": campaign["id"],
+                "scope_id": f"player:{alice['id']}",
+                "audience": "player",
+                "principal_id": "player:alice",
+            },
+        )
+        assert player_context["scoped_scene"]["redacted"] is True
+        assert "cursed crown" not in str(player_context["scoped_scene"])
+        assert "The crown is cursed" not in str(player_context["scoped_scene"])
         redacted = await call(
             server,
             "module_read_scene",

@@ -54,33 +54,42 @@ async def seed(home: Path) -> dict[str, Any]:
     )
     pc_one = await _call(
         server,
-        "character_create",
+        "character_create_from",
         {
-            "name": "Aria",
-            "campaign_id": campaign["id"],
-            "character_type": "pc",
-            "player_name": "smoke-player-1",
+            "mode": "direct",
+            "payload": {
+                "name": "Aria",
+                "campaign_id": campaign["id"],
+                "character_type": "pc",
+                "player_name": "smoke-player-1",
+            },
             "idempotency_key": "smoke-create-aria",
         },
     )
     pc_two = await _call(
         server,
-        "character_create",
+        "character_create_from",
         {
-            "name": "Bram",
-            "campaign_id": campaign["id"],
-            "character_type": "pc",
-            "player_name": "smoke-player-2",
+            "mode": "direct",
+            "payload": {
+                "name": "Bram",
+                "campaign_id": campaign["id"],
+                "character_type": "pc",
+                "player_name": "smoke-player-2",
+            },
             "idempotency_key": "smoke-create-bram",
         },
     )
     npc = await _call(
         server,
-        "character_create",
+        "character_create_from",
         {
-            "name": "The Lantern Warden",
-            "campaign_id": campaign["id"],
-            "character_type": "npc",
+            "mode": "direct",
+            "payload": {
+                "name": "The Lantern Warden",
+                "campaign_id": campaign["id"],
+                "character_type": "npc",
+            },
             "idempotency_key": "smoke-create-warden",
         },
     )
@@ -90,46 +99,57 @@ async def seed(home: Path) -> dict[str, Any]:
     ):
         await _call(
             server,
-            "campaign_member_grant",
+            "access_grant",
             {
+                "scope": "campaign",
                 "campaign_id": campaign["id"],
                 "principal_id": principal_id,
-                "role": "player",
+                "payload": {"role": "player"},
                 "by_principal_id": LOCAL_SYSTEM_PRINCIPAL_ID,
             },
         )
         await _call(
             server,
-            "actor_grant",
+            "access_grant",
             {
+                "scope": "actor",
                 "campaign_id": campaign["id"],
                 "principal_id": principal_id,
-                "actor_id": actor["id"],
-                "can_control": True,
-                "can_view_private": True,
+                "payload": {
+                    "actor_id": actor["id"],
+                    "can_control": True,
+                    "can_view_private": True,
+                },
                 "by_principal_id": LOCAL_SYSTEM_PRINCIPAL_ID,
             },
         )
     event = await _call(
         server,
-        "event_add",
+        "campaign_event",
         {
             "campaign_id": campaign["id"],
-            "summary": "Aria and the Warden see the sealed lantern room.",
-            "event_type": "scene",
-            "audience_scope": "party",
-            "known_by_actor_ids": [pc_one["id"], npc["id"]],
-            "knowledge_key": "lantern-room-sealed",
-            "knowledge_proposition": "The lantern room is sealed and the brass key is nearby.",
+            "action": "add",
+            "payload": {
+                "summary": "Aria and the Warden see the sealed lantern room.",
+                "event_type": "scene",
+                "audience_scope": "party",
+                "known_by_actor_ids": [pc_one["id"], npc["id"]],
+                "knowledge_key": "lantern-room-sealed",
+                "knowledge_proposition": (
+                    "The lantern room is sealed and the brass key is nearby."
+                ),
+            },
             "principal_id": LOCAL_SYSTEM_PRINCIPAL_ID,
             "idempotency_key": "smoke-lantern-room-event",
         },
     )
     wallet = await _call(
         server,
-        "party_wallet_adjust",
+        "wallet_change",
         {
-            "campaign_id": campaign["id"],
+            "owner": "party",
+            "action": "adjust",
+            "owner_id": campaign["id"],
             "denomination": "gp",
             "amount": 25,
             "expected_revision": campaign["revision"],

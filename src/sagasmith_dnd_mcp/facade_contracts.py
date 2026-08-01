@@ -50,6 +50,7 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
         "list": [_variant(("status",))],
         "get": [_variant(("campaign_id",), ("campaign_id",))],
         "party": [_variant(("campaign_id",), ("campaign_id",))],
+        "binding": [_variant(("campaign_id",), ("campaign_id",))],
         "resume": [
             _variant(
                 (

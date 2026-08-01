@@ -3,7 +3,7 @@
   "$id": "https://sagasmith.ai/contracts/actor-turn-proposal.v1.schema.json",
   "title": "SagaSmith autonomous actor turn proposal v1",
   "type": "object",
-  "required": ["schema_version", "bundle_id", "purpose", "actor_id", "intent", "proposed_action", "claims", "resolution_requests", "proposed_deltas", "decision_summary"],
+  "required": ["schema_version", "bundle_id", "purpose", "actor_id", "intent", "proposed_action", "claims", "resolution_requests", "decision_summary"],
   "properties": {
     "schema_version": {"const": 1},
     "bundle_id": {"type": "string", "minLength": 1},
@@ -22,7 +22,6 @@
     },
     "claims": {"$ref": "#/$defs/claims"},
     "resolution_requests": {"$ref": "#/$defs/requests"},
-    "proposed_deltas": {"type": "array", "items": {"type": "object"}},
     "decision_summary": {"type": "string", "maxLength": 500}
   },
   "allOf": [
