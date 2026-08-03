@@ -33,6 +33,7 @@ from sagasmith_dnd_mcp.server import (
     _source_statblock_recovery_hints,
     _statblock_index_recovery_hints,
     _statblock_mechanical_identity,
+    _statblock_ocr_discovery_needed,
     _valid_statblock_heading,
     create_server,
 )
@@ -189,6 +190,32 @@ def test_source_statblock_hints_fill_only_unclaimed_layout_identities() -> None:
         ["RADIANT IDOL"],
         layout_blocks=[{"text": "Large celestial, lawful evil"}],
     ) == ["RADIANT IDOL"]
+
+
+def test_statblock_ocr_discovery_fills_empty_and_partially_paired_text_layers() -> None:
+    assert _statblock_ocr_discovery_needed(
+        [],
+        layout_blocks=[],
+        page_has_usable_catalog_card=False,
+    )
+    assert _statblock_ocr_discovery_needed(
+        [{"name": "CLAWFOOT"}],
+        layout_blocks=[
+            {"text": "Medium beast, unaligned"},
+            {"text": "Medium beast, unaligned"},
+        ],
+        page_has_usable_catalog_card=False,
+    )
+    assert not _statblock_ocr_discovery_needed(
+        [{"name": "MORDAKHESH"}],
+        layout_blocks=[{"text": "Medium.fiend, lawful evil"}],
+        page_has_usable_catalog_card=False,
+    )
+    assert not _statblock_ocr_discovery_needed(
+        [],
+        layout_blocks=[],
+        page_has_usable_catalog_card=True,
+    )
 
 
 def test_source_statblock_hints_skip_structural_page_headers() -> None:

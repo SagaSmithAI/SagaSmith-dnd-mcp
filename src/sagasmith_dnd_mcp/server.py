@@ -441,6 +441,7 @@ from sagasmith_dnd.statblocks import (
     finalize_imported_actor_rulings,
     frightful_presence_spec,
     gazer_eye_ray_spec,
+    is_2014_statblock_identity_line,
     legendary_action_spec,
     materialize_parameterized_statblock_source,
     parameterized_statblock_requirements,
@@ -1264,12 +1265,6 @@ def _merge_statblock_discoveries(
     return result
 
 
-_LAYOUT_STATBLOCK_IDENTITY_RE = re.compile(
-    r"(?i)^(?:Tiny|Small|Medium|Large|Huge|Gargantuan)\s*"
-    r"[A-Za-z][A-Za-z0-9 '/()\-]{0,120}?(?:,\s*.+)?$"
-)
-
-
 def _source_statblock_hint_additions(
     discoveries: list[dict[str, Any]],
     source_names: list[str],
@@ -1284,7 +1279,7 @@ def _source_statblock_hint_additions(
     """
 
     identity_count = sum(
-        bool(_LAYOUT_STATBLOCK_IDENTITY_RE.fullmatch(str(block.get("text") or "")))
+        is_2014_statblock_identity_line(str(block.get("text") or ""))
         for block in layout_blocks
     )
     discovered_names = [str(item.get("name") or "") for item in discoveries]
@@ -1302,6 +1297,23 @@ def _source_statblock_hint_additions(
         if len(additions) >= missing_slots:
             break
     return additions
+
+
+def _statblock_ocr_discovery_needed(
+    discoveries: list[dict[str, Any]],
+    *,
+    layout_blocks: list[dict[str, Any]],
+    page_has_usable_catalog_card: bool,
+) -> bool:
+    """Detect an empty or partially paired text layer that needs OCR discovery."""
+
+    if page_has_usable_catalog_card:
+        return False
+    identity_count = sum(
+        is_2014_statblock_identity_line(str(block.get("text") or ""))
+        for block in layout_blocks
+    )
+    return not discoveries or identity_count > len(discoveries)
 
 
 _STATBLOCK_INDEX_ENTRY_RE = re.compile(
@@ -37348,8 +37360,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         ocr_provider = storage.rule_ocr_provider()
         for page_number in selected_pages:
             text_layout = text_layouts[page_number]
+            text_layout_value = text_layout.as_dict()
+            text_layout_blocks = list(text_layout_value.get("blocks") or [])
             text_discoveries = discover_2014_statblock_names_from_layout(
-                text_layout.as_dict(),
+                text_layout_value,
                 minimum_confidence=0.5,
             )
             discovery_items = _merge_statblock_discoveries(
@@ -37362,18 +37376,21 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 secondary=[],
                 secondary_provider="",
             )
-            # A usable positioned text layer already supplies both identity
-            # discovery and exact column geometry. Running a neural OCR model
-            # on every such page is expensive and can introduce a second,
-            # noisier heading. Reserve OCR discovery for pages where the text
-            # layer found no card; individual text recoveries still fall back
-            # to OCR below when their mechanical fields cannot be validated.
+            # A positioned text layer normally supplies both identity discovery
+            # and exact column geometry. Some decorated titles or identity lines
+            # are image-font glyphs, however, and a two-card page can expose only
+            # one of them. Run OCR only when structural cards remain unpaired;
+            # individual text recoveries still fall back to OCR below.
             if (
                 ocr_provider is not None
-                and not discovery_items
                 and not index_hints["by_page"].get(page_number)
-                and not source_text_hints["by_page"].get(page_number)
-                and page_number not in usable_catalog_pages
+                and _statblock_ocr_discovery_needed(
+                    [item for item, _provider_name in discovery_items],
+                    layout_blocks=text_layout_blocks,
+                    page_has_usable_catalog_card=(
+                        page_number in usable_catalog_pages
+                    ),
+                )
             ):
                 ocr_layout = cached_rapidocr_layout(
                     source_path,
@@ -37408,9 +37425,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     )
                 )
             source_hint_additions = _source_statblock_hint_additions(
-                text_discoveries,
+                [item for item, _provider_name in discovery_items],
                 source_text_hints["by_page"].get(page_number, []),
-                layout_blocks=list(text_layout.as_dict().get("blocks") or []),
+                layout_blocks=text_layout_blocks,
             )
             for source_name in source_hint_additions:
                 if any(
@@ -37447,7 +37464,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 recovery_mode = "layout_text"
                 try:
                     recovery = recover_2014_statblock_from_ocr(
-                        text_layout.as_dict(),
+                        text_layout_value,
                         name=name,
                         minimum_confidence=0.5,
                     )
