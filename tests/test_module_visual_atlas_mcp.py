@@ -85,11 +85,32 @@ async def _call(server, name: str, arguments: dict):
     return called
 
 
-def test_pdf_page_review_becomes_snapshot_managed_scene_atlas(tmp_path: Path) -> None:
+def test_pdf_page_review_becomes_snapshot_managed_scene_atlas(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     import_root = tmp_path / "modules"
     import_root.mkdir()
     source = import_root / "dungeon.pdf"
     _write_text_pdf(source)
+    layout = OcrPageLayout(
+        page_number=1,
+        width=450,
+        height=300,
+        blocks=(OcrTextBlock("D5. Entry", 0.97, 20, 20, 120, 45),),
+    )
+
+    def extract_layout(
+        provider: RapidOcrProvider,
+        path: Path,
+        *,
+        page_numbers: list[int] | None = None,
+    ) -> list[OcrPageLayout]:
+        assert provider.model_type == "medium"
+        assert page_numbers == [1]
+        return [layout]
+
+    monkeypatch.setattr(RapidOcrProvider, "extract_layout", extract_layout)
     config = McpConfig(
         home=tmp_path / "home",
         database_url=None,
@@ -172,6 +193,8 @@ def test_pdf_page_review_becomes_snapshot_managed_scene_atlas(tmp_path: Path) ->
         assert isinstance(rendered.content[1], ImageContent)
         render_metadata = json.loads(rendered.content[0].text)
         assert render_metadata["asset"]["metadata"]["source_page"] == 1
+        assert render_metadata["ocr"]["text"] == "D5. Entry"
+        assert render_metadata["ocr"]["model"] == "medium"
         assert rendered.structuredContent == render_metadata
         assert rendered.content[1].mimeType == "image/png"
 
@@ -203,6 +226,7 @@ def test_pdf_page_review_becomes_snapshot_managed_scene_atlas(tmp_path: Path) ->
         fallback_envelope = json.loads(fallback.content[0].text)
         assert fallback_envelope["tool_id"] == "module_review"
         assert fallback_envelope["result"]["asset"]["metadata"]["source_page"] == 1
+        assert fallback_envelope["result"]["ocr"] == render_metadata["ocr"]
         assert fallback.structuredContent == fallback_envelope
         assert fallback.content[1].mimeType == "image/png"
 

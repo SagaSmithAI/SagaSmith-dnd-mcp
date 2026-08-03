@@ -62,6 +62,7 @@ from sagasmith_core import (
     extract_pdf_page_text,
     file_sha256,
     normalize_document,
+    ocr_layout_text,
     portable_rule_definition_checksum,
     render_pdf_page,
     validate_addon_pack,
@@ -11444,6 +11445,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "module_document_cache": True,
                 "module_selective_ocr": True,
                 "text_only_layout_ocr_recovery": True,
+                "visionless_page_ocr_text": True,
                 "indexed_text_statblock_review": True,
                 "player_safe_scene_scopes": True,
                 "player_safe_combat_maps": True,
@@ -35256,6 +35258,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         page_number: int,
         source_asset_id: str | None = None,
         scale: float = 1.5,
+        include_ocr_text: bool = True,
         principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
     ) -> Any:
         """Render one imported PDF page as visual evidence for maps or handouts."""
@@ -35264,6 +35267,17 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         rendered = render_pdf_page(source_asset["source_path"], page_number, scale=scale)
         if rendered.source_checksum != source_asset["checksum"]:
             raise RuntimeError("module PDF no longer matches its imported checksum")
+        if not isinstance(include_ocr_text, bool):
+            raise ValueError("include_ocr_text must be a boolean")
+        ocr_evidence = (
+            local_ocr_page_evidence(
+                source_asset["source_path"],
+                page_number,
+                scope="module",
+            )
+            if include_ocr_text
+            else {"included": False}
+        )
         target = storage.store_rendered_module_page(
             module_id=module_id,
             source_checksum=rendered.source_checksum,
@@ -35295,6 +35309,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "module_id": module_id,
                 "asset": asset,
                 "source_asset_id": source_asset["id"],
+                "ocr": ocr_evidence,
             },
             Image(path=target),
         ]
@@ -36012,6 +36027,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         job_id: str,
         page_number: int,
         scale: float = 1.5,
+        include_ocr_text: bool = True,
         principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
     ) -> Any:
         """Render one staged rulebook PDF page as checksum-bound Agent review evidence."""
@@ -36023,6 +36039,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         rendered = render_pdf_page(source, page_number, scale=scale)
         if rendered.source_checksum != job.artifact_checksum:
             raise RuntimeError("rulebook PDF no longer matches its staged checksum")
+        if not isinstance(include_ocr_text, bool):
+            raise ValueError("include_ocr_text must be a boolean")
         return [
             {
                 "campaign_id": campaign_id,
@@ -36035,6 +36053,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "height": rendered.height,
                 "scale": rendered.scale,
                 "image_checksum": rendered.checksum,
+                "ocr": (
+                    local_ocr_page_evidence(
+                        source,
+                        page_number,
+                        scope="rulebook",
+                    )
+                    if include_ocr_text
+                    else {"included": False}
+                ),
             },
             Image(data=rendered.content, format="png"),
         ]
@@ -36088,6 +36115,58 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         layout = provider.extract_layout(source, page_numbers=[page_number])[0]
         rapidocr_layout_cache[cache_key] = layout
         return layout
+
+    def local_ocr_page_evidence(
+        source_path: str | Path,
+        page_number: int,
+        *,
+        scope: Literal["rulebook", "module"],
+    ) -> dict[str, Any]:
+        """Return checksum-bound local OCR so visionless Agents can review a page."""
+
+        if scope == "rulebook":
+            enabled = config.rule_ocr_enabled
+            provider = storage.rule_ocr_provider()
+            scale = config.rule_ocr_scale
+            model = config.rule_ocr_model
+        else:
+            enabled = config.module_ocr_enabled
+            provider = storage.module_ocr_provider()
+            scale = config.module_ocr_scale
+            model = config.module_ocr_model
+        if not enabled or provider is None:
+            return {
+                "included": True,
+                "available": False,
+                "reason": f"{scope} OCR is disabled",
+            }
+        layout = cached_rapidocr_layout(
+            source_path,
+            page_number,
+            scale=scale,
+            preferred_provider=provider,
+            model_type=model,
+        )
+        page_text, used_columns = ocr_layout_text(layout)
+        confidences = [float(block.confidence) for block in layout.blocks]
+        return {
+            "included": True,
+            "available": True,
+            "provider": provider.name,
+            "profile": provider.cache_profile,
+            "model": model,
+            "scale": scale,
+            "page_number": page_number,
+            "used_column_recovery": used_columns,
+            "block_count": len(layout.blocks),
+            "average_confidence": (
+                sum(confidences) / len(confidences) if confidences else 0.0
+            ),
+            "minimum_confidence": min(confidences) if confidences else 0.0,
+            "text_sha256": hashlib.sha256(page_text.encode("utf-8")).hexdigest(),
+            "text": page_text[:50000],
+            "truncated": len(page_text) > 50000,
+        }
 
     def recover_pdf_statblock_layout(
         *,
@@ -43343,7 +43422,7 @@ Useful bounded guidance:
             data = strict_facade_payload(
                 payload,
                 action="rule_import(render_page)",
-                allowed={"job_id", "page_number", "scale"},
+                allowed={"include_ocr_text", "job_id", "page_number", "scale"},
                 required_names=("job_id", "page_number"),
             )
             return facade_render_result(  # type: ignore[return-value]
@@ -43352,6 +43431,7 @@ Useful bounded guidance:
                     data["job_id"],
                     data["page_number"],
                     data.get("scale", 1.5),
+                    data.get("include_ocr_text", True),
                     principal_id,
                 )
             )
@@ -43820,6 +43900,7 @@ Useful bounded guidance:
                     "page_number",
                     "source_asset_id",
                     "scale",
+                    "include_ocr_text",
                 },
                 required_names=("module_id", "page_number"),
             )
@@ -43830,6 +43911,7 @@ Useful bounded guidance:
                     data["page_number"],
                     data.get("source_asset_id"),
                     data.get("scale", 1.5),
+                    data.get("include_ocr_text", True),
                     principal_id,
                 )
             )

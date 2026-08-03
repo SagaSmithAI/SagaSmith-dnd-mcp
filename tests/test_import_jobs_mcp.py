@@ -487,6 +487,33 @@ def test_rule_import_renders_a_checksum_bound_review_page(
     page[NameObject("/Contents")] = writer._add_object(content)
     with source.open("wb") as stream:
         writer.write(stream)
+    layout = OcrPageLayout(
+        page_number=1,
+        width=450,
+        height=300,
+        blocks=(
+            OcrTextBlock(
+                "Commoner rulebook review page",
+                0.98,
+                20,
+                20,
+                300,
+                45,
+            ),
+        ),
+    )
+
+    def extract_layout(
+        provider: RapidOcrProvider,
+        path: Path,
+        *,
+        page_numbers: list[int] | None = None,
+    ) -> list[OcrPageLayout]:
+        assert provider.model_type == "medium"
+        assert page_numbers == [1]
+        return [layout]
+
+    monkeypatch.setattr(RapidOcrProvider, "extract_layout", extract_layout)
     config = McpConfig(
         home=tmp_path / "home",
         database_url=None,
@@ -533,6 +560,24 @@ def test_rule_import_renders_a_checksum_bound_review_page(
         metadata = json.loads(rendered.content[0].text)
         assert metadata["page_number"] == 1
         assert metadata["source_checksum"] == staged["result"]["checksum"]
+        assert metadata["ocr"]["included"] is True
+        assert metadata["ocr"]["available"] is True
+        assert metadata["ocr"]["provider"] == "rapidocr"
+        assert ":ocr=PP-OCRv6:model=medium:scale=2.00" in metadata["ocr"][
+            "profile"
+        ]
+        assert metadata["ocr"]["model"] == "medium"
+        assert metadata["ocr"]["scale"] == 2.0
+        assert metadata["ocr"]["page_number"] == 1
+        assert metadata["ocr"]["used_column_recovery"] is False
+        assert metadata["ocr"]["block_count"] == 1
+        assert metadata["ocr"]["average_confidence"] == 0.98
+        assert metadata["ocr"]["minimum_confidence"] == 0.98
+        assert metadata["ocr"]["text_sha256"] == hashlib.sha256(
+            b"Commoner rulebook review page"
+        ).hexdigest()
+        assert metadata["ocr"]["text"] == "Commoner rulebook review page"
+        assert metadata["ocr"]["truncated"] is False
         assert rendered.structuredContent == metadata
         assert rendered.content[1].mimeType == "image/png"
 

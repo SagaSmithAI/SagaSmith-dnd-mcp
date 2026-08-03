@@ -647,6 +647,7 @@ def test_server_capabilities_publish_the_rulebook_import_contract(tmp_path: Path
         assert capabilities["features"]["core_pdf_module_normalization"] is True
         assert capabilities["features"]["module_document_cache"] is True
         assert capabilities["features"]["module_selective_ocr"] is True
+        assert capabilities["features"]["visionless_page_ocr_text"] is True
         assert capabilities["module_import"]["stage_inputs"] == [
             "source_path",
             "name+content",

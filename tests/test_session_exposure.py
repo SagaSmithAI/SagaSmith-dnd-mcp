@@ -1114,6 +1114,7 @@ def test_stdio_exposure_fallback_preserves_rendered_image_content(tmp_path: Path
                                 "module_id": module_id,
                                 "page_number": 1,
                                 "scale": 0.5,
+                                "include_ocr_text": False,
                             },
                         },
                     },

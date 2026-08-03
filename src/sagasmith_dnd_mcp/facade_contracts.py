@@ -1199,7 +1199,10 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
         ],
         "inspect": [_variant(("job_id",), ("job_id",))],
         "render_page": [
-            _variant(("job_id", "page_number", "scale"), ("job_id", "page_number"))
+            _variant(
+                ("include_ocr_text", "job_id", "page_number", "scale"),
+                ("job_id", "page_number"),
+            )
         ],
         "recover_statblock": [
             _variant(
@@ -1240,6 +1243,12 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
             ),
         ],
         "extract_candidates": [_variant(("job_id",), ("job_id",))],
+        "augment_catalog": [
+            _variant(
+                ("additions", "job_id", "rationale"),
+                ("job_id", "additions", "rationale"),
+            )
+        ],
         "review": [_variant(("decisions", "job_id"), ("job_id", "decisions"))],
         "compile": [
             _variant(
@@ -1300,7 +1309,13 @@ ACTION_PAYLOAD_CONTRACTS: dict[str, dict[str, list[dict[str, Any]]]] = {
     "module_review": {
         "render_page": [
             _variant(
-                ("module_id", "page_number", "scale", "source_asset_id"),
+                (
+                    "include_ocr_text",
+                    "module_id",
+                    "page_number",
+                    "scale",
+                    "source_asset_id",
+                ),
                 ("module_id", "page_number"),
             )
         ],
