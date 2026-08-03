@@ -35459,9 +35459,9 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             Image(data=rendered.content, format="png"),
         ]
 
-    rapidocr_providers: dict[float, RapidOcrProvider] = {}
+    rapidocr_providers: dict[tuple[str, float], RapidOcrProvider] = {}
     rapidocr_layout_cache: dict[
-        tuple[str, int, int, float, int], OcrPageLayout
+        tuple[str, int, int, str, float, int], OcrPageLayout
     ] = {}
 
     def cached_rapidocr_layout(
@@ -35470,16 +35470,22 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         *,
         scale: float,
         preferred_provider: RapidOcrProvider | None = None,
+        model_type: str | None = None,
     ) -> OcrPageLayout:
         """Reuse one rendered/OCR layout across catalog entries on the same page."""
 
         source = Path(source_path).expanduser().resolve()
         stat = source.stat()
         normalized_scale = round(float(scale), 3)
+        normalized_model = str(
+            model_type
+            or getattr(preferred_provider, "model_type", "small")
+        )
         cache_key = (
             str(source),
             int(stat.st_size),
             int(stat.st_mtime_ns),
+            normalized_model,
             normalized_scale,
             page_number,
         )
@@ -35487,10 +35493,17 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         if cached is not None:
             return cached
         provider = preferred_provider
-        if provider is None or abs(float(provider.scale) - normalized_scale) >= 0.001:
+        if (
+            provider is None
+            or abs(float(provider.scale) - normalized_scale) >= 0.001
+            or str(getattr(provider, "model_type", "small")) != normalized_model
+        ):
             provider = rapidocr_providers.setdefault(
-                normalized_scale,
-                RapidOcrProvider(scale=normalized_scale),
+                (normalized_model, normalized_scale),
+                RapidOcrProvider(
+                    scale=normalized_scale,
+                    model_type=normalized_model,
+                ),
             )
         layout = provider.extract_layout(source, page_numbers=[page_number])[0]
         rapidocr_layout_cache[cache_key] = layout
@@ -35524,6 +35537,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     preferred_provider=(
                         provider if abs(scale - primary_scale) < 0.001 else None
                     ),
+                    model_type=str(getattr(provider, "model_type", "small")),
                 )
                 try:
                     candidate_recovery = recover_2014_statblock_from_ocr(
@@ -35625,6 +35639,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                             if abs(candidate_scale - float(provider.scale)) < 0.001
                             else None
                         ),
+                        model_type=str(getattr(provider, "model_type", "small")),
                     )
                     secondary = recover_2014_statblock_from_ocr(
                         secondary_layout.as_dict(),

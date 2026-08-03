@@ -81,6 +81,7 @@ def test_environment_config_has_separate_rule_and_module_import_roots(monkeypatc
     )
     monkeypatch.setenv("SAGASMITH_DND_MCP_MODULE_OCR", "0")
     monkeypatch.setenv("SAGASMITH_DND_MCP_MODULE_OCR_SCALE", "1.5")
+    monkeypatch.setenv("SAGASMITH_DND_MCP_RULE_OCR_MODEL", "medium")
     monkeypatch.setenv("SAGASMITH_DND_MCP_BOUND_PRINCIPAL_ID", "trusted-user")
     monkeypatch.setenv("SAGASMITH_DOCUMENT_CACHE_DIR", "shared-documents")
 
@@ -90,6 +91,8 @@ def test_environment_config_has_separate_rule_and_module_import_roots(monkeypatc
     assert [path.name for path in config.module_import_roots] == ["modules-a", "modules-b"]
     assert config.module_ocr_enabled is False
     assert config.module_ocr_scale == 1.5
+    assert config.rule_ocr_model == "medium"
+    assert config.module_ocr_model == "medium"
     assert config.bound_principal_id == "trusted-user"
     assert config.document_cache_dir is not None
     assert config.document_cache_dir.name == "shared-documents"

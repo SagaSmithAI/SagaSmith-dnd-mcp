@@ -158,14 +158,20 @@ class SagaSmithStorage:
         if not self.config.rule_ocr_enabled:
             return None
         if self._rule_ocr_provider is None:
-            self._rule_ocr_provider = RapidOcrProvider(scale=self.config.rule_ocr_scale)
+            self._rule_ocr_provider = RapidOcrProvider(
+                scale=self.config.rule_ocr_scale,
+                model_type=self.config.rule_ocr_model,
+            )
         return self._rule_ocr_provider
 
     def module_ocr_provider(self) -> RapidOcrProvider | None:
         if not self.config.module_ocr_enabled:
             return None
         if self._module_ocr_provider is None:
-            self._module_ocr_provider = RapidOcrProvider(scale=self.config.module_ocr_scale)
+            self._module_ocr_provider = RapidOcrProvider(
+                scale=self.config.module_ocr_scale,
+                model_type=self.config.module_ocr_model,
+            )
         return self._module_ocr_provider
 
     def artifact_rulebook_path(self, name: str) -> Path:
