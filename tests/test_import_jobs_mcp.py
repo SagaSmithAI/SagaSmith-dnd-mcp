@@ -73,6 +73,14 @@ def test_catalog_identity_can_span_ordered_sibling_headings_only() -> None:
     assert not _catalog_identity_is_evidenced(
         "Sanctuary Twilight", evidence
     )
+    assert _catalog_identity_is_evidenced(
+        "House Agent (Cannith)",
+        "HOUSE AGENT Tool Proficiency: Two tools by house: Cannith",
+    )
+    assert not _catalog_identity_is_evidenced(
+        "House Agent (Cannith Operative)",
+        "HOUSE AGENT Tool Proficiency: Two tools by house: Cannith",
+    )
     assert not _bounded_ocr_heading_equivalent("Female Steeder", "Male Steeder")
 
 

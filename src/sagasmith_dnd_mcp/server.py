@@ -898,13 +898,26 @@ def _catalog_identity_is_evidenced(name: str, evidence: str) -> bool:
     paths, which restores the printed title without ignoring arbitrary words.
     """
 
-    normalized_name = "".join(
-        character for character in name.casefold() if character.isalnum()
-    )
+    def normalized(value: str) -> str:
+        return "".join(
+            character for character in value.casefold() if character.isalnum()
+        )
+
+    normalized_name = normalized(name)
     normalized_evidence = "".join(
         character for character in evidence.casefold() if character.isalnum()
     )
-    return bool(normalized_name) and normalized_name in normalized_evidence
+    if normalized_name and normalized_name in normalized_evidence:
+        return True
+
+    variant = re.fullmatch(r"\s*(.+?)\s*\(([^()]+)\)\s*", name)
+    if variant is None:
+        return False
+    base_name = normalized(variant.group(1))
+    qualifier = normalized(variant.group(2))
+    return bool(base_name and qualifier) and all(
+        part in normalized_evidence for part in (base_name, qualifier)
+    )
 
 
 def _bounded_edit_distance(left: str, right: str, *, limit: int) -> int:
