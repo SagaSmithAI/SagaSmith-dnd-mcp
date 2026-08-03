@@ -83,6 +83,15 @@ def _arguments() -> argparse.Namespace:
             "Campaign databases and exported packages remain isolated per --home."
         ),
     )
+    parser.add_argument(
+        "--catalog-manifest",
+        type=Path,
+        help=(
+            "Optional source-reviewed JSON manifest for catalog additions, "
+            "corrections, and rejections. Stable source selectors are resolved "
+            "to indexed chunk ids before the public augment_catalog call."
+        ),
+    )
     parser.add_argument("--fail-on-warning", action="store_true")
     parser.add_argument(
         "--portable-roundtrip",
@@ -135,6 +144,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
     document_cache = (
         args.document_cache.expanduser().resolve() if args.document_cache else None
     )
+    catalog_manifest = _load_catalog_manifest(args.catalog_manifest)
     addon_output_dir = (
         args.addon_output_dir.expanduser().resolve()
         if args.addon_output_dir
@@ -341,6 +351,43 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             )
             candidates = extracted["result"]["candidates"]
             inventory = extracted["result"]["inventory"]
+            document_review = _catalog_document_review(
+                catalog_manifest,
+                relative_path,
+            )
+            catalog_augmentation: dict[str, Any] | None = None
+            if document_review.get("additions"):
+                source_chunks = await _source_chunks(server, source_id)
+                additions = _resolve_catalog_additions(
+                    document_review["additions"],
+                    source_chunks,
+                    relative_path=relative_path,
+                )
+                augmented = await _call(
+                    server,
+                    "rule_import",
+                    {
+                        "campaign_id": campaign["id"],
+                        "action": "augment_catalog",
+                        "payload": {
+                            "job_id": job_id,
+                            "rationale": str(
+                                document_review.get("rationale")
+                                or "Agent reviewed the complete indexed source catalog."
+                            ),
+                            "additions": additions,
+                        },
+                        "expected_revision": extracted["result"]["job"]["revision"],
+                        "idempotency_key": f"regression-augment-{id_key}",
+                    },
+                )
+                candidates = augmented["result"]["candidates"]
+                catalog_augmentation = {
+                    "added_candidate_ids": augmented["result"][
+                        "added_candidate_ids"
+                    ],
+                    "added": len(additions),
+                }
             hits = await _call(
                 server,
                 "rule_search",
@@ -370,6 +417,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                     primary_review_method=str(args.primary_review_method),
                     critic_reviewer=str(args.critic_reviewer),
                     critic_review_method=str(args.critic_review_method),
+                    review_spec=document_review,
                 )
                 release_components.append(
                     {
@@ -410,6 +458,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                         if key != "ledger"
                     },
                     "statblock_recovery": statblock_recovery,
+                    "catalog_augmentation": catalog_augmentation,
                     "source_scoped_search_hit": bool(hits),
                     "portable": portable,
                     "seconds": round(perf_counter() - item_started, 3),
@@ -462,6 +511,283 @@ def _kind_counts(candidates: list[dict[str, Any]]) -> dict[str, int]:
         kind = str(candidate.get("kind") or "unknown")
         result[kind] = result.get(kind, 0) + 1
     return dict(sorted(result.items()))
+
+
+def _load_catalog_manifest(path: Path | None) -> dict[str, Any]:
+    if path is None:
+        return {"version": 1, "documents": {}}
+    resolved = path.expanduser().resolve()
+    payload = json.loads(resolved.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict) or payload.get("version") != 1:
+        raise ValueError("catalog manifest must be a version 1 JSON object")
+    documents = payload.get("documents")
+    if not isinstance(documents, dict):
+        raise ValueError("catalog manifest documents must be an object")
+    return payload
+
+
+def _catalog_document_review(
+    manifest: dict[str, Any],
+    relative_path: str,
+) -> dict[str, Any]:
+    documents = dict(manifest.get("documents") or {})
+    normalized_path = relative_path.replace("/", "\\").casefold()
+    matches = [
+        value
+        for key, value in documents.items()
+        if str(key).replace("/", "\\").casefold() == normalized_path
+    ]
+    if len(matches) > 1:
+        raise ValueError(f"catalog manifest duplicates {relative_path}")
+    if not matches:
+        if manifest.get("strict") is True:
+            raise ValueError(f"catalog manifest has no complete review for {relative_path}")
+        return {}
+    review = matches[0]
+    if not isinstance(review, dict):
+        raise ValueError(f"catalog manifest entry for {relative_path} must be an object")
+    if review.get("complete_review") is not True:
+        raise ValueError(
+            f"catalog manifest entry for {relative_path} is not marked complete_review"
+        )
+    unknown = set(review) - {
+        "complete_review",
+        "rationale",
+        "additions",
+        "decisions",
+        "default_status",
+        "expected_catalog",
+    }
+    if unknown:
+        raise ValueError(
+            f"catalog manifest entry for {relative_path} has unsupported fields: "
+            f"{sorted(unknown)}"
+        )
+    return review
+
+
+async def _source_chunks(server: Any, source_id: str) -> list[dict[str, Any]]:
+    chunks: list[dict[str, Any]] = []
+    while True:
+        response = await _call(
+            server,
+            "rule_pack_query",
+            {
+                "view": "source_chunks",
+                "payload": {
+                    "source_id": source_id,
+                    "limit": 200,
+                    "offset": len(chunks),
+                },
+            },
+        )
+        page = list(response["result"])
+        chunks.extend(page)
+        if len(page) < 200:
+            return chunks
+
+
+def _fold_text(value: Any) -> str:
+    return " ".join(str(value or "").casefold().split())
+
+
+def _source_selector_matches(
+    chunk: dict[str, Any],
+    selector: dict[str, Any],
+) -> bool:
+    unknown = set(selector) - {
+        "heading_exact",
+        "heading_contains",
+        "content_contains",
+        "page_start",
+        "page_end",
+    }
+    if unknown:
+        raise ValueError(f"source selector has unsupported fields: {sorted(unknown)}")
+    if not selector:
+        raise ValueError("source selector cannot be empty")
+    heading_parts = [str(value) for value in chunk.get("heading_path") or []]
+    heading = " > ".join(heading_parts)
+    if "heading_exact" in selector:
+        expected = selector["heading_exact"]
+        if isinstance(expected, list):
+            if [_fold_text(value) for value in expected] != [
+                _fold_text(value) for value in heading_parts
+            ]:
+                return False
+        elif _fold_text(expected) not in {
+            _fold_text(heading),
+            _fold_text(heading_parts[-1] if heading_parts else ""),
+        }:
+            return False
+    if "heading_contains" in selector and _fold_text(
+        selector["heading_contains"]
+    ) not in _fold_text(heading):
+        return False
+    if "content_contains" in selector and _fold_text(
+        selector["content_contains"]
+    ) not in _fold_text(chunk.get("content")):
+        return False
+    for key in ("page_start", "page_end"):
+        if key in selector and int(chunk.get(key) or -1) != int(selector[key]):
+            return False
+    return True
+
+
+def _resolve_catalog_additions(
+    additions: Any,
+    chunks: list[dict[str, Any]],
+    *,
+    relative_path: str,
+) -> list[dict[str, Any]]:
+    if not isinstance(additions, list) or not additions:
+        raise ValueError(f"catalog additions for {relative_path} must be a nonempty list")
+    resolved: list[dict[str, Any]] = []
+    for index, addition in enumerate(additions):
+        if not isinstance(addition, dict):
+            raise ValueError(f"catalog addition {index} for {relative_path} must be an object")
+        unknown = set(addition) - {
+            "kind",
+            "name",
+            "source_selectors",
+            "card",
+            "note",
+        }
+        if unknown:
+            raise ValueError(
+                f"catalog addition {index} for {relative_path} has unsupported fields: "
+                f"{sorted(unknown)}"
+            )
+        selectors = addition.get("source_selectors")
+        if not isinstance(selectors, list) or not selectors:
+            raise ValueError(
+                f"catalog addition {index} for {relative_path} needs source_selectors"
+            )
+        chunk_ids: list[str] = []
+        for selector_index, selector in enumerate(selectors):
+            if not isinstance(selector, dict):
+                raise ValueError(
+                    f"source selector {selector_index} for {relative_path} must be an object"
+                )
+            matches = [
+                chunk for chunk in chunks if _source_selector_matches(chunk, selector)
+            ]
+            if len(matches) != 1:
+                raise ValueError(
+                    f"source selector {selector_index} for {relative_path} matched "
+                    f"{len(matches)} chunks; expected exactly one"
+                )
+            chunk_ids.append(str(matches[0]["id"]))
+        resolved.append(
+            {
+                key: addition[key]
+                for key in ("kind", "name", "card", "note")
+                if key in addition
+            }
+            | {"source_chunk_ids": list(dict.fromkeys(chunk_ids))}
+        )
+    return resolved
+
+
+def _deep_merge(base: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
+    result = json.loads(json.dumps(base))
+    for key, value in patch.items():
+        if isinstance(value, dict) and isinstance(result.get(key), dict):
+            result[key] = _deep_merge(result[key], value)
+        else:
+            result[key] = json.loads(json.dumps(value))
+    return result
+
+
+def _review_spec_decisions(
+    candidates: list[dict[str, Any]],
+    review_spec: dict[str, Any],
+    *,
+    reviewer: str,
+    method: str,
+) -> list[dict[str, Any]]:
+    raw_rules = review_spec.get("decisions") or []
+    if not isinstance(raw_rules, list):
+        raise ValueError("catalog manifest decisions must be a list")
+    rules: dict[tuple[str, str], dict[str, Any]] = {}
+    for index, rule in enumerate(raw_rules):
+        if not isinstance(rule, dict):
+            raise ValueError(f"catalog decision {index} must be an object")
+        unknown = set(rule) - {"kind", "name", "status", "artifact_patch", "note"}
+        if unknown:
+            raise ValueError(
+                f"catalog decision {index} has unsupported fields: {sorted(unknown)}"
+            )
+        key = (_fold_text(rule.get("kind")), _fold_text(rule.get("name")))
+        if not all(key) or key in rules:
+            raise ValueError(f"catalog decision {index} has an invalid or duplicate identity")
+        rules[key] = rule
+    default_status = str(review_spec.get("default_status") or "accepted")
+    if default_status not in {"accepted", "rejected"}:
+        raise ValueError("catalog manifest default_status must be accepted or rejected")
+    decisions: list[dict[str, Any]] = []
+    matched: set[tuple[str, str]] = set()
+    for candidate in candidates:
+        key = (_fold_text(candidate.get("kind")), _fold_text(candidate.get("name")))
+        rule = rules.get(key, {})
+        if rule:
+            matched.add(key)
+        status = str(rule.get("status") or default_status)
+        if status not in {"accepted", "rejected"}:
+            raise ValueError(f"catalog decision for {key} has invalid status {status}")
+        decision: dict[str, Any] = {
+            "id": candidate["id"],
+            "review_status": status,
+        }
+        if status == "accepted":
+            note = str(
+                rule.get("note")
+                or (
+                    "Reviewed typed card identity, classification, entry boundary, "
+                    "and exact indexed references."
+                )
+            )
+            decision["catalog_review_decision"] = _catalog_review_decision(
+                role="primary",
+                reviewer=reviewer,
+                method=method,
+                notes=note,
+            )
+            artifact_patch = rule.get("artifact_patch")
+            if artifact_patch is not None:
+                if not isinstance(artifact_patch, dict):
+                    raise ValueError(f"artifact_patch for {key} must be an object")
+                decision["artifact"] = _deep_merge(
+                    dict(candidate.get("artifact") or {}),
+                    artifact_patch,
+                )
+        elif rule.get("artifact_patch") is not None:
+            raise ValueError(f"rejected catalog decision for {key} cannot patch its artifact")
+        decisions.append(decision)
+    unmatched = sorted(set(rules) - matched)
+    if unmatched:
+        raise ValueError(f"catalog manifest decisions matched no candidate: {unmatched}")
+    expected = review_spec.get("expected_catalog")
+    if expected is not None:
+        if not isinstance(expected, list):
+            raise ValueError("expected_catalog must be a list")
+        expected_keys = {
+            (_fold_text(item.get("kind")), _fold_text(item.get("name")))
+            for item in expected
+            if isinstance(item, dict)
+        }
+        accepted_keys = {
+            (_fold_text(candidate.get("kind")), _fold_text(candidate.get("name")))
+            for candidate, decision in zip(candidates, decisions, strict=True)
+            if decision["review_status"] == "accepted"
+        }
+        if expected_keys != accepted_keys:
+            raise ValueError(
+                "catalog manifest expected_catalog differs from the accepted catalog: "
+                f"missing={sorted(expected_keys - accepted_keys)}, "
+                f"unexpected={sorted(accepted_keys - expected_keys)}"
+            )
+    return decisions
 
 
 def _matches_includes(
@@ -518,27 +844,11 @@ async def _portable_roundtrip(
     primary_review_method: str,
     critic_reviewer: str,
     critic_review_method: str,
+    review_spec: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Compile the entire reviewed catalog and round-trip its self-contained addon."""
 
-    chunks: list[dict[str, Any]] = []
-    while True:
-        chunk_response = await _call(
-            source_server,
-            "rule_pack_query",
-            {
-                "view": "source_chunks",
-                "payload": {
-                    "source_id": source_id,
-                    "limit": 200,
-                    "offset": len(chunks),
-                },
-            },
-        )
-        page = list(chunk_response["result"])
-        chunks.extend(page)
-        if len(page) < 200:
-            break
+    chunks = await _source_chunks(source_server, source_id)
     if not chunks:
         raise RuntimeError("indexed source has no chunk available for a portable probe")
     pack_id = _portable_pack_id(relative_path, run_id=run_id)
@@ -622,6 +932,12 @@ async def _portable_roundtrip(
         )
         draft_response = {"result": {"draft": draft_response["result"]}}
     else:
+        primary_decisions = _review_spec_decisions(
+            candidates,
+            review_spec or {},
+            reviewer=primary_reviewer,
+            method=primary_review_method,
+        )
         primary_reviewed = await _call(
             source_server,
             "rule_import",
@@ -630,22 +946,7 @@ async def _portable_roundtrip(
                 "action": "review",
                 "payload": {
                     "job_id": job_id,
-                    "decisions": [
-                        {
-                            "id": candidate["id"],
-                            "review_status": "accepted",
-                            "catalog_review_decision": _catalog_review_decision(
-                                role="primary",
-                                reviewer=primary_reviewer,
-                                method=primary_review_method,
-                                notes=(
-                                    "Reviewed typed card identity, classification, "
-                                    "entry boundary, and exact indexed references."
-                                ),
-                            ),
-                        }
-                        for candidate in candidates
-                    ],
+                    "decisions": primary_decisions,
                 },
                 "idempotency_key": f"regression-review-primary-{id_key}",
             },
@@ -689,10 +990,21 @@ async def _portable_roundtrip(
             },
         )
         if any(
-            item["review_status"] != "accepted"
+            item["review_status"] not in {"accepted", "rejected"}
             for item in reviewed["result"]["candidates"]
         ):
             raise RuntimeError("full candidate catalog was not independently approved")
+        original_by_id = {str(item.get("id")): item for item in candidates}
+        candidates = [
+            {
+                **dict(original_by_id.get(str(item.get("id"))) or {}),
+                **item,
+            }
+            for item in reviewed["result"]["candidates"]
+            if item["review_status"] == "accepted"
+        ]
+        if not candidates:
+            raise RuntimeError("catalog review rejected every extracted candidate")
         draft_response = await _call(
             source_server,
             "rule_import",

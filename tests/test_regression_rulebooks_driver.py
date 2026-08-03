@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Any
 
 import pytest
@@ -51,6 +52,136 @@ def test_include_globs_are_case_insensitive_and_optional() -> None:
     assert driver._matches_includes(path, ["Player*.pdf", "*guide.PDF"]) is True
     assert driver._matches_includes(path, ["Monster*.pdf"]) is False
     assert driver._matches_includes(path, [], empty=False) is False
+
+
+def test_catalog_manifest_resolves_stable_sources_and_review_actions(tmp_path) -> None:
+    manifest_path = tmp_path / "catalog.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "documents": {
+                    "UO/Artificer.pdf": {
+                        "complete_review": True,
+                        "default_status": "accepted",
+                        "additions": [
+                            {
+                                "kind": "subclass",
+                                "name": "Gunsmith",
+                                "source_selectors": [
+                                    {
+                                        "heading_exact": "Artificer Specialists",
+                                        "content_contains": "A gunsmith is a master engineer",
+                                    }
+                                ],
+                                "card": {"class_name": "Artificer"},
+                            }
+                        ],
+                        "decisions": [
+                            {
+                                "kind": "feature",
+                                "name": "Layout Note",
+                                "status": "rejected",
+                                "note": "This is explanatory layout prose.",
+                            },
+                            {
+                                "kind": "subclass",
+                                "name": "Gunsmith",
+                                "artifact_patch": {
+                                    "card": {"minimum_level": 1},
+                                },
+                            },
+                        ],
+                        "expected_catalog": [
+                            {"kind": "subclass", "name": "Gunsmith"}
+                        ],
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    manifest = driver._load_catalog_manifest(manifest_path)
+    review = driver._catalog_document_review(manifest, "UO\\Artificer.pdf")
+    additions = driver._resolve_catalog_additions(
+        review["additions"],
+        [
+            {
+                "id": "chunk-specialist",
+                "heading_path": ["Artificer Specialists"],
+                "content": "A gunsmith is a master engineer who uses magic.",
+            },
+            {
+                "id": "chunk-other",
+                "heading_path": ["Other"],
+                "content": "Unrelated text.",
+            },
+        ],
+        relative_path="UO\\Artificer.pdf",
+    )
+    assert additions == [
+        {
+            "kind": "subclass",
+            "name": "Gunsmith",
+            "card": {"class_name": "Artificer"},
+            "source_chunk_ids": ["chunk-specialist"],
+        }
+    ]
+    candidates = [
+        {
+            "id": "layout-note",
+            "kind": "feature",
+            "name": "Layout Note",
+            "artifact": {"kind": "feature", "card": {"name": "Layout Note"}},
+        },
+        {
+            "id": "gunsmith",
+            "kind": "subclass",
+            "name": "Gunsmith",
+            "artifact": {
+                "kind": "subclass",
+                "card": {"name": "Gunsmith", "class_name": "Artificer"},
+            },
+        },
+    ]
+    decisions = driver._review_spec_decisions(
+        candidates,
+        review,
+        reviewer="agent:catalog-author",
+        method="agent",
+    )
+    assert decisions[0] == {"id": "layout-note", "review_status": "rejected"}
+    assert decisions[1]["artifact"]["card"] == {
+        "name": "Gunsmith",
+        "class_name": "Artificer",
+        "minimum_level": 1,
+    }
+    assert decisions[1]["catalog_review_decision"]["method"] == "agent"
+
+
+def test_catalog_manifest_rejects_ambiguous_source_selectors() -> None:
+    addition = {
+        "kind": "subclass",
+        "name": "Gunsmith",
+        "source_selectors": [{"content_contains": "gunsmith"}],
+    }
+    with pytest.raises(ValueError, match="matched 2 chunks"):
+        driver._resolve_catalog_additions(
+            [addition],
+            [
+                {"id": "one", "content": "Gunsmith rules."},
+                {"id": "two", "content": "More gunsmith rules."},
+            ],
+            relative_path="Artificer.pdf",
+        )
+
+
+def test_strict_catalog_manifest_requires_every_selected_document() -> None:
+    with pytest.raises(ValueError, match="no complete review"):
+        driver._catalog_document_review(
+            {"version": 1, "strict": True, "documents": {}},
+            "Missing.pdf",
+        )
 
 
 def test_portable_roundtrip_uses_public_facades_and_preserves_package() -> None:
