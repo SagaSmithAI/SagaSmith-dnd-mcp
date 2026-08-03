@@ -217,6 +217,182 @@ Hit: 8 (1d8 + 4) slashing damage.
     )
 
 
+def test_rule_import_agent_can_add_only_source_bound_catalog_entities(tmp_path: Path) -> None:
+    import_root = tmp_path / "imports"
+    import_root.mkdir()
+    rulebook = import_root / "specialists.md"
+    rulebook.write_text(
+        (
+            "# Artificer Specialists\n\n"
+            "A gunsmith is a master engineer who forges a firearm powered by magic.\n\n"
+            "### Master Smith\n\n"
+            "When you choose this specialization at 1st level, you gain proficiency "
+            "with smith's tools.\n"
+        ),
+        encoding="utf-8",
+    )
+    config = McpConfig(
+        home=tmp_path / "home",
+        database_url=None,
+        chroma_url=None,
+        chroma_path_override=None,
+        dnd_skills_dir=tmp_path / "dnd",
+        modulegen_skills_dir=tmp_path / "modulegen",
+        rule_import_roots=(import_root,),
+    )
+
+    async def _call(server, name: str, arguments: dict):
+        _, result = await server.call_tool(name, arguments)
+        return result.get("result", result) if isinstance(result, dict) else result
+
+    async def exercise() -> None:
+        server = create_server(config)
+        campaign = await _call(
+            server,
+            "campaign_create",
+            {"name": "Agent catalog", "idempotency_key": "catalog-campaign"},
+        )
+        staged = await _call(
+            server,
+            "rule_import",
+            {
+                "campaign_id": campaign["id"],
+                "action": "stage",
+                "payload": {
+                    "source_path": str(rulebook),
+                    "source_key": "agent-catalog-test",
+                    "title": "Agent Catalog Test",
+                    "edition": "2014",
+                },
+                "idempotency_key": "catalog-stage",
+            },
+        )
+        job_id = staged["job"]["id"]
+        await _call(
+            server,
+            "rule_import",
+            {
+                "campaign_id": campaign["id"],
+                "action": "inspect",
+                "payload": {"job_id": job_id},
+                "idempotency_key": "catalog-inspect",
+            },
+        )
+        await _call(
+            server,
+            "rule_import",
+            {
+                "campaign_id": campaign["id"],
+                "action": "ingest",
+                "payload": {"job_id": job_id},
+                "idempotency_key": "catalog-ingest",
+            },
+        )
+        extracted = await _call(
+            server,
+            "rule_import",
+            {
+                "campaign_id": campaign["id"],
+                "action": "extract_candidates",
+                "payload": {"job_id": job_id},
+                "idempotency_key": "catalog-extract",
+            },
+        )
+        chunks = await _call(
+            server,
+            "rule_pack_query",
+            {
+                "view": "source_chunks",
+                "payload": {
+                    "source_id": extracted["job"]["source_id"],
+                    "query": "gunsmith",
+                },
+            },
+        )
+        gunsmith_chunk = next(
+            item for item in chunks if "gunsmith" in item.get("content", "").casefold()
+        )
+        arguments = {
+            "campaign_id": campaign["id"],
+            "action": "augment_catalog",
+            "payload": {
+                "job_id": job_id,
+                "rationale": "The layout parser found the feature but missed its parent subclass.",
+                "additions": [
+                    {
+                        "kind": "subclass",
+                        "name": "Gunsmith",
+                        "source_chunk_ids": [gunsmith_chunk["id"]],
+                        "card": {
+                            "class_name": "Artificer",
+                            "minimum_level": 1,
+                            "always_prepared_spells": [],
+                            "description": "invented text must not survive",
+                        },
+                    }
+                ],
+            },
+            "expected_revision": extracted["job"]["revision"],
+            "idempotency_key": "catalog-augment",
+        }
+        augmented = await _call(server, "rule_import", arguments)
+        added = next(
+            item
+            for item in augmented["candidates"]
+            if item["id"] in augmented["added_candidate_ids"]
+        )
+        assert added["name"] == "Gunsmith"
+        assert added["artifact"]["card"]["description"] == gunsmith_chunk["content"]
+        assert "invented text" not in added["artifact"]["card"]["description"]
+        assert added["source_citations"]
+        replay = await _call(server, "rule_import", arguments)
+        assert replay["job"]["revision"] == augmented["job"]["revision"]
+
+        with pytest.raises(Exception, match="outside the indexed source"):
+            await _call(
+                server,
+                "rule_import",
+                {
+                    **arguments,
+                    "payload": {
+                        **arguments["payload"],
+                        "additions": [
+                            {
+                                "kind": "subclass",
+                                "name": "Invented",
+                                "source_chunk_ids": ["foreign-chunk"],
+                            }
+                        ],
+                    },
+                    "expected_revision": augmented["job"]["revision"],
+                    "idempotency_key": "catalog-forged",
+                },
+            )
+
+        with pytest.raises(Exception, match="not evidenced"):
+            await _call(
+                server,
+                "rule_import",
+                {
+                    **arguments,
+                    "payload": {
+                        **arguments["payload"],
+                        "additions": [
+                            {
+                                "kind": "subclass",
+                                "name": "Invented Name",
+                                "source_chunk_ids": [gunsmith_chunk["id"]],
+                            }
+                        ],
+                    },
+                    "expected_revision": augmented["job"]["revision"],
+                    "idempotency_key": "catalog-invented-name",
+                },
+            )
+
+    asyncio.run(exercise())
+
+
 def test_rule_import_discovers_nested_allowlisted_rulebooks(tmp_path: Path) -> None:
     import_root = tmp_path / "imports"
     nested = import_root / "third-party"

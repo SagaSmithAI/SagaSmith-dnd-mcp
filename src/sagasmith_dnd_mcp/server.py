@@ -12259,6 +12259,251 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "inventory": inventory,
         }
 
+    def rule_content_candidates_augment(
+        campaign_id: str,
+        job_id: str,
+        additions: list[dict[str, Any]],
+        rationale: str,
+        principal_id: str,
+        expected_revision: int | None,
+        idempotency_key: str | None,
+    ) -> dict[str, Any]:
+        """Add entities missed by layout extraction without accepting invented source text."""
+
+        access.require_campaign(campaign_id, principal_id, roles=CAMPAIGN_DM_ROLES)
+        if expected_revision is None or not idempotency_key:
+            raise ValueError(
+                "expected_revision and idempotency_key are required for catalog augmentation"
+            )
+        normalized_rationale = " ".join(str(rationale).split())
+        if not normalized_rationale or len(normalized_rationale) > 2000:
+            raise ValueError("catalog augmentation rationale is required and limited to 2000 chars")
+        if not isinstance(additions, list) or not 1 <= len(additions) <= 100:
+            raise ValueError("catalog augmentation requires 1 to 100 additions")
+        job = require_import_job(campaign_id, job_id)
+        if job.kind != "rulebook" or not job.source_id:
+            raise ValueError("catalog augmentation requires an indexed rulebook source")
+        payload = {
+            "job_id": job_id,
+            "operation": "augment_catalog",
+            "additions": deepcopy(additions),
+            "rationale": normalized_rationale,
+        }
+        scope = f"import-job:{campaign_id}:{job_id}:{principal_id}"
+        replay = replay_idempotent(scope, idempotency_key, payload)
+        if replay is not None:
+            return replay
+        if job.state not in {"extracted", "review_required"}:
+            raise ValueError("catalog augmentation must happen before candidate approval")
+        if job.revision != expected_revision:
+            raise ValueError(
+                f"import job revision conflict: expected {expected_revision}, found {job.revision}"
+            )
+
+        available_chunks = {
+            str(chunk.get("id") or ""): dict(chunk)
+            for chunk in rules.source_chunks(job.source_id)
+            if str(chunk.get("id") or "")
+        }
+        supported_kinds = {
+            "activity",
+            "background",
+            "class",
+            "feat",
+            "feature",
+            "item",
+            "species",
+            "spell",
+            "statblock",
+            "subclass",
+        }
+        forbidden_card_keys = {
+            "catalog_review",
+            "mechanic_refs",
+            "resolution_plan",
+            "resolution_plans",
+            "runtime_contract",
+            "selection_contract",
+            "semantic_resolution",
+        }
+
+        def reject_executable_fields(value: Any, *, path: str = "card") -> None:
+            if isinstance(value, list):
+                for index, item in enumerate(value):
+                    reject_executable_fields(item, path=f"{path}[{index}]")
+                return
+            if not isinstance(value, dict):
+                return
+            for key, item in value.items():
+                if str(key) in forbidden_card_keys:
+                    raise ValueError(
+                        f"{path}.{key} is assigned only by reviewed server contracts"
+                    )
+                reject_executable_fields(item, path=f"{path}.{key}")
+
+        candidates = [deepcopy(item) for item in job.candidates]
+        existing_keys = {
+            (
+                str(item.get("kind") or "").casefold(),
+                "".join(
+                    character
+                    for character in str(item.get("name") or "").casefold()
+                    if character.isalnum()
+                ),
+            )
+            for item in candidates
+        }
+        added_ids: list[str] = []
+        for index, raw_addition in enumerate(additions):
+            if not isinstance(raw_addition, dict):
+                raise ValueError(f"additions[{index}] must be an object")
+            unknown = set(raw_addition) - {"kind", "name", "source_chunk_ids", "card", "note"}
+            if unknown:
+                raise ValueError(
+                    f"additions[{index}] has unsupported fields: {sorted(unknown)}"
+                )
+            kind = str(raw_addition.get("kind") or "").strip().casefold()
+            name = " ".join(str(raw_addition.get("name") or "").split())
+            if kind not in supported_kinds:
+                raise ValueError(f"additions[{index}].kind is not supported")
+            if not name or len(name) > 200:
+                raise ValueError(f"additions[{index}].name is required and limited to 200 chars")
+            raw_chunk_ids = raw_addition.get("source_chunk_ids")
+            if not isinstance(raw_chunk_ids, list) or not 1 <= len(raw_chunk_ids) <= 32:
+                raise ValueError(
+                    f"additions[{index}].source_chunk_ids requires 1 to 32 source chunks"
+                )
+            chunk_ids = list(dict.fromkeys(str(item).strip() for item in raw_chunk_ids))
+            if any(not item or item not in available_chunks for item in chunk_ids):
+                raise ValueError(
+                    f"additions[{index}] references a chunk outside the indexed source"
+                )
+            identity_key = (
+                kind,
+                "".join(character for character in name.casefold() if character.isalnum()),
+            )
+            if identity_key in existing_keys:
+                raise ValueError(
+                    f"additions[{index}] duplicates an existing candidate; revise it during review"
+                )
+            raw_card = raw_addition.get("card") or {}
+            if not isinstance(raw_card, dict):
+                raise ValueError(f"additions[{index}].card must be an object")
+            if len(json.dumps(raw_card, ensure_ascii=False)) > 64000:
+                raise ValueError(f"additions[{index}].card exceeds 64000 serialized chars")
+            card = deepcopy(raw_card)
+            reject_executable_fields(card)
+            source_chunks = [available_chunks[item] for item in chunk_ids]
+            source_text = "\n\n".join(
+                str(chunk.get("content") or "").strip()
+                for chunk in source_chunks
+                if str(chunk.get("content") or "").strip()
+            )
+            if not source_text:
+                raise ValueError(f"additions[{index}] source chunks contain no indexed text")
+            identity_evidence = " ".join(
+                [
+                    *(
+                        str(part)
+                        for chunk in source_chunks
+                        for part in (chunk.get("heading_path") or [])
+                    ),
+                    source_text,
+                ]
+            )
+            normalized_name = "".join(
+                character for character in name.casefold() if character.isalnum()
+            )
+            normalized_evidence = "".join(
+                character
+                for character in identity_evidence.casefold()
+                if character.isalnum()
+            )
+            if normalized_name not in normalized_evidence:
+                raise ValueError(
+                    f"additions[{index}].name is not evidenced by the referenced source chunks"
+                )
+            card["name"] = name
+            card["description"] = source_text[:24000]
+            identity = json.dumps(
+                {
+                    "source_id": job.source_id,
+                    "kind": kind,
+                    "name": name.casefold(),
+                    "source_chunk_ids": sorted(chunk_ids),
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            candidate_id = (
+                "candidate:agent:"
+                + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:20]
+            )
+            pages_start = [
+                int(chunk["page_start"])
+                for chunk in source_chunks
+                if isinstance(chunk.get("page_start"), int)
+            ]
+            pages_end = [
+                int(chunk["page_end"])
+                for chunk in source_chunks
+                if isinstance(chunk.get("page_end"), int)
+            ]
+            candidate = {
+                "id": candidate_id,
+                "kind": kind,
+                "name": name,
+                "source_chunk_ids": chunk_ids,
+                "source_heading_path": list(source_chunks[0].get("heading_path") or []),
+                "page_start": min(pages_start) if pages_start else None,
+                "page_end": max(pages_end) if pages_end else None,
+                "extraction_confidence": "agent_review_required",
+                "extraction_signals": ["source-bound agent catalog addition"],
+                "review_status": "pending",
+                "mechanical_scope": "review_required",
+                "application_state": "catalog_only",
+                "execution_state": "agent_resolution_required",
+                "agent_catalog_addition": {
+                    "principal_id": principal_id,
+                    "rationale": normalized_rationale,
+                    "note": " ".join(str(raw_addition.get("note") or "").split())[:2000],
+                },
+                "artifact": {
+                    "kind": kind,
+                    "application_state": "catalog_only",
+                    "mechanical_scope": "review_required",
+                    "card": card,
+                },
+                "source_citations": [
+                    rules.citation(chunk_id, source_id=job.source_id)
+                    for chunk_id in chunk_ids
+                ],
+            }
+            candidates.append(candidate)
+            existing_keys.add(identity_key)
+            added_ids.append(candidate_id)
+
+        updated = import_jobs.set_candidates(
+            job_id,
+            candidates,
+            expected_revision=expected_revision,
+            idempotency_key=idempotency_key,
+            idempotency_write=IdempotencyWrite(
+                scope=scope,
+                payload=payload,
+                response=lambda result: {
+                    "job": import_job_view(result),
+                    "candidates": [import_candidate_view(item) for item in result.candidates],
+                    "added_candidate_ids": added_ids,
+                },
+            ),
+        )
+        return {
+            "job": import_job_view(updated),
+            "candidates": [import_candidate_view(item) for item in updated.candidates],
+            "added_candidate_ids": added_ids,
+        }
+
     @mcp.tool()
     def import_job_review_candidates(
         campaign_id: str,
@@ -42774,6 +43019,7 @@ Useful bounded guidance:
             "ingest",
             "review_statblock",
             "extract_candidates",
+            "augment_catalog",
             "review",
             "compile",
             "install",
@@ -43119,6 +43365,30 @@ Useful bounded guidance:
                 action,
                 rule_content_candidates_extract(
                     campaign_id, data["job_id"], principal_id, idempotency_key
+                ),
+            )
+        if action == "augment_catalog":
+            require_facade_phase(
+                campaign_id,
+                "rule_import(augment_catalog)",
+                PROFILE_LOBBY,
+            )
+            data = strict_facade_payload(
+                payload,
+                action="rule_import(augment_catalog)",
+                allowed={"job_id", "additions", "rationale"},
+                required_names=("job_id", "additions", "rationale"),
+            )
+            return facade_result(
+                action,
+                rule_content_candidates_augment(
+                    campaign_id,
+                    str(data["job_id"]),
+                    data["additions"],
+                    str(data["rationale"]),
+                    principal_id,
+                    expected_revision,
+                    idempotency_key,
                 ),
             )
         if action == "review":
