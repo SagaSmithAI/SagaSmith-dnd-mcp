@@ -537,6 +537,231 @@ def _kind_counts(candidates: list[dict[str, Any]]) -> dict[str, int]:
     return dict(sorted(result.items()))
 
 
+def _runtime_path_value(value: Any, path: str) -> Any:
+    current = value
+    for part in path.split("."):
+        if isinstance(current, dict):
+            if part not in current:
+                raise RuntimeError(f"runtime probe path is absent: {path}")
+            current = current[part]
+        elif isinstance(current, list) and part.isdecimal():
+            index = int(part)
+            if index >= len(current):
+                raise RuntimeError(f"runtime probe path index is absent: {path}")
+            current = current[index]
+        else:
+            raise RuntimeError(f"runtime probe path is not traversable: {path}")
+    return current
+
+
+def _assert_runtime_expectations(value: Any, expectations: Any) -> None:
+    if not isinstance(expectations, list):
+        raise ValueError("runtime probe expect must be an array")
+    for index, raw_expectation in enumerate(expectations):
+        if not isinstance(raw_expectation, dict):
+            raise ValueError(f"runtime probe expect[{index}] must be an object")
+        unknown = set(raw_expectation) - {
+            "path",
+            "equals",
+            "contains",
+            "contains_names",
+            "length",
+        }
+        if unknown:
+            raise ValueError(
+                f"runtime probe expect[{index}] has unsupported fields: {sorted(unknown)}"
+            )
+        path = str(raw_expectation.get("path") or "").strip()
+        operators = [
+            key
+            for key in ("equals", "contains", "contains_names", "length")
+            if key in raw_expectation
+        ]
+        if not path or len(operators) != 1:
+            raise ValueError(
+                f"runtime probe expect[{index}] needs a path and exactly one operator"
+            )
+        actual = _runtime_path_value(value, path)
+        operator = operators[0]
+        expected = raw_expectation[operator]
+        if operator == "equals":
+            passed = actual == expected
+        elif operator == "contains":
+            passed = isinstance(actual, (list, str, dict)) and expected in actual
+        elif operator == "contains_names":
+            if not isinstance(actual, list) or not isinstance(expected, list):
+                passed = False
+            else:
+                actual_names = [
+                    str(item.get("name") or "")
+                    for item in actual
+                    if isinstance(item, dict)
+                ]
+                passed = all(str(item) in actual_names for item in expected)
+        else:
+            passed = hasattr(actual, "__len__") and len(actual) == expected
+        if not passed:
+            raise RuntimeError(
+                f"runtime probe expectation failed at {path}: "
+                f"{operator}={expected!r}, actual={actual!r}"
+            )
+
+
+def _unwrapped_tool_result(value: Any) -> Any:
+    if isinstance(value, dict) and isinstance(value.get("result"), dict):
+        return value["result"]
+    return value
+
+
+async def _run_content_runtime_probes(
+    *,
+    server: Any,
+    campaign_id: str,
+    edition: str,
+    package: dict[str, Any],
+    probes: Any,
+    id_key: str,
+) -> list[dict[str, Any]]:
+    if probes in (None, []):
+        return []
+    if not isinstance(probes, list):
+        raise ValueError("runtime_probes must be an array")
+    artifacts = list(dict(package.get("payload") or {}).get("artifacts") or [])
+    summaries: list[dict[str, Any]] = []
+    for probe_index, raw_probe in enumerate(probes):
+        if not isinstance(raw_probe, dict):
+            raise ValueError(f"runtime_probes[{probe_index}] must be an object")
+        unknown = set(raw_probe) - {
+            "name",
+            "level",
+            "class_name",
+            "ability_scores",
+            "steps",
+        }
+        if unknown:
+            raise ValueError(
+                f"runtime_probes[{probe_index}] has unsupported fields: {sorted(unknown)}"
+            )
+        probe_name = str(raw_probe.get("name") or f"probe-{probe_index}").strip()
+        steps = raw_probe.get("steps")
+        if not isinstance(steps, list) or not steps:
+            raise ValueError(f"runtime_probes[{probe_index}] needs nonempty steps")
+        sheet = default_character_sheet()
+        sheet["edition"] = edition
+        level = int(raw_probe.get("level", 1) or 1)
+        if not 1 <= level <= 20:
+            raise ValueError(f"runtime_probes[{probe_index}].level must be 1..20")
+        class_name = str(raw_probe.get("class_name") or "Fighter").strip()
+        sheet["progression"]["level"] = level
+        sheet["progression"]["classes"] = [
+            {"name": class_name, "level": level, "subclass": "", "hit_die": 10}
+        ]
+        ability_scores = raw_probe.get("ability_scores") or {}
+        if not isinstance(ability_scores, dict):
+            raise ValueError(f"runtime_probes[{probe_index}].ability_scores must be an object")
+        for ability, raw_score in ability_scores.items():
+            normalized_ability = str(ability).casefold()
+            if normalized_ability not in sheet["abilities"]:
+                raise ValueError(f"runtime probe has unknown ability: {ability}")
+            score = int(raw_score)
+            if not 1 <= score <= 30:
+                raise ValueError("runtime probe ability scores must be 1..30")
+            sheet["abilities"][normalized_ability]["score"] = score
+        probe_key = f"{id_key}-content-{probe_index}"
+        created_response = await _call(
+            server,
+            "character_create_from",
+            {
+                "mode": "direct",
+                "payload": {
+                    "campaign_id": campaign_id,
+                    "name": f"Addon runtime probe {probe_name}",
+                    "sheet": sheet,
+                },
+                "idempotency_key": f"regression-addon-content-character-{probe_key}",
+            },
+        )
+        current = dict(_unwrapped_tool_result(created_response))
+        step_summaries: list[dict[str, Any]] = []
+        for step_index, raw_step in enumerate(steps):
+            if not isinstance(raw_step, dict):
+                raise ValueError("runtime probe step must be an object")
+            unknown_step = set(raw_step) - {
+                "kind",
+                "name",
+                "selection",
+                "expect",
+                "expect_error",
+            }
+            if unknown_step:
+                raise ValueError(
+                    f"runtime probe step has unsupported fields: {sorted(unknown_step)}"
+                )
+            kind = str(raw_step.get("kind") or "").strip()
+            artifact_name = str(raw_step.get("name") or "").strip()
+            matches = [
+                artifact
+                for artifact in artifacts
+                if str(artifact.get("kind") or "") == kind
+                and str(dict(artifact.get("card") or {}).get("name") or "") == artifact_name
+            ]
+            if len(matches) != 1:
+                raise RuntimeError(
+                    f"runtime probe needs exactly one {kind} named {artifact_name!r}; "
+                    f"found {len(matches)}"
+                )
+            artifact_id = str(matches[0]["id"])
+            arguments = {
+                "character_id": current["id"],
+                "artifact_id": artifact_id,
+                "selection": dict(raw_step.get("selection") or {}),
+                "expected_revision": current["revision"],
+                "idempotency_key": f"regression-addon-content-{probe_key}-{step_index}",
+            }
+            expected_error = str(raw_step.get("expect_error") or "").strip()
+            if expected_error:
+                try:
+                    await _call(server, "character_content_apply", arguments)
+                except Exception as error:
+                    if expected_error not in str(error):
+                        raise RuntimeError(
+                            f"runtime probe rejected for the wrong reason: {error}"
+                        ) from error
+                else:
+                    raise RuntimeError("runtime probe expected content application to fail")
+                fetched = await _call(
+                    server,
+                    "character_get",
+                    {"character_id": current["id"]},
+                )
+                after_failure = dict(_unwrapped_tool_result(fetched))
+                if after_failure["revision"] != current["revision"]:
+                    raise RuntimeError("failed runtime probe mutated the character revision")
+                step_summaries.append(
+                    {"artifact_id": artifact_id, "rejected": True, "revision": current["revision"]}
+                )
+                continue
+            applied_response = await _call(server, "character_content_apply", arguments)
+            applied = dict(_unwrapped_tool_result(applied_response))
+            if applied.get("status") in {"pending_choice", "pending_ruling"}:
+                raise RuntimeError(
+                    f"runtime probe did not materialize {artifact_name}: {applied}"
+                )
+            _assert_runtime_expectations(applied, raw_step.get("expect") or [])
+            current = applied
+            step_summaries.append(
+                {"artifact_id": artifact_id, "rejected": False, "revision": current["revision"]}
+            )
+        summaries.append(
+            {
+                "name": probe_name,
+                "character_id": current["id"],
+                "steps": step_summaries,
+            }
+        )
+    return summaries
+
+
 def _core_content_dependency(edition: str) -> dict[str, str]:
     if edition == "2014":
         return {"id": SRD2014_PACK_ID, "version": SRD2014_PACK_VERSION}
@@ -692,6 +917,7 @@ def _catalog_document_review(
         "expected_catalog",
         "expected_counts",
         "expected_actor_names",
+        "runtime_probes",
     }
     if unknown:
         raise ValueError(
@@ -1540,6 +1766,14 @@ async def _portable_roundtrip(
     )
     if activated_response["result"]["activation"]["enabled"] is not True:
         raise RuntimeError("addon did not activate its exact branch lock")
+    content_runtime_probes = await _run_content_runtime_probes(
+        server=target_server,
+        campaign_id=target_campaign_id,
+        edition=edition,
+        package=package,
+        probes=dict(review_spec or {}).get("runtime_probes") or [],
+        id_key=id_key,
+    )
     dependent_actor_runtime_probes: list[dict[str, Any]] = []
     for template_index, template in enumerate(
         preset_summary.get("dependent_actor_templates") or []
@@ -1718,6 +1952,7 @@ async def _portable_roundtrip(
         "deferred_actor_presets": preset_summary.get("deferred", 0),
         "dependent_actor_templates": preset_summary.get("dependent_actor_templates", []),
         "dependent_actor_runtime_probes": dependent_actor_runtime_probes,
+        "content_runtime_probes": content_runtime_probes,
         "preset_failures": preset_summary.get("failures", []),
         "target_source_ids": imported_source_ids,
         "fresh_source_ids": True,

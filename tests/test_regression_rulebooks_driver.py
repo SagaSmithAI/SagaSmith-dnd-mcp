@@ -289,6 +289,27 @@ def test_catalog_manifest_can_bind_one_entry_to_all_matching_source_chunks() -> 
     ] == ["heading", "continuation"]
 
 
+def test_runtime_probe_expectations_support_nested_and_named_content() -> None:
+    driver._assert_runtime_expectations(
+        {
+            "sheet": {
+                "combat": {"speed": {"swim": 30}},
+                "content": {
+                    "spells": [{"name": "Gust"}, {"name": "Gust of Wind"}]
+                },
+            }
+        },
+        [
+            {"path": "sheet.combat.speed.swim", "equals": 30},
+            {
+                "path": "sheet.content.spells",
+                "contains_names": ["Gust", "Gust of Wind"],
+            },
+            {"path": "sheet.content.spells", "length": 2},
+        ],
+    )
+
+
 def test_catalog_manifest_keeps_empty_heading_chunk_as_identity_evidence() -> None:
     additions = driver._resolve_catalog_additions(
         [
