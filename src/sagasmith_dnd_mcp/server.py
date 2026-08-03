@@ -10747,11 +10747,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         idempotency_key: str | None = None,
         payload: dict[str, Any] | None = None,
         response_extra: dict[str, Any] | None = None,
+        flatten_response_extra: bool = False,
         rule_receipts: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         def response_for(character: dict[str, Any]) -> dict[str, Any]:
             if response_extra is None:
                 return character
+            if flatten_response_extra:
+                return {**character, **response_extra}
             return {"character": character, **response_extra}
 
         if before.campaign_id is None:
@@ -28713,6 +28716,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         idempotency_key: str | None = None,
         payload: dict[str, Any] | None = None,
         response_extra: dict[str, Any] | None = None,
+        flatten_response_extra: bool = False,
         rule_receipts: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """Persist a D&D schema mutation with derived values recalculated."""
@@ -28737,6 +28741,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             idempotency_key=idempotency_key,
             payload=payload,
             response_extra=response_extra,
+            flatten_response_extra=flatten_response_extra,
             rule_receipts=rule_receipts,
         )
 
@@ -37608,6 +37613,28 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 installed_pack.manifest,
                 edition=profile.edition,
             )
+            installed_manifest = dict(installed_pack.manifest)
+            if "readiness" in installed_manifest or "readiness_policy" in installed_manifest:
+                if installed_manifest.get("readiness_policy") != "build_time_complete":
+                    raise RulesetUnavailableError(
+                        "addon cannot be enabled until its four-dimensional review is complete"
+                    )
+                readiness = installed_manifest.get("readiness")
+                if not isinstance(readiness, dict):
+                    raise RulesetUnavailableError(
+                        "addon readiness declaration is missing"
+                    )
+                try:
+                    verified_readiness = validate_addon_readiness(readiness)
+                except ValueError as error:
+                    raise RulesetUnavailableError(
+                        f"addon readiness declaration is invalid: {error}"
+                    ) from error
+                if verified_readiness["complete"] is not True:
+                    raise RulesetUnavailableError(
+                        "addon cannot be enabled while source, catalog, selection, "
+                        "or runtime readiness has blockers"
+                    )
 
         def activation_response(result: dict[str, Any]) -> dict[str, Any]:
             return {
@@ -37812,6 +37839,43 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             if kind is None or artifact.get("kind") == kind:
                 unique.append((pack_id, version, artifact))
         return unique
+
+    def content_runtime_context(
+        pack_id: str,
+        version: str,
+        artifact: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Return bounded source and settlement context for an external Agent."""
+
+        catalog_review = dict(artifact.get("catalog_review") or {})
+        return {
+            "artifact_id": str(artifact.get("id") or ""),
+            "kind": str(artifact.get("kind") or ""),
+            "pack_id": pack_id,
+            "pack_version": version,
+            "content_hash": content_fingerprint(artifact),
+            "catalog_review_hash": str(
+                catalog_review.get("reviewed_content_hash") or ""
+            ),
+            "application_state": str(
+                artifact.get("application_state") or "selection_ready"
+            ),
+            "execution_state": str(artifact.get("execution_state") or ""),
+            "semantic_resolution": deepcopy(
+                dict(artifact.get("semantic_resolution") or {})
+            ),
+            "selection_contract": deepcopy(
+                dict(artifact.get("selection_contract") or {})
+            ),
+            "card": deepcopy(dict(artifact.get("card") or {})),
+            "rule_clauses": deepcopy(list(artifact.get("rule_clauses") or [])),
+            "resolution_plan": deepcopy(artifact.get("resolution_plan")),
+            "resolution_plans": deepcopy(list(artifact.get("resolution_plans") or [])),
+            "rule_refs": list(artifact.get("rule_refs") or []),
+            "source_citations": deepcopy(
+                list(artifact.get("source_citations") or [])
+            ),
+        }
 
     def hydrate_class_prepared_spell_cards(
         campaign_id: str,
@@ -38734,17 +38798,22 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         query: str = "",
         principal_id: str = LOCAL_SYSTEM_PRINCIPAL_ID,
         branch_id: str | None = None,
+        include_context: bool = False,
     ) -> list[dict[str, Any]]:
         """List core and enabled-extension character options from one uniform catalog."""
         access.require_campaign(campaign_id, principal_id)
         resolved_branch_id = readable_branch(campaign_id, branch_id, principal_id)
         lowered = query.casefold().strip()
+        if include_context and not lowered:
+            raise ValueError("include_context requires an exact artifact id query")
         result = []
         for pack_id, version, artifact in available_content_artifacts(
             campaign_id, kind=kind, branch_id=resolved_branch_id
         ):
             card = dict(artifact.get("card") or {})
             name = str(card.get("name") or artifact["id"])
+            if include_context and lowered != str(artifact["id"]).casefold():
+                continue
             if (
                 lowered
                 and lowered not in name.casefold()
@@ -38887,8 +38956,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     ),
                     "normalization_authority": "engine",
                 }
-            result.append(
-                {
+            entry = {
                     "id": artifact["id"],
                     "kind": artifact_kind,
                     "name": name,
@@ -38902,7 +38970,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         artifact.get("application_state") or "selection_ready"
                     ),
                 }
-            )
+            if include_context:
+                entry["runtime_context"] = content_runtime_context(
+                    pack_id,
+                    version,
+                    artifact,
+                )
+            result.append(entry)
+        if include_context and len(result) != 1:
+            raise LookupError("exact content artifact is not available for this campaign")
         return sorted(
             result,
             key=lambda item: (str(item["kind"]), str(item["name"]), str(item["id"])),
@@ -38948,6 +39024,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         principal_id: str,
         expected_revision: int,
         idempotency_key: str,
+        content_context: dict[str, Any] | None = None,
+        content_receipt: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Pay, wait, expire effects, and record one discovered spell atomically."""
         assert current.campaign_id is not None
@@ -39138,6 +39216,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "character.spellbook.copy",
             )
         )
+        if content_receipt is not None:
+            receipts.append(deepcopy(content_receipt))
         current_update = next(item for item in updates if item.character_id == current.id)
         response = character_view(
             replace(
@@ -39169,6 +39249,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "world_expired": list(dict.fromkeys(world_expired)),
             "rule_receipts": receipts,
         }
+        if content_context is not None:
+            response["content_context"] = deepcopy(content_context)
         StateMutationService(storage.database).replace(
             campaign_id,
             campaign_state=next_state,
@@ -39245,6 +39327,29 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                         "contract for this request"
                     ),
                     "errors": contract_errors,
+                }
+        runtime_context = content_runtime_context(pack_id, version, artifact)
+        content_receipt: dict[str, Any] | None = None
+        raw_selection_contract = artifact.get("selection_contract")
+        if isinstance(raw_selection_contract, dict) and not selection_contract_errors(
+            artifact
+        ):
+            selection_contract = dict(raw_selection_contract)
+            if selection_contract.get("status") == "ready":
+                content_receipt = {
+                    "ruleset_fingerprint": effective_rule_context(
+                        current.campaign_id
+                    ).fingerprint,
+                    "mechanic_id": str(selection_contract["materializer"]),
+                    "event": "character.content.apply",
+                    "artifact_id": artifact_id,
+                    "pack_id": pack_id,
+                    "pack_version": version,
+                    "reviewed_content_hash": str(
+                        selection_contract["reviewed_content_hash"]
+                    ),
+                    "selection": deepcopy(selection),
+                    "rule_refs": list(artifact.get("rule_refs") or []),
                 }
         sheet = deepcopy(current.sheet)
         campaign = campaigns.get(current.campaign_id)
@@ -41768,9 +41873,29 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 principal_id=principal_id,
                 expected_revision=expected_revision,
                 idempotency_key=idempotency_key,
+                content_context=runtime_context,
+                content_receipt=content_receipt,
             )
         if phase != PROFILE_LOBBY and not replacing_feature_selection:
             raise CombatEngineError("content grants belong to lobby setup or level advancement")
+        response_extra = {
+            **(
+                {"subclass_spell_grants": subclass_spell_grants}
+                if subclass_spell_grants
+                else {}
+            ),
+            **(
+                {"feature_spell_grants": feature_spell_grants}
+                if feature_spell_grants
+                else {}
+            ),
+            "content_context": runtime_context,
+            **(
+                {"rule_receipts": [deepcopy(content_receipt)]}
+                if content_receipt is not None
+                else {}
+            ),
+        }
         return update_sheet(
             character_id,
             sheet,
@@ -41784,20 +41909,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "version": version,
                 "selection": selection,
             },
-            response_extra=(
-                {
-                    **(
-                        {"subclass_spell_grants": subclass_spell_grants}
-                        if subclass_spell_grants
-                        else {}
-                    ),
-                    **(
-                        {"feature_spell_grants": feature_spell_grants}
-                        if feature_spell_grants
-                        else {}
-                    ),
-                }
-                or None
+            response_extra=response_extra,
+            flatten_response_extra=True,
+            rule_receipts=(
+                [content_receipt] if content_receipt is not None else None
             ),
         )
 
@@ -43411,6 +43526,7 @@ Useful bounded guidance:
                 data.get("query", ""),
                 principal_id,
                 data.get("branch_id"),
+                include_context=bool(data.get("include_context", False)),
             )
         elif view == "actor_presets":
             data = strict_facade_payload(

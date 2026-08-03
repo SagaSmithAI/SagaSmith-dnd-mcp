@@ -86,7 +86,6 @@ def test_reviewed_addon_item_uses_bound_inventory_materializer(tmp_path: Path) -
                     "system_id": "dnd5e",
                     "editions": ["2014"],
                     "capabilities": [],
-                    "readiness_policy": "review_required",
                 },
                 "artifacts": [artifact],
                 "mechanics": [],
@@ -98,6 +97,42 @@ def test_reviewed_addon_item_uses_bound_inventory_materializer(tmp_path: Path) -
             "rule_pack_install",
             {"pack_id": "dnd5e.addon.reviewed-item", "version": "1.0.0"},
         )
+        blocked = await _call(
+            server,
+            "rule_pack_draft",
+            {
+                "manifest": {
+                    "id": "dnd5e.addon.blocked",
+                    "version": "1.0.0",
+                    "title": "Blocked addon",
+                    "namespace": "dnd5e.addon.blocked",
+                    "system_id": "dnd5e",
+                    "editions": ["2014"],
+                    "capabilities": [],
+                    "readiness_policy": "review_required",
+                },
+                "artifacts": [],
+                "mechanics": [],
+            },
+        )
+        assert blocked["status"] == "validated"
+        await _call(
+            server,
+            "rule_pack_install",
+            {"pack_id": "dnd5e.addon.blocked", "version": "1.0.0"},
+        )
+        with pytest.raises(Exception, match="four-dimensional review"):
+            await _call(
+                server,
+                "campaign_rule_pack_set",
+                {
+                    "campaign_id": campaign["id"],
+                    "pack_id": "dnd5e.addon.blocked",
+                    "version": "1.0.0",
+                    "expected_revision": profile["campaign_revision"],
+                    "idempotency_key": "blocked-addon-activate",
+                },
+            )
         await _call(
             server,
             "campaign_rule_pack_set",
@@ -144,6 +179,7 @@ def test_reviewed_addon_item_uses_bound_inventory_materializer(tmp_path: Path) -
                 "idempotency_key": "addon-item-applied",
             },
         )
+        assert "sheet" in applied, str(applied)
         item = applied["sheet"]["inventory"]["items"][0]
         assert item["name"] == "Moon Blade"
         assert item["mechanics"]["damage_formula"] == "1d8"
@@ -154,6 +190,34 @@ def test_reviewed_addon_item_uses_bound_inventory_materializer(tmp_path: Path) -
         assert applied["sheet"]["content"]["selections"][0]["selection"] == {
             "inventory_item_id": item["id"]
         }
+        assert applied["content_context"]["artifact_id"] == artifact["id"]
+        assert applied["content_context"]["card"]["inventory_template"]["name"] == (
+            "Moon Blade"
+        )
+        assert applied["rule_receipts"][0]["mechanic_id"] == (
+            "dnd5e.character.inventory_item.v1"
+        )
+        queried = await _call(
+            server,
+            "content_catalog_list",
+            {
+                "campaign_id": campaign["id"],
+                "query": artifact["id"],
+                "include_context": True,
+            },
+        )
+        assert queried[0]["runtime_context"]["content_hash"] == (
+            applied["content_context"]["content_hash"]
+        )
+        receipts = await _call(
+            server,
+            "campaign_rule_receipts",
+            {
+                "campaign_id": campaign["id"],
+                "mechanic_id": "dnd5e.character.inventory_item.v1",
+            },
+        )
+        assert receipts[0]["receipt"]["artifact_id"] == artifact["id"]
 
     import asyncio
 
