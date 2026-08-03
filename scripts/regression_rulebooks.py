@@ -937,14 +937,47 @@ async def _enable_core_content_pack(
 def _load_catalog_manifest(path: Path | None) -> dict[str, Any]:
     if path is None:
         return {"version": 1, "documents": {}}
-    resolved = path.expanduser().resolve()
-    payload = json.loads(resolved.read_text(encoding="utf-8"))
-    if not isinstance(payload, dict) or payload.get("version") != 1:
-        raise ValueError("catalog manifest must be a version 1 JSON object")
-    documents = payload.get("documents")
-    if not isinstance(documents, dict):
-        raise ValueError("catalog manifest documents must be an object")
-    return payload
+
+    def load(resolved: Path, ancestors: tuple[Path, ...]) -> dict[str, Any]:
+        if resolved in ancestors:
+            chain = " -> ".join(str(item) for item in (*ancestors, resolved))
+            raise ValueError(f"catalog manifest include cycle: {chain}")
+        payload = json.loads(resolved.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict) or payload.get("version") != 1:
+            raise ValueError("catalog manifest must be a version 1 JSON object")
+        own_documents = payload.get("documents")
+        if not isinstance(own_documents, dict):
+            raise ValueError("catalog manifest documents must be an object")
+        raw_includes = payload.get("includes") or []
+        if not isinstance(raw_includes, list) or any(
+            not isinstance(item, str) or not item.strip()
+            for item in raw_includes
+        ):
+            raise ValueError("catalog manifest includes must be an array of paths")
+        documents: dict[str, Any] = {}
+        for include in raw_includes:
+            included_path = (resolved.parent / include).resolve()
+            included = load(included_path, (*ancestors, resolved))
+            duplicates = set(documents).intersection(included["documents"])
+            if duplicates:
+                raise ValueError(
+                    "catalog manifest includes duplicate documents: "
+                    f"{sorted(duplicates)}"
+                )
+            documents.update(included["documents"])
+        duplicates = set(documents).intersection(own_documents)
+        if duplicates:
+            raise ValueError(
+                "catalog manifest includes duplicate documents: "
+                f"{sorted(duplicates)}"
+            )
+        documents.update(own_documents)
+        return {
+            **payload,
+            "documents": documents,
+        }
+
+    return load(path.expanduser().resolve(), ())
 
 
 def _catalog_document_review(
@@ -975,6 +1008,7 @@ def _catalog_document_review(
         "complete_review",
         "rationale",
         "additions",
+        "addition_default_status",
         "decisions",
         "default_status",
         "default_status_by_kind",
@@ -1080,6 +1114,7 @@ def _resolve_catalog_additions(
             "source_selectors",
             "card",
             "note",
+            "replace_existing",
         }
         if unknown:
             raise ValueError(
@@ -1176,7 +1211,11 @@ def _resolve_catalog_additions(
                     }
                 )
         resolved.append(
-            {key: addition[key] for key in ("kind", "name", "card", "note") if key in addition}
+            {
+                key: addition[key]
+                for key in ("kind", "name", "card", "note", "replace_existing")
+                if key in addition
+            }
             | {
                 "source_chunk_ids": list(dict.fromkeys(chunk_ids)),
                 "source_spans": source_spans,
@@ -1227,6 +1266,13 @@ def _review_spec_decisions(
     default_status = str(review_spec.get("default_status") or "accepted")
     if default_status not in {"accepted", "rejected"}:
         raise ValueError("catalog manifest default_status must be accepted or rejected")
+    addition_default_status = str(
+        review_spec.get("addition_default_status") or default_status
+    )
+    if addition_default_status not in {"accepted", "rejected"}:
+        raise ValueError(
+            "catalog manifest addition_default_status must be accepted or rejected"
+        )
     raw_defaults_by_kind = review_spec.get("default_status_by_kind") or {}
     if not isinstance(raw_defaults_by_kind, dict):
         raise ValueError("catalog manifest default_status_by_kind must be an object")
@@ -1277,6 +1323,11 @@ def _review_spec_decisions(
             matched.add(matching_rules[0][0])
         status = str(
             rule.get("status")
+            or (
+                addition_default_status
+                if candidate.get("agent_catalog_addition")
+                else None
+            )
             or defaults_by_kind.get(key[0])
             or default_status
         )
@@ -1931,10 +1982,21 @@ async def _portable_roundtrip(
             instantiate_arguments,
         )
         actor_result = actor_response
+        expected_weapon_names = {
+            str(value).strip()
+            for value in template.get("expected_weapon_names") or []
+            if str(value).strip()
+        }
+        materialized_weapon_names = {
+            str(item.get("name") or "").strip()
+            for item in actor_result["character"]["sheet"]["inventory"]["items"]
+            if item.get("kind") == "weapon" and str(item.get("name") or "").strip()
+        }
         if (
             actor_result["character"]["id"] != actor_replay["character"]["id"]
             or actor_result.get("actor_knowledge_imported") is not False
             or int(actor_result["character"]["sheet"]["combat"]["hp"]["max"]) < 1
+            or not expected_weapon_names.issubset(materialized_weapon_names)
         ):
             raise RuntimeError("dependent actor template runtime probe failed")
         dependent_actor_runtime_probes.append(
@@ -1943,6 +2005,8 @@ async def _portable_roundtrip(
                 "actor_id": actor_result["character"]["id"],
                 "owner_id": owner_response["result"]["id"],
                 "content_receipt": actor_result["content_receipt"],
+                "expected_weapon_names": sorted(expected_weapon_names),
+                "materialized_weapon_names": sorted(materialized_weapon_names),
                 "idempotent": True,
                 "actor_knowledge_imported": False,
             }

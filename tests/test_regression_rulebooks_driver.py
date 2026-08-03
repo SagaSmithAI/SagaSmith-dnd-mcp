@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -100,6 +101,7 @@ def test_catalog_manifest_resolves_stable_sources_and_review_actions(tmp_path) -
                             {
                                 "kind": "subclass",
                                 "name": "Gunsmith",
+                                "replace_existing": True,
                                 "source_selectors": [
                                     {
                                         "heading_exact": "Artificer Specialists",
@@ -159,6 +161,7 @@ def test_catalog_manifest_resolves_stable_sources_and_review_actions(tmp_path) -
             "kind": "subclass",
             "name": "Gunsmith",
             "card": {"class_name": "Artificer"},
+            "replace_existing": True,
             "source_chunk_ids": ["chunk-specialist"],
             "source_spans": [
                 {
@@ -272,6 +275,37 @@ def test_catalog_manifest_can_accept_only_fully_reviewed_content_kinds() -> None
         "accepted",
         "accepted",
     ]
+
+
+def test_catalog_manifest_can_accept_only_source_bound_additions_by_default() -> None:
+    candidates = [
+        {
+            "id": "candidate:automatic",
+            "kind": "feature",
+            "name": "Automatic Noise",
+            "artifact": {"kind": "feature", "card": {"name": "Automatic Noise"}},
+        },
+        {
+            "id": "candidate:agent:addition",
+            "kind": "feature",
+            "name": "Reviewed Addition",
+            "agent_catalog_addition": {"principal_id": "system:local"},
+            "artifact": {"kind": "feature", "card": {"name": "Reviewed Addition"}},
+        },
+    ]
+
+    decisions = driver._review_spec_decisions(
+        candidates,
+        {
+            "default_status": "rejected",
+            "addition_default_status": "accepted",
+        },
+        reviewer="agent:catalog",
+        method="agent",
+    )
+
+    assert decisions[0]["review_status"] == "rejected"
+    assert decisions[1]["review_status"] == "accepted"
 
 
 def test_catalog_manifest_rejects_ambiguous_source_selectors() -> None:
@@ -538,6 +572,40 @@ def test_strict_catalog_manifest_requires_every_selected_document() -> None:
             {"version": 1, "strict": True, "documents": {}},
             "Missing.pdf",
         )
+
+
+def test_catalog_manifest_merges_relative_per_book_includes(tmp_path: Path) -> None:
+    included = tmp_path / "included.json"
+    included.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "documents": {
+                    "Book B.pdf": {"complete_review": True},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    root = tmp_path / "root.json"
+    root.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "strict": True,
+                "includes": ["included.json"],
+                "documents": {
+                    "Book A.pdf": {"complete_review": True},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    manifest = driver._load_catalog_manifest(root)
+
+    assert manifest["strict"] is True
+    assert set(manifest["documents"]) == {"Book A.pdf", "Book B.pdf"}
 
 
 def test_catalog_decisions_distinguish_same_named_contextual_features() -> None:

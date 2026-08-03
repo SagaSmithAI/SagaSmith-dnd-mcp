@@ -29,6 +29,7 @@ from sagasmith_dnd_mcp.server import (
     _noisy_ocr_heading_equivalent,
     _ocr_fact_key,
     _project_recovered_statblock_candidates,
+    _select_catalog_ocr_identity_evidence,
     _select_preferred_statblock_reviews,
     _source_statblock_hint_additions,
     _source_statblock_recovery_hints,
@@ -71,6 +72,10 @@ def test_catalog_identity_can_span_ordered_sibling_headings_only() -> None:
     assert _catalog_identity_is_evidenced(
         "Channel Divinity: Twilight Sanctuary", evidence
     )
+    assert _catalog_identity_is_evidenced(
+        "The Right Tool for the Job",
+        "THE RIGHT TO OL FOR THE OB Create artisan tools at 3rd level",
+    )
     assert not _catalog_identity_is_evidenced(
         "Channel Divinity: Solar Twilight Sanctuary", evidence
     )
@@ -81,11 +86,50 @@ def test_catalog_identity_can_span_ordered_sibling_headings_only() -> None:
         "House Agent (Cannith)",
         "HOUSE AGENT Tool Proficiency: Two tools by house: Cannith",
     )
+    assert _catalog_identity_is_evidenced(
+        "House Agent (Vadalis)",
+        "HOUSE AGENT Tool Proficiency: Vada I is Herbalism kit and vehicles",
+    )
     assert not _catalog_identity_is_evidenced(
         "House Agent (Cannith Operative)",
         "HOUSE AGENT Tool Proficiency: Two tools by house: Cannith",
     )
     assert not _bounded_ocr_heading_equivalent("Female Steeder", "Male Steeder")
+
+
+def test_catalog_identity_ocr_evidence_can_fall_back_to_another_local_model() -> None:
+    selected = _select_catalog_ocr_identity_evidence(
+        "Orc",
+        [
+            {
+                "provider": "rapidocr",
+                "profile": "medium-profile",
+                "model": "medium",
+                "scale": 2.0,
+                "page_number": 33,
+                "text_sha256": "medium-checksum",
+                "text": "0 RC TRAITS An ore character has these traits.",
+            },
+            {
+                "provider": "rapidocr",
+                "profile": "small-profile",
+                "model": "small",
+                "scale": 2.0,
+                "page_number": 33,
+                "text_sha256": "small-checksum",
+                "text": "ORC TRAITS An orc character has these traits.",
+            },
+        ],
+    )
+
+    assert selected == {
+        "provider": "rapidocr",
+        "profile": "small-profile",
+        "model": "small",
+        "scale": 2.0,
+        "page_number": 33,
+        "text_sha256": "small-checksum",
+    }
 
 
 def test_bundled_mm_actor_reuse_is_book_bound_and_requires_one_match() -> None:
@@ -573,6 +617,56 @@ def test_rule_import_agent_can_add_only_source_bound_catalog_entities(tmp_path: 
         replay = await _call(server, "rule_import", arguments)
         assert replay["job"]["revision"] == augmented["job"]["revision"]
 
+        master_smith = next(
+            item for item in augmented["candidates"] if item["name"] == "Master Smith"
+        )
+        replacement = await _call(
+            server,
+            "rule_import",
+            {
+                "campaign_id": campaign["id"],
+                "action": "augment_catalog",
+                "payload": {
+                    "job_id": job_id,
+                    "rationale": (
+                        "The automatic card omitted the bounded class feature fields."
+                    ),
+                    "additions": [
+                        {
+                            "kind": "feature",
+                            "name": "Master Smith",
+                            "replace_existing": True,
+                            "source_chunk_ids": master_smith["source_chunk_ids"],
+                            "card": {
+                                "class_name": "Artificer",
+                                "subclass_name": "Gunsmith",
+                                "minimum_level": 1,
+                                "selection_requirements": {},
+                                "selection_requirements_by_level": {},
+                                "mechanical_grants": {
+                                    "tool_proficiencies": ["Smith's Tools"]
+                                },
+                            },
+                        }
+                    ],
+                },
+                "expected_revision": augmented["job"]["revision"],
+                "idempotency_key": "catalog-replace",
+            },
+        )
+        assert replacement["replaced_candidate_ids"] == [master_smith["id"]]
+        assert all(
+            item["id"] != master_smith["id"] for item in replacement["candidates"]
+        )
+        replacement_card = next(
+            item
+            for item in replacement["candidates"]
+            if item["id"] in replacement["added_candidate_ids"]
+        )
+        assert replacement_card["agent_catalog_addition"][
+            "replaced_candidate_id"
+        ] == master_smith["id"]
+
         with pytest.raises(Exception, match="outside the indexed source"):
             await _call(
                 server,
@@ -589,7 +683,7 @@ def test_rule_import_agent_can_add_only_source_bound_catalog_entities(tmp_path: 
                             }
                         ],
                     },
-                    "expected_revision": augmented["job"]["revision"],
+                    "expected_revision": replacement["job"]["revision"],
                     "idempotency_key": "catalog-forged",
                 },
             )
@@ -610,7 +704,7 @@ def test_rule_import_agent_can_add_only_source_bound_catalog_entities(tmp_path: 
                             }
                         ],
                     },
-                    "expected_revision": augmented["job"]["revision"],
+                    "expected_revision": replacement["job"]["revision"],
                     "idempotency_key": "catalog-invented-name",
                 },
             )

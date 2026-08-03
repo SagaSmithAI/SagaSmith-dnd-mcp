@@ -446,6 +446,7 @@ from sagasmith_dnd.statblocks import (
     materialize_parameterized_statblock_source,
     parameterized_statblock_requirements,
     parse_2014_statblock,
+    parse_2014_statblock_template_preview,
     parse_2024_statblock,
     recover_2014_statblock_from_ocr,
     source_contest_effect_spec,
@@ -930,14 +931,71 @@ def _catalog_identity_is_evidenced(name: str, evidence: str) -> bool:
     if normalized_name and normalized_name in normalized_evidence:
         return True
 
+    evidence_tokens = [
+        normalized(token)
+        for token in re.findall(r"[A-Za-z0-9]+", evidence)
+        if normalized(token)
+    ]
+    name_words = max(1, len(re.findall(r"[A-Za-z0-9]+", name)))
+    if len(normalized_name) >= 4:
+        for start in range(len(evidence_tokens)):
+            for width in range(max(1, name_words - 1), name_words + 3):
+                candidate = "".join(evidence_tokens[start : start + width])
+                if abs(len(candidate) - len(normalized_name)) <= 1 and (
+                    _bounded_edit_distance(candidate, normalized_name, limit=1) <= 1
+                ):
+                    return True
+
     variant = re.fullmatch(r"\s*(.+?)\s*\(([^()]+)\)\s*", name)
     if variant is None:
         return False
     base_name = normalized(variant.group(1))
     qualifier = normalized(variant.group(2))
-    return bool(base_name and qualifier) and all(
-        part in normalized_evidence for part in (base_name, qualifier)
-    )
+    if not base_name or not qualifier or base_name not in normalized_evidence:
+        return False
+    if qualifier in normalized_evidence:
+        return True
+
+    # Printed qualifiers in compact tables are often split at one mistaken
+    # glyph (for example ``Vadalis`` -> ``Vada I is``).  Keep this fallback
+    # bounded to a variant whose base identity is already exact, one edit, and
+    # at most two additional OCR fragments.
+    qualifier_words = max(1, len(re.findall(r"[A-Za-z0-9]+", variant.group(2))))
+    for start in range(len(evidence_tokens)):
+        for width in range(max(1, qualifier_words - 1), qualifier_words + 3):
+            candidate = "".join(evidence_tokens[start : start + width])
+            if abs(len(candidate) - len(qualifier)) <= 1 and _bounded_edit_distance(
+                candidate,
+                qualifier,
+                limit=1,
+            ) <= 1:
+                return True
+    return False
+
+
+def _select_catalog_ocr_identity_evidence(
+    name: str,
+    observations: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Select checksum-bound OCR evidence without persisting full page text."""
+
+    for observation in observations:
+        text = str(observation.get("text") or "")
+        if not text or not _catalog_identity_is_evidenced(name, text):
+            continue
+        return {
+            key: observation[key]
+            for key in (
+                "provider",
+                "profile",
+                "model",
+                "scale",
+                "page_number",
+                "text_sha256",
+            )
+            if key in observation
+        }
+    return None
 
 
 def _bounded_edit_distance(left: str, right: str, *, limit: int) -> int:
@@ -12710,7 +12768,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             checksum = hashlib.sha256(content.encode()).hexdigest()
             if not content or checksum != str(review.get("normalized_content_sha256") or ""):
                 raise ValueError("recovered statblock review checksum is stale")
-            parsed = parse_2014_statblock(
+            parsed = parse_2014_statblock_template_preview(
                 content,
                 source_key=f"rule-review:{review['id']}",
             )
@@ -12913,6 +12971,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             for item in candidates
         }
         added_ids: list[str] = []
+        replaced_ids: list[str] = []
         for index, raw_addition in enumerate(additions):
             if not isinstance(raw_addition, dict):
                 raise ValueError(f"additions[{index}] must be an object")
@@ -12923,6 +12982,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "source_spans",
                 "card",
                 "note",
+                "replace_existing",
             }
             if unknown:
                 raise ValueError(
@@ -13008,10 +13068,41 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 kind,
                 "".join(character for character in name.casefold() if character.isalnum()),
             )
-            if identity_key in existing_keys:
+            replace_existing = raw_addition.get("replace_existing", False)
+            if not isinstance(replace_existing, bool):
+                raise ValueError(f"additions[{index}].replace_existing must be a boolean")
+            matching_existing = [
+                item
+                for item in candidates
+                if (
+                    str(item.get("kind") or "").casefold(),
+                    "".join(
+                        character
+                        for character in str(item.get("name") or "").casefold()
+                        if character.isalnum()
+                    ),
+                )
+                == identity_key
+            ]
+            if identity_key in existing_keys and not replace_existing:
                 raise ValueError(
                     f"additions[{index}] duplicates an existing candidate; revise it during review"
                 )
+            if replace_existing:
+                if len(matching_existing) != 1:
+                    raise ValueError(
+                        f"additions[{index}].replace_existing requires exactly one existing "
+                        "candidate with the same kind and name"
+                    )
+                replaced = matching_existing[0]
+                if replaced.get("agent_catalog_addition"):
+                    raise ValueError(
+                        f"additions[{index}].replace_existing cannot replace another "
+                        "source-bound addition"
+                    )
+                candidates.remove(replaced)
+                existing_keys.remove(identity_key)
+                replaced_ids.append(str(replaced.get("id") or ""))
             raw_card = raw_addition.get("card") or {}
             if not isinstance(raw_card, dict):
                 raise ValueError(f"additions[{index}].card must be an object")
@@ -13045,7 +13136,25 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     source_text,
                 ]
             )
+            ocr_identity_evidence = None
             if not _catalog_identity_is_evidenced(name, identity_evidence):
+                candidate_pages = sorted(
+                    {
+                        int(page)
+                        for chunk in source_chunks
+                        for page in (chunk.get("page_start"), chunk.get("page_end"))
+                        if isinstance(page, int) and page > 0
+                    }
+                )[:8]
+                ocr_identity_evidence = local_rule_catalog_identity_evidence(
+                    storage.artifact_rulebook_path(job.artifact),
+                    candidate_pages,
+                    name=name,
+                )
+            if (
+                not _catalog_identity_is_evidenced(name, identity_evidence)
+                and ocr_identity_evidence is None
+            ):
                 raise ValueError(
                     f"additions[{index}].name is not evidenced by the referenced source chunks"
                 )
@@ -13095,6 +13204,16 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "principal_id": principal_id,
                     "rationale": normalized_rationale,
                     "note": " ".join(str(raw_addition.get("note") or "").split())[:2000],
+                    "replaced_candidate_id": (
+                        str(matching_existing[0].get("id") or "")
+                        if replace_existing
+                        else ""
+                    ),
+                    "identity_evidence": (
+                        {"mode": "local_ocr", **ocr_identity_evidence}
+                        if ocr_identity_evidence is not None
+                        else {"mode": "indexed_text"}
+                    ),
                 },
                 "artifact": {
                     "kind": kind,
@@ -13123,6 +13242,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "job": import_job_view(result),
                     "candidates": [import_candidate_view(item) for item in result.candidates],
                     "added_candidate_ids": added_ids,
+                    "replaced_candidate_ids": replaced_ids,
                 },
             ),
         )
@@ -13130,6 +13250,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "job": import_job_view(updated),
             "candidates": [import_candidate_view(item) for item in updated.candidates],
             "added_candidate_ids": added_ids,
+            "replaced_candidate_ids": replaced_ids,
         }
 
     @mcp.tool()
@@ -36716,6 +36837,59 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             "truncated": len(page_text) > 50000,
         }
 
+    def local_rule_catalog_identity_evidence(
+        source_path: str | Path,
+        page_numbers: list[int],
+        *,
+        name: str,
+    ) -> dict[str, Any] | None:
+        """Recover a failed catalog identity with bounded local OCR model fallback."""
+
+        if not config.rule_ocr_enabled or not page_numbers:
+            return None
+        preferred = storage.rule_ocr_provider()
+        if preferred is None:
+            return None
+        preferred_model = str(getattr(preferred, "model_type", config.rule_ocr_model))
+        models = [preferred_model, "small" if preferred_model == "medium" else "medium"]
+        for model in models:
+            observations: list[dict[str, Any]] = []
+            for page_number in page_numbers:
+                layout = cached_rapidocr_layout(
+                    source_path,
+                    page_number,
+                    scale=config.rule_ocr_scale,
+                    preferred_provider=(preferred if model == preferred_model else None),
+                    model_type=model,
+                )
+                page_text, _used_columns = ocr_layout_text(layout)
+                provider_profile = (
+                    preferred.cache_profile
+                    if model == preferred_model
+                    else RapidOcrProvider(
+                        scale=config.rule_ocr_scale,
+                        model_type=model,
+                        cache_dir=config.ocr_page_cache_dir,
+                    ).cache_profile
+                )
+                observations.append(
+                    {
+                        "provider": "rapidocr",
+                        "profile": provider_profile,
+                        "model": model,
+                        "scale": config.rule_ocr_scale,
+                        "page_number": page_number,
+                        "text_sha256": hashlib.sha256(
+                            page_text.encode("utf-8")
+                        ).hexdigest(),
+                        "text": page_text,
+                    }
+                )
+            selected = _select_catalog_ocr_identity_evidence(name, observations)
+            if selected is not None:
+                return selected
+        return None
+
     def recover_pdf_statblock_layout(
         *,
         source_path: str | Path,
@@ -37112,7 +37286,19 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 if raw_source
                 else ""
             )
-            usable = parameterized_statblock_requirements(probe) is not None
+            template_requirement = parameterized_statblock_requirements(probe)
+            usable = False
+            if template_requirement is not None:
+                try:
+                    parse_2014_statblock_template_preview(
+                        probe,
+                        source_key=str(candidate.get("id") or "catalog-statblock"),
+                        rule_refs=[],
+                    )
+                except (StatblockImportError, ValueError):
+                    pass
+                else:
+                    usable = True
             if normalized and raw_source and not usable:
                 try:
                     normalized_card = parse_2014_statblock(
@@ -38063,15 +38249,24 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             review_identity = f"{review_identity}:derived-from:{derived_from_review_id}"
         review_digest = hashlib.sha256(review_identity.encode()).hexdigest()
         review_id = f"rule-statblock-review:{review_digest[:24]}"
-        parsed = parse_edition_statblock(
-            content,
-            edition=campaign_edition,
-            source_key=f"rule-review:{review_id}",
-            rule_refs=[
-                f"rule-source:{job.source_id}",
-                f"rule-source-page:{job.source_id}:{page_number}",
-                f"rule-review:{review_id}",
-            ],
+        review_rule_refs = [
+            f"rule-source:{job.source_id}",
+            f"rule-source-page:{job.source_id}:{page_number}",
+            f"rule-review:{review_id}",
+        ]
+        parsed = (
+            parse_2014_statblock_template_preview(
+                content,
+                source_key=f"rule-review:{review_id}",
+                rule_refs=review_rule_refs,
+            )
+            if campaign_edition == "2014"
+            else parse_edition_statblock(
+                content,
+                edition=campaign_edition,
+                source_key=f"rule-review:{review_id}",
+                rule_refs=review_rule_refs,
+            )
         )
         if is_canonical_standard_rule_source(source):
             agent_fill_requirements = require_standard_statblock_engine_support(
@@ -45900,6 +46095,18 @@ Useful bounded guidance:
                         "dependent actor template is not runtime-ready: "
                         + "; ".join(solution_errors)
                     )
+                preview = parse_2014_statblock_template_preview(
+                    source_text,
+                    source_key=f"dependent-template-preview:{artifact_id or normalized_name}",
+                    rule_refs=source_refs,
+                    name=normalized_name,
+                )
+                expected_weapon_names = sorted(
+                    str(item.get("name") or "").strip()
+                    for item in preview.sheet["inventory"]["items"]
+                    if item.get("kind") == "weapon"
+                    and str(item.get("name") or "").strip()
+                )
                 source_checksum = hashlib.sha256(source_text.encode()).hexdigest()
                 if source_checksum in seen_source_checksums:
                     return compact_ascii_key(normalized_name)
@@ -45909,6 +46116,7 @@ Useful bounded guidance:
                         "source_checksum": source_checksum,
                         "source_refs": deepcopy(source_refs),
                         "requirement": deepcopy(requirement),
+                        "expected_weapon_names": expected_weapon_names,
                         **({"artifact_id": str(artifact_id)} if artifact_id else {}),
                     }
                 )
@@ -46041,6 +46249,12 @@ Useful bounded guidance:
                         failures.append(
                             {"artifact_id": review.get("id"), "error": "stale review"}
                         )
+                        continue
+                    if parameterized_statblock_requirements(source_text) is not None:
+                        # The reviewed source belongs to the catalog's dependent
+                        # actor template. It must be instantiated with a real
+                        # owner, never exported as a static preset using preview
+                        # values from build-time validation.
                         continue
                     page_number = int(review.get("page_number") or 0)
                     reviewed_heading = re.search(
