@@ -1326,7 +1326,11 @@ def test_reviewed_addon_base_class_uses_bound_level_one_materializer(tmp_path: P
                     "saving_throw_proficiencies": ["constitution", "intelligence"],
                     "armor_proficiencies": ["light armor", "medium armor", "shields"],
                     "weapon_proficiencies": ["simple weapons"],
-                    "tool_proficiencies": ["thieves' tools", "tinker's tools"],
+                    "tool_proficiencies": [
+                        "thieves' tools",
+                        "tinker's tools",
+                        "Alchemist's Supplies",
+                    ],
                     "tool_choice_count": 1,
                     "tool_options": ["smith's tools", "weaver's tools"],
                     "skill_choice_count": 2,
@@ -1399,9 +1403,15 @@ def test_reviewed_addon_base_class_uses_bound_level_one_materializer(tmp_path: P
                 "repeatable_selection_levels": [],
                 "selection_requirements": {},
                 "selection_requirements_by_level": {},
-                "mechanical_grants": {
-                    "tool_expertise_all": True,
-                    "tool_proficiencies": ["Alchemist's Supplies"],
+                    "mechanical_grants": {
+                        "tool_expertise_all": True,
+                        "tool_proficiencies": ["Alchemist's Supplies"],
+                        "tool_proficiency_replacement_options": {
+                            "Alchemist's Supplies": [
+                                "Smith's Tools",
+                                "Weaver's Tools",
+                            ]
+                        },
                     "weapon_proficiencies": ["Martial Weapons"],
                     "skill_proficiencies": ["History"],
                 },
@@ -1468,7 +1478,7 @@ def test_reviewed_addon_base_class_uses_bound_level_one_materializer(tmp_path: P
                 "artifact_id": artifact["id"],
                 "selection": {
                     "skills": ["arcana", "investigation"],
-                    "tools": ["smith's tools"],
+                    "tools": ["weaver's tools"],
                 },
                 "expected_revision": character["revision"],
                 "idempotency_key": "addon-class-apply",
@@ -1489,12 +1499,12 @@ def test_reviewed_addon_base_class_uses_bound_level_one_materializer(tmp_path: P
             "intelligence",
         ]
         assert applied["class_materialization"]["tool_proficiency_choices"] == [
-            "smith's tools"
+            "weaver's tools"
         ]
         assert applied["rule_receipts"][0]["mechanic_id"] == ("dnd5e.character.base_class.v1")
         assert applied["sheet"]["content"]["selections"][0]["selection"] == {
             "skills": ["arcana", "investigation"],
-            "tools": ["smith's tools"],
+            "tools": ["weaver's tools"],
         }
         feature_applied = await _call(
             server,
@@ -1502,7 +1512,11 @@ def test_reviewed_addon_base_class_uses_bound_level_one_materializer(tmp_path: P
             {
                 "character_id": character["id"],
                 "artifact_id": tool_feature["id"],
-                "selection": {},
+                "selection": {
+                    "tool_replacements": {
+                        "Alchemist's Supplies": "Smith's Tools",
+                    }
+                },
                 "expected_revision": applied["revision"],
                 "idempotency_key": "addon-tool-expertise-apply",
             },
@@ -1512,8 +1526,9 @@ def test_reviewed_addon_base_class_uses_bound_level_one_materializer(tmp_path: P
         assert proficiencies["tools"] == [
             "thieves' tools",
             "tinker's tools",
-            "smith's tools",
             "Alchemist's Supplies",
+            "weaver's tools",
+            "Smith's Tools",
         ]
         assert proficiencies["tool_expertise_all"] is True
         assert proficiencies["tool_expertise"] == proficiencies["tools"]

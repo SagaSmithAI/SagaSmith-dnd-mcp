@@ -894,6 +894,7 @@ SUPPORTED_FEATURE_MECHANICAL_GRANTS = frozenset(
         "skill_proficiencies",
         "tool_expertise_all",
         "tool_proficiencies",
+        "tool_proficiency_replacement_options",
         "unarmored_base",
         "unarmored_formula",
         "weapon_proficiencies",
@@ -40256,10 +40257,15 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 }
             elif artifact_kind == "feature":
                 requirements = deepcopy(dict(card.get("selection_requirements") or {}))
+                grants = deepcopy(dict(card.get("mechanical_grants") or {}))
+                replacement_options = deepcopy(
+                    dict(grants.get("tool_proficiency_replacement_options") or {})
+                )
+                fields = [requirements["field"]] if requirements.get("field") else []
+                if replacement_options:
+                    fields.append("tool_replacements")
                 selection_requirements = {
-                    "fields": [requirements["field"]]
-                    if requirements.get("field")
-                    else [],
+                    "fields": fields,
                     "class_name": str(card.get("class_name") or ""),
                     "subclass_name": str(card.get("subclass_name") or ""),
                     "minimum_level": int(card.get("minimum_level", 1) or 1),
@@ -40273,6 +40279,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "selection_requirements_by_level": deepcopy(
                         dict(card.get("selection_requirements_by_level") or {})
                     ),
+                    "tool_proficiency_replacement_options": replacement_options,
                     **requirements,
                 }
             elif artifact_kind == "species":
@@ -42555,6 +42562,10 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 allowed_selection_fields = {"grant_level"}
                 if choice_field:
                     allowed_selection_fields.add(choice_field)
+                if dict(card.get("mechanical_grants") or {}).get(
+                    "tool_proficiency_replacement_options"
+                ):
+                    allowed_selection_fields.add("tool_replacements")
                 if int(dict(card.get("mechanical_grants") or {}).get("hp_per_class_level", 0) or 0):
                     allowed_selection_fields.add("initial_setup_full_hp")
                 if replacing_feature_selection:
@@ -43699,11 +43710,66 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     }:
                         weapons.append(proficiency)
                 tools = sheet["traits"]["proficiencies"]["tools"]
-                for proficiency in mechanical_grants.get("tool_proficiencies") or []:
-                    if str(proficiency).casefold() not in {
-                        str(item).casefold() for item in tools
+                fixed_tools = [
+                    str(value).strip()
+                    for value in mechanical_grants.get("tool_proficiencies") or []
+                    if str(value).strip()
+                ]
+                replacement_options = dict(
+                    mechanical_grants.get("tool_proficiency_replacement_options") or {}
+                )
+                fixed_tool_map = {value.casefold(): value for value in fixed_tools}
+                if set(str(key).casefold() for key in replacement_options) - set(
+                    fixed_tool_map
+                ):
+                    raise RulesetUnavailableError(
+                        "feature tool replacement options must reference a fixed tool grant"
+                    )
+                known_tools = {str(item).casefold() for item in tools}
+                duplicate_tools = {
+                    key for key in fixed_tool_map if key in known_tools
+                }
+                raw_replacements = selection.get("tool_replacements") or {}
+                if not isinstance(raw_replacements, dict):
+                    raise ValueError("feature tool_replacements must be an object")
+                supplied_replacements = {
+                    str(key).casefold(): str(value).strip()
+                    for key, value in raw_replacements.items()
+                }
+                if set(supplied_replacements) != duplicate_tools:
+                    raise ValueError(
+                        "feature tool_replacements must replace exactly the already-known "
+                        "fixed tool grants"
+                    )
+                selected_replacements: list[str] = []
+                for key, replacement in supplied_replacements.items():
+                    options = {
+                        str(value).casefold(): str(value)
+                        for value in replacement_options.get(fixed_tool_map[key], [])
+                    }
+                    if replacement.casefold() not in options:
+                        raise ValueError(
+                            "feature tool replacement is not one of the reviewed options"
+                        )
+                    normalized_replacement = options[replacement.casefold()]
+                    if normalized_replacement.casefold() in known_tools:
+                        raise ValueError("feature tool replacement is already proficient")
+                    if normalized_replacement.casefold() in {
+                        value.casefold() for value in selected_replacements
                     }:
+                        raise ValueError("feature tool replacements must be distinct")
+                    selected_replacements.append(normalized_replacement)
+                for proficiency in [
+                    *(
+                        fixed_tool_map[key]
+                        for key in fixed_tool_map
+                        if key not in duplicate_tools
+                    ),
+                    *selected_replacements,
+                ]:
+                    if proficiency.casefold() not in known_tools:
                         tools.append(proficiency)
+                        known_tools.add(proficiency.casefold())
                 for proficiency in mechanical_grants.get("skill_proficiencies") or []:
                     skill_key = str(proficiency).casefold().replace(" ", "_")
                     if skill_key not in sheet["skills"]:
