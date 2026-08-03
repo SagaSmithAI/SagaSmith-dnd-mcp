@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 from pathlib import Path
 
@@ -312,6 +313,8 @@ def test_rule_import_agent_can_add_only_source_bound_catalog_entities(tmp_path: 
         gunsmith_chunk = next(
             item for item in chunks if "gunsmith" in item.get("content", "").casefold()
         )
+        evidence = "A gunsmith is a master engineer who forges a firearm powered by magic."
+        evidence_start = gunsmith_chunk["content"].index(evidence)
         arguments = {
             "campaign_id": campaign["id"],
             "action": "augment_catalog",
@@ -322,7 +325,16 @@ def test_rule_import_agent_can_add_only_source_bound_catalog_entities(tmp_path: 
                     {
                         "kind": "subclass",
                         "name": "Gunsmith",
-                        "source_chunk_ids": [gunsmith_chunk["id"]],
+                        "source_spans": [
+                            {
+                                "source_chunk_id": gunsmith_chunk["id"],
+                                "start": evidence_start,
+                                "end": evidence_start + len(evidence),
+                                "checksum": hashlib.sha256(
+                                    evidence.encode("utf-8")
+                                ).hexdigest(),
+                            }
+                        ],
                         "card": {
                             "class_name": "Artificer",
                             "minimum_level": 1,
@@ -342,7 +354,8 @@ def test_rule_import_agent_can_add_only_source_bound_catalog_entities(tmp_path: 
             if item["id"] in augmented["added_candidate_ids"]
         )
         assert added["name"] == "Gunsmith"
-        assert added["artifact"]["card"]["description"] == gunsmith_chunk["content"]
+        assert added["artifact"]["card"]["description"] == evidence
+        assert added["source_spans"][0]["start"] == evidence_start
         assert "invented text" not in added["artifact"]["card"]["description"]
         assert added["source_citations"]
         replay = await _call(server, "rule_import", arguments)

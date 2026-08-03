@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from typing import Any
 
@@ -72,6 +73,8 @@ def test_catalog_manifest_resolves_stable_sources_and_review_actions(tmp_path) -
                                     {
                                         "heading_exact": "Artificer Specialists",
                                         "content_contains": "A gunsmith is a master engineer",
+                                        "start_contains": "A gunsmith",
+                                        "end_contains": "uses magic.",
                                     }
                                 ],
                                 "card": {"class_name": "Artificer"},
@@ -125,6 +128,16 @@ def test_catalog_manifest_resolves_stable_sources_and_review_actions(tmp_path) -
             "name": "Gunsmith",
             "card": {"class_name": "Artificer"},
             "source_chunk_ids": ["chunk-specialist"],
+            "source_spans": [
+                {
+                    "source_chunk_id": "chunk-specialist",
+                    "start": 0,
+                    "end": len("A gunsmith is a master engineer who uses magic."),
+                    "checksum": hashlib.sha256(
+                        b"A gunsmith is a master engineer who uses magic."
+                    ).hexdigest(),
+                }
+            ],
         }
     ]
     candidates = [

@@ -447,6 +447,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                             "id": item["id"],
                             "kind": item["kind"],
                             "name": item["name"],
+                            "source_heading_path": item.get("source_heading_path", []),
                             "page_start": item.get("page_start"),
                             "page_end": item.get("page_end"),
                             "execution_state": item.get("execution_state"),
@@ -602,6 +603,9 @@ def _source_selector_matches(
         "content_contains",
         "page_start",
         "page_end",
+        "start_contains",
+        "end_before_contains",
+        "end_contains",
     }
     if unknown:
         raise ValueError(f"source selector has unsupported fields: {sorted(unknown)}")
@@ -665,6 +669,7 @@ def _resolve_catalog_additions(
                 f"catalog addition {index} for {relative_path} needs source_selectors"
             )
         chunk_ids: list[str] = []
+        source_spans: list[dict[str, Any]] = []
         for selector_index, selector in enumerate(selectors):
             if not isinstance(selector, dict):
                 raise ValueError(
@@ -678,14 +683,65 @@ def _resolve_catalog_additions(
                     f"source selector {selector_index} for {relative_path} matched "
                     f"{len(matches)} chunks; expected exactly one"
                 )
-            chunk_ids.append(str(matches[0]["id"]))
+            chunk = matches[0]
+            chunk_id = str(chunk["id"])
+            chunk_ids.append(chunk_id)
+            content = str(chunk.get("content") or "")
+            start = 0
+            if "start_contains" in selector:
+                needle = str(selector["start_contains"])
+                start = content.casefold().find(needle.casefold())
+                if start < 0:
+                    raise ValueError(
+                        f"source selector {selector_index} for {relative_path} "
+                        "did not find start_contains"
+                    )
+            end = len(content)
+            if "end_before_contains" in selector:
+                needle = str(selector["end_before_contains"])
+                end = content.casefold().find(needle.casefold(), start + 1)
+                if end < 0:
+                    raise ValueError(
+                        f"source selector {selector_index} for {relative_path} "
+                        "did not find end_before_contains"
+                    )
+            elif "end_contains" in selector:
+                needle = str(selector["end_contains"])
+                found = content.casefold().find(needle.casefold(), start)
+                if found < 0:
+                    raise ValueError(
+                        f"source selector {selector_index} for {relative_path} "
+                        "did not find end_contains"
+                    )
+                end = found + len(needle)
+            while start < end and content[start].isspace():
+                start += 1
+            while end > start and content[end - 1].isspace():
+                end -= 1
+            if start >= end:
+                raise ValueError(
+                    f"source selector {selector_index} for {relative_path} resolved "
+                    "an empty source span"
+                )
+            exact_text = content[start:end]
+            source_spans.append(
+                {
+                    "source_chunk_id": chunk_id,
+                    "start": start,
+                    "end": end,
+                    "checksum": hashlib.sha256(exact_text.encode("utf-8")).hexdigest(),
+                }
+            )
         resolved.append(
             {
                 key: addition[key]
                 for key in ("kind", "name", "card", "note")
                 if key in addition
             }
-            | {"source_chunk_ids": list(dict.fromkeys(chunk_ids))}
+            | {
+                "source_chunk_ids": list(dict.fromkeys(chunk_ids)),
+                "source_spans": source_spans,
+            }
         )
     return resolved
 

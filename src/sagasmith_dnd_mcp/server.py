@@ -12357,7 +12357,14 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
         for index, raw_addition in enumerate(additions):
             if not isinstance(raw_addition, dict):
                 raise ValueError(f"additions[{index}] must be an object")
-            unknown = set(raw_addition) - {"kind", "name", "source_chunk_ids", "card", "note"}
+            unknown = set(raw_addition) - {
+                "kind",
+                "name",
+                "source_chunk_ids",
+                "source_spans",
+                "card",
+                "note",
+            }
             if unknown:
                 raise ValueError(
                     f"additions[{index}] has unsupported fields: {sorted(unknown)}"
@@ -12368,16 +12375,76 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 raise ValueError(f"additions[{index}].kind is not supported")
             if not name or len(name) > 200:
                 raise ValueError(f"additions[{index}].name is required and limited to 200 chars")
-            raw_chunk_ids = raw_addition.get("source_chunk_ids")
-            if not isinstance(raw_chunk_ids, list) or not 1 <= len(raw_chunk_ids) <= 32:
+            raw_chunk_ids = raw_addition.get("source_chunk_ids") or []
+            raw_spans = raw_addition.get("source_spans") or []
+            if not isinstance(raw_chunk_ids, list) or len(raw_chunk_ids) > 32:
                 raise ValueError(
-                    f"additions[{index}].source_chunk_ids requires 1 to 32 source chunks"
+                    f"additions[{index}].source_chunk_ids allows at most 32 source chunks"
+                )
+            if not isinstance(raw_spans, list) or len(raw_spans) > 32:
+                raise ValueError(
+                    f"additions[{index}].source_spans allows at most 32 source spans"
+                )
+            if not raw_chunk_ids and not raw_spans:
+                raise ValueError(
+                    f"additions[{index}] requires source_chunk_ids or source_spans"
                 )
             chunk_ids = list(dict.fromkeys(str(item).strip() for item in raw_chunk_ids))
             if any(not item or item not in available_chunks for item in chunk_ids):
                 raise ValueError(
                     f"additions[{index}] references a chunk outside the indexed source"
                 )
+            source_spans: list[dict[str, Any]] = []
+            span_texts: list[str] = []
+            for span_index, raw_span in enumerate(raw_spans):
+                if not isinstance(raw_span, dict):
+                    raise ValueError(
+                        f"additions[{index}].source_spans[{span_index}] must be an object"
+                    )
+                span_unknown = set(raw_span) - {"source_chunk_id", "start", "end", "checksum"}
+                if span_unknown:
+                    raise ValueError(
+                        f"additions[{index}].source_spans[{span_index}] has unsupported "
+                        f"fields: {sorted(span_unknown)}"
+                    )
+                chunk_id = str(raw_span.get("source_chunk_id") or "").strip()
+                if chunk_id not in available_chunks:
+                    raise ValueError(
+                        f"additions[{index}] references a span outside the indexed source"
+                    )
+                start = raw_span.get("start")
+                end = raw_span.get("end")
+                if (
+                    isinstance(start, bool)
+                    or not isinstance(start, int)
+                    or isinstance(end, bool)
+                    or not isinstance(end, int)
+                ):
+                    raise ValueError(
+                        f"additions[{index}].source_spans[{span_index}] needs integer bounds"
+                    )
+                chunk_text = str(available_chunks[chunk_id].get("content") or "")
+                if not 0 <= start < end <= len(chunk_text):
+                    raise ValueError(
+                        f"additions[{index}].source_spans[{span_index}] bounds are invalid"
+                    )
+                span_text = chunk_text[start:end]
+                checksum = hashlib.sha256(span_text.encode("utf-8")).hexdigest()
+                if str(raw_span.get("checksum") or "") != checksum:
+                    raise ValueError(
+                        f"additions[{index}].source_spans[{span_index}] checksum mismatch"
+                    )
+                source_spans.append(
+                    {
+                        "source_chunk_id": chunk_id,
+                        "start": start,
+                        "end": end,
+                        "checksum": checksum,
+                    }
+                )
+                span_texts.append(span_text)
+                chunk_ids.append(chunk_id)
+            chunk_ids = list(dict.fromkeys(chunk_ids))
             identity_key = (
                 kind,
                 "".join(character for character in name.casefold() if character.isalnum()),
@@ -12395,6 +12462,8 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
             reject_executable_fields(card)
             source_chunks = [available_chunks[item] for item in chunk_ids]
             source_text = "\n\n".join(
+                text.strip() for text in span_texts if text.strip()
+            ) or "\n\n".join(
                 str(chunk.get("content") or "").strip()
                 for chunk in source_chunks
                 if str(chunk.get("content") or "").strip()
@@ -12431,6 +12500,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                     "kind": kind,
                     "name": name.casefold(),
                     "source_chunk_ids": sorted(chunk_ids),
+                    "source_spans": source_spans,
                 },
                 sort_keys=True,
                 separators=(",", ":"),
@@ -12454,6 +12524,7 @@ def create_server(config: McpConfig | None = None) -> FastMCP:
                 "kind": kind,
                 "name": name,
                 "source_chunk_ids": chunk_ids,
+                "source_spans": source_spans,
                 "source_heading_path": list(source_chunks[0].get("heading_path") or []),
                 "page_start": min(pages_start) if pages_start else None,
                 "page_end": max(pages_end) if pages_end else None,
