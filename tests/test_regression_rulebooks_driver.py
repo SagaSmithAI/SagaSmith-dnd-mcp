@@ -198,6 +198,162 @@ def test_catalog_manifest_rejects_ambiguous_source_selectors() -> None:
         )
 
 
+def test_catalog_manifest_can_bind_one_entry_to_all_matching_source_chunks() -> None:
+    additions = driver._resolve_catalog_additions(
+        [
+            {
+                "kind": "subclass",
+                "name": "Order of the Mutant",
+                "source_selectors": [
+                    {"heading_exact": "ORDER OF THE MUTANT", "match_all": True}
+                ],
+            }
+        ],
+        [
+            {
+                "id": "heading",
+                "ordinal": 2,
+                "heading_path": ["ORDER OF THE MUTANT"],
+                "content": "Order of the Mutant studies controlled transformation.",
+            },
+            {
+                "id": "continuation",
+                "ordinal": 3,
+                "heading_path": ["ORDER OF THE MUTANT"],
+                "content": "Order of the Mutant features continue here.",
+            },
+        ],
+        relative_path="Blood Hunter.pdf",
+    )
+
+    assert additions[0]["source_chunk_ids"] == ["heading", "continuation"]
+    assert [
+        span["source_chunk_id"] for span in additions[0]["source_spans"]
+    ] == ["heading", "continuation"]
+
+
+def test_catalog_manifest_keeps_empty_heading_chunk_as_identity_evidence() -> None:
+    additions = driver._resolve_catalog_additions(
+        [
+            {
+                "kind": "subclass",
+                "name": "Onomancy",
+                "source_selectors": [
+                    {"heading_contains": "Onomancy", "match_all": True}
+                ],
+            }
+        ],
+        [
+            {
+                "id": "heading",
+                "ordinal": 1,
+                "heading_path": ["Onomancy"],
+                "content": "",
+            },
+            {
+                "id": "body",
+                "ordinal": 2,
+                "heading_path": ["Onomancy", "True Names"],
+                "content": "Onomancy is the study of true names.",
+            },
+        ],
+        relative_path="Twilight.pdf",
+    )
+
+    assert additions[0]["source_chunk_ids"] == ["heading", "body"]
+    assert [
+        span["source_chunk_id"] for span in additions[0]["source_spans"]
+    ] == ["body"]
+
+
+def test_portable_receiver_enables_exact_core_dependency() -> None:
+    server = _FakeServer(
+        [
+            (
+                "campaign_rules",
+                {
+                    "result": {
+                        "activations": [],
+                        "campaign_revision": 4,
+                    }
+                },
+            ),
+            (
+                "campaign_rules",
+                {
+                    "result": {
+                        "activation": {
+                            "pack_id": "dnd5e.content.srd2014",
+                            "version": "1.20.0",
+                            "enabled": True,
+                        }
+                    }
+                },
+            ),
+        ]
+    )
+
+    activation = asyncio.run(
+        driver._enable_core_content_pack(
+            server,
+            campaign_id="receiver",
+            edition="2014",
+            run_id="reviewed-v2",
+        )
+    )
+
+    assert activation["enabled"] is True
+    assert server.calls[1][1]["payload"] == {
+        "pack_id": "dnd5e.content.srd2014",
+        "version": "1.20.0",
+    }
+    assert server.calls[1][1]["expected_revision"] == 4
+    assert server.calls[1][1]["idempotency_key"].endswith(
+        f"{driver._run_token('reviewed-v2')}-r4"
+    )
+
+
+def test_parameterized_statblock_skips_visual_ocr_recovery() -> None:
+    candidates = [
+        {
+            "id": "homunculus",
+            "kind": "statblock",
+            "name": "Alchemical Homunculus",
+            "source_chunk_ids": ["core"],
+            "artifact": {
+                "kind": "statblock",
+                "card": {"name": "Alchemical Homunculus"},
+            },
+        }
+    ]
+    chunks = [
+        {
+            "id": "core",
+            "content": (
+                "Tiny construct, neutral Armor Class 13 (natural armor) "
+                "Hit Points equal to five times your level in this class + "
+                "your Intelligence modifier Speed 20 ft., fly 30 ft. "
+                "STR DEX CON INT WIS CHA"
+            ),
+        }
+    ]
+
+    assert driver._statblock_recovery_needed(candidates, chunks) is False
+    assert driver._statblock_recovery_needed([], chunks) is True
+    assert driver._statblock_recovery_needed(
+        [
+            {
+                "id": "broken",
+                "kind": "statblock",
+                "name": "Broken Creature",
+                "source_chunk_ids": ["broken"],
+                "artifact": {"kind": "statblock", "card": {"name": "Broken"}},
+            }
+        ],
+        [{"id": "broken", "content": "Armor Class unreadable"}],
+    ) is True
+
+
 def test_strict_catalog_manifest_requires_every_selected_document() -> None:
     with pytest.raises(ValueError, match="no complete review"):
         driver._catalog_document_review(

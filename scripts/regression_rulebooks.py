@@ -27,6 +27,11 @@ from sagasmith_dnd.core_content_2024 import (
     PACK_VERSION as SRD2024_PACK_VERSION,
 )
 from sagasmith_dnd.editions import SUPPORTED_DND_EDITIONS
+from sagasmith_dnd.statblocks import (
+    StatblockImportError,
+    parameterized_statblock_requirements,
+    parse_2014_statblock,
+)
 
 from sagasmith_dnd_mcp.config import McpConfig
 from sagasmith_dnd_mcp.server import create_server
@@ -253,6 +258,12 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                 ),
             },
         )
+        await _enable_core_content_pack(
+            target_server,
+            campaign_id=str(target_campaign["id"]),
+            edition=args.edition,
+            run_id=args.run_id,
+        )
     report: dict[str, Any] = {
         "root": str(root),
         "home": str(home),
@@ -339,19 +350,6 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                 },
             )
             source_id = ingested["result"]["source"]["id"]
-            statblock_recovery: dict[str, Any] | None = None
-            if target_server is not None and args.edition == "2014":
-                recovery_response = await _call(
-                    server,
-                    "rule_import",
-                    {
-                        "campaign_id": campaign["id"],
-                        "action": "recover_statblocks",
-                        "payload": {"job_id": job_id},
-                        "idempotency_key": f"regression-recover-catalog-{id_key}",
-                    },
-                )
-                statblock_recovery = recovery_response["result"]
             extracted = await _call(
                 server,
                 "rule_import",
@@ -364,13 +362,45 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
             )
             candidates = extracted["result"]["candidates"]
             inventory = extracted["result"]["inventory"]
+            catalog_revision = int(extracted["result"]["job"]["revision"])
+            source_chunks: list[dict[str, Any]] | None = None
+            statblock_recovery: dict[str, Any] | None = None
+            if target_server is not None and args.edition == "2014":
+                source_chunks = await _source_chunks(server, source_id)
+                if _statblock_recovery_needed(candidates, source_chunks):
+                    recovery_response = await _call(
+                        server,
+                        "rule_import",
+                        {
+                            "campaign_id": campaign["id"],
+                            "action": "recover_statblocks",
+                            "payload": {"job_id": job_id},
+                            "idempotency_key": (
+                                f"regression-recover-catalog-{id_key}"
+                            ),
+                        },
+                    )
+                    statblock_recovery = recovery_response["result"]
+                    catalog_revision = int(
+                        statblock_recovery["job"]["revision"]
+                    )
+                else:
+                    statblock_recovery = {
+                        "schema_version": 1,
+                        "status": "not_required",
+                        "reason": (
+                            "all extracted statblocks are parser-ready or "
+                            "source-proven dependent actor templates"
+                        ),
+                    }
             document_review = _catalog_document_review(
                 catalog_manifest,
                 relative_path,
             )
             catalog_augmentation: dict[str, Any] | None = None
             if document_review.get("additions"):
-                source_chunks = await _source_chunks(server, source_id)
+                if source_chunks is None:
+                    source_chunks = await _source_chunks(server, source_id)
                 additions = _resolve_catalog_additions(
                     document_review["additions"],
                     source_chunks,
@@ -390,7 +420,7 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
                             ),
                             "additions": additions,
                         },
-                        "expected_revision": extracted["result"]["job"]["revision"],
+                        "expected_revision": catalog_revision,
                         "idempotency_key": f"regression-augment-{id_key}",
                     },
                 )
@@ -535,6 +565,115 @@ def _core_content_dependency(edition: str) -> dict[str, str]:
     raise ValueError(f"unsupported D&D edition: {edition}")
 
 
+def _statblock_recovery_needed(
+    candidates: list[dict[str, Any]],
+    source_chunks: list[dict[str, Any]],
+) -> bool:
+    """Run visual OCR only when indexed source cannot prove a usable card.
+
+    A source-dependent companion is intentionally not a static actor card and
+    must not trigger increasingly large OCR models merely because its printed
+    HP field is a formula.  Documents with no extracted statblock still run
+    discovery recovery so a missed visual card cannot disappear silently.
+    """
+
+    statblocks = [
+        candidate
+        for candidate in candidates
+        if str(candidate.get("kind") or "") == "statblock"
+    ]
+    if not statblocks:
+        return True
+    chunks_by_id = {
+        str(chunk.get("id") or ""): str(chunk.get("content") or "")
+        for chunk in source_chunks
+    }
+    for candidate in statblocks:
+        card = dict(dict(candidate.get("artifact") or {}).get("card") or {})
+        normalized = str(
+            card.get("normalized_content")
+            or candidate.get("normalized_content")
+            or ""
+        ).strip()
+        raw_source = "\n\n".join(
+            chunks_by_id.get(str(chunk_id), "").strip()
+            for chunk_id in candidate.get("source_chunk_ids") or []
+            if chunks_by_id.get(str(chunk_id), "").strip()
+        )
+        probe = normalized or (
+            f"# {str(candidate.get('name') or '').strip()}\n\n{raw_source}"
+            if raw_source
+            else ""
+        )
+        if parameterized_statblock_requirements(probe) is not None:
+            continue
+        if not normalized:
+            return True
+        try:
+            parse_2014_statblock(
+                normalized,
+                source_key=str(candidate.get("id") or "regression-statblock"),
+                rule_refs=[],
+            )
+        except (StatblockImportError, ValueError):
+            return True
+    return False
+
+
+async def _enable_core_content_pack(
+    server: Any,
+    *,
+    campaign_id: str,
+    edition: str,
+    run_id: str,
+) -> dict[str, Any]:
+    """Enable the installed built-in content dependency on a receiver branch.
+
+    Auto-seeding installs the immutable package globally, but activation is a
+    separate campaign/branch mutation.  Addon activation must therefore prove
+    the exact dependency is enabled through the public revisioned facade.
+    """
+
+    dependency = _core_content_dependency(edition)
+    profile = await _call(
+        server,
+        "campaign_rules",
+        {"campaign_id": campaign_id, "action": "get_profile"},
+    )
+    result = dict(profile["result"])
+    matching = [
+        item
+        for item in result.get("activations") or []
+        if str(item.get("pack_id") or "") == dependency["id"]
+        and str(item.get("version") or "") == dependency["version"]
+        and item.get("enabled") is True
+    ]
+    if matching:
+        return matching[0]
+    revision = int(result["campaign_revision"])
+    activated = await _call(
+        server,
+        "campaign_rules",
+        {
+            "campaign_id": campaign_id,
+            "action": "set_pack",
+            "payload": {
+                "pack_id": dependency["id"],
+                "version": dependency["version"],
+            },
+            "expected_revision": revision,
+            "idempotency_key": (
+                "rulebook-portable-core-activation-"
+                f"{_run_token(run_id)}-r{revision}"
+            ),
+        },
+    )
+    activation = dict(activated["result"]["activation"])
+    if activation.get("enabled") is not True:
+        raise RuntimeError("portable receiver did not enable its core content dependency")
+    return activation
+
+
 def _load_catalog_manifest(path: Path | None) -> dict[str, Any]:
     if path is None:
         return {"version": 1, "documents": {}}
@@ -627,6 +766,7 @@ def _source_selector_matches(
         "start_contains",
         "end_before_contains",
         "end_contains",
+        "match_all",
     }
     if unknown:
         raise ValueError(f"source selector has unsupported fields: {sorted(unknown)}")
@@ -699,60 +839,86 @@ def _resolve_catalog_additions(
             matches = [
                 chunk for chunk in chunks if _source_selector_matches(chunk, selector)
             ]
-            if len(matches) != 1:
+            match_all = selector.get("match_all", False)
+            if not isinstance(match_all, bool):
+                raise ValueError("source selector match_all must be a boolean")
+            if (not match_all and len(matches) != 1) or (match_all and not matches):
                 raise ValueError(
                     f"source selector {selector_index} for {relative_path} matched "
-                    f"{len(matches)} chunks; expected exactly one"
+                    f"{len(matches)} chunks; expected "
+                    + ("one or more" if match_all else "exactly one")
                 )
-            chunk = matches[0]
-            chunk_id = str(chunk["id"])
-            chunk_ids.append(chunk_id)
-            content = str(chunk.get("content") or "")
-            start = 0
-            if "start_contains" in selector:
-                needle = str(selector["start_contains"])
-                start = content.casefold().find(needle.casefold())
-                if start < 0:
+            for chunk in sorted(
+                matches,
+                key=lambda item: (
+                    int(item.get("ordinal") or 0),
+                    str(item.get("id") or ""),
+                ),
+            ):
+                chunk_id = str(chunk["id"])
+                chunk_ids.append(chunk_id)
+                content = str(chunk.get("content") or "")
+                if not content:
+                    if any(
+                        key in selector
+                        for key in (
+                            "start_contains",
+                            "end_before_contains",
+                            "end_contains",
+                        )
+                    ):
+                        raise ValueError(
+                            f"source selector {selector_index} for {relative_path} "
+                            "cannot slice an empty heading chunk"
+                        )
+                    continue
+                start = 0
+                if "start_contains" in selector:
+                    needle = str(selector["start_contains"])
+                    start = content.casefold().find(needle.casefold())
+                    if start < 0:
+                        raise ValueError(
+                            f"source selector {selector_index} for {relative_path} "
+                            "did not find start_contains"
+                        )
+                end = len(content)
+                if "end_before_contains" in selector:
+                    needle = str(selector["end_before_contains"])
+                    end = content.casefold().find(needle.casefold(), start + 1)
+                    if end < 0:
+                        raise ValueError(
+                            f"source selector {selector_index} for {relative_path} "
+                            "did not find end_before_contains"
+                        )
+                elif "end_contains" in selector:
+                    needle = str(selector["end_contains"])
+                    found = content.casefold().find(needle.casefold(), start)
+                    if found < 0:
+                        raise ValueError(
+                            f"source selector {selector_index} for {relative_path} "
+                            "did not find end_contains"
+                        )
+                    end = found + len(needle)
+                while start < end and content[start].isspace():
+                    start += 1
+                while end > start and content[end - 1].isspace():
+                    end -= 1
+                if start >= end:
                     raise ValueError(
                         f"source selector {selector_index} for {relative_path} "
-                        "did not find start_contains"
+                        "resolved an empty source span"
                     )
-            end = len(content)
-            if "end_before_contains" in selector:
-                needle = str(selector["end_before_contains"])
-                end = content.casefold().find(needle.casefold(), start + 1)
-                if end < 0:
-                    raise ValueError(
-                        f"source selector {selector_index} for {relative_path} "
-                        "did not find end_before_contains"
-                    )
-            elif "end_contains" in selector:
-                needle = str(selector["end_contains"])
-                found = content.casefold().find(needle.casefold(), start)
-                if found < 0:
-                    raise ValueError(
-                        f"source selector {selector_index} for {relative_path} "
-                        "did not find end_contains"
-                    )
-                end = found + len(needle)
-            while start < end and content[start].isspace():
-                start += 1
-            while end > start and content[end - 1].isspace():
-                end -= 1
-            if start >= end:
-                raise ValueError(
-                    f"source selector {selector_index} for {relative_path} resolved "
-                    "an empty source span"
+                exact_text = content[start:end]
+                source_spans.append(
+                    {
+                        "source_chunk_id": chunk_id,
+                        "start": start,
+                        "end": end,
+                        "checksum": hashlib.sha256(
+                            exact_text.encode("utf-8")
+                        ).hexdigest(),
+                    }
                 )
-            exact_text = content[start:end]
-            source_spans.append(
-                {
-                    "source_chunk_id": chunk_id,
-                    "start": start,
-                    "end": end,
-                    "checksum": hashlib.sha256(exact_text.encode("utf-8")).hexdigest(),
-                }
-            )
         resolved.append(
             {
                 key: addition[key]
@@ -829,7 +995,14 @@ def _review_spec_decisions(
                     if isinstance(exact, list)
                     else [_fold_text(exact)]
                 )
-                if expected_path != heading_path and expected_path != heading_path[-1:]:
+                if isinstance(exact, list):
+                    exact_matches = expected_path == heading_path
+                else:
+                    exact_matches = (
+                        expected_path == heading_path
+                        or expected_path == heading_path[-1:]
+                    )
+                if not exact_matches:
                     continue
             contains = rule.get("source_heading_contains")
             if contains is not None and _fold_text(contains) not in " > ".join(
